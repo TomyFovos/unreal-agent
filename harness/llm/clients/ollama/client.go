@@ -1,6 +1,7 @@
 package ollama
 
 import (
+	"net/http"
 	"strings"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -11,6 +12,7 @@ import (
 const BaseURL = "http://localhost:11434/v1"
 
 type Config struct {
+	HTTPClient  *http.Client
 	BaseURL     string
 	MaxAttempts *int
 }
@@ -26,6 +28,10 @@ func NewClient(config Config) (*Client, error) {
 		baseURL = BaseURL
 	}
 	remote := primitives.NewRemoteClient()
+	if config.HTTPClient != nil {
+		_ = remote.Close()
+		remote = primitives.NewRemoteClientWithHTTPClient(config.HTTPClient)
+	}
 	adapter, err := responsesapi.NewAdapter(remote, responsesapi.Config{
 		Endpoint:    baseURL + "/responses",
 		Headers:     map[string][]string{"Content-Type": {"application/json"}},

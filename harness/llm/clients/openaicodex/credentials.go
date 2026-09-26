@@ -146,3 +146,13 @@ func headerValue(value string) bool {
 	}
 	return value != ""
 }
+
+// CurrentCredentials reads the explicitly selected external source. It never writes
+// an official CLI auth file or claims ownership of its refresh token.
+func (config Config) CurrentCredentials() (string, string, error) {
+	value, err := config.credentials()
+	if err != nil {
+		return "", "", err
+	}
+	return value.accessToken, value.accountID, nil
+}

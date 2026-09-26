@@ -24,6 +24,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm/responsesapi"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/provider"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
@@ -55,6 +56,7 @@ type Client interface {
 }
 
 type Provider struct {
+	Descriptor        *provider.Descriptor
 	Name              string
 	BaseURL           string
 	DefaultModel      string
@@ -260,7 +262,7 @@ func Run(
 			)
 		}
 	}
-	client, err := selected.NewClient(apiKey, configuredBaseURL, maxAttempts, getenv)
+	client, resolvedProvider, err := buildSessionClient(selected, model, apiKey, configuredBaseURL, maxAttempts, getenv)
 	if err != nil {
 		return fmt.Errorf("create %s client: %w", selected.Name, err)
 	}
@@ -397,11 +399,14 @@ func Run(
 		return err
 	}
 	defer currentHost.Close()
-	identity, err := json.Marshal(struct {
-		Version                              int
-		Provider, Model, Endpoint, Workspace string
-		MaxAttempts                          int
-	}{1, selected.Name, model, configuredBaseURL, workspace, maxAttempts})
+    if resolvedProvider.Version == 0 {
+        resolvedProvider = provider.Selection{Version:1,Provider:selected.Name,Model:provider.Model{ID:model},Endpoint:configuredBaseURL,MaxAttempts:maxAttempts,Source:"injected provider"}
+    }
+    identity, err := json.Marshal(struct {
+        Version int
+        Provider provider.Selection
+        Workspace string
+    }{1, resolvedProvider, workspace})
 	if err != nil {
 		return err
 	}

@@ -17,6 +17,7 @@ import (
 const BaseURL = "https://chatgpt.com/backend-api/codex"
 
 type Config struct {
+	HTTPClient  *http.Client
 	AccessToken string
 	AccountID   string
 	// Read once at construction; exclusive with inline credentials.
@@ -46,10 +47,15 @@ func NewClient(config Config) (*Client, error) {
 		return nil, err
 	}
 	// Never forward subscription credentials through redirects.
-	remote := primitives.NewRemoteClientWithHTTPClient(&http.Client{
+	httpClient := http.Client{
 		Transport:     http.DefaultTransport.(*http.Transport).Clone(),
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	})
+	}
+	if config.HTTPClient != nil {
+		httpClient = *config.HTTPClient
+		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
+	remote := primitives.NewRemoteClientWithHTTPClient(&httpClient)
 	adapter, err := responsesapi.NewAdapter(remote, responsesapi.Config{
 		Endpoint: baseURL + "/responses",
 		Headers: map[string][]string{
