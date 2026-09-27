@@ -54,6 +54,54 @@ def status(state="completed", stdout="test", **fields):
 
 
 class TrajectoryTests(unittest.TestCase):
+    def test_host_records_are_audit_metadata_not_model_steps(self):
+        lines = [
+            record(
+                1,
+                "host_record",
+                {
+                    "Version": 1,
+                    "Kind": "configuration",
+                    "Configuration": {"model": "fixture"},
+                },
+            ),
+            record(2, "input", {"Kind": "external", "Payload": "hello"}),
+            record(
+                3,
+                "host_record",
+                {
+                    "Version": 1,
+                    "Kind": "stop_complete",
+                    "Inputs": ["stop"],
+                },
+            ),
+        ]
+        trajectory = convert(
+            lines, Agent(name="unreal-agent", version="test"), "session"
+        )
+        self.assertEqual(len(trajectory.steps), 1)
+        self.assertEqual(trajectory.steps[0].message, "hello")
+        self.assertEqual(len(trajectory.extra["host_records"]), 2)
+        self.assertEqual(trajectory.extra["host_records"][1]["sequence"], 3)
+        self.assertEqual(trajectory.final_metrics.total_prompt_tokens, 0)
+
+    def test_unknown_host_record_version_fails_explicitly(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported Host metadata"):
+            convert(
+                [
+                    record(
+                        1,
+                        "host_record",
+                        {
+                            "Version": 999,
+                            "Kind": "configuration",
+                        },
+                    )
+                ],
+                Agent(name="unreal-agent", version="test"),
+                "session",
+            )
+
     def test_plain_text_is_not_base64_decoded(self):
         for text in ("test", "1234", "aGVsbG8=", "😃\n", "", "{not JSON", '  "hi"\n\n'):
             with self.subTest(text=text):
