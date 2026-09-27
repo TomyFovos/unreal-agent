@@ -29,6 +29,6 @@ func parseRequest(input io.Reader) (agentrunner.Request, agentrunner.ToolFactory
 		if err != nil {
 			return agentrunner.Tools{}, err
 		}
-		return agentrunner.Tools{Registry: tool.NewRegistry(nativeTool.Configure(config.Translators), parsed.EnabledTools(append(append([]string(nil), config.Names...), tool.ReadName, tool.WriteName, tool.EditName, tool.GrepName, tool.GlobName)...)...), RemoteJobs: []operation.RemoteJobHandler{handler}}, nil
+		return agentrunner.Tools{Registry: tool.NewRegistry(nativeTool.Configure(config.Translators), parsed.EnabledTools(append(append([]string(nil), config.Names...), tool.ReadName, tool.WriteName, tool.EditName, tool.GrepName, tool.GlobName)...)...), RemoteJobs: []operation.RemoteJobHandler{handler}, Close: handler.Close}, nil
 	}, nil
 }

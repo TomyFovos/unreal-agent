@@ -23,6 +23,10 @@ func Spec(request Request) (operation.Spec, error) {
 
 type Handler struct {
 	ctx       context.Context
+	cancel    context.CancelFunc
+	workers   sync.WaitGroup
+	closed    bool
+	closeOnce sync.Once
 	executor  Executor
 	namespace string
 	mu        sync.Mutex
@@ -34,7 +38,8 @@ func NewHandler(ctx context.Context, executor Executor, sessionID string) (*Hand
 	if executor.Files == nil || sessionID == "" {
 		return nil, errors.New("native handler requires file service and stable session ID")
 	}
-	return &Handler{ctx: ctx, executor: executor, namespace: sessionID, jobs: make(map[operation.ID]context.CancelFunc), updates: make(chan operation.Operation)}, nil
+	ctx, cancel := context.WithCancel(ctx)
+	return &Handler{ctx: ctx, cancel: cancel, executor: executor, namespace: sessionID, jobs: make(map[operation.ID]context.CancelFunc), updates: make(chan operation.Operation)}, nil
 }
 func (h *Handler) RemoteJobPlanType() operation.RemoteJobPlanType       { return PlanType }
 func (h *Handler) RemoteJobPlanVersion() operation.RemoteJobPlanVersion { return Version }
@@ -60,14 +65,21 @@ func (h *Handler) AddRemoteJob(current operation.Operation) error {
 		return err
 	}
 	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return errors.New("handler is closed")
+	}
 	if _, ok := h.jobs[current.ID]; ok {
 		h.mu.Unlock()
 		return nil
 	}
 	ctx, cancel := context.WithCancel(h.ctx)
 	h.jobs[current.ID] = cancel
+	h.workers.Add(1)
 	h.mu.Unlock()
 	go func() {
+		defer h.workers.Done()
+		defer func() { h.mu.Lock(); delete(h.jobs, current.ID); h.mu.Unlock() }()
 		defer cancel()
 		result := Result{Version: Version, Code: "canceled"}
 		if current.Status != operation.StatusCanceling {
@@ -92,5 +104,19 @@ func (h *Handler) AddRemoteJob(current operation.Operation) error {
 		case <-h.ctx.Done():
 		}
 	}()
+	return nil
+}
+
+// Close cancels and drains all execution before the owning Session lock is released.
+// Add and WaitGroup.Add share the closed mutex boundary, so Close cannot miss work.
+func (h *Handler) Close() error {
+	h.closeOnce.Do(func() {
+		h.mu.Lock()
+		h.closed = true
+		h.cancel()
+		h.mu.Unlock()
+		h.workers.Wait()
+		close(h.updates)
+	})
 	return nil
 }

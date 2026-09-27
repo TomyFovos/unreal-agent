@@ -349,7 +349,11 @@ func (p *Policy) OpenFile(path string, flag int, mode os.FileMode) (*os.File, er
 // OpenParent authorizes the target path, then opens its parent under the pinned
 // write root. Callers must use only basename-relative non-symlink operations on
 // the returned descriptor. It never grants access to the parent itself.
-func (p *Policy) OpenParent(path string) (*os.File, error) {
+func (p *Policy) OpenParent(path string) (*os.File, error) { return p.OpenParentFor(path, true) }
+
+// OpenParentFor authorizes read or write access and returns the matching pinned
+// parent. Only basename-relative nofollow operations may use the descriptor.
+func (p *Policy) OpenParentFor(path string, write bool) (*os.File, error) {
 	if p.unrestrictedFilesystem() {
 		parent, _ := filepath.Split(path)
 		if parent == "" {
@@ -357,7 +361,7 @@ func (p *Policy) OpenParent(path string) (*os.File, error) {
 		}
 		return os.Open(parent)
 	}
-	r, absolute, err := p.selectRoot(path, true)
+	r, absolute, err := p.selectRoot(path, write)
 	if err != nil {
 		return nil, err
 	}

@@ -38,7 +38,7 @@ func (s *Service) ReadDir(ctx context.Context, path string, limit int) ([]Entry,
 	}
 	// A synthetic basename pins the requested directory with the same nofollow
 	// traversal used by file operations. No synthetic file is opened or created.
-	parent, _, err := s.openParent(filepath.Join(path, ".directory-read"))
+	parent, _, err := s.authorizedParent(ctx, filepath.Join(path, ".directory-read"), false)
 	if err != nil {
 		return nil, false, err
 	}

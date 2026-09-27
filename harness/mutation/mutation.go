@@ -193,7 +193,7 @@ func (s *Service) Snapshot(ctx context.Context, path string) (Snapshot, error) {
 	if err = ctx.Err(); err != nil {
 		return Snapshot{}, err
 	}
-	parent, base, err := s.openParent(canonical)
+	parent, base, err := s.authorizedParent(ctx, canonical, false)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -291,10 +291,14 @@ func (s *Service) apply(ctx context.Context, request Request) Result {
 			result.Targets[i].Code = Denied
 			return result
 		}
-		parent, base, err := s.openParent(path)
+		parent, base, err := s.authorizedParent(ctx, path, true)
 		if err != nil {
 			result.Code = Invalid
-			result.Targets[i].Code = Invalid
+			result.Denial = permission.Failure(err)
+			if result.Denial != nil {
+				result.Code = Denied
+			}
+			result.Targets[i].Code = result.Code
 			return result
 		}
 		targets[i] = prepared{parent: parent, base: base, mode: 0600}
@@ -486,4 +490,27 @@ func ReadBounded(reader io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("file exceeds %d bytes", MaxFileBytes)
 	}
 	return data, nil
+}
+
+// authorizedParent proves that the no-symlink walk and the policy's pinned root
+// identify the same parent, then uses the authorized descriptor for actual I/O.
+// Reopening a policy's pathname is never treated as an authorization grant.
+func (s *Service) authorizedParent(ctx context.Context, path string, write bool) (*os.File, string, error) {
+	approved, err := permission.FromContext(ctx).OpenParentFor(path, write)
+	if err != nil {
+		return nil, "", err
+	}
+	current, base, err := s.openParent(path)
+	if err != nil {
+		approved.Close()
+		return nil, "", err
+	}
+	defer current.Close()
+	a, ae := approved.Stat()
+	b, be := current.Stat()
+	if ae != nil || be != nil || !os.SameFile(a, b) {
+		approved.Close()
+		return nil, "", &permission.Error{Code: permission.Denied, Capability: "filesystem", Reason: "authorized directory identity changed"}
+	}
+	return approved, base, nil
 }
