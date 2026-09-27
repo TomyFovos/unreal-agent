@@ -399,14 +399,14 @@ func Run(
 		return err
 	}
 	defer currentHost.Close()
-    if resolvedProvider.Version == 0 {
-        resolvedProvider = provider.Selection{Version:1,Provider:selected.Name,Model:provider.Model{ID:model},Endpoint:configuredBaseURL,MaxAttempts:maxAttempts,Source:"injected provider"}
-    }
-    identity, err := json.Marshal(struct {
-        Version int
-        Provider provider.Selection
-        Workspace string
-    }{1, resolvedProvider, workspace})
+	if resolvedProvider.Version == 0 {
+		resolvedProvider = provider.Selection{Version: 1, Provider: selected.Name, Model: provider.Model{ID: model}, Endpoint: configuredBaseURL, MaxAttempts: maxAttempts, Source: "injected provider"}
+	}
+	identity, err := json.Marshal(struct {
+		Version   int
+		Provider  provider.Selection
+		Workspace string
+	}{1, resolvedProvider, workspace})
 	if err != nil {
 		return err
 	}

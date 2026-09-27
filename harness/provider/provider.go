@@ -13,6 +13,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/responsesapi"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 )
 
 type Client interface {
@@ -154,6 +155,7 @@ func (r *Registry) Build(c BuildConfig) (Client, Selection, error) {
 		return nil, Selection{}, &Error{Code: "credential_resolver_required"}
 	}
 	c.Selection = s
+	c.Selection.Model.Capabilities = slices.Clone(s.Model.Capabilities)
 	// Credentials never follow redirects, even within the same origin. Embedders
 	// may inject a policy transport; copy the client rather than mutating it.
 	hc := http.Client{}
@@ -210,6 +212,9 @@ type Error struct {
 
 func (e *Error) Error() string { return "provider: " + e.Code }
 func normalize(err error) error {
+	if denied := permission.Failure(err); denied != nil {
+		return denied
+	}
 	if errors.Is(err, context.Canceled) {
 		return context.Canceled
 	}
