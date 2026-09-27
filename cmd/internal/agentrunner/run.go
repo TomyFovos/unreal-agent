@@ -11,7 +11,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,7 +18,7 @@ import (
 	"uuid"
 
 	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
-	"github.com/unreallabsai/unreal-agent/harness/coordinator"
+	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/responsesapi"
@@ -79,16 +78,6 @@ type RequestMessage struct {
 	Role      string  `json:"role"`
 	Content   string  `json:"content"`
 	MessageID *string `json:"message_id"`
-}
-
-type environmentChange struct {
-	name    string
-	value   string
-	present bool
-}
-
-type environmentScope struct {
-	changes []environmentChange
 }
 
 type errorEvent struct {
@@ -224,15 +213,11 @@ func Run(
 	if !workspaceInfo.IsDir() {
 		return fmt.Errorf("workspace %q is not a directory", workspace)
 	}
-	environment, err := loadDotEnv(filepath.Join(workspace, ".env"))
+	environment, err := loadDotEnv(filepath.Join(workspace, ".env"), getenv)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err := environment.Close(); err != nil {
-			runErr = errors.Join(runErr, err)
-		}
-	}()
+	getenv = environment
 	maxAttempts, err := resolveMaxAttempts(parsed.MaxAttempts, getenv)
 	if err != nil {
 		return err
@@ -288,13 +273,9 @@ func Run(
 	if err != nil {
 		return fmt.Errorf("resolve session directory: %w", err)
 	}
-	store, err := localfile.New(storeDirectory)
-	if err != nil {
-		return fmt.Errorf("open session store: %w", err)
-	}
-	sessionID, restored, err := openSession(ctx, store, parsed.SessionID)
-	if err != nil {
-		return err
+	sessionID := session.ID(uuid.New().String())
+	if parsed.SessionID != nil {
+		sessionID = session.ID(strings.TrimSpace(*parsed.SessionID))
 	}
 	observedOutput := output
 	if directory := strings.TrimSpace(*logDirectory); directory != "" {
@@ -360,11 +341,7 @@ func Run(
 		}
 	}
 
-	operations := operation.NewLocalOperationManager(runContext, configuredTools.RemoteJobs...)
-	inputs, err := inbox.New(runContext, restored.ExternalInputIDs)
-	if err != nil {
-		return fmt.Errorf("open inbox: %w", err)
-	}
+	var initialInputs []inbox.Input
 	settingsPayload, err := json.Marshal(inbox.ControlMessage{
 		Mode: inbox.UpdateSettings,
 		Parameters: inbox.Settings{
@@ -374,11 +351,7 @@ func Run(
 	if err != nil {
 		return fmt.Errorf("encode settings: %w", err)
 	}
-	if err := inputs.Submit(runContext, inbox.Input{
-		ID: inbox.ID(uuid.New().String()), Kind: inbox.InputControl, Payload: settingsPayload,
-	}); err != nil {
-		return fmt.Errorf("submit settings: %w", err)
-	}
+	initialInputs = append(initialInputs, inbox.Input{ID: inbox.ID(uuid.New().String()), Kind: inbox.InputControl, Payload: settingsPayload})
 	for index, message := range messages {
 		payload, err := json.Marshal(message.Content)
 		if err != nil {
@@ -390,22 +363,14 @@ func Run(
 		} else {
 			messageID = inbox.ID(uuid.New().String())
 		}
-		if err := inputs.Submit(runContext, inbox.Input{
-			ID: messageID, Kind: inbox.InputExternal, Payload: payload,
-		}); err != nil {
-			return fmt.Errorf("submit message %d: %w", index, err)
-		}
+		initialInputs = append(initialInputs, inbox.Input{ID: messageID, Kind: inbox.InputExternal, Payload: payload})
 	}
 
 	stopPayload, err := json.Marshal(inbox.ControlMessage{Mode: inbox.StopWhenIdle})
 	if err != nil {
 		return fmt.Errorf("encode stop request: %w", err)
 	}
-	if err := inputs.Submit(runContext, inbox.Input{
-		ID: inbox.ID(uuid.New().String()), Kind: inbox.InputControl, Payload: stopPayload,
-	}); err != nil {
-		return fmt.Errorf("submit stop request: %w", err)
-	}
+	initialInputs = append(initialInputs, inbox.Input{ID: inbox.ID(uuid.New().String()), Kind: inbox.InputControl, Payload: stopPayload})
 
 	builder := contextbuilder.NewBuilder(registry.Skills()...)
 	builder.SetModel(llm.Model{
@@ -421,32 +386,89 @@ func Run(
 		builder.AddTool(definition.Tool)
 	}
 
-	observer := &sessionObserver{
-		sessionID: sessionID,
-		output:    observedOutput,
-		cancel:    cancel,
+	currentHost, err := host.New(runContext, host.Config{Directory: storeDirectory, Build: func(sessionContext context.Context, _ session.ID) (host.Runtime, error) {
+		return host.Runtime{Builder: builder, LLM: client, Tools: registry, Operations: operation.NewLocalOperationManager(sessionContext, configuredTools.RemoteJobs...)}, nil
+	}})
+	if err != nil {
+		return err
 	}
-	observerID := store.AddObserver(observer.Observe)
-	defer store.RemoveObserver(observerID)
-	current := coordinator.New(coordinator.Dependencies{
-		ToolHeartbeatInterval: *toolHeartbeatInterval,
-		SessionID:             sessionID,
-		Inbox:                 inputs,
-		Restored:              restored,
-		Sessions:              store,
-		ContextBuilder:        builder,
-		LLM:                   client,
-		Tools:                 registry,
-		Operations:            operations,
-	})
-	coordinatorErr := current.Run(runContext)
-	if observerErr := observer.Err(); observerErr != nil {
-		return observerErr
+	defer currentHost.Close()
+	identity, err := json.Marshal(struct {
+		Version                              int
+		Provider, Model, Endpoint, Workspace string
+		MaxAttempts                          int
+	}{1, selected.Name, model, configuredBaseURL, workspace, maxAttempts})
+	if err != nil {
+		return err
 	}
-	if coordinatorErr != nil {
-		return fmt.Errorf("run coordinator: %w", coordinatorErr)
+	current, err := currentHost.Open(runContext, host.Options{Lifecycle: "one-shot", Configuration: identity, ID: sessionID, Initial: initialInputs, Heartbeat: *toolHeartbeatInterval})
+	if err != nil {
+		return err
+	}
+	if err = writeHostSession(runContext, current, observedOutput); err != nil {
+		return err
+	}
+	if err = current.Wait(runContext); err != nil {
+		return fmt.Errorf("run coordinator: %w", err)
 	}
 	return nil
+}
+
+// The one-shot client follows canonical history. A slow output can resync
+// without blocking the session owner or holding its store lock.
+func writeHostSession(ctx context.Context, current *host.Session, output io.Writer) error {
+	after := current.StartAfter
+	drain := func() error {
+		for {
+			view, err := current.Inspect(after, 256)
+			if err != nil {
+				return err
+			}
+			for _, item := range view.History.Items {
+				if err = writeSessionItem(output, item); err != nil {
+					return err
+				}
+				after = item.Sequence
+			}
+			if !view.History.More {
+				return nil
+			}
+		}
+	}
+	for {
+		sub, err := current.Subscribe(after, 256, 64)
+		if err != nil {
+			return err
+		}
+		if err = drain(); err != nil {
+			sub.Cancel()
+			return err
+		}
+		for event := range sub.Events {
+			if err = drain(); err != nil {
+				sub.Cancel()
+				return err
+			}
+			if event.Kind == "gap" {
+				break
+			}
+			if err = context.Cause(ctx); err != nil {
+				sub.Cancel()
+				return err
+			}
+		}
+		sub.Cancel()
+		if err = drain(); err != nil {
+			return err
+		}
+		view, err := current.Inspect(after, 1)
+		if err != nil {
+			return err
+		}
+		if !view.Running {
+			return nil
+		}
+	}
 }
 
 func resolveMaxAttempts(requested *int, getenv func(string) string) (int, error) {
@@ -531,77 +553,31 @@ func openDatetimeLog(directory string, now time.Time) (*os.File, error) {
 	return file, nil
 }
 
-func loadDotEnv(path string) (*environmentScope, error) {
+// loadDotEnv returns a session-local overlay and never mutates the process.
+// Explicit caller environment wins; sandbox proxy remains the documented file override.
+func loadDotEnv(path string, parent func(string) string) (func(string) string, error) {
 	encoded, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return &environmentScope{}, nil
-		}
-		return nil, fmt.Errorf("read environment file: %w", err)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, errors.New("read environment file failed")
 	}
-	values := make(map[string]string)
+	values := map[string]string{}
 	for line := range strings.Lines(string(encoded)) {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		name, value, exists := strings.Cut(line, "=")
-		if !exists {
-			continue
-		}
+		name, value, ok := strings.Cut(line, "=")
 		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		values[name] = strings.TrimSpace(value)
-	}
-	scope := &environmentScope{}
-	for name, value := range values {
-		_, present := os.LookupEnv(name)
-		if present && name != "SANDBOX_EGRESS_PROXY" {
-			continue
-		}
-		if err := scope.set(name, value); err != nil {
-			return nil, errors.Join(err, scope.Close())
+		if ok && name != "" {
+			values[name] = strings.TrimSpace(value)
 		}
 	}
-	if proxy := os.Getenv("SANDBOX_EGRESS_PROXY"); proxy != "" {
-		if err := scope.set("HTTPS_PROXY", proxy); err != nil {
-			return nil, errors.Join(err, scope.Close())
+	return func(name string) string {
+		if value := parent(name); value != "" && name != "SANDBOX_EGRESS_PROXY" {
+			return value
 		}
-	}
-	return scope, nil
-}
-
-func (scope *environmentScope) set(name, value string) error {
-	previous, present := os.LookupEnv(name)
-	if err := os.Setenv(name, value); err != nil {
-		return fmt.Errorf("set environment variable %q: %w", name, err)
-	}
-	scope.changes = append(scope.changes, environmentChange{
-		name: name, value: previous, present: present,
-	})
-	return nil
-}
-
-func (scope *environmentScope) Close() error {
-	var closeErr error
-	for _, change := range slices.Backward(scope.changes) {
-		var err error
-		if change.present {
-			err = os.Setenv(change.name, change.value)
-		} else {
-			err = os.Unsetenv(change.name)
-		}
-		if err != nil {
-			closeErr = errors.Join(
-				closeErr,
-				fmt.Errorf("restore environment variable %q: %w", change.name, err),
-			)
-		}
-	}
-	scope.changes = nil
-	return closeErr
+		return values[name]
+	}, nil
 }
 
 func validateRequest(parsed Request) ([]RequestMessage, error) {

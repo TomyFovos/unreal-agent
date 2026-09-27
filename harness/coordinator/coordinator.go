@@ -15,6 +15,8 @@ import (
 )
 
 type Dependencies struct {
+	// RestoredStop is a persisted stop whose effect was not completed.
+	RestoredStop          *inbox.ControlMessage
 	ToolHeartbeatInterval time.Duration
 	SessionID             session.ID
 	Inbox                 *inbox.Inbox

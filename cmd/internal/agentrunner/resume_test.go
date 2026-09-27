@@ -167,6 +167,11 @@ func TestRunMainResumesInterruptedDeliveryWithDuplicateInput(t *testing.T) {
 				}
 				return llm.Response{Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "Done."}}}}, nil
 			}
+			code, _, stderr = run(resumed)
+			if code != 1 || resumed.calls != 0 || !strings.Contains(stderr, "configuration mismatch") {
+				t.Fatalf("changed model must be rejected before delivery: %d %d %s", code, resumed.calls, stderr)
+			}
+			model = "initial-model"
 			code, stdout, stderr := run(resumed)
 			if code != 0 || resumed.calls != 1 {
 				t.Fatalf("resumed run: exit=%d, calls=%d, stderr=%s", code, resumed.calls, stderr)

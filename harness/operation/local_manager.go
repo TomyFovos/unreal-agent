@@ -9,6 +9,7 @@ import (
 )
 
 type LocalOperationManager struct {
+	done            chan struct{}
 	ctx             context.Context
 	remoteJobs      *remoteJobHandlers
 	adds            chan localAddRequest
@@ -63,6 +64,7 @@ var _ Manager = (*LocalOperationManager)(nil)
 
 func NewLocalOperationManager(ctx context.Context, remoteJobHandlers ...RemoteJobHandler) *LocalOperationManager {
 	manager := &LocalOperationManager{
+		done:            make(chan struct{}),
 		ctx:             ctx,
 		remoteJobs:      newRemoteJobHandlers(ctx, remoteJobHandlers),
 		adds:            make(chan localAddRequest),
@@ -111,6 +113,7 @@ func (manager *LocalOperationManager) Updates() <-chan Operation {
 }
 
 func (manager *LocalOperationManager) run() {
+	defer close(manager.done)
 	defer close(manager.updates)
 	defer manager.remoteJobs.workers.Wait()
 	operations := make(map[ID]*localRunningOperation)
@@ -442,3 +445,6 @@ func localPrimitiveCompleted(eventType primitives.PrimitiveEventType) bool {
 		return false
 	}
 }
+
+// Done closes after executor processes and primitive goroutines have drained.
+func (manager *LocalOperationManager) Done() <-chan struct{} { return manager.done }
