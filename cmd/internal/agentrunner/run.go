@@ -254,7 +254,7 @@ func Run(
 		return fmt.Errorf("model must be set in the request or %s", llmModelEnvironment)
 	}
 	var apiKey string
-	if selected.APIKeyEnvironment != "" {
+	if selected.APIKeyEnvironment != "" && strings.TrimSpace(getenv("UNREAL_HARNESS_CREDENTIAL_ID")) == "" {
 		apiKey = getenv(llmAPIKeyEnvironment)
 		if strings.TrimSpace(apiKey) == "" {
 			apiKey = getenv(selected.APIKeyEnvironment)
