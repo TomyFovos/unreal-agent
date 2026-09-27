@@ -65,6 +65,10 @@ type Provider struct {
 }
 
 type Request struct {
+	ProfileID      string `json:"profile_id"`
+	ProfileVersion int    `json:"profile_version"`
+	ModelFamily    string `json:"model_family"`
+
 	Messages               []RequestMessage `json:"messages"`
 	Prompt                 *string          `json:"prompt"`
 	SystemPrompt           *string          `json:"system_prompt"`
