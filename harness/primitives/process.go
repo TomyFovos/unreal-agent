@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"golang.org/x/sys/unix"
 )
 
@@ -322,6 +323,12 @@ func runProcess(
 	process *ProcessInvocation,
 	events chan<- PrimitiveEvent,
 ) {
+	if err := permission.FromContext(ctx).CheckProcess(); err != nil {
+		process.startErr = err
+		close(process.ready)
+		sendProcessTerminalEvent(events, processFailure(request.Source, request.CorrelationID, err))
+		return
+	}
 	if err := validateProcessStartRequest(request); err != nil {
 		process.startErr = err
 		close(process.ready)

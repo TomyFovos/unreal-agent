@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/primitives"
 )
 
@@ -76,6 +77,12 @@ func NewLocalOperationManager(ctx context.Context, remoteJobHandlers ...RemoteJo
 	return manager
 }
 
+// NewLocalOperationManagerWithPolicy accepts explicit Host capabilities. Nested
+// policies are intersected; a nil policy fails closed.
+func NewLocalOperationManagerWithPolicy(ctx context.Context, policy *permission.Policy, handlers ...RemoteJobHandler) *LocalOperationManager {
+	return NewLocalOperationManager(permission.WithPolicy(ctx, policy), handlers...)
+}
+
 func (manager *LocalOperationManager) Add(operation Operation) error {
 	result := make(chan error, 1)
 	request := localAddRequest{operation: operation, result: result}
@@ -138,6 +145,17 @@ func (manager *LocalOperationManager) run() {
 				request.result <- nil
 				continue
 			}
+			if err := Authorize(permission.FromContext(manager.ctx), request.operation); err != nil {
+				if denial := permission.Failure(err); denial != nil {
+					failed := PermissionFailure(request.operation, denial)
+					accepted[request.operation.ID] = struct{}{}
+					manager.appendLocalUpdate(failed)
+					request.result <- nil
+				} else {
+					request.result <- err
+				}
+				continue
+			}
 			ctx, cancel := context.WithCancel(manager.ctx)
 			current := &localRunningOperation{
 				ctx:                   ctx,
@@ -149,7 +167,13 @@ func (manager *LocalOperationManager) run() {
 				handlerIndex, err := manager.remoteJobs.add(request.operation)
 				if err != nil {
 					cancel()
-					request.result <- err
+					if denial := permission.Failure(err); denial != nil {
+						accepted[request.operation.ID] = struct{}{}
+						manager.appendLocalUpdate(PermissionFailure(request.operation, denial))
+						request.result <- nil
+					} else {
+						request.result <- err
+					}
 					continue
 				}
 				current.remoteJobHandlerIndex = handlerIndex
@@ -240,6 +264,12 @@ func (manager *LocalOperationManager) run() {
 			if completed && current.ctx.Err() != nil {
 				event.Type = primitives.PrimitiveEventCanceled
 				event.Result = nil
+			}
+			if failure, ok := event.Result.(primitives.PrimitiveFailureResult); ok && failure.Denial != nil {
+				manager.appendLocalUpdate(PermissionFailure(current.operation, failure.Denial))
+				current.cancel()
+				delete(operations, current.operation.ID)
+				continue
 			}
 			step, err := current.handle(&event)
 			if err != nil {

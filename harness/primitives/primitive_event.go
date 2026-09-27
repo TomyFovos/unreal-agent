@@ -1,5 +1,7 @@
 package primitives
 
+import "github.com/unreallabsai/unreal-agent/harness/permission"
+
 type PrimitiveEventType string
 
 type SourceID string
@@ -19,7 +21,8 @@ type PrimitiveEvent struct {
 }
 
 type PrimitiveFailureResult struct {
-	Error string
+	Denial *permission.Error
+	Error  string
 }
 
 func primitiveFailure(
@@ -27,12 +30,16 @@ func primitiveFailure(
 	correlationID CorrelationID,
 	err error,
 ) PrimitiveEvent {
+	if denial := permission.Failure(err); denial != nil {
+		err = denial
+	}
 	return PrimitiveEvent{
 		Type:          PrimitiveEventFailed,
 		Source:        source,
 		CorrelationID: correlationID,
 		Result: PrimitiveFailureResult{
-			Error: err.Error(),
+			Error:  err.Error(),
+			Denial: permission.Failure(err),
 		},
 	}
 }

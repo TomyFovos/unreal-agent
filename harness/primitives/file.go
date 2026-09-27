@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"io"
 	"os"
 	"syscall"
@@ -58,7 +59,7 @@ func streamFile(ctx context.Context, request IOReadRequest, events chan<- Primit
 		return
 	}
 
-	file, err := os.OpenFile(request.Path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	file, err := permission.FromContext(ctx).OpenFile(request.Path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		events <- ioReadFailure(request, fmt.Errorf("open %q: %w", request.Path, err))
 		return

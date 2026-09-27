@@ -189,6 +189,9 @@ func remoteFailureError(ctx context.Context, event primitives.PrimitiveEvent) er
 	if !ok {
 		return errors.New("remote request failed with an invalid result")
 	}
+	if failure.Denial != nil {
+		return failure.Denial
+	}
 	return errors.New(failure.Error)
 }
 

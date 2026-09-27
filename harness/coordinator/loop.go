@@ -13,6 +13,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
@@ -577,7 +578,7 @@ func (current *coordinator) restoreItem(item sessionstore.Item) error {
 	if item.Kind == sessionstore.ItemToolCallStatus && ok && toolCallRequiresTranslator(status) {
 		call, exists := current.state.toolCalls[toolCallKey{turnID: status.TurnID, callID: status.CallID}]
 		if exists {
-			if _, available := current.dependencies.Tools.Resolve(call.toolCall.Name); !available {
+			if _, available := tool.ResolveHistory(current.dependencies.Tools, call.toolCall.Name); !available {
 				return fmt.Errorf("tool %q required by recorded call %q is not available", call.toolCall.Name, status.CallID)
 			}
 		}
@@ -778,6 +779,9 @@ func (current *coordinator) addToolResultToLocalState(
 		return nil
 	}
 	translator, exists := current.dependencies.Tools.Resolve(call.toolCall.Name)
+	if toolCallRequiresTranslator(status) {
+		translator, exists = tool.ResolveHistory(current.dependencies.Tools, call.toolCall.Name)
+	}
 	if !exists {
 		if !toolCallRequiresTranslator(status) {
 			current.dependencies.ContextBuilder.AddToolResult(status.CallID, []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: status.Status.Error}}, false)
@@ -845,13 +849,16 @@ func (current *coordinator) scheduleToolCall(
 	translator, exists := current.dependencies.Tools.Resolve(call.Name)
 	toolContext := &toolCallContext{}
 	var status tool.CallStatus
-	if exists {
+	if err := permission.FromContext(ctx).CheckTool(call.Name); err != nil {
+		status = tool.CallStatus{Error: err.Error(), Denial: permission.Failure(err)}
+	} else if exists {
 		status = translator.Translate(toolContext, call)
 	} else {
 		status = tool.ErrorStatus(fmt.Sprintf("tool %q is not available", call.Name), 0)
 	}
 	operations := make([]operation.Operation, 0, len(toolContext.operations))
 	for _, value := range toolContext.operations {
+		value.ToolName = call.Name
 		operations = append(operations, current.addOperationToLocalState(value))
 	}
 	toolCallStatus := sessionstore.ToolCallStatus{

@@ -79,6 +79,26 @@ func (current *registry) Resolve(name string) (Translator, bool) {
 	return nil, false
 }
 
+// ResolveHistory retains result codecs for hidden or currently denied tools.
+func (current *registry) ResolveHistory(name string) (Translator, bool) {
+	translator, exists := current.staticTranslators[name]
+	if _, unavailable := translator.(unavailableTranslator); unavailable {
+		return nil, false
+	}
+	return translator, exists
+}
+
+// ResolveHistory uses a registry's independent history catalog when available.
+// The fallback keeps third-party registries source-compatible.
+func ResolveHistory(registry Registry, name string) (Translator, bool) {
+	if history, ok := registry.(interface {
+		ResolveHistory(string) (Translator, bool)
+	}); ok {
+		return history.ResolveHistory(name)
+	}
+	return registry.Resolve(name)
+}
+
 func (current *registry) RegisterSkill(skill Skill) (RegistrationID, error) {
 	if err := validateSkill(skill); err != nil {
 		return uuid.Nil(), err

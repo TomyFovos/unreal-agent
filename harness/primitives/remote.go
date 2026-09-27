@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"io"
 	"mime"
 	"net"
@@ -162,6 +163,22 @@ func runRemoteRequest(
 	request RemoteRequest,
 	events chan<- PrimitiveEvent,
 ) {
+	// Apply request-scoped policy to every exchange, not only the initial URL.
+	if permission.Configured(ctx) {
+		guarded := *client
+		base := client.Transport
+		// Standard transports may inherit ambient proxies; guard a private clone.
+		if transport, ok := base.(*http.Transport); ok {
+			clone := transport.Clone()
+			if !permission.FromContext(ctx).NetworkUnrestricted() {
+				clone.Proxy = nil
+			}
+			base = clone
+			defer clone.CloseIdleConnections()
+		}
+		guarded.Transport = permission.FromContext(ctx).RoundTripper(base)
+		client = &guarded
+	}
 	baseRequest, err := prepareRemoteRequest(request)
 	if err != nil {
 		sendRemoteTerminalEvent(events, remoteFailure(request, err))
