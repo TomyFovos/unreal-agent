@@ -46,18 +46,8 @@ func (s *Service) Login(ctx context.Context, request LoginRequest) (credential.M
 	if err := ctx.Err(); err != nil {
 		return credential.Metadata{}, err
 	}
-	if err := request.Reference.Validate(); err != nil {
+	if err := ValidateMethod(request.Reference); err != nil {
 		return credential.Metadata{}, err
-	}
-	allowed := false
-	for _, support := range Matrix() {
-		if support.Provider == request.Reference.Provider && support.Method == request.Reference.Method && (support.Status == "supported" || support.Status == "configuration_only") {
-			allowed = true
-			break
-		}
-	}
-	if !allowed {
-		return credential.Metadata{}, &credential.Error{Code: "unsupported_auth_flow"}
 	}
 	material := credential.Material{Token: credential.NewSecret(strings.TrimSpace(request.Secret.Reveal())), Owner: credential.Managed}
 	if err := s.manager.Login(ctx, request.Reference, material); err != nil {
@@ -79,4 +69,22 @@ func (s *Service) Logout(ctx context.Context, reference credential.Reference) er
 }
 func (s *Service) List(ctx context.Context) ([]credential.Metadata, error) {
 	return s.manager.List(ctx)
+}
+
+// ValidateMethod rejects unavailable flows before a UI requests a secret.
+func ValidateMethod(ref credential.Reference) error {
+	if err := ref.Validate(); err != nil {
+		return err
+	}
+	allowed := false
+	for _, support := range Matrix() {
+		if support.Provider == ref.Provider && support.Method == ref.Method && (support.Status == "supported" || support.Status == "configuration_only") {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return &credential.Error{Code: "unsupported_auth_flow"}
+	}
+	return nil
 }
