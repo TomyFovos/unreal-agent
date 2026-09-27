@@ -32,8 +32,9 @@ type registry struct {
 var _ Registry = (*registry)(nil)
 
 type StaticTranslators struct {
-	Bash      Translator
-	ViewImage Translator
+	Read, Write, Edit, Grep, Glob Translator
+	Bash                          Translator
+	ViewImage                     Translator
 }
 
 func NewRegistry(configured StaticTranslators, enabled ...string) Registry {
@@ -55,6 +56,12 @@ func NewRegistry(configured StaticTranslators, enabled ...string) Registry {
 		BashName:      configured.Bash,
 		ViewImageName: configured.ViewImage,
 		SkillUseName:  &skillUseTranslator{registry: current},
+	}
+	for name, translator := range map[string]Translator{ReadName: configured.Read, WriteName: configured.Write, EditName: configured.Edit, GrepName: configured.Grep, GlobName: configured.Glob} {
+		if translator == nil {
+			translator = unavailableTranslator{name: name}
+		}
+		current.staticTranslators[name] = translator
 	}
 	return current
 }

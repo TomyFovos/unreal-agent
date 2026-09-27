@@ -10,6 +10,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"io"
 	"os"
 	"path/filepath"
@@ -101,9 +102,10 @@ type TargetResult struct {
 	Revision Revision `json:"revision"`
 }
 type Result struct {
-	Version int            `json:"version"`
-	Code    Code           `json:"code"`
-	Targets []TargetResult `json:"targets"`
+	Denial  *permission.Error `json:"denial,omitempty"`
+	Version int               `json:"version"`
+	Code    Code              `json:"code"`
+	Targets []TargetResult    `json:"targets"`
 }
 type Authorizer func(context.Context, string, bool) error
 type Config struct {
@@ -285,6 +287,7 @@ func (s *Service) apply(ctx context.Context, request Request) Result {
 		}
 		if err := s.authorize(ctx, path, true); err != nil {
 			result.Code = Denied
+			result.Denial = permission.Failure(err)
 			result.Targets[i].Code = Denied
 			return result
 		}
@@ -361,11 +364,50 @@ type receipt struct {
 // not a second scheduler or session history.
 func (s *Service) Execute(ctx context.Context, id string, request Request) Result {
 	result := baseResult(request, Invalid)
-	if id == "" || request.Validate() != nil {
+	if request.Validate() != nil {
 		return result
 	}
 	encoded, err := json.Marshal(request)
 	if err != nil {
+		return result
+	}
+	return s.execute(ctx, id, encoded, result, func() Result { return s.apply(ctx, request) })
+}
+
+// PrepareFailure is a typed validation outcome returned by a conditional edit builder.
+type PrepareFailure struct {
+	Code   Code
+	Denial *permission.Error
+}
+
+func (e PrepareFailure) Error() string { return string(e.Code) }
+
+// ExecutePrepared binds the receipt to an immutable edit/AST plan before reading
+// the source. On recovery it returns saved evidence without rebuilding from newer
+// bytes. Prepare performs no writes; Apply still validates all resulting revisions
+// and replacements under target locks.
+func (s *Service) ExecutePrepared(ctx context.Context, id string, identity []byte, prepare func(context.Context) (Request, error)) Result {
+	initial := Result{Version: Version, Code: Invalid}
+	if len(identity) == 0 || len(identity) > MaxFileBytes || prepare == nil {
+		return initial
+	}
+	return s.execute(ctx, id, identity, initial, func() Result {
+		request, err := prepare(ctx)
+		if err != nil {
+			result := initial
+			result.Code = Failed
+			var failure PrepareFailure
+			if errors.As(err, &failure) {
+				result.Code = failure.Code
+				result.Denial = failure.Denial
+			}
+			return result
+		}
+		return s.apply(ctx, request)
+	})
+}
+func (s *Service) execute(ctx context.Context, id string, encoded []byte, result Result, run func() Result) Result {
+	if id == "" {
 		return result
 	}
 	digest := sha256.Sum256(encoded)
@@ -419,7 +461,7 @@ func (s *Service) Execute(ctx context.Context, id string, request Request) Resul
 			return result
 		}
 	}
-	result = s.apply(ctx, request)
+	result = run()
 	if s.hook != nil {
 		if s.hook("before_receipt", -1) != nil {
 			result.Code = Indeterminate

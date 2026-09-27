@@ -311,7 +311,7 @@ func Run(
 		names = append(names, tool.SkillUseName)
 	}
 	toolConfig := ToolConfig{
-		SessionID: sessionID, Getenv: getenv, Names: names,
+		SessionID: sessionID, Getenv: getenv, Names: names, Directory: workspace,
 		Translators: tool.StaticTranslators{
 			Bash: bash.New(bash.Config{
 				Shell:         shell,
