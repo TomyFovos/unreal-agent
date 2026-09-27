@@ -27,7 +27,7 @@ func TestParseRequestConfiguresStaticTools(t *testing.T) {
 	for _, definition := range configured.Registry.StaticDefinitions() {
 		names = append(names, definition.Tool.Name)
 	}
-	if !slices.Equal(names, []string{"ViewImage", "read", "write", "edit", "grep", "glob"}) {
+	if !slices.Equal(names, []string{"ViewImage", "read", "write", "edit", "grep", "glob", "ast_grep", "ast_edit"}) {
 		t.Fatalf("static tools = %v, want native tools and ViewImage", names)
 	}
 	for _, name := range []string{"Bash", "SkillUse", "McpSearch", "McpCall"} {
@@ -35,7 +35,7 @@ func TestParseRequestConfiguresStaticTools(t *testing.T) {
 			t.Errorf("unavailable tool %s resolves", name)
 		}
 	}
-	if len(configured.RemoteJobs) != 1 {
+	if len(configured.RemoteJobs) != 2 {
 		t.Fatal("runner must configure native operations")
 	}
 }

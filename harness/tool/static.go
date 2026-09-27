@@ -84,7 +84,7 @@ func staticDefinitions() []Definition {
 				"required": []any{"name"},
 			},
 		}},
-	}, nativeDefinitions()...)
+	}, append(nativeDefinitions(), astDefinitions()...)...)
 }
 
 func maxOutputLengthSchema() map[string]any {
