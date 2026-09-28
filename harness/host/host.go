@@ -262,16 +262,22 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 			return nil, err
 		}
 	}
-	// Queue the complete initial batch before running, preserving one-shot batching.
+	// Register the initial batch without asynchronously forwarding individual
+	// messages. Coordinator consumes all of it before its first model decision.
+	var initial []inbox.Input
 	for _, input := range o.Initial {
-		if _, err = s.enqueue(input); err != nil {
-			return nil, err
+		pending, fresh, e := s.register(input)
+		if e != nil {
+			return nil, e
+		}
+		if fresh {
+			initial = append(initial, pending.input)
 		}
 	}
 	pending := s.pendingStop()
 	dependencies := coordinator.Dependencies{SessionID: o.ID, Inbox: s.inbox, Restored: restored,
 		Sessions: &serializedStore{s}, ContextBuilder: s.runtime.Builder, LLM: s.runtime.LLM, Tools: s.runtime.Tools,
-		Operations: s.runtime.Operations, ToolHeartbeatInterval: o.Heartbeat, RestoredStop: pending}
+		Operations: s.runtime.Operations, ToolHeartbeatInterval: o.Heartbeat, RestoredStop: pending, InitialInputs: initial}
 	h.sessions[o.ID] = s
 	go func() {
 		runErr := coordinator.New(dependencies).Run(cctx)
@@ -363,26 +369,34 @@ func canonical(input inbox.Input) (inbox.Input, error) {
 	return input, nil
 }
 func same(a, b inbox.Input) bool { return a.Kind == b.Kind && bytes.Equal(a.Payload, b.Payload) }
-func (s *Session) enqueue(input inbox.Input) (*submission, error) {
+func (s *Session) register(input inbox.Input) (*submission, bool, error) {
 	input, err := canonical(input)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	s.mu.Lock()
 	if old := s.submissions[input.ID]; old != nil {
 		s.mu.Unlock()
 		if !same(old.input, input) {
-			return nil, ErrConflict
+			return nil, false, ErrConflict
 		}
-		return old, nil
+		return old, false, nil
 	}
 	if !s.running {
 		s.mu.Unlock()
-		return nil, ErrStopped
+		return nil, false, ErrStopped
 	}
 	p := &submission{input: input, done: make(chan struct{})}
 	s.submissions[input.ID] = p
 	s.mu.Unlock()
+	return p, true, nil
+}
+func (s *Session) enqueue(input inbox.Input) (*submission, error) {
+	p, fresh, err := s.register(input)
+	if err != nil || !fresh {
+		return p, err
+	}
+	input = p.input
 	if err = s.inbox.Submit(s.ctx, input); err != nil {
 		s.mu.Lock()
 		p.err = err

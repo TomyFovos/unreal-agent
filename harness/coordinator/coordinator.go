@@ -15,6 +15,8 @@ import (
 )
 
 type Dependencies struct {
+	// InitialInputs is one startup batch processed before any execution or model decision.
+	InitialInputs []inbox.Input
 	// RestoredStop is a persisted stop whose effect was not completed.
 	RestoredStop          *inbox.ControlMessage
 	ToolHeartbeatInterval time.Duration
