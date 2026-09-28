@@ -68,18 +68,28 @@ func TestRunResumesAfterOutputFailure(t *testing.T) {
 			if err := run(&output); err != nil {
 				t.Fatal(err)
 			}
-			wantInputs := 0
-			if test.name == "settings" {
-				wantInputs = 1
+			// Output is a subscriber and can fail after the owner has progressed.
+			// Only the canonical history defines whether a retry needs new input.
+			page, err = store.Items(ctx, "output-failure", sessionstore.BeforeFirst, 100)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if got := len(inputIDs(t, output.String())); got != wantInputs {
-				t.Fatalf("retry persisted %d user inputs, want %d", got, wantInputs)
+			inputs := 0
+			for _, item := range page.Items {
+				if input, ok := item.Data.(inbox.Input); ok && input.Kind == inbox.InputExternal {
+					inputs++
+				}
 			}
-			if len(requests) != 1 {
-				t.Fatalf("model calls across failure and retry = %d, want 1", len(requests))
+			if inputs != 1 {
+				t.Fatalf("canonical user inputs = %d, want 1", inputs)
 			}
-			if err := (<-requests).Err(); !errors.Is(err, context.Canceled) {
-				t.Fatalf("model context error = %v, want cancellation", err)
+			if len(requests) < 1 || len(requests) > 2 {
+				t.Fatalf("model calls across failure and retry = %d, want 1 or interrupted retry", len(requests))
+			}
+			for len(requests) > 0 {
+				if err := (<-requests).Err(); !errors.Is(err, context.Canceled) {
+					t.Fatalf("model context error = %v, want cancellation", err)
+				}
 			}
 			if err := run(io.Discard); err != nil {
 				t.Fatal(err)
@@ -159,7 +169,7 @@ func TestRunMainResumesInterruptedDeliveryWithDuplicateInput(t *testing.T) {
 			resumed := &fakeClient{}
 			resumed.respond = func(_ context.Context, request llm.Request) (llm.Response, error) {
 				resumed.calls++
-				if request.Model.ID != model || request.Model.ReasoningEffort != llm.ReasoningEffortLow {
+				if request.Model.ID != model || request.Model.ReasoningEffort != effort {
 					return llm.Response{}, fmt.Errorf("recovered request settings = %#v", request.Model)
 				}
 				if withTool && !hasResult(request) {

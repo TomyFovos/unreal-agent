@@ -93,41 +93,44 @@ func (current *coordinator) Run(ctx context.Context) error {
 
 	if request := current.dependencies.RestoredStop; request != nil {
 		current.acceptStop(*request)
-		if request.Mode == inbox.StopHard {
-			// The session writer lock proves the old owner is gone. Do not dispatch
-			// recovered effects merely to cancel them immediately afterwards.
-			for _, op := range current.state.operations {
-				if operationIsTerminal(op.Status) {
-					continue
-				}
-				canceled, err := operation.CancelUndispatched(op)
-				if err != nil {
-					return err
-				}
-				if err = current.handleOperationUpdate(ctx, canceled); err != nil {
-					return err
-				}
+	}
+	if err := current.processInputs(ctx, current.dependencies.InitialInputs); err != nil {
+		return err
+	}
+	if current.stop.request.Mode == inbox.StopHard {
+		// The session writer lock proves the old owner is gone. Do not dispatch
+		// recovered effects merely to cancel them immediately afterwards.
+		for _, op := range current.state.operations {
+			if operationIsTerminal(op.Status) {
+				continue
 			}
-			if _, err := current.scheduleToolCalls(ctx); err != nil {
+			canceled, err := operation.CancelUndispatched(op)
+			if err != nil {
 				return err
 			}
-			for _, op := range current.state.operations {
-				if operationIsTerminal(op.Status) {
-					continue
-				}
-				canceled, err := operation.CancelUndispatched(op)
-				if err != nil {
-					return err
-				}
-				if err = current.handleOperationUpdate(ctx, canceled); err != nil {
-					return err
-				}
-			}
-			if _, err := current.reconcileToolCalls(ctx); err != nil {
+			if err = current.handleOperationUpdate(ctx, canceled); err != nil {
 				return err
 			}
-			return nil
 		}
+		if _, err := current.scheduleToolCalls(ctx); err != nil {
+			return err
+		}
+		for _, op := range current.state.operations {
+			if operationIsTerminal(op.Status) {
+				continue
+			}
+			canceled, err := operation.CancelUndispatched(op)
+			if err != nil {
+				return err
+			}
+			if err = current.handleOperationUpdate(ctx, canceled); err != nil {
+				return err
+			}
+		}
+		if _, err := current.reconcileToolCalls(ctx); err != nil {
+			return err
+		}
+		return nil
 	}
 	modelContext, cancelModels := context.WithCancel(ctx)
 	defer cancelModels()
@@ -153,7 +156,7 @@ func (current *coordinator) Run(ctx context.Context) error {
 		}
 	}
 
-	if current.dependencies.RestoredStop != nil && current.stop.request.Mode == inbox.StopWhenIdle {
+	if current.stop.request.Mode == inbox.StopWhenIdle {
 		call, err := current.processEvents(ctx)
 		if err != nil {
 			return err
