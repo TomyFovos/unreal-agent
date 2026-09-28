@@ -34,6 +34,7 @@ type Child struct {
 type ChildDecoder func(session.ID, operation.Operation) (Child, bool, error)
 
 // Finish is the child's explicit canonical result, never an inferred outcome.
+// OperationID is the child Finish operation, not the parent SubagentStart ID.
 type Finish struct {
 	OperationID  operation.ID
 	Status       string

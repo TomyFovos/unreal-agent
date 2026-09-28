@@ -7,11 +7,14 @@ or invokes an LLM.
 
 ## Embed in a frontend
 
-Create a Model with typed DecodeChild and DecodeFinish adapters, then
-NewClient(reader, model, controls). The reader matches the local Host gateway's
+Create a Model with SubagentOptions(), then NewClient(reader, model, controls).
+ParentReader scopes reads to an attached parent and the direct children identified
+by its canonical SubagentStart operations. HostControls delegates to the parent
+Host through subagent.SteerChild, CancelChild and ResumeChild. The reader matches the local Host gateway's
 Inspect and Subscribe methods. DecodeChild must accept only a versioned Subagent
 start plan. DecodeFinish must accept only the child's canonical explicit Finish
-record, never a parent handle's cached result or assistant text.
+record, never a parent handle's cached result or assistant text. The Finish OperationID belongs to the child Finish operation;
+it is not the parent SubagentStart operation ID.
 
 Watch(ctx, sessionID, onChange) owns one subscription per session. Refresh is a
 read-only one-shot rebuild (also useful for archived/offline children). A second
@@ -69,3 +72,11 @@ authority for idempotency and duplicate resume across clients/processes.
 
 All render helpers remove terminal control characters. A UI rendering raw detail
 or transcript values must also escape/sanitize external text.
+
+The separate child process has no live Host subscription in the parent process.
+ParentReader exposes read-only child snapshots with an empty generation and
+unknown runtime liveness. A frontend may refresh the selected child periodically;
+this reads persisted history and never asks the parent LLM to poll a child.
+ResumeChild verifies that a live parent already owns a nonterminal child. It does
+not launch a second process. Resume a stopped parent explicitly through the Host
+ownership gate; its existing operations recover the same children.

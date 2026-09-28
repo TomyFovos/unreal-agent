@@ -157,7 +157,7 @@ func TestUnknownUsageTimingAndOverflow(t *testing.T) {
 func TestParentOperationFinishAndTransientRuntimeRemainSeparate(t *testing.T) {
 	decodeFinish := func(i sessionstore.Item) (*Finish, error) {
 		if in, ok := i.Data.(inbox.Input); ok && in.ID == "finish" {
-			return &Finish{OperationID: "op-child", Status: "success", Summary: "explicit result"}, nil
+			return &Finish{OperationID: "child-finish-op", Status: "success", Summary: "explicit result"}, nil
 		}
 		return nil, nil
 	}

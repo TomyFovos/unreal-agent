@@ -424,11 +424,7 @@ func (m *Model) rows(now time.Time) []Row {
 				r.ParentOperationID = op.ID
 				r.ParentOperationStatus = op.Status
 				r.Label = child.Label
-				if r.Finish != nil && r.Finish.OperationID != op.ID {
-					r.Finish = nil
-					r.Elapsed = Duration{}
-					r.Problem = "Finish does not match parent operation"
-				}
+
 				byID[child.ID] = r
 			}
 		}
