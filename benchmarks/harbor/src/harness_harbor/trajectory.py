@@ -18,7 +18,13 @@ from harbor.models.trajectories import (
     Trajectory,
 )
 
-from harness_harbor.remote_results import NATIVE_PENDING, native_result
+from harness_harbor.remote_results import (
+    REMOTE_PENDING,
+    ast_result,
+    dap_result,
+    lsp_result,
+    native_result,
+)
 
 RUNNING = (
     "Tool call is still running. Its result arrives in a later turn: "
@@ -275,6 +281,12 @@ def convert(
                 content = view_image_result(data, output_dir)
             elif name in {"Read", "Write", "Edit", "Grep", "Glob"}:
                 content = native_result(data)
+            elif name in {"ast_grep", "ast_edit"}:
+                content = ast_result(data)
+            elif name == "LSP":
+                content = lsp_result(data)
+            elif name == "DAP":
+                content = dap_result(data)
             elif data["Status"].get("Error") and not data.get("Operations"):
                 content = data["Status"]["Error"]
             else:
@@ -284,7 +296,7 @@ def convert(
                 for result in pending_observations
                 if not (
                     result.source_call_id == data["CallID"]
-                    and result.content in (RUNNING, NATIVE_PENDING)
+                    and result.content in (RUNNING, *REMOTE_PENDING)
                 )
             ]
             result = ObservationResult(

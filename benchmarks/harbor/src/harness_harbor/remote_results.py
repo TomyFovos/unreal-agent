@@ -59,3 +59,60 @@ def native_result(data: dict[str, Any]) -> str:
     if "Handle" not in state:
         return NATIVE_PENDING
     return typed_json(state["Handle"])
+
+
+AST_PENDING = "Structural operation is pending."
+LSP_PENDING = '{"version":1,"code":"running"}'
+DAP_PENDING = "Debugger operation is running."
+REMOTE_PENDING = (NATIVE_PENDING, AST_PENDING, LSP_PENDING, DAP_PENDING)
+
+
+def ast_result(data: dict[str, Any]) -> str:
+    operations = data.get("Operations") or []
+    if len(operations) == 1 and operations[0].get("Denial"):
+        return permission_text(operations[0]["Denial"])
+    if data["Status"].get("Error"):
+        return data["Status"]["Error"]
+    state = remote_state(one_operation(data, "AST"), "structural_code")
+    if "Handle" not in state:
+        return AST_PENDING
+    return typed_json(state["Handle"])
+
+
+def lsp_result(data: dict[str, Any]) -> str:
+    if data["Status"].get("Error"):
+        return data["Status"]["Error"]
+    op = one_operation(data, "LSP")
+    if op.get("Denial"):
+        denial = op["Denial"]
+        return typed_json({"version": 1, "code": denial["Code"], "denial": denial})
+    state = remote_state(op, "lsp")
+    if "Handle" in state:
+        return typed_json(state["Handle"])
+    return state.get("TerminalError") or LSP_PENDING
+
+
+def dap_result(data: dict[str, Any]) -> str:
+    if data["Status"].get("Denial"):
+        return permission_text(data["Status"]["Denial"])
+    if data["Status"].get("Error"):
+        return data["Status"]["Error"]
+    op = one_operation(data, "DAP")
+    if op.get("Denial"):
+        return permission_text(op["Denial"])
+    state = remote_state(op, "dap")
+    if op["Status"] in {"ready", "awaiting", "canceling"}:
+        return DAP_PENDING
+    handle = state.get("Handle")
+    if not isinstance(handle, dict):
+        raise ValueError("Invalid typed DAP result")
+    known = {
+        "version", "handle", "command", "status", "stop_epoch", "items",
+        "value", "variables_reference", "truncated", "error",
+    }
+    if handle.keys() - known:
+        raise ValueError("Invalid typed DAP result fields")
+    encoded = typed_json(handle)
+    if len(encoded.encode("utf-8")) > 32 << 10:
+        raise ValueError("Typed DAP result exceeds limit")
+    return encoded
