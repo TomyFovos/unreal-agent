@@ -26,18 +26,28 @@ def build(revision: str, output: Path, arch: str, runner: str) -> None:
         with tarfile.open(archive.name) as tree:
             tree.extractall(source, filter="data")
         binary = source / "unreal-agent-runner"
+        cgo = os.environ.get("CGO_ENABLED", "1")
+        build_flags = []
+        if cgo == "1":
+            # Keep the native AST parser while avoiding a host-glibc dependency
+            # in older benchmark containers. Cross builds require a matching CC.
+            build_flags = [
+                "-tags=netgo,osusergo",
+                "-ldflags=-linkmode=external -extldflags=-static",
+            ]
         subprocess.run(
             [
                 "go",
                 "build",
                 "-trimpath",
                 "-buildvcs=false",
+                *build_flags,
                 "-o",
                 str(binary),
                 f"./cmd/{runner}",
             ],
             cwd=source,
-            env={**os.environ, "GOOS": "linux", "GOARCH": arch, "CGO_ENABLED": "0"},
+            env={**os.environ, "GOOS": "linux", "GOARCH": arch, "CGO_ENABLED": cgo},
             check=True,
         )
         data = binary.read_bytes()
@@ -47,6 +57,7 @@ def build(revision: str, output: Path, arch: str, runner: str) -> None:
             "sha256": hashlib.sha256(data).hexdigest(),
             "goos": "linux",
             "goarch": arch,
+            "cgo_enabled": cgo,
             "go_version": subprocess.check_output(["go", "version"], text=True).strip(),
         }
         output.mkdir(parents=True)
