@@ -202,6 +202,14 @@ func (s *Service) Snapshot(ctx context.Context, path string) (Snapshot, error) {
 	if err = ctx.Err(); err != nil {
 		return Snapshot{}, err
 	}
+	// Serialize observation with cooperating replacements. Otherwise a file
+	// opened just before rename may have link count zero by the time readTarget
+	// validates its descriptor and be mistaken for an invalid target.
+	lock, err := s.lock(ctx, canonical)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer lock.Close()
 	parent, base, err := s.authorizedParent(ctx, canonical, false)
 	if err != nil {
 		return Snapshot{}, err
