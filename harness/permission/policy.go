@@ -64,6 +64,7 @@ type Config struct {
 
 type root struct {
 	path   string
+	alias  string
 	handle *os.Root
 }
 
@@ -117,7 +118,11 @@ func New(config Config) (*Policy, error) {
 func openRoots(paths []string) ([]root, error) {
 	var roots []root
 	for _, path := range paths {
-		canonical, err := filepath.EvalSymlinks(path)
+		original, err := filepath.Abs(path)
+		if err != nil {
+			return nil, errors.New("invalid permission root")
+		}
+		canonical, err := filepath.EvalSymlinks(original)
 		if err == nil {
 			canonical, err = filepath.Abs(canonical)
 		}
@@ -134,7 +139,7 @@ func openRoots(paths []string) ([]root, error) {
 			}
 			return nil, errors.New("cannot open permission root")
 		}
-		roots = append(roots, root{canonical, handle})
+		roots = append(roots, root{path: canonical, alias: original, handle: handle})
 	}
 	return roots, nil
 }
@@ -233,6 +238,15 @@ func within(root, path string) (string, bool) {
 	relative, err := filepath.Rel(root, path)
 	return relative, err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)
 }
+
+// rootRelative preserves explicitly configured aliases (e.g. macOS /var) while
+// all I/O remains relative to the pinned canonical root.
+func rootRelative(r *root, path string) (string, bool) {
+	if relative, ok := within(r.path, path); ok {
+		return relative, true
+	}
+	return within(r.alias, path)
+}
 func canonicalPath(path string) (string, error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
@@ -298,7 +312,7 @@ func (p *Policy) selectRoot(path string, write bool) (*root, string, error) {
 		var match *root
 		for i := range roots {
 			r := &roots[i]
-			_, lexical := within(r.path, absolute)
+			_, lexical := rootRelative(r, absolute)
 			_, resolved := within(r.path, canonical)
 			if lexical && resolved && (match == nil || len(r.path) > len(match.path)) {
 				match = r
@@ -338,7 +352,7 @@ func (p *Policy) OpenFile(path string, flag int, mode os.FileMode) (*os.File, er
 	if r == nil {
 		return os.OpenFile(absolute, flag, mode)
 	}
-	relative, _ := within(r.path, absolute)
+	relative, _ := rootRelative(r, absolute)
 	file, err := r.handle.OpenFile(relative, flag, mode)
 	if errors.Is(err, os.ErrPermission) {
 		return nil, deny("filesystem", "rooted file access was denied")
@@ -369,7 +383,7 @@ func (p *Policy) OpenParentFor(path string, write bool) (*os.File, error) {
 	if r == nil {
 		return os.Open(parent)
 	}
-	relative, ok := within(r.path, parent)
+	relative, ok := rootRelative(r, parent)
 	if !ok {
 		return nil, deny("filesystem", "cannot modify an allowed root itself")
 	}
