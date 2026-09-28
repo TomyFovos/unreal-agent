@@ -29,6 +29,7 @@ type Manager struct {
 	updates    chan operation.Operation
 	workers    sync.WaitGroup
 	closed     bool
+	closedDone chan struct{}
 }
 
 func NewManager(ctx context.Context, configs ...AdapterConfig) (*Manager, error) {
@@ -36,7 +37,7 @@ func NewManager(ctx context.Context, configs ...AdapterConfig) (*Manager, error)
 		ctx = permission.WithPolicy(ctx, permission.DenyAll())
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	m := &Manager{ctx: ctx, cancel: cancel, generation: uuid.New().String(), configs: map[string]AdapterConfig{}, sessions: map[string]*liveSession{}, jobs: map[operation.ID]context.CancelFunc{}, seen: map[operation.ID]struct{}{}, canceled: map[operation.ID]bool{}, updates: make(chan operation.Operation, 32)}
+	m := &Manager{ctx: ctx, cancel: cancel, generation: uuid.New().String(), configs: map[string]AdapterConfig{}, sessions: map[string]*liveSession{}, jobs: map[operation.ID]context.CancelFunc{}, seen: map[operation.ID]struct{}{}, canceled: map[operation.ID]bool{}, updates: make(chan operation.Operation, 32), closedDone: make(chan struct{})}
 	for _, c := range configs {
 		if !idPattern.MatchString(c.ID) || !filepath.IsAbs(c.Path) || !filepath.IsAbs(c.Directory) {
 			cancel()
@@ -57,6 +58,8 @@ func NewManager(ctx context.Context, configs ...AdapterConfig) (*Manager, error)
 		}
 		m.configs[c.ID] = copyConfig(c)
 	}
+	// Parent cancellation still performs bounded disconnect before killing the adapter.
+	context.AfterFunc(ctx, func() { _ = m.Close() })
 	return m, nil
 }
 func (m *Manager) Generation() string { return m.generation }
@@ -64,9 +67,11 @@ func (m *Manager) Close() error {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
+		<-m.closedDone
 		return nil
 	}
 	m.closed = true
+	defer close(m.closedDone)
 	sessions := make([]*liveSession, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		sessions = append(sessions, s)
@@ -76,13 +81,13 @@ func (m *Manager) Close() error {
 		cancels = append(cancels, cancel)
 	}
 	m.mu.Unlock()
+	m.cancel() // release in-flight request locks; adapter processes remain alive for detach
 	for _, cancel := range cancels {
 		cancel()
 	}
 	for _, s := range sessions {
 		s.shutdown()
 	}
-	m.cancel()
 	m.workers.Wait()
 	return nil
 }
@@ -298,7 +303,9 @@ func (m *Manager) start(ctx context.Context, r Request) (Result, error) {
 	if r.Command == "attach" && !slices.Contains(c.AllowedAttachPIDs, r.Start.ProcessID) {
 		return fail(&permission.Error{Code: permission.Denied, Capability: "debuggee.attach", Reason: "target is not explicitly authorized"})
 	}
-	processContext, cancel := context.WithCancel(m.ctx)
+	// Keep the adapter alive long enough to detach on owner cancellation. The
+	// Manager cancellation callback owns shutdown and always cancels this context.
+	processContext, cancel := context.WithCancel(context.WithoutCancel(m.ctx))
 	s := &liveSession{handle: result.Handle, attached: r.Command == "attach", cancel: cancel, done: make(chan struct{}), initialized: make(chan struct{}), pending: map[int]chan response{}, state: "starting"}
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()

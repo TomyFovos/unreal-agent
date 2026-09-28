@@ -24,16 +24,16 @@ type Handle struct {
 	Generation string `json:"generation"`
 }
 type AdapterConfig struct {
-	ID          string
-	Path        string
-	Arguments   []string
-	Directory   string
-	Environment []string
+	ID          string   `json:"id"`
+	Path        string   `json:"path"`
+	Arguments   []string `json:"arguments,omitempty"`
+	Directory   string   `json:"directory"`
+	Environment []string `json:"environment,omitempty"`
 	// LaunchFields/AttachFields are trusted Host configuration for adapter-specific
 	// options. Model requests cannot supply an opaque arbitrary adapter payload.
-	LaunchFields      jsontext.Value
-	AttachFields      jsontext.Value
-	AllowedAttachPIDs []int
+	LaunchFields      jsontext.Value `json:"launch_fields,omitempty"`
+	AttachFields      jsontext.Value `json:"attach_fields,omitempty"`
+	AllowedAttachPIDs []int          `json:"allowed_attach_pids,omitempty"`
 }
 type Start struct {
 	Adapter     string   `json:"adapter"`

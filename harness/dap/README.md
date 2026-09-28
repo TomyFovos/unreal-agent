@@ -6,6 +6,27 @@ tool/dap Definition and translator New(manager.Generation()), and call Close whe
 the Host releases resources. The manager uses the existing Process primitive,
 not an additional agent loop or task database. No I/O occurs in translation.
 
+## Runner configuration
+
+Set `UNREAL_HARNESS_DAP_ADAPTERS` to a JSON array (64 KiB limit), for example:
+
+```json
+[{"id":"lldb","path":"/opt/bin/lldb-dap","directory":"/workspace","arguments":[],"allowed_attach_pids":[]}]
+```
+
+Adapter installation and platform-specific options are caller responsibilities.
+Launch requests supply typed program/argv/cwd; attach additionally needs the PID
+listed in the trusted configuration. `launch_fields` and `attach_fields` hold
+adapter-specific options and are not accepted from model requests. Raw adapter
+configuration is not persisted in session metadata; only its digest binds resume.
+DAP is advertised only when configured and not in disallowed_tools. Its history
+codec remains available while disabled.
+
+`agentrunner.DebugTools` wraps a ToolFactory, creating an isolated debugger
+owner/generation for each Host-owned Session runtime and closing it with that
+runtime. Parent cancellation and explicit Close use the same drain path; racing
+callers wait for cleanup before the ownership lease can be released.
+
 ## Identity, recovery and operations
 
 The durable typed plan contains a stable logical session ID and the current
@@ -46,7 +67,8 @@ target is rejected. Cancellation, pipe/protocol failure and parent death expire
 the resource and terminate the owned adapter process group; no signal is sent
 directly to an unrelated attached PID. Adapter-specific detach-on-crash behavior
 still belongs to that adapter. An attach PID is not a durable identity.
-Use Close before cancelling the Host lifetime when orderly detach is required.
+Cancellation performs a bounded disconnect attempt before adapter termination.
+A process crash cannot guarantee that an adapter detaches cleanly.
 
 ## Tests
 

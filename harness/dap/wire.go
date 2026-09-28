@@ -236,8 +236,5 @@ func (s *liveSession) shutdown() {
 	// Never terminate an unrelated attach target.
 	_, _ = s.request(ctx, "disconnect", map[string]any{"restart": false, "terminateDebuggee": !s.attached})
 	s.cancel()
-	select {
-	case <-s.done:
-	case <-time.After(6 * time.Second):
-	}
+	<-s.done
 }

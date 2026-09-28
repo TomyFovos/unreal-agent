@@ -363,3 +363,42 @@ func TestAttachAllowlistAndEvaluateCapability(t *testing.T) {
 		t.Fatal("evaluation capability bypass")
 	}
 }
+
+func TestOwnerCancellationDrainsGracefulDetach(t *testing.T) {
+	for _, command := range []string{"launch", "attach"} {
+		t.Run(command, func(t *testing.T) {
+			exe, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			cleanup := filepath.Join(dir, "cleanup.json")
+			ctx, cancel := context.WithCancel(permission.WithPolicy(t.Context(), permission.Unrestricted()))
+			defer cancel()
+			m, err := NewManager(ctx, AdapterConfig{ID: "test", Path: exe, Arguments: []string{"-test.run=^TestDAPAdapterProcess$"}, Directory: dir, Environment: []string{"UNREAL_DAP_TEST_MODE=normal", "UNREAL_DAP_TEST_CLEANUP=" + cleanup}, AllowedAttachPIDs: []int{1234}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			call(t, m, startRequest(m, command))
+			cancel()
+			// Close may race the parent-cancellation callback, but both wait for cleanup.
+			if err = m.Close(); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(cleanup)
+			if err != nil {
+				t.Fatal("adapter killed before disconnect:", err)
+			}
+			var fields struct {
+				Terminate bool `json:"terminateDebuggee"`
+			}
+			if err = json.Unmarshal(data, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if fields.Terminate != (command == "launch") {
+				t.Fatal("wrong ownership cleanup", string(data))
+			}
+		})
+	}
+}
