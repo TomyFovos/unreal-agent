@@ -54,6 +54,11 @@ Full AST support requires CGO_ENABLED=1 and a C compiler: GCC on Linux/WSL or
 Xcode Command Line Tools on macOS. CI checks the compiler. The Debian build image
 enables CGO and the Debian runtime supplies libc. CGO_ENABLED=0 remains buildable;
 AST execution then returns unsupported_backend_cgo_required explicitly.
+Harbor bundles default to a static CGO build (netgo/osusergo) so native parsers
+also work inside older benchmark images. Building a different target architecture
+requires a matching C compiler via CC. An explicit CGO_ENABLED=0 creates a
+portable bundle with the documented unsupported AST outcome; the bundle manifest
+records this choice.
 
 Tests exercise all three real parsers, preview/apply consistency, malformed and
 missing syntax, bad replacements/queries, overlap/unknown captures, unsupported
