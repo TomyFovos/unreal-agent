@@ -2,18 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
-	"github.com/unreallabsai/unreal-agent/harness/ast"
-	astTool "github.com/unreallabsai/unreal-agent/harness/tool/ast"
-	"io"
-
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
-	"github.com/unreallabsai/unreal-agent/harness/mutation"
-	"github.com/unreallabsai/unreal-agent/harness/native"
-	"github.com/unreallabsai/unreal-agent/harness/operation"
-	"github.com/unreallabsai/unreal-agent/harness/permission"
-	"github.com/unreallabsai/unreal-agent/harness/tool"
-	nativeTool "github.com/unreallabsai/unreal-agent/harness/tool/native"
+	"io"
 )
 
 func parseRequest(input io.Reader) (agentrunner.Request, agentrunner.ToolFactory, error) {
@@ -21,24 +11,7 @@ func parseRequest(input io.Reader) (agentrunner.Request, agentrunner.ToolFactory
 	if err := agentrunner.DecodeRequest(input, &parsed); err != nil {
 		return agentrunner.Request{}, nil, err
 	}
-	return parsed, func(ctx context.Context, config agentrunner.ToolConfig) (agentrunner.Tools, error) {
-		files, err := mutation.New(mutation.Config{Root: config.Directory, Authorize: func(ctx context.Context, path string, write bool) error {
-			return permission.FromContext(ctx).CheckPath(path, write)
-		}})
-		if err != nil {
-			return agentrunner.Tools{}, err
-		}
-		handler, err := native.NewHandler(ctx, native.Executor{Files: files}, string(config.SessionID))
-		if err != nil {
-			return agentrunner.Tools{}, err
-		}
-
-		structural, err := ast.NewHandler(ctx, ast.Executor{Files: files}, string(config.SessionID))
-		if err != nil {
-			handler.Close()
-			return agentrunner.Tools{}, err
-		}
-		return agentrunner.Tools{Registry: tool.NewRegistry(astTool.Configure(nativeTool.Configure(config.Translators)), parsed.EnabledTools(append(append([]string(nil), config.Names...), tool.ReadName, tool.WriteName, tool.EditName, tool.GrepName, tool.GlobName, tool.ASTGrepName, tool.ASTEditName)...)...), RemoteJobs: []operation.RemoteJobHandler{handler, structural}, Close: func() error { return errors.Join(handler.Close(), structural.Close()) }}, nil
-
+	return parsed, func(ctx context.Context, c agentrunner.ToolConfig) (agentrunner.Tools, error) {
+		return agentrunner.DefaultTools(ctx, c, parsed.DisallowedTools)
 	}, nil
 }

@@ -14,6 +14,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/primitives"
 )
 
@@ -23,6 +24,8 @@ func (adapter *adapter) exchange(ctx context.Context, body []byte, cacheKey stri
 		if err := ctx.Err(); err != nil {
 			return 0, nil, err
 		}
+		emitProgress(ctx, llm.Progress{Attempt: uint64(attempt), Reset: true})
+		ctx = context.WithValue(ctx, attemptKey{}, uint64(attempt))
 		request := adapter.remoteRequest(body, cacheKey)
 		result := adapter.exchangeAttempt(ctx, request, events)
 		if !result.retry || attempt >= adapter.maxAttempts {
@@ -83,6 +86,9 @@ func (adapter *adapter) exchangeAttempt(ctx context.Context, request primitives.
 				payload := bytes.TrimSpace(primitives.SSEData(output.Data))
 				if len(payload) != 0 && !bytes.Equal(payload, []byte("[DONE]")) {
 					parseErr = state.observe(payload)
+					if parseErr == nil {
+						emitTextProgress(ctx, payload)
+					}
 				}
 			} else if len(result.body)+len(output.Data) > 1<<20 {
 				parseErr = errors.New("responses API error response exceeds 1 MiB")

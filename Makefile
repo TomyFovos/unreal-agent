@@ -1,6 +1,7 @@
 .PHONY: build test check
 
 build:
+	go build -trimpath -o bin/unreal-agent ./cmd/unreal-agent
 	go build -trimpath -o bin/unreal-agent-runner ./cmd/unreal-agent-runner
 	go build -trimpath -o bin/unreal-agent-auth ./cmd/unreal-agent-auth
 
