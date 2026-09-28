@@ -23,6 +23,9 @@ func (s *Service) ReadDir(ctx context.Context, path string, limit int) ([]Entry,
 		path = filepath.Join(s.root, path)
 	}
 	path = filepath.Clean(path)
+	if path == s.alias {
+		path = s.root
+	}
 	if path != s.root {
 		var err error
 		path, err = s.Path(path)

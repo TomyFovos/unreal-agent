@@ -116,9 +116,9 @@ type Config struct {
 	Authorize Authorizer
 }
 type Service struct {
-	root, state string
-	authorize   Authorizer
-	hook        func(string, int) error
+	root, alias, state string
+	authorize          Authorizer
+	hook               func(string, int) error
 }
 
 func New(config Config) (*Service, error) {
@@ -129,6 +129,7 @@ func New(config Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	alias := root
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
 		return nil, err
@@ -161,7 +162,7 @@ func New(config Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Service{root: root, state: state, authorize: config.Authorize}, nil
+	return &Service{root: root, alias: alias, state: state, authorize: config.Authorize}, nil
 }
 func (s *Service) Root() string { return s.root }
 func (s *Service) Path(path string) (string, error) {
@@ -172,6 +173,14 @@ func (s *Service) Path(path string) (string, error) {
 		path = filepath.Join(s.root, path)
 	}
 	path = filepath.Clean(path)
+	// Translate only the root alias explicitly supplied to New. Descendant
+	// symlinks are still rejected by the descriptor-relative filesystem layer.
+	if s.alias != s.root {
+		rel, err := filepath.Rel(s.alias, path)
+		if err == nil && rel != ".." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			path = filepath.Join(s.root, rel)
+		}
+	}
 	rel, err := filepath.Rel(s.root, path)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", errors.New("path outside workspace")

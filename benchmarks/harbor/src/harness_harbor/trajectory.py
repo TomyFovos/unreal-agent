@@ -153,6 +153,7 @@ def convert(
     calls: dict[str, tuple[Step, str]] = {}
     pending_observations: list[ObservationResult] = []
     errors: list[str] = []
+    host_records: list[dict] = []
     totals = dict(prompt=0, completion=0, cached=0, reasoning=0, cache_write=0)
     previous_sequence = 0
     for line_number, line in enumerate(lines, 1):
@@ -172,7 +173,14 @@ def convert(
         kind, data = item["Kind"], item["Data"]
         timestamp = item["RecordedAt"]
         extra = {"sequence": sequence}
-        if kind == "turn":
+        if kind == "host_record":
+            if data.get("Version") != 1 or data.get("Kind") not in (
+                "configuration",
+                "stop_complete",
+            ):
+                raise ValueError("Unsupported Host metadata record")
+            host_records.append({**extra, "timestamp": timestamp, "data": data})
+        elif kind == "turn":
             for result in pending_observations:
                 result.extra["available_before_turn"] = data["ID"]
             pending_observations.clear()
@@ -308,5 +316,5 @@ def convert(
                 "cache_write_tokens": totals["cache_write"],
             },
         ),
-        extra={"runner_errors": errors},
+        extra={"runner_errors": errors, "host_records": host_records},
     )
