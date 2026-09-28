@@ -3,6 +3,7 @@ package subagent
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json/v2"
 	"errors"
@@ -97,18 +98,34 @@ type reply struct {
 type endpoint struct {
 	ctx                       context.Context
 	connection, local, remote string
-	write                     func(frame) error
+	write                     func(context.Context, frame) error
 	receive                   func(context.Context, inbox.Input) (host.Receipt, error)
 	mu                        sync.Mutex
 	pending                   map[inbox.ID]chan reply
+	sent                      map[inbox.ID][32]byte
 }
 
 func (e *endpoint) send(ctx context.Context, input inbox.Input) (host.Receipt, error) {
 	if err := input.Validate(); err != nil {
 		return host.Receipt{}, err
 	}
+	payload := input.Payload.Clone()
+	if len(payload) > 0 {
+		if err := payload.Canonicalize(); err != nil {
+			return host.Receipt{}, err
+		}
+	}
+	digest := sha256.Sum256(append([]byte(string(input.Kind)+"\\x00"), payload...))
 	ch := make(chan reply, 1)
 	e.mu.Lock()
+	if e.sent == nil {
+		e.sent = map[inbox.ID][32]byte{}
+	}
+	if previous, ok := e.sent[input.ID]; ok && previous != digest {
+		e.mu.Unlock()
+		return host.Receipt{}, host.ErrConflict
+	}
+	e.sent[input.ID] = digest
 	if e.pending == nil {
 		e.pending = map[inbox.ID]chan reply{}
 	}
@@ -126,7 +143,7 @@ func (e *endpoint) send(ctx context.Context, input inbox.Input) (host.Receipt, e
 	f := e.envelope("input")
 	f.ID = input.ID
 	f.Input = &input
-	if err := e.write(f); err != nil {
+	if err := e.write(ctx, f); err != nil {
 		return host.Receipt{}, err
 	}
 	select {
@@ -189,7 +206,7 @@ func (e *endpoint) accept(f frame) error {
 		} else {
 			ack.Receipt = &r
 		}
-		return e.write(ack)
+		return e.write(e.ctx, ack)
 	default:
 		return fmt.Errorf("unexpected peer frame")
 	}

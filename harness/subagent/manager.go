@@ -192,6 +192,8 @@ func (m *Manager) run(j *job, p Plan) {
 			op.Denial = denial
 			state.TerminalError = denial.Error()
 		}
+	} else if status == operation.StatusFailed && state.TerminalError == "" {
+		state.TerminalError = "Child reported failed completion"
 	} else if status == operation.StatusCompleted {
 		if state.TerminalResult == "" {
 			state.TerminalResult = "Subagent " + p.Action + " acknowledged"
@@ -306,7 +308,7 @@ func (m *Manager) spawn(j *job, p Plan, state *operation.RemoteJobState) (operat
 		return true, nil
 	}
 	if done, err := collect(); done || err != nil {
-		return operation.StatusCompleted, err
+		return finishStatus(handle), err
 	}
 	state.Handle, _ = json.Marshal(handle)
 	checkpoint, _ := operation.UpdateRemoteJob(j.operation, *state, operation.StatusAwaiting)
@@ -350,7 +352,7 @@ func (m *Manager) spawn(j *job, p Plan, state *operation.RemoteJobState) (operat
 				return operation.StatusCanceled, nil
 			}
 			if done, err := collect(); done || err != nil {
-				return operation.StatusCompleted, err
+				return finishStatus(handle), err
 			}
 			if channel.err != nil {
 				return operation.StatusFailed, channel.err
@@ -364,4 +366,11 @@ func sameJSON(a, b []byte) bool {
 	x := jsontext.Value(a).Clone()
 	y := jsontext.Value(b).Clone()
 	return x.Canonicalize() == nil && y.Canonicalize() == nil && bytes.Equal(x, y)
+}
+
+func finishStatus(h Handle) operation.Status {
+	if h.Finish != nil && h.Finish.Result.Status == "failed" {
+		return operation.StatusFailed
+	}
+	return operation.StatusCompleted
 }

@@ -3,10 +3,15 @@ package subagent
 import (
 	"bytes"
 	"context"
+	"encoding/json/jsontext"
 	"errors"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestFramesPartialCombinedAndBounds(t *testing.T) {
@@ -42,7 +47,7 @@ func TestChannelBindingAndAckAfterCommit(t *testing.T) {
 		committed = true
 		return host.Receipt{ID: "one", Sequence: 7}, nil
 	}
-	ep.write = func(f frame) error {
+	ep.write = func(_ context.Context, f frame) error {
 		if !committed {
 			t.Fatal("ack before commit")
 		}
@@ -58,7 +63,7 @@ func TestChannelBindingAndAckAfterCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	ep.receive = func(context.Context, inbox.Input) (host.Receipt, error) { return host.Receipt{}, host.ErrConflict }
-	ep.write = func(f frame) error {
+	ep.write = func(_ context.Context, f frame) error {
 		if f.Error != "conflict" {
 			t.Fatal(f)
 		}
@@ -69,5 +74,88 @@ func TestChannelBindingAndAckAfterCommit(t *testing.T) {
 	}
 	if !errors.Is(host.ErrConflict, host.ErrConflict) {
 		t.Fatal("unreachable")
+	}
+}
+
+func TestCancellationBeforeHandlerRegistration(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	config := Template{Workspace: dir, Runtime: jsontext.Value("{}"), Policy: permission.Config{Tools: []string{"Finish"}}}
+	m, err := NewManager(ctx, Config{Owner: &host.Session{ID: "parent"}, Directory: dir, Binary: "/missing", Templates: map[string]Template{"default": config}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	spec, _ := NewSpec(Plan{Version: 1, Action: "start", ParentID: "parent", Template: "default", Configuration: &config, Text: "task"})
+	op := operation.Operation{ID: "op", Type: spec.Type, Version: spec.Version, State: spec.State, MaxOutputLength: spec.MaxOutputLength, Status: operation.StatusReady}
+	if err = m.CancelRemoteJob(op.ID, "cancel before add"); err != nil {
+		t.Fatal(err)
+	}
+	if err = m.AddRemoteJob(op); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case update := <-m.RemoteJobUpdates():
+		if update.Status != operation.StatusCanceled {
+			t.Fatal(update)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancel lost before registration")
+	}
+}
+func TestBlockedProcessWriteIsCanceledAndDrained(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	child := ChildConfig{ParentID: "parent", ChildID: "child", Workspace: t.TempDir()}
+	p := startProcess(ctx, Config{Owner: &host.Session{ID: "parent"}, Binary: "/bin/sh", Arguments: []string{"-c", "sleep 60"}}, child)
+	defer func() { p.cancel(); <-p.done }()
+	writeCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		f := p.endpoint.envelope("input")
+		f.Error = strings.Repeat("x", 200000)
+		done <- p.write(writeCtx, f)
+	}()
+	stop()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("blocked writer succeeded")
+		}
+	case <-ctx.Done():
+		t.Fatal("blocked writer leaked")
+	}
+	select {
+	case <-p.done:
+	case <-ctx.Done():
+		t.Fatal("canceled process leaked")
+	}
+}
+
+func TestLostAckRetryRejectsChangedPayload(t *testing.T) {
+	ep := endpoint{ctx: t.Context(), connection: "one", local: "parent", remote: "child"}
+	writes := 0
+	ep.write = func(_ context.Context, f frame) error {
+		writes++
+		if writes == 1 {
+			return nil
+		} // Receiver committed but the ACK was lost.
+		return ep.accept(frame{Version: 1, Connection: "one", Sender: "child", Target: "parent", Kind: "ack", ID: f.ID, Receipt: &host.Receipt{ID: f.ID, Sequence: 42}})
+	}
+	first := inbox.Input{ID: "one", Kind: inbox.InputExternal, Payload: jsontext.Value(`"original"`)}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := ep.send(canceled, first); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	changed := first
+	changed.Payload = jsontext.Value(`"different"`)
+	if _, err := ep.send(t.Context(), changed); !errors.Is(err, host.ErrConflict) {
+		t.Fatal("changed retry admitted", err)
+	}
+	receipt, err := ep.send(t.Context(), first)
+	if err != nil || receipt.Sequence != 42 || writes != 2 {
+		t.Fatal(receipt, err, writes)
 	}
 }

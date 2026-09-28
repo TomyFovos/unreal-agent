@@ -148,6 +148,15 @@ func (c ChildConfig) Validate() error {
 	}
 	// This implementation offers bounded built-in file/network executors, not an
 	// arbitrary subprocess sandbox. No child can request ambient capabilities.
+	canFinish := false
+	for _, name := range c.Policy.Tools {
+		if name == "Finish" {
+			canFinish = true
+		}
+	}
+	if !canFinish {
+		return fmt.Errorf("child policy must enable Finish")
+	}
 	if c.Policy.ProcessMode != permission.ProcessDenied || c.Policy.FilesystemUnrestricted || c.Policy.NetworkUnrestricted {
 		return &permission.Error{Code: permission.Unsupported, Capability: "child process", Reason: "bounded child executors required"}
 	}

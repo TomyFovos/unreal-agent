@@ -107,13 +107,17 @@ func startProcess(ctx context.Context, c Config, child ChildConfig) *processChan
 	go func() {
 		hello := ep.envelope("hello")
 		hello.Config = &child
-		if err := p.write(hello); err != nil {
+		if err := p.write(ctx, hello); err != nil {
 			cancel()
 		}
 	}()
 	return p
 }
-func (p *processChannel) write(f frame) error {
+func (p *processChannel) write(ctx context.Context, f frame) error {
+	// Cancellation of a pipe write after it started requires closing the channel.
+	// Tear down that child rather than leave an unbounded writer behind.
+	stop := context.AfterFunc(ctx, p.cancel)
+	defer stop()
 	data, err := encodeFrame(f)
 	if err != nil {
 		return err

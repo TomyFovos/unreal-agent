@@ -60,7 +60,9 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 	}
 	var writeMu sync.Mutex
 	ep := &endpoint{ctx: ctx, connection: hello.Connection, local: hello.Target, remote: hello.Sender}
-	ep.write = func(f frame) error {
+	ep.write = func(writeContext context.Context, f frame) error {
+		stop := context.AfterFunc(writeContext, cancel)
+		defer stop()
 		data, err := encodeFrame(f)
 		if err != nil {
 			return err
@@ -140,7 +142,7 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 	}
 	close(ready)
 	welcome := ep.envelope("welcome")
-	if err = ep.write(welcome); err != nil {
+	if err = ep.write(ctx, welcome); err != nil {
 		return err
 	}
 	// Ready has stable identity in canonical ChildConfig and is retryable after
@@ -163,10 +165,23 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 			}
 			readyDone = nil
 		case <-child.Done():
+			// Even a very fast Finish must not race away the stable ready intent.
+			if readyDone != nil {
+				select {
+				case err := <-readyDone:
+					if err != nil {
+						return err
+					}
+				case err := <-readDone:
+					return err
+				case <-ctx.Done():
+					return context.Cause(ctx)
+				}
+			}
 			if result := child.Finish(); result != nil {
 				f := ep.envelope("finish")
 				f.Finish = result
-				return ep.write(f)
+				return ep.write(ctx, f)
 			}
 			return child.Wait(ctx)
 		}

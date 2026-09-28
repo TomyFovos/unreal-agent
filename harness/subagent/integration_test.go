@@ -1,6 +1,7 @@
 package subagent_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -78,6 +79,9 @@ func TestChildServerHelper(t *testing.T) {
 		var calls atomic.Int32
 		model := adapter(func(ctx context.Context, r llm.Request, _ llm.RequestOptions) (llm.Response, error) {
 			n := calls.Add(1)
+			if c.Task == "failed" {
+				return response("Finish", `{"status":"failed","summary":"child complete","changedFiles":[],"tests":[],"blockers":["cannot proceed"]}`), nil
+			}
 			if c.Task == "crash" {
 				os.Exit(17)
 			}
@@ -220,11 +224,15 @@ func awaitChild(t *testing.T, s *host.Session, terminal bool) operation.Operatio
 	}
 }
 func TestSeparateProcessFinishAndBidirectionalInbox(t *testing.T) {
-	for _, task := range []string{"finish", "question"} {
+	for _, task := range []string{"finish", "question", "failed"} {
 		t.Run(task, func(t *testing.T) {
 			_, s := newParent(t, task)
 			op := awaitChild(t, s, true)
-			if op.Status != operation.StatusCompleted {
+			want := operation.StatusCompleted
+			if task == "failed" {
+				want = operation.StatusFailed
+			}
+			if op.Status != want {
 				t.Fatalf("child result: %+v", op)
 			}
 			handle, err := sub.DecodeHandle(op)
@@ -419,5 +427,172 @@ func TestParentCrashRecoversSameChildAndDeduplicatesReady(t *testing.T) {
 	lock.Close()
 	if _, err = sub.SteerChild(ctx, s, sub.ControlRequest{ParentID: s.ID, ParentGeneration: "old", OperationID: before.ID, ChildID: p.ChildID, InputID: "stale", Text: "x"}); !errors.Is(err, host.ErrStaleGeneration) {
 		t.Fatal(err)
+	}
+}
+
+func TestCommittedFinishCollectedWithoutRespawn(t *testing.T) {
+	dir := t.TempDir()
+	h, s := parentAt(t, dir, "finish", host.Create)
+	completed := awaitChild(t, s, true)
+	plan, err := sub.DecodePlan(completed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Close()
+	path := filepath.Join(dir, "parent.session.jsonl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep the exact committed prefix preceding the parent's terminal save.
+	// This is the crash boundary after child Finish, before parent SaveOperation.
+	offset := 0
+	found := false
+	for _, line := range bytes.SplitAfter(data, []byte{'\n'}) {
+		var rec struct {
+			Type string         `json:"type"`
+			Data jsontext.Value `json:"data"`
+		}
+		if json.Unmarshal(bytes.TrimSpace(line), &rec) == nil && rec.Type == "operation" {
+			var value struct{ Operation operation.Operation }
+			if json.Unmarshal(rec.Data, &value) == nil && value.Operation.ID == completed.ID && value.Operation.Status == operation.StatusCompleted {
+				found = true
+				break
+			}
+		}
+		offset += len(line)
+	}
+	if !found {
+		t.Fatal("terminal boundary missing")
+	}
+	if err = os.WriteFile(path, data[:offset], 0600); err != nil {
+		t.Fatal(err)
+	}
+	model := adapter(func(context.Context, llm.Request, llm.RequestOptions) (llm.Response, error) {
+		return llm.Response{}, nil
+	})
+	config := sub.Config{Directory: dir, Binary: "/intentionally-missing-unreal-agent", Templates: map[string]sub.Template{plan.Template: *plan.Configuration}}
+	resumedHost, err := host.New(t.Context(), host.Config{Directory: dir, Build: factory(config, model)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resumedHost.Close()
+	resumed, err := resumedHost.Resume(t.Context(), host.Options{ID: "parent", Policy: permission.Unrestricted()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := awaitChild(t, resumed, true)
+	if result.Status != operation.StatusCompleted || result.ID != completed.ID {
+		t.Fatal(result)
+	}
+	oldHandle, _ := sub.DecodeHandle(completed)
+	newHandle, _ := sub.DecodeHandle(result)
+	oldJSON, _ := json.Marshal(oldHandle.Finish)
+	newJSON, _ := json.Marshal(newHandle.Finish)
+	if !bytes.Equal(oldJSON, newJSON) {
+		t.Fatal("canonical Finish changed")
+	}
+	child, err := sub.ReadChild(t.Context(), dir, plan.ChildID, 0, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turns := 0
+	for _, item := range child.View.History.Items {
+		if item.Kind == sessionstore.ItemTurn {
+			turns++
+		}
+	}
+	if turns != 1 {
+		t.Fatal("Finish caused another model turn", turns)
+	}
+}
+func TestForkCannotControlOriginalChild(t *testing.T) {
+	dir := t.TempDir()
+	h, s := parentAt(t, dir, "wait", host.Create)
+	op := waitReady(t, s)
+	plan, _ := sub.DecodePlan(op)
+	view, _ := s.Inspect(0, 256)
+	var turn session.TurnID
+	for _, item := range view.History.Items {
+		if item.Kind == sessionstore.ItemTurn {
+			turn = item.Data.(session.Turn).ID
+		}
+	}
+	store, _ := localfile.New(dir)
+	if _, err := store.Fork(t.Context(), "fork", s.ID, turn); err != nil {
+		t.Fatal(err)
+	}
+	model := adapter(func(context.Context, llm.Request, llm.RequestOptions) (llm.Response, error) {
+		return llm.Response{}, nil
+	})
+	binary, _ := os.Executable()
+	forkHost, err := host.New(t.Context(), host.Config{Directory: dir, Build: factory(sub.Config{Directory: dir, Binary: binary, Templates: map[string]sub.Template{plan.Template: *plan.Configuration}}, model)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer forkHost.Close()
+	fork, err := forkHost.Resume(t.Context(), host.Options{ID: "fork", Policy: permission.Unrestricted()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forkView, _ := fork.Inspect(0, 256)
+	if len(forkView.Operations) != 0 {
+		t.Fatal("inherited operation ownership", forkView.Operations)
+	}
+	req := sub.ControlRequest{ParentID: fork.ID, ParentGeneration: fork.Generation, OperationID: op.ID, ChildID: plan.ChildID, InputID: "cross-parent", Text: "spoof"}
+	if _, err = sub.CancelChild(t.Context(), fork, req); err == nil {
+		t.Fatal("fork canceled original child")
+	}
+	if _, err = sub.SteerChild(t.Context(), fork, req); err == nil {
+		t.Fatal("fork steered original child")
+	}
+	h.Close()
+}
+func TestChildCapabilityWideningRejectedBeforeSpawn(t *testing.T) {
+	for _, which := range []string{"child-process", "tool-expansion"} {
+		t.Run(which, func(t *testing.T) {
+			dir := t.TempDir()
+			binary, _ := os.Executable()
+			childPolicy := permission.Config{Tools: []string{"Finish", "SendParent"}, ReadRoots: []string{dir}}
+			parentPolicy := permission.Unrestricted()
+			if which == "child-process" {
+				childPolicy.ProcessMode = permission.ProcessUnrestricted
+				childPolicy.FilesystemUnrestricted = true
+				childPolicy.NetworkUnrestricted = true
+			} else {
+				var err error
+				parentPolicy, err = permission.New(permission.Config{Tools: []string{"SubagentStart"}, FilesystemUnrestricted: true, NetworkUnrestricted: true, ProcessMode: permission.ProcessUnrestricted})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer parentPolicy.Close()
+			}
+			templates := map[string]sub.Template{"default": {Workspace: dir, Runtime: jsontext.Value("{}"), Policy: childPolicy}}
+			var count atomic.Int32
+			model := adapter(func(context.Context, llm.Request, llm.RequestOptions) (llm.Response, error) {
+				if count.Add(1) == 1 {
+					return response("SubagentStart", `{"template":"default","task":"finish"}`), nil
+				}
+				return llm.Response{}, nil
+			})
+			h, err := host.New(t.Context(), host.Config{Directory: dir, Build: factory(sub.Config{Directory: dir, Binary: binary, Templates: templates}, model)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer h.Close()
+			data, _ := json.Marshal("start")
+			s, err := h.Create(t.Context(), host.Options{ID: "parent", Policy: parentPolicy, Initial: []inbox.Input{{ID: "start", Kind: inbox.InputExternal, Payload: data}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := awaitChild(t, s, true)
+			if result.Status != operation.StatusFailed || result.Denial == nil {
+				t.Fatal("missing permission denial", result)
+			}
+			p, _ := sub.DecodePlan(result)
+			if _, err = os.Stat(filepath.Join(dir, string(p.ChildID)+".session.jsonl")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("unauthorized child was spawned", err)
+			}
+		})
 	}
 }

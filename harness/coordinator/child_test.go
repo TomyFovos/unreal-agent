@@ -56,3 +56,21 @@ func TestCancelStorageFailurePreventsEffect(t *testing.T) {
 		t.Fatal("effect delivered before checkpoint")
 	}
 }
+
+func TestCancelIntentBeforeRegistrationPreventsLocalEffect(t *testing.T) {
+	store := emptyFakeStore()
+	manager := newFakeOperationManager()
+	c := newTestCoordinator(store, newTestInbox(t), manager, contextbuilder.NewBuilder(), tool.NewRegistry(tool.StaticTranslators{}))
+	data, _ := json.Marshal(inbox.ControlMessage{Mode: inbox.CancelOperation, Parameters: inbox.CancelRequest{OperationID: "later"}})
+	if err := c.handleInboxInput(t.Context(), inbox.Input{ID: "cancel-future", Kind: inbox.InputControl, Payload: data}); err != nil {
+		t.Fatal(err)
+	}
+	value := operation.Operation{ID: "later", Type: operation.TypeValue, Version: 1, Status: operation.StatusReady}
+	c.state.operations[value.ID] = value
+	if err := c.dispatchOperationToManager(t.Context(), value); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.adds) != 0 || c.state.operations[value.ID].Status != operation.StatusCanceled {
+		t.Fatal("cancellation before registration was lost")
+	}
+}

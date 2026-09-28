@@ -139,6 +139,20 @@ func (current *coordinator) Run(ctx context.Context) error {
 		}
 		return nil
 	}
+	// No old local executor is owned by this restored Coordinator. Complete
+	// accepted targeted cancellations before an initial-phase actor can restart.
+	for _, op := range current.state.operations {
+		if op.Status != operation.StatusCanceling || op.Type == operation.TypeRemoteJob {
+			continue
+		}
+		canceled, err := operation.CancelUndispatched(op)
+		if err != nil {
+			return err
+		}
+		if err = current.handleOperationUpdate(ctx, canceled); err != nil {
+			return err
+		}
+	}
 	modelContext, cancelModels := context.WithCancel(ctx)
 	defer cancelModels()
 	defer current.interruptModel()
@@ -153,7 +167,7 @@ func (current *coordinator) Run(ctx context.Context) error {
 	if _, err := current.reconcileToolCalls(ctx); err != nil {
 		return err
 	}
-	if err := current.dispatchOperationsToManager(); err != nil {
+	if err := current.dispatchOperationsToManager(ctx); err != nil {
 		return err
 	}
 	if toolCallStatusesRequireModelResponse(statuses) || current.pendingInputs() > 0 {
@@ -304,7 +318,7 @@ func (current *coordinator) processModelResponse(ctx context.Context, modelRespo
 	}
 	for _, status := range statuses {
 		for _, value := range status.Operations {
-			if err := current.dispatchOperationToManager(value); err != nil {
+			if err := current.dispatchOperationToManager(ctx, value); err != nil {
 				return err
 			}
 		}
@@ -489,7 +503,7 @@ func (current *coordinator) handleInboxInput(ctx context.Context, input inbox.In
 			if err != nil {
 				return err
 			}
-			return current.dispatchOperationToManager(op)
+			return current.dispatchOperationToManager(ctx, op)
 		case inbox.CancelOperation:
 			return current.cancelOperation(ctx, operation.ID(request.Parameters.(inbox.CancelRequest).OperationID), request.Reason)
 		case inbox.UpdateSettings:
@@ -1112,16 +1126,33 @@ func (current *coordinator) storeOperationInSessionStore(
 	return nil
 }
 
-func (current *coordinator) dispatchOperationsToManager() error {
+func (current *coordinator) dispatchOperationsToManager(ctx context.Context) error {
 	for _, value := range current.state.operations {
-		if err := current.dispatchOperationToManager(value); err != nil {
+		if err := current.dispatchOperationToManager(ctx, value); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (current *coordinator) dispatchOperationToManager(value operation.Operation) error {
+func (current *coordinator) dispatchOperationToManager(ctx context.Context, value operation.Operation) error {
+	if latest, ok := current.state.operations[value.ID]; ok {
+		value = latest
+	}
+	if _, requested := current.pendingCancels[value.ID]; requested && !operationIsTerminal(value.Status) && value.Status != operation.StatusCanceling {
+		value.Status = operation.StatusCanceling
+		if err := current.storeOperationInSessionStore(ctx, value); err != nil {
+			return err
+		}
+		current.addOperationToLocalState(value)
+	}
+	if value.Status == operation.StatusCanceling && value.Type != operation.TypeRemoteJob {
+		canceled, err := operation.CancelUndispatched(value)
+		if err != nil {
+			return err
+		}
+		return current.handleOperationUpdate(ctx, canceled)
+	}
 	if operationIsTerminal(value.Status) {
 		return nil
 	}
