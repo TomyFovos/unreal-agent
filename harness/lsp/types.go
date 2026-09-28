@@ -15,11 +15,11 @@ const MaxDocuments = 2048
 const MaxWorkspaceBytes = 16 << 20
 
 type ServerConfig struct {
-	Language    string
-	Path        string
-	Arguments   []string
-	Environment []string
-	Extensions  []string
+	Language    string   `json:"language"`
+	Path        string   `json:"path"`
+	Arguments   []string `json:"arguments,omitempty"`
+	Environment []string `json:"environment,omitempty"`
+	Extensions  []string `json:"extensions,omitempty"`
 }
 type Config struct {
 	Mutation       *mutation.Service

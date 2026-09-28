@@ -29,6 +29,26 @@ process policy fails closed because the harness does not provide an OS sandbox.
 Language server processes have the ambient effects that the explicit unrestricted
 process grant permits.
 
+## Runner configuration
+
+Set `UNREAL_HARNESS_LSP_SERVERS` to a bounded JSON array, for example:
+
+```json
+[{"language":"go","path":"/opt/bin/gopls","arguments":["serve"],"extensions":[".go"]}]
+```
+
+The runner adds LSP to the model tool surface only when a server is configured
+and LSP is not in disallowed_tools. Its history codec remains available when
+disabled. Invalid configuration is rejected before model execution. Executables
+are explicit absolute paths; arguments and environment are trusted Host
+configuration, never model-selected commands. Raw configuration is not persisted
+in session metadata; a digest binds resumed sessions to the accepted configuration.
+
+For a multi-session Host, `agentrunner.NewLanguageTools` exposes `Wrap` and
+`Close`: wrap the session tool factory once, then close the owner after Host
+sessions stop. Separate services for native and semantic tools share the same
+canonical root and durable mutation lock/receipt directory.
+
 ## Tool surface
 
 `LSP` accepts a typed request with `language`, `action`, and action-specific

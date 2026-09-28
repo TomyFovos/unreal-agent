@@ -328,6 +328,16 @@ func Run(
 			ViewImage: viewimage.New(viewimage.Config{Directory: workspace}),
 		},
 	}
+	servers, err := LanguageServerConfiguration(getenv)
+	if err != nil {
+		return err
+	}
+	languageTools, err := NewLanguageTools(runContext, workspace, servers)
+	if err != nil {
+		return err
+	}
+	defer languageTools.Close()
+	newTools = languageTools.Wrap(newTools, parsed.DisallowedTools)
 	configuredTools, err := newTools(runContext, toolConfig)
 	if err != nil {
 		return err
@@ -419,11 +429,12 @@ func Run(
 	}
 	defer currentHost.Close()
 	identity, err := json.Marshal(struct {
-		Version   int
-		Provider  provider.Selection
-		Profile   profile.Selection
-		Workspace string
-	}{1, resolvedProvider, resolvedProfile.Selection(), workspace})
+		Version         int
+		Provider        provider.Selection
+		Profile         profile.Selection
+		Workspace       string
+		LanguageServers string `json:",omitempty"`
+	}{1, resolvedProvider, resolvedProfile.Selection(), workspace, languageTools.Identity()})
 	if err != nil {
 		return err
 	}
