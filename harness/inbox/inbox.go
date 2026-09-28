@@ -16,6 +16,7 @@ type InputKind string
 
 const (
 	InputExternal InputKind = "external"
+	InputPeer     InputKind = "peer"
 	InputControl  InputKind = "control"
 	InputCrash    InputKind = "crash"
 )
@@ -32,6 +33,10 @@ func (input Input) Validate() error {
 	}
 	switch input.Kind {
 	case InputExternal, InputCrash:
+	case InputPeer:
+		if _, err := input.DecodePeerMessage(); err != nil {
+			return err
+		}
 	case InputControl:
 		if _, err := input.DecodeControlMessage(); err != nil {
 			return err
@@ -48,10 +53,12 @@ func (input Input) Validate() error {
 type ControlMode string
 
 const (
-	StopHard       ControlMode = "hard"
-	StopWhenIdle   ControlMode = "when_idle"
-	Heartbeat      ControlMode = "heartbeat"
-	UpdateSettings ControlMode = "settings"
+	StopHard          ControlMode = "hard"
+	StopWhenIdle      ControlMode = "when_idle"
+	Heartbeat         ControlMode = "heartbeat"
+	UpdateSettings    ControlMode = "settings"
+	CancelOperation   ControlMode = "cancel_operation"
+	DispatchOperation ControlMode = "dispatch_operation"
 )
 
 type Settings struct {
@@ -77,7 +84,7 @@ func (input Input) DecodeControlMessage() (ControlMessage, error) {
 		return ControlMessage{}, fmt.Errorf("decode control message: %w", err)
 	}
 	request := ControlMessage{Mode: envelope.Mode, Reason: envelope.Reason}
-	if request.Mode != UpdateSettings && len(envelope.Parameters) != 0 {
+	if request.Mode != UpdateSettings && request.Mode != CancelOperation && request.Mode != DispatchOperation && len(envelope.Parameters) != 0 {
 		return ControlMessage{}, fmt.Errorf("control mode %q does not accept parameters", request.Mode)
 	}
 	switch request.Mode {
@@ -86,6 +93,18 @@ func (input Input) DecodeControlMessage() (ControlMessage, error) {
 		if request.Reason == "" {
 			return ControlMessage{}, fmt.Errorf("heartbeat reason is empty")
 		}
+	case DispatchOperation:
+		var intent OperationIntent
+		if err := json.Unmarshal(envelope.Parameters, &intent, json.RejectUnknownMembers(true)); err != nil || intent.OperationID == "" || intent.ToolName == "" || !intent.Spec.IsValid() || len(intent.Spec) > 131072 {
+			return ControlMessage{}, fmt.Errorf("invalid operation intent")
+		}
+		request.Parameters = intent
+	case CancelOperation:
+		var cancel CancelRequest
+		if err := json.Unmarshal(envelope.Parameters, &cancel, json.RejectUnknownMembers(true)); err != nil || cancel.OperationID == "" {
+			return ControlMessage{}, fmt.Errorf("invalid cancel operation parameters")
+		}
+		request.Parameters = cancel
 	case UpdateSettings:
 		var settings Settings
 		if err := json.Unmarshal(envelope.Parameters, &settings, json.RejectUnknownMembers(true)); err != nil {

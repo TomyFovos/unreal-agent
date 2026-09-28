@@ -14,6 +14,7 @@ type HostRecord struct {
 	Version             uint32
 	Kind                string
 	Configuration       jsontext.Value                `json:",omitzero"`
+	Finish              *FinishRecord                 `json:",omitzero"`
 	Inputs              []inbox.ID                    `json:",omitzero"`
 	ProjectInstructions *projectinstructions.Snapshot `json:",omitzero"`
 }
@@ -31,18 +32,23 @@ func (r HostRecord) Validate() error {
 	}
 	switch r.Kind {
 	case HostProjectInstructions:
-		if r.ProjectInstructions == nil || len(r.Configuration) != 0 || len(r.Inputs) != 0 {
+		if r.ProjectInstructions == nil || len(r.Configuration) != 0 || len(r.Inputs) != 0 || r.Finish != nil {
 			return fmt.Errorf("invalid project instructions record")
 		}
 		if err := r.ProjectInstructions.Validate(); err != nil {
 			return err
 		}
+	case "finish":
+		if r.Finish == nil || len(r.Configuration) != 0 || len(r.Inputs) != 0 {
+			return fmt.Errorf("invalid finish record")
+		}
+		return r.Finish.Validate()
 	case "configuration":
-		if len(r.Configuration) == 0 || !r.Configuration.IsValid() || len(r.Inputs) != 0 {
+		if len(r.Configuration) == 0 || !r.Configuration.IsValid() || len(r.Inputs) != 0 || r.Finish != nil {
 			return fmt.Errorf("invalid host configuration record")
 		}
 	case "stop_complete":
-		if len(r.Inputs) == 0 || len(r.Configuration) != 0 {
+		if len(r.Inputs) == 0 || len(r.Configuration) != 0 || r.Finish != nil {
 			return fmt.Errorf("invalid stop completion")
 		}
 		for _, id := range r.Inputs {

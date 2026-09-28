@@ -317,7 +317,8 @@ func assertCoordinatorFaultTrace(t *testing.T, events []coordinatorFaultEvent, r
 			updates[value.ID] = append(updates[value.ID], value)
 		case "save":
 			value := event.value.(operation.Operation)
-			found := false
+			// Canceling is a Coordinator-owned durable decision, preceding Cancel.
+			found := hardStop && value.Status == operation.StatusCanceling
 			for _, update := range updates[value.ID] {
 				found = found || reflect.DeepEqual(update, value)
 			}

@@ -39,7 +39,9 @@ type Runtime struct {
 	LLM        llm.Adapter
 	Tools      tool.Registry
 	Operations operation.Manager
-	Close      func() error
+	// Close must cancel/drain its own handlers; it must not wait for Session.Wait.
+	// Normal completion calls it before the session context is canceled.
+	Close func() error
 }
 type Factory func(context.Context, session.ID) (Runtime, error)
 type Config struct {
@@ -148,6 +150,8 @@ type Session struct {
 	store          *localfile.Store
 	inbox          *inbox.Inbox
 	runtime        Runtime
+	lifecycle      string
+	finish         *sessionstore.FinishRecord
 	mu             sync.Mutex
 	snapshot       sessionstore.Snapshot
 	items          []sessionstore.Item
@@ -291,6 +295,12 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	if err != nil {
 		return nil, err
 	}
+	s.lifecycle = o.Lifecycle
+	if s.lifecycle == "" {
+		s.lifecycle = "interactive"
+	}
+	cctx = context.WithValue(cctx, sessionContextKey{}, s)
+	s.ctx = cctx
 	s.runtime, err = h.config.Build(cctx, o.ID)
 	if err != nil {
 		return nil, err
@@ -322,7 +332,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	pending := s.pendingStop()
 	dependencies := coordinator.Dependencies{SessionID: o.ID, Inbox: s.inbox, Restored: restored,
 		Sessions: &serializedStore{s}, ContextBuilder: s.runtime.Builder, LLM: s.runtime.LLM, Tools: s.runtime.Tools,
-		Operations: s.runtime.Operations, ToolHeartbeatInterval: o.Heartbeat, RestoredStop: pending, InitialInputs: initial}
+		Finished: func() bool { return s.Finish() != nil }, Operations: s.runtime.Operations, ToolHeartbeatInterval: o.Heartbeat, RestoredStop: pending, InitialInputs: initial}
 	h.sessions[o.ID] = s
 	go func() {
 		runErr := coordinator.New(dependencies).Run(cctx)
@@ -331,10 +341,10 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 			runErr = s.completeStops(context.WithoutCancel(cctx))
 		}
 		s.mu.Unlock()
-		cancel()
 		if s.runtime.Close != nil {
 			runErr = errors.Join(runErr, s.runtime.Close())
 		}
+		cancel()
 		if manager, ok := s.runtime.Operations.(interface{ Done() <-chan struct{} }); ok {
 			<-manager.Done()
 		}
@@ -453,6 +463,12 @@ func (s *Session) enqueue(input inbox.Input) (*submission, error) {
 	return p, nil
 }
 func (s *Session) Submit(ctx context.Context, generation string, input inbox.Input) (Receipt, error) {
+	if input.Kind == inbox.InputPeer {
+		return Receipt{}, fmt.Errorf("peer input requires an authenticated channel")
+	}
+	return s.submit(ctx, generation, input)
+}
+func (s *Session) submit(ctx context.Context, generation string, input inbox.Input) (Receipt, error) {
 	if generation != s.Generation {
 		return Receipt{}, ErrStaleGeneration
 	}
@@ -572,8 +588,21 @@ func (s *Session) rememberItem(item sessionstore.Item, notify bool) {
 	if item.Kind == sessionstore.ItemTurn || item.Kind == sessionstore.ItemModelResponse {
 		s.progress = nil
 	}
+	if item.Kind == sessionstore.ItemFork {
+		clear(s.operations)
+		s.finish = nil
+	}
+	if item.Kind == sessionstore.ItemHostRecord {
+		r := item.Data.(sessionstore.HostRecord)
+		if r.Kind == "finish" {
+			s.finish = r.Finish
+		}
+	}
 	if item.Kind == sessionstore.ItemInput {
 		input, err := canonical(item.Data.(inbox.Input))
+		if op, e := sessionstore.DecodeOperationIntent(input); e == nil {
+			s.operations[op.ID] = op
+		}
 		if err != nil {
 			panic(err)
 		}
@@ -611,7 +640,13 @@ func (s *Session) configure(ctx context.Context, config jsontext.Value) error {
 	if err := config.Canonicalize(); err != nil {
 		return err
 	}
-	for _, item := range s.items {
+	start := 0
+	for i, item := range s.items {
+		if item.Kind == sessionstore.ItemFork {
+			start = i + 1
+		}
+	}
+	for _, item := range s.items[start:] {
 		if item.Kind == sessionstore.ItemHostRecord {
 			r := item.Data.(sessionstore.HostRecord)
 			if r.Kind == "configuration" {
@@ -631,6 +666,9 @@ func (s *Session) configure(ctx context.Context, config jsontext.Value) error {
 func (s *Session) pendingStops() []inbox.Input {
 	pending := map[inbox.ID]inbox.Input{}
 	for _, item := range s.items {
+		if item.Kind == sessionstore.ItemFork {
+			clear(pending)
+		}
 		if item.Kind == sessionstore.ItemHostRecord {
 			r := item.Data.(sessionstore.HostRecord)
 			if r.Kind == "stop_complete" {

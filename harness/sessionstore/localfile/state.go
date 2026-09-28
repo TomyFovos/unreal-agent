@@ -62,6 +62,26 @@ func (head *sessionHead) appendInput(
 		return sessionstore.Item{}, fmt.Errorf("append input to session %q: %w", id, err)
 	}
 
+	if input.Kind == inbox.InputControl {
+		c, err := input.DecodeControlMessage()
+		if err != nil {
+			return sessionstore.Item{}, err
+		}
+		if c.Mode == inbox.DispatchOperation {
+			op, err := sessionstore.DecodeOperationIntent(input)
+			if err != nil {
+				return sessionstore.Item{}, err
+			}
+			if err = validateOperation(op); err != nil {
+				return sessionstore.Item{}, err
+			}
+			if _, exists := head.operationPositions[op.ID]; exists {
+				return sessionstore.Item{}, fmt.Errorf("operation intent ID already exists")
+			}
+			head.operationPositions[op.ID] = len(head.Operations)
+			head.Operations = append(head.Operations, op)
+		}
+	}
 	return head.appendItem(sessionstore.ItemInput, input, recordedAt), nil
 }
 
@@ -290,6 +310,9 @@ func (state storedState) resume() sessionstore.ResumeState {
 		switch item.Kind {
 		case sessionstore.ItemInput:
 			input := item.Data.(inbox.Input)
+			if op, err := sessionstore.DecodeOperationIntent(input); err == nil {
+				pending[op.ID] = struct{}{}
+			}
 			if input.Kind == inbox.InputExternal {
 				externalInputIDs = append(externalInputIDs, input.ID)
 			}

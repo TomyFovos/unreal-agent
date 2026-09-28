@@ -17,6 +17,8 @@ import (
 type Dependencies struct {
 	// InitialInputs is one startup batch processed before any execution or model decision.
 	InitialInputs []inbox.Input
+	// Finished is a pure read of an already committed canonical Finish record.
+	Finished func() bool
 	// RestoredStop is a persisted stop whose effect was not completed.
 	RestoredStop          *inbox.ControlMessage
 	ToolHeartbeatInterval time.Duration
