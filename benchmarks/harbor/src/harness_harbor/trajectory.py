@@ -18,6 +18,8 @@ from harbor.models.trajectories import (
     Trajectory,
 )
 
+from harness_harbor.remote_results import NATIVE_PENDING, native_result
+
 RUNNING = (
     "Tool call is still running. Its result arrives in a later turn: "
     "continue with independent work, or end your turn to wait for it."
@@ -271,6 +273,8 @@ def convert(
                 content = bash_result(data)
             elif name == "ViewImage":
                 content = view_image_result(data, output_dir)
+            elif name in {"Read", "Write", "Edit", "Grep", "Glob"}:
+                content = native_result(data)
             elif data["Status"].get("Error") and not data.get("Operations"):
                 content = data["Status"]["Error"]
             else:
@@ -280,7 +284,7 @@ def convert(
                 for result in pending_observations
                 if not (
                     result.source_call_id == data["CallID"]
-                    and result.content == RUNNING
+                    and result.content in (RUNNING, NATIVE_PENDING)
                 )
             ]
             result = ObservationResult(
