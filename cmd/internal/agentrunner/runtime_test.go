@@ -7,8 +7,10 @@ import (
 	"testing"
 
 	"github.com/unreallabsai/unreal-agent/harness/credential"
+	"github.com/unreallabsai/unreal-agent/harness/dap"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/lsp"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/profile"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
@@ -22,7 +24,12 @@ func TestRuntimeFactoryOwnsFreshSessionComponentsAndIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := RuntimeIdentity{Version: 1, Workspace: t.TempDir(), SystemPrompt: "explicit system", Provider: provider.Selection{Version: 1, Provider: "ollama", Model: catalog["ollama"][0], Auth: credential.Reference{Method: credential.None}, Source: "test", MaxAttempts: 1}, Profile: profile.Default(), ReasoningEffort: llm.ReasoningEffort("low"), DisallowedTools: []string{tool.BashName}}
-	c := RuntimeConfig{Identity: identity, SessionDirectory: filepath.Join(t.TempDir(), "sessions"), Providers: registry}
+	languages, err := NewLanguageTools(permission.WithPolicy(t.Context(), permission.Unrestricted()), identity.Workspace, []lsp.ServerConfig{{Language: "go", Path: "/missing/gopls"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer languages.Close()
+	c := RuntimeConfig{Identity: identity, SessionDirectory: filepath.Join(t.TempDir(), "sessions"), Providers: registry, LanguageTools: languages, DebugAdapters: []dap.AdapterConfig{{ID: "debug", Path: "/missing/adapter", Directory: identity.Workspace}}}
 	factory, raw, err := NewRuntimeFactory(c)
 	if err != nil {
 		t.Fatal(err)
@@ -31,6 +38,9 @@ func TestRuntimeFactoryOwnsFreshSessionComponentsAndIdentity(t *testing.T) {
 	var saved RuntimeIdentity
 	if err = json.Unmarshal(raw, &saved); err != nil {
 		t.Fatal(err)
+	}
+	if saved.LanguageServers != languages.Identity() || len(saved.DebugAdapters) != 64 {
+		t.Fatal("protocol configuration identity missing", saved)
 	}
 	if saved.DisallowedTools[0] != tool.BashName {
 		t.Fatal("identity alias")
@@ -52,6 +62,11 @@ func TestRuntimeFactoryOwnsFreshSessionComponentsAndIdentity(t *testing.T) {
 	}
 	if _, ok := first.Tools.Resolve(tool.ReadName); !ok {
 		t.Fatal("default native tools absent")
+	}
+	for _, name := range []string{"ast_grep", "ast_edit", "LSP", "DAP"} {
+		if _, ok := first.Tools.Resolve(name); !ok {
+			t.Fatalf("missing integrated tool %s", name)
+		}
 	}
 	cancel()
 	first.Close()

@@ -13,16 +13,20 @@ import (
 	"github.com/unreallabsai/unreal-agent/cmd/internal/tui"
 	"github.com/unreallabsai/unreal-agent/harness/authflow"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
+	"github.com/unreallabsai/unreal-agent/harness/dap"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
+	"github.com/unreallabsai/unreal-agent/harness/lsp"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 )
 
 type serveConfiguration struct {
-	Runtime     agentrunner.RuntimeIdentity
-	Permissions permission.Config
+	Runtime         agentrunner.RuntimeIdentity
+	Permissions     permission.Config
+	LanguageServers []lsp.ServerConfig
+	DebugAdapters   []dap.AdapterConfig
 }
 
 func run(ctx context.Context, args []string, output io.Writer) error {
@@ -80,7 +84,12 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		if err != nil {
 			return err
 		}
-		factory, identity, err := agentrunner.NewRuntimeFactory(agentrunner.RuntimeConfig{Identity: config.Runtime, SessionDirectory: *directory, Providers: registry, Credentials: resolver})
+		languageTools, err := agentrunner.NewLanguageTools(permission.WithPolicy(ctx, policy), config.Runtime.Workspace, config.LanguageServers)
+		if err != nil {
+			return err
+		}
+		defer languageTools.Close()
+		factory, identity, err := agentrunner.NewRuntimeFactory(agentrunner.RuntimeConfig{Identity: config.Runtime, SessionDirectory: *directory, Providers: registry, Credentials: resolver, LanguageTools: languageTools, DebugAdapters: config.DebugAdapters})
 		if err != nil {
 			return err
 		}

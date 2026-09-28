@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
+	"github.com/unreallabsai/unreal-agent/harness/dap"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -31,6 +32,8 @@ type RuntimeIdentity struct {
 	Workspace, SystemPrompt string
 	ReasoningEffort         llm.ReasoningEffort
 	DisallowedTools         []string
+	LanguageServers         string `json:",omitempty"`
+	DebugAdapters           string `json:",omitempty"`
 }
 type RuntimeConfig struct {
 	Identity         RuntimeIdentity
@@ -38,6 +41,9 @@ type RuntimeConfig struct {
 	Providers        *provider.Registry
 	Credentials      credential.Resolver
 	HTTPClient       *http.Client
+	// LanguageTools is borrowed from the Host owner, which closes it after sessions drain.
+	LanguageTools *LanguageTools
+	DebugAdapters []dap.AdapterConfig
 	// NewTools optionally composes additional protocol/subagent handlers. It is
 	// called per session with that session's owner context and explicit workspace.
 	NewTools ToolFactory
@@ -86,14 +92,23 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	identity, err := json.Marshal(c.Identity)
-	if err != nil {
-		return nil, nil, err
-	}
 	if c.NewTools == nil {
 		c.NewTools = func(ctx context.Context, t ToolConfig) (Tools, error) {
 			return DefaultTools(ctx, t, c.Identity.DisallowedTools)
 		}
+	}
+	c.Identity.LanguageServers = ""
+	if c.LanguageTools != nil {
+		c.NewTools = c.LanguageTools.Wrap(c.NewTools, c.Identity.DisallowedTools)
+		c.Identity.LanguageServers = c.LanguageTools.Identity()
+	}
+	c.NewTools, c.Identity.DebugAdapters, err = DebugTools(c.NewTools, c.DebugAdapters, c.Identity.DisallowedTools)
+	if err != nil {
+		return nil, nil, err
+	}
+	identity, err := json.Marshal(c.Identity)
+	if err != nil {
+		return nil, nil, err
 	}
 	factory := func(ctx context.Context, id session.ID) (host.Runtime, error) {
 		client, _, err := c.Providers.Build(provider.BuildConfig{Selection: c.Identity.Provider, Resolver: c.Credentials, HTTPClient: c.HTTPClient})

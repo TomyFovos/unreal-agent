@@ -88,3 +88,30 @@ The receiver subscribes atomically, pages canonical history by sequence, and rep
 ## Validation
 
 `make test check build` runs race tests, vet, formatting and builds. Added tests cover real subprocess attach/detach, durable retry, multiple prompts, writer contention, resume generations, slow subscribers, bounded transient progress, real SSE retry/reset, private authentication, gap rebuild, Unicode/paste/resize, and cancellation. Linux additionally runs a real PTY subprocess with Unicode input, resize, masked login and detach. The Darwin build is checked with `GOOS=darwin CGO_ENABLED=0 go build ./cmd/unreal-agent` on this pre-AST branch; final AST composition has its separate CGO requirement.
+
+## Structural, semantic and debugger tools
+
+The common runtime includes the native file and Tree-sitter AST tools used by
+the one-shot runner. Full AST support requires the normal CGO build.
+
+The serve JSON may additionally contain `LanguageServers` (the entries described
+in `harness/lsp/README.md`) and `DebugAdapters` (entries described in
+`harness/dap/README.md`). Language servers are shared by sessions in this Host
+and workspace; debugger owners are isolated per Session runtime. All protocol
+work remains in Operations. Session cleanup drains request handlers and debugger
+resources; the Host closes shared language servers after its sessions stop.
+Configuration digests are included in immutable runtime identity. Protocol
+settings come from this explicit serve configuration, not client prompts.
+
+Example optional top-level fields:
+
+```json
+{
+  "LanguageServers": [{"language":"go","path":"/opt/bin/gopls","extensions":[".go"]}],
+  "DebugAdapters": [{"id":"lldb","path":"/opt/bin/lldb-dap","directory":"/workspace"}]
+}
+```
+
+Combine these with the Runtime and Permissions fields above. Enabling a tool
+does not grant process permissions; the explicit execution policy is checked
+at every boundary. Restrictive OS sandbox requests remain unsupported.
