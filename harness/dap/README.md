@@ -81,3 +81,8 @@ pure translation. No production debugger binary was installed in the review
 environment; adapter-specific smoke tests remain opt-in integration validation.
 
 Protocol source: https://microsoft.github.io/debug-adapter-protocol/overview
+
+Owner cancellation and Close cancel active requests before graceful cleanup. Those
+requests release the command lock while the adapter remains alive for a bounded
+disconnect; attach uses terminateDebuggee=false. Ordinary request cancellation,
+protocol failure, and the final cleanup deadline still expire/kill the adapter.

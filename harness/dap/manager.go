@@ -306,7 +306,7 @@ func (m *Manager) start(ctx context.Context, r Request) (Result, error) {
 	// Keep the adapter alive long enough to detach on owner cancellation. The
 	// Manager cancellation callback owns shutdown and always cancels this context.
 	processContext, cancel := context.WithCancel(context.WithoutCancel(m.ctx))
-	s := &liveSession{handle: result.Handle, attached: r.Command == "attach", cancel: cancel, done: make(chan struct{}), initialized: make(chan struct{}), pending: map[int]chan response{}, state: "starting"}
+	s := &liveSession{owner: m.ctx, handle: result.Handle, attached: r.Command == "attach", cancel: cancel, done: make(chan struct{}), initialized: make(chan struct{}), pending: map[int]chan response{}, state: "starting"}
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
 	m.mu.Lock()

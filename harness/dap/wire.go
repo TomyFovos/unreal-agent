@@ -33,6 +33,7 @@ type response struct {
 type liveSession struct {
 	handle            Handle
 	attached          bool
+	owner             context.Context
 	process           *primitives.ProcessInvocation
 	cancel            context.CancelFunc
 	done              chan struct{}
@@ -66,10 +67,18 @@ func (s *liveSession) request(ctx context.Context, command string, args any) (js
 	case result := <-pending:
 		return result.body, result.err
 	case <-ctx.Done():
-		s.cancel()
+		s.interrupt()
 		return nil, &Error{Code: "interrupted"}
 	case <-s.done:
 		return nil, &Error{Code: "expired"}
+	}
+}
+
+// Ordinary request cancellation expires an uncertain adapter. During owner
+// cancellation or Close, keep it alive until the bounded disconnect attempt completes.
+func (s *liveSession) interrupt() {
+	if s.owner == nil || s.owner.Err() == nil {
+		s.cancel()
 	}
 }
 func (s *liveSession) send(ctx context.Context, command string, args jsontext.Value) (<-chan response, error) {
@@ -99,7 +108,7 @@ func (s *liveSession) send(ctx context.Context, command string, args jsontext.Va
 			return nil, &Error{Code: "write_failed"}
 		}
 	case <-ctx.Done():
-		s.cancel()
+		s.interrupt()
 		return nil, &Error{Code: "interrupted"}
 	case <-s.done:
 		return nil, &Error{Code: "expired"}
