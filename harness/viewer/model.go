@@ -107,6 +107,7 @@ func (m *Model) snapshot(p *projection, v host.View) {
 	p.view.Revision = v.Revision
 	p.view.Running = v.Running
 	p.view.Failure = v.Failure
+	p.view.ProjectInstructions = v.ProjectInstructions
 	p.operations = map[operation.ID]operation.Operation{}
 	for _, op := range v.Operations {
 		p.operations[op.ID] = op
@@ -200,6 +201,9 @@ func (m *Model) Apply(id session.ID, event host.Event) error {
 			return ErrResync
 		}
 		p.operations[e.Operation.ID] = *e.Operation
+	case "progress":
+		// Streaming text is transient. Advancing its revision keeps the stream
+		// contiguous without inventing canonical activity, usage, or Finish.
 	case "stopped":
 		p.runtime = RuntimeStopped
 		p.view.Running = false
@@ -349,6 +353,7 @@ func (m *Model) base(id session.ID, p *projection, now time.Time) Row {
 	if p == nil {
 		return r
 	}
+	r.ProjectInstructions = p.view.ProjectInstructions
 	r.Generation = p.view.Generation
 	r.Runtime = p.runtime
 	r.Failure = p.view.Failure
@@ -518,6 +523,10 @@ func (m *Model) Detail(id session.ID, now time.Time) (Detail, bool) {
 }
 
 func cloneRow(r Row) Row {
+	if r.ProjectInstructions != nil {
+		metadata := *r.ProjectInstructions
+		r.ProjectInstructions = &metadata
+	}
 	r.Operations = append([]OperationRow(nil), r.Operations...)
 	if r.Finish != nil {
 		f := *r.Finish

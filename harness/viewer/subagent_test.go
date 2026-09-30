@@ -122,7 +122,7 @@ func TestHostAdapterPersistsControlsAndChildReadDoesNotAcquireWriter(t *testing.
 	_, err = parent.SubmitOperation(ctx, parent.Generation, "start-request", "start-op", "SubagentStart", spec)
 	must(t, err)
 	childID := subagent.ChildID(parent.ID, "start-op")
-	config := subagent.ChildConfig{Version: 1, ParentID: parent.ID, ChildID: childID, OperationID: "start-op", SessionDirectory: dir, Workspace: dir, Runtime: jsontext.Value("{}"), ReadyID: "ready:start-op", Task: "inspect task"}
+	config := subagent.ChildConfig{Version: 1, ParentID: parent.ID, ChildID: childID, OperationID: "start-op", SessionDirectory: dir, Workspace: dir, Runtime: jsontext.Value("{}"), ReadyID: "ready:start-op", Task: "inspect task", Policy: permission.Config{Tools: []string{"Finish"}}}
 	raw, err := json.Marshal(config)
 	must(t, err)
 	child, err := h.Create(ctx, host.Options{ID: childID, Lifecycle: "child", Configuration: raw, Policy: permission.Unrestricted()})

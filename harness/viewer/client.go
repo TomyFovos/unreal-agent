@@ -249,15 +249,31 @@ func (c *Client) control(ctx context.Context, action string, child session.ID, i
 	if c.Controls == nil {
 		return host.Receipt{}, ErrUnavailable
 	}
+	// A committed retry remains the same intent after Finish, disconnect, or
+	// generation change. Consult receipts before checking current availability.
+	detail, ok := c.Model.Detail(child, time.Now())
+	if !ok || detail.Row.ParentID == "" || inputID == "" {
+		return host.Receipt{}, ErrUnavailable
+	}
+	key := controlKey{detail.Row.ParentID, inbox.ID(inputID)}
+	c.mu.Lock()
+	old, completed := c.completed[key]
+	c.mu.Unlock()
+	if completed {
+		if old.action != action || old.request.ChildID != child || old.request.Text != text {
+			return host.Receipt{}, host.ErrConflict
+		}
+		return old.receipt, nil
+	}
 	req, err := c.request(child, inputID, text)
 	if err != nil {
 		return host.Receipt{}, err
 	}
-	key := controlKey{req.ParentID, req.InputID}
 	c.mu.Lock()
+	// Another caller can finish between the receipt lookup and request check.
 	if old, ok := c.completed[key]; ok {
 		c.mu.Unlock()
-		if old.action != action || old.request != req {
+		if old.action != action || old.request.ChildID != child || old.request.Text != text {
 			return host.Receipt{}, host.ErrConflict
 		}
 		return old.receipt, nil

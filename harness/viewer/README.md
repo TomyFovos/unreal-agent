@@ -80,3 +80,32 @@ this reads persisted history and never asks the parent LLM to poll a child.
 ResumeChild verifies that a live parent already owns a nonterminal child. It does
 not launch a second process. Resume a stopped parent explicitly through the Host
 ownership gate; its existing operations recover the same children.
+
+## CLI panel and local transport
+
+The interactive CLI mounts ExtensionHandler on its existing private 0700 socket
+directory/0600 Unix socket, and attach embeds Panel alongside the normal parent
+transcript. Remote keeps parent subscriptions on the Host gateway and uses its
+extension only for scoped child snapshots and controls. No additional listener,
+scheduler, writer, or LLM polling is introduced.
+
+Select with /child ID; /child-history [after] [limit] and /child-next load explicit
+bounded persisted pages. /child-send TEXT, /child-cancel and /child-resume delegate
+to the owning Host. /child-retry preserves the original uncertain request ID.
+A successful repeated ID retains its receipt even after Finish or disconnect;
+changing its action/child/text conflicts. A new control against a terminal child
+is unavailable. Resume confirms existing ownership; resume a stopped parent with
+the normal /resume command.
+
+Only the selected child is refreshed once per second. Child runtime stays unknown
+because this is a persisted snapshot, not a live runtime claim. Closing the panel
+cancels and joins read workers without stopping the Host. Rendered lines are
+bounded in terminal columns, preserve Unicode graphemes, and remove controls.
+Project instruction metadata comes from Host snapshots (source, digest, bytes);
+the panel never discovers AGENTS.md or renders the instruction body.
+
+The real CLI process test exercises steer/duplicate resume/cancel, committed
+receipt retry after termination, bounded history, canonical Finish provenance,
+usage rebuild without double-counting, and present/absent instruction inheritance.
+Provider HTTP is a deterministic fixture; serve/child processes, IPC and stores
+are real.

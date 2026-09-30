@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
-	"github.com/unreallabsai/unreal-agent/cmd/internal/tui"
 	"github.com/unreallabsai/unreal-agent/harness/authflow"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/dap"
@@ -113,7 +112,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return gateway.ListenAndServe(ctx, *socket, gateway.Config{Host: owner, Policy: policy, Configuration: identity, Auth: auth, Workspace: workspace})
+		return gateway.ListenAndServe(ctx, *socket, withViewer(gateway.Config{Host: owner, Policy: policy, Configuration: identity, Auth: auth, Workspace: workspace}, *directory))
 	case "attach":
 		id := flags.String("session", "", "session ID; optional with --mode create")
 		mode := flags.String("mode", "attach", "attach, create, or resume")
@@ -144,7 +143,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return tui.Terminal(ctx, tui.Config{Client: client, ID: view.Session.Session.ID})
+		return attachViewer(ctx, client, view.Session.Session.ID)
 	case "child":
 		return runChild(ctx, args[1:], output)
 	default:

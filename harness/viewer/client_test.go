@@ -200,3 +200,23 @@ func TestDuplicateResumeAndRetryAfterFailure(t *testing.T) {
 		t.Fatal("retry identity lost")
 	}
 }
+
+func TestCommittedRetryAfterTerminalAndDisconnect(t *testing.T) {
+	f := &fakeControls{}
+	c := controlClient(t, f)
+	want, err := c.Steer(t.Context(), "child", "request", "finish now")
+	must(t, err)
+	must(t, c.Model.Replace("parent", parentView(operation.StatusCompleted)))
+	c.Model.Disconnect("parent")
+	got, err := c.Steer(t.Context(), "child", "request", "finish now")
+	must(t, err)
+	if got != want || len(f.calls) != 1 {
+		t.Fatal("committed retry lost its receipt")
+	}
+	if _, err = c.Steer(t.Context(), "child", "request", "changed"); !errors.Is(err, host.ErrConflict) {
+		t.Fatal("changed retry was accepted", err)
+	}
+	if _, err = c.Steer(t.Context(), "child", "new", "finish now"); !errors.Is(err, ErrUnavailable) {
+		t.Fatal("new terminal control was accepted", err)
+	}
+}

@@ -32,6 +32,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/provider"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
+	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
 
 // Build and invoke the real CLI: serve -> RemoteJob -> child --stdio.
@@ -42,8 +43,12 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 	if data, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, data)
 	}
-	for _, present := range []bool{true, false} {
-		t.Run(fmt.Sprintf("present-%t", present), func(t *testing.T) {
+	for _, scenario := range []struct {
+		present bool
+		control string
+	}{{true, ""}, {false, ""}, {true, "steer"}, {false, "cancel"}} {
+		present := scenario.present
+		t.Run(fmt.Sprintf("present-%t-control-%s", present, scenario.control), func(t *testing.T) {
 			workspace := t.TempDir()
 			if err := os.Chmod(workspace, 0700); err != nil {
 				t.Fatal(err)
@@ -71,7 +76,7 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 						output = []any{map[string]any{"type": "function_call", "id": "start", "call_id": "start", "name": "SubagentStart", "arguments": `{"template":"worker","task":"delegated task only"}`}}
 					}
 				case "child":
-					childCalls.Add(1)
+					calls := childCalls.Add(1)
 					body := string(data)
 					if strings.Contains(body, "PARENT_CONVERSATION_ONLY") || strings.Contains(body, "PROJECT_REVISION_B") {
 						t.Error("child copied parent conversation or rediscovered disk")
@@ -83,13 +88,18 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 						t.Error("instructions duplicated in delegated task")
 					}
 					output = []any{map[string]any{"type": "function_call", "id": "finish", "call_id": "finish", "name": "Finish", "arguments": `{"status":"completed","summary":"CLI child finished","changedFiles":[],"tests":["fixture"],"blockers":[]}`}}
+					if scenario.control != "" && calls == 1 {
+						output = []any{}
+					} else if scenario.control == "steer" && !strings.Contains(body, "VIEWER_STEER_INPUT") {
+						t.Error("viewer input did not reach child inbox")
+					}
 				default:
 					t.Errorf("unexpected model %q", request.Model)
 				}
 				if output == nil {
 					output = []any{}
 				}
-				event, _ := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]any{"id": "r", "status": "completed", "output": output}})
+				event, _ := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]any{"id": "r", "status": "completed", "output": output, "usage": map[string]any{"input_tokens": 10, "output_tokens": 2}}})
 				w.Header().Set("Content-Type", "text/event-stream")
 				fmt.Fprintf(w, "data: %s\n\n", event)
 			}))
@@ -169,6 +179,10 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 				t.Fatal(err)
 			}
 			var completed operation.Operation
+			remote := viewer.Remote{ParentID: "parent", Parent: client, Call: client.Extension}
+			observer := viewer.NewClient(remote, viewer.New(viewer.SubagentOptions()), remote)
+			controlled := false
+			var receipt host.Receipt
 			for {
 				view, err = client.Inspect(ctx, "parent", 0, 256)
 				if err != nil {
@@ -178,19 +192,54 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 					t.Fatalf("parent failed: %s", view.Failure)
 				}
 				for _, op := range view.Operations {
-					if op.ToolName == "SubagentStart" && (op.Status == operation.StatusCompleted || op.Status == operation.StatusFailed) {
+					if op.ToolName == "SubagentStart" && (op.Status == operation.StatusCompleted || op.Status == operation.StatusFailed || op.Status == operation.StatusCanceled) {
 						completed = op
 					}
 				}
 				if completed.ID != "" {
 					break
 				}
+				if scenario.control != "" && !controlled && childCalls.Load() > 0 {
+					if err = observer.Refresh(ctx, "parent"); err != nil {
+						t.Fatal(err)
+					}
+					for _, op := range view.Operations {
+						if op.ToolName != "SubagentStart" {
+							continue
+						}
+						plan, e := subagent.DecodePlan(op)
+						if e != nil {
+							t.Fatal(e)
+						}
+						if e = observer.Refresh(ctx, plan.ChildID); e != nil {
+							t.Fatal(e)
+						}
+						for range 2 {
+							if e = observer.Resume(ctx, plan.ChildID, "viewer-resume"); e != nil {
+								t.Fatal(e)
+							}
+						}
+						if scenario.control == "steer" {
+							receipt, e = observer.Steer(ctx, plan.ChildID, "viewer-steer", "VIEWER_STEER_INPUT")
+						} else {
+							receipt, e = observer.Cancel(ctx, plan.ChildID, "viewer-cancel", "stop")
+						}
+						if e != nil || receipt.Sequence == 0 {
+							t.Fatalf("viewer control: %v %+v", e, receipt)
+						}
+						controlled = true
+					}
+				}
 				if ctx.Err() != nil {
 					t.Fatal("child did not finish")
 				}
 				time.Sleep(time.Millisecond)
 			}
-			if completed.Status != operation.StatusCompleted {
+			if scenario.control == "cancel" {
+				if completed.Status != operation.StatusCanceled || !controlled {
+					t.Fatalf("cancel outcome: %+v", completed)
+				}
+			} else if completed.Status != operation.StatusCompleted {
 				t.Fatalf("child outcome: %+v", completed)
 			}
 			plan, err := subagent.DecodePlan(completed)
@@ -214,10 +263,12 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 				}
 				if in, ok := item.Data.(inbox.Input); ok && in.Kind == inbox.InputPeer {
 					peer, _ := in.DecodePeerMessage()
-					if peer.Text != "delegated task only" {
+					if in.ID == inbox.ID("task:"+string(completed.ID)) && peer.Text != "delegated task only" {
 						t.Error("task payload includes extra context")
 					}
-					tasks++
+					if in.ID == inbox.ID("task:"+string(completed.ID)) {
+						tasks++
+					}
 				}
 			}
 			for _, item := range view.History.Items {
@@ -231,11 +282,53 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 					}
 				}
 			}
-			if bindings != 1 || tasks != 1 || ready != 1 || childCalls.Load() != 1 {
+			wantCalls := int32(1)
+			if scenario.control == "steer" {
+				wantCalls = 2
+			}
+			if bindings != 1 || tasks != 1 || ready != 1 || childCalls.Load() != wantCalls {
 				t.Fatalf("bindings=%d tasks=%d ready=%d childCalls=%d", bindings, tasks, ready, childCalls.Load())
 			}
-			if child.Finish == nil || child.Finish.Result.Summary != "CLI child finished" {
+			if scenario.control == "cancel" {
+				if child.Finish != nil {
+					t.Fatal("cancel invented Finish")
+				}
+			} else if child.Finish == nil || child.Finish.Result.Summary != "CLI child finished" {
 				t.Fatal("canonical Finish missing")
+			}
+			for range 2 {
+				if err = observer.Refresh(ctx, "parent"); err != nil {
+					t.Fatal(err)
+				}
+				if err = observer.Refresh(ctx, plan.ChildID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			detail, ok := observer.Model.Detail(plan.ChildID, time.Now())
+			if !ok || detail.Row.ProjectInstructions == nil || *detail.Row.ProjectInstructions != want.Metadata() || detail.Row.Runtime != viewer.RuntimeUnknown || detail.Row.Usage.Responses != int(wantCalls) || detail.Row.Usage.Input != int64(wantCalls)*10 {
+				t.Fatalf("viewer projection: %+v", detail.Row)
+			}
+			if (detail.Row.Finish == nil) != (child.Finish == nil) {
+				t.Fatal("viewer result provenance differs")
+			}
+			page, e := observer.History(ctx, plan.ChildID, 0, 2)
+			if e != nil || len(page.Items) != 2 || !page.More {
+				t.Fatalf("viewer page: %v %+v", e, page)
+			}
+			if scenario.control == "steer" {
+				again, e := observer.Steer(ctx, plan.ChildID, "viewer-steer", "VIEWER_STEER_INPUT")
+				if e != nil || again != receipt {
+					t.Fatalf("terminal steer retry: %v", e)
+				}
+			}
+			if scenario.control == "cancel" {
+				again, e := observer.Cancel(ctx, plan.ChildID, "viewer-cancel", "stop")
+				if e != nil || again != receipt {
+					t.Fatalf("terminal cancel retry: %v", e)
+				}
+			}
+			if _, e = observer.Steer(ctx, plan.ChildID, "new-control", "too late"); e == nil {
+				t.Fatal("terminal child accepted new viewer input")
 			}
 		})
 	}

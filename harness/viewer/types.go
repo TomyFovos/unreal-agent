@@ -8,6 +8,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"time"
@@ -81,6 +82,7 @@ type OperationRow struct {
 	Elapsed Duration
 }
 type Row struct {
+	ProjectInstructions   *projectinstructions.Metadata
 	ID                    session.ID
 	ParentID              session.ID
 	ParentOperationID     operation.ID
