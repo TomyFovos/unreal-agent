@@ -4,16 +4,21 @@ import (
 	"encoding/json/jsontext"
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 )
 
-// HostRecord is canonical configuration or completion of a persisted stop.
-// It carries no credential values or runtime handles.
+// HostRecord is canonical configuration, completion of a persisted stop, or
+// the project instructions a session was created with. It carries no
+// credential values or runtime handles.
 type HostRecord struct {
-	Version       uint32
-	Kind          string
-	Configuration jsontext.Value `json:",omitzero"`
-	Inputs        []inbox.ID     `json:",omitzero"`
+	Version             uint32
+	Kind                string
+	Configuration       jsontext.Value                `json:",omitzero"`
+	Inputs              []inbox.ID                    `json:",omitzero"`
+	ProjectInstructions *projectinstructions.Snapshot `json:",omitzero"`
 }
+
+const HostProjectInstructions = "project_instructions"
 
 const ItemHostRecord ItemKind = "host_record"
 
@@ -21,7 +26,17 @@ func (r HostRecord) Validate() error {
 	if r.Version != 1 {
 		return fmt.Errorf("unsupported host record version %d", r.Version)
 	}
+	if r.Kind != HostProjectInstructions && r.ProjectInstructions != nil {
+		return fmt.Errorf("host record %q carries project instructions", r.Kind)
+	}
 	switch r.Kind {
+	case HostProjectInstructions:
+		if r.ProjectInstructions == nil || len(r.Configuration) != 0 || len(r.Inputs) != 0 {
+			return fmt.Errorf("invalid project instructions record")
+		}
+		if err := r.ProjectInstructions.Validate(); err != nil {
+			return err
+		}
 	case "configuration":
 		if len(r.Configuration) == 0 || !r.Configuration.IsValid() || len(r.Inputs) != 0 {
 			return fmt.Errorf("invalid host configuration record")

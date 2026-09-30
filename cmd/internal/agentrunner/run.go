@@ -447,7 +447,7 @@ func Run(
 	if err != nil {
 		return err
 	}
-	current, err := currentHost.Open(runContext, host.Options{Policy: executionPolicy, Lifecycle: "one-shot", Configuration: identity, ID: sessionID, Initial: initialInputs, Heartbeat: *toolHeartbeatInterval})
+	current, err := currentHost.Open(runContext, host.Options{Policy: executionPolicy, Lifecycle: "one-shot", Configuration: identity, ID: sessionID, Initial: initialInputs, Heartbeat: *toolHeartbeatInterval, Workspace: workspace})
 	if err != nil {
 		return err
 	}

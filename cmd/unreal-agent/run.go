@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/cmd/internal/tui"
@@ -99,7 +100,11 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		}
 		defer owner.Close()
 		fmt.Fprintln(output, "Local Host starting; attach clients may disconnect without stopping sessions.")
-		return gateway.ListenAndServe(ctx, *socket, gateway.Config{Host: owner, Policy: policy, Configuration: identity, Auth: auth})
+		workspace, err := filepath.Abs(config.Runtime.Workspace)
+		if err != nil {
+			return err
+		}
+		return gateway.ListenAndServe(ctx, *socket, gateway.Config{Host: owner, Policy: policy, Configuration: identity, Auth: auth, Workspace: workspace})
 	case "attach":
 		id := flags.String("session", "", "session ID; optional with --mode create")
 		mode := flags.String("mode", "attach", "attach, create, or resume")

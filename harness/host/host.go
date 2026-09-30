@@ -21,6 +21,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
@@ -65,6 +66,31 @@ type Options struct {
 	Configuration jsontext.Value
 	Initial       []inbox.Input
 	Heartbeat     time.Duration
+
+	// Workspace, when set, is the root whose AGENTS.md a newly created session
+	// binds. Resume, restart, and fork replay the persisted snapshot instead.
+	Workspace string
+	// ProjectInstructions binds this snapshot to a newly created session
+	// instead of discovering one, so a child shares its parent's revision.
+	ProjectInstructions *projectinstructions.Snapshot
+}
+
+// creationRecords are bound atomically with a new session's header. Discovery
+// failures fail creation; they are never skipped or truncated.
+func (o Options) creationRecords() ([]sessionstore.HostRecord, error) {
+	var snapshot projectinstructions.Snapshot
+	switch {
+	case o.ProjectInstructions != nil:
+		snapshot = *o.ProjectInstructions
+	case o.Workspace != "":
+		var err error
+		if snapshot, err = projectinstructions.Discover(o.Workspace); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, nil
+	}
+	return []sessionstore.HostRecord{{Version: 1, Kind: sessionstore.HostProjectInstructions, ProjectInstructions: &snapshot}}, nil
 }
 type Host struct {
 	ctx      context.Context
@@ -102,6 +128,9 @@ type View struct {
 	Operations []operation.Operation
 	Running    bool
 	Failure    string `json:",omitzero"`
+
+	// ProjectInstructions identifies the bound snapshot without its content.
+	ProjectInstructions *projectinstructions.Metadata `json:",omitzero"`
 }
 type Subscription struct {
 	Initial View
@@ -126,6 +155,7 @@ type Session struct {
 	subscribers    map[uint64]chan Event
 	nextSubscriber uint64
 	progress       *Progress
+	instructions   *projectinstructions.Metadata
 	progressEpoch  uint64
 	revision       uint64
 	done           chan struct{}
@@ -185,6 +215,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		}
 	}()
 	restored, err := raw.Resume(ctx, o.ID)
+	created := false
 	if err == nil && o.Mode == Create {
 		return nil, fs.ErrExist
 	}
@@ -192,11 +223,16 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		if !errors.Is(err, fs.ErrNotExist) || o.Mode == Resume {
 			return nil, err
 		}
-		snapshot, e := raw.Create(ctx, o.ID)
+		records, e := o.creationRecords()
+		if e != nil {
+			return nil, e
+		}
+		snapshot, e := raw.CreateWithHostRecords(ctx, o.ID, records...)
 		if e != nil {
 			return nil, e
 		}
 		restored = sessionstore.ResumeState{Snapshot: snapshot}
+		created = true
 	} else {
 		// Explicit non-destructive v2 -> v3 migration; the original remains .v2.
 		if err = raw.Upgrade(ctx, o.ID); err != nil {
@@ -239,7 +275,10 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		s.operations[op.ID] = op
 	}
 	raw.AddObserver(func(_ session.ID, item sessionstore.Item) { s.rememberItem(item, true) })
-	s.StartAfter = sessionstore.Sequence(len(s.items))
+	// A new session's creation bindings are part of this run's output.
+	if !created {
+		s.StartAfter = sessionstore.Sequence(len(s.items))
+	}
 	if err = s.configure(ctx, o.Configuration); err != nil {
 		return nil, err
 	}
@@ -457,7 +496,7 @@ func (s *Session) view(after sessionstore.Sequence, limit int) (View, error) {
 		return View{}, fmt.Errorf("history cursor beyond session")
 	}
 	end := min(int(after)+limit, len(s.items))
-	v := View{Progress: s.progress, Session: s.snapshot, Generation: s.Generation, Revision: s.revision, Running: s.running,
+	v := View{Progress: s.progress, ProjectInstructions: s.instructions, Session: s.snapshot, Generation: s.Generation, Revision: s.revision, Running: s.running,
 		History: sessionstore.Page{Items: append([]sessionstore.Item(nil), s.items[int(after):end]...), NextAfter: sessionstore.Sequence(end), More: end < len(s.items)}}
 	if s.err != nil {
 		v.Failure = s.err.Error()
@@ -546,6 +585,12 @@ func (s *Session) rememberItem(item sessionstore.Item, notify bool) {
 			p.receipt = Receipt{ID: input.ID, Sequence: item.Sequence}
 			p.committed = true
 			close(p.done)
+		}
+	}
+	if item.Kind == sessionstore.ItemHostRecord {
+		if r := item.Data.(sessionstore.HostRecord); r.Kind == sessionstore.HostProjectInstructions && s.instructions == nil {
+			metadata := r.ProjectInstructions.Metadata()
+			s.instructions = &metadata
 		}
 	}
 	if item.Kind == sessionstore.ItemToolCallStatus {

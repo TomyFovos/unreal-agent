@@ -270,7 +270,7 @@ func TestBuilderLeadsSystemPromptWithPreamble(t *testing.T) {
 	}
 }
 
-func TestBuilderAppendsSkillsToPreamble(t *testing.T) {
+func TestBuilderAppendsSkillsAfterSystemPrompt(t *testing.T) {
 	skills := []tool.Skill{
 		{
 			Name:        "go-review",
@@ -293,13 +293,13 @@ func TestBuilderAppendsSkillsToPreamble(t *testing.T) {
 	}
 	want := preamble + `
 
+Be concise.
+
 The following skills provide specialized instructions for specific tasks.
 Use SkillUse to load a skill's file when the task matches its description.
 When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool calls.
 
-<available_skills><skill><name>go-review</name><description>Review &lt;Go&gt; &amp; &#34;tests&#34;</description><location>/skills/reviewer&#39;s/SKILL.md</location></skill><skill><name>documents</name><description>Edit documents</description><location>/skills/documents/SKILL.md</location></skill></available_skills>
-
-Be concise.`
+<available_skills><skill><name>go-review</name><description>Review &lt;Go&gt; &amp; &#34;tests&#34;</description><location>/skills/reviewer&#39;s/SKILL.md</location></skill><skill><name>documents</name><description>Edit documents</description><location>/skills/documents/SKILL.md</location></skill></available_skills>`
 	if got := result.Request.Input[0].Data.(llm.Message).Text; got != want {
 		t.Fatalf("system prompt = %q, want %q", got, want)
 	}

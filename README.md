@@ -57,3 +57,5 @@ tools to execute there.
 ## Interactive Host API
 
 See [Host lifecycle, delivery, subscriptions, and session migration](docs/host.md). The one-shot runner uses the same Host.
+
+A workspace root `AGENTS.md` is bound to each new session as project instructions; see [Project instructions](docs/project-instructions.md).

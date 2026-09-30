@@ -50,6 +50,9 @@ description: Review code.
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(workspace, "AGENTS.md"), []byte("Project rule: keep diffs small.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	sessions := t.TempDir()
 	logDirectory := filepath.Join(t.TempDir(), "logs")
 	var stdout, stderr bytes.Buffer
@@ -108,6 +111,13 @@ description: Review code.
 		!slices.Equal(messages[1:], wantMessages) {
 		t.Fatalf("messages = %#v, want system preamble plus %#v", messages, wantMessages)
 	}
+	// Project instructions apply without the prompt asking for AGENTS.md and
+	// stay a separate layer ahead of the skill catalog.
+	system := messages[0].Text
+	instructions := strings.Index(system, "<project_instructions source=\"AGENTS.md\">\nProject rule: keep diffs small.\n</project_instructions>")
+	if instructions < 0 || instructions < strings.Index(system, "be concise") || instructions > strings.Index(system, "<available_skills>") || strings.Count(system, "keep diffs small") != 1 {
+		t.Fatalf("system prompt layering = %q", system)
+	}
 	if len(request.Tools) != 3 || !containsTool(request.Tools, "Bash") || !containsTool(request.Tools, "ViewImage") || !containsTool(request.Tools, "SkillUse") {
 		t.Fatalf("tools = %#v, want Bash, ViewImage, and SkillUse", request.Tools)
 	}
@@ -117,10 +127,14 @@ description: Review code.
 		"input.control input.external input.external turn model_response input.control",
 	)
 	items := decodeLogItems(t, stdout.Bytes())
-	if items[0].Kind != sessionstore.ItemHostRecord || items[0].Data.(sessionstore.HostRecord).Kind != "configuration" {
+	if items[0].Kind != sessionstore.ItemHostRecord || items[0].Data.(sessionstore.HostRecord).Kind != sessionstore.HostProjectInstructions ||
+		items[0].Data.(sessionstore.HostRecord).ProjectInstructions.Content != "Project rule: keep diffs small.\n" {
+		t.Fatal("missing project instructions binding")
+	}
+	if items[1].Kind != sessionstore.ItemHostRecord || items[1].Data.(sessionstore.HostRecord).Kind != "configuration" {
 		t.Fatal("missing Host configuration")
 	}
-	control, err := items[1].Data.(inbox.Input).DecodeControlMessage()
+	control, err := items[2].Data.(inbox.Input).DecodeControlMessage()
 	if err != nil || control.Mode != inbox.UpdateSettings || control.Parameters != (inbox.Settings{ReasoningEffort: llm.ReasoningEffortMedium}) {
 		t.Fatalf("initial settings = %#v, error = %v", control, err)
 	}
