@@ -139,3 +139,8 @@ mutation recovery. Mutation tests cover process lock/crash/partial-write behavio
 LSP additionally checks that detailed target outcomes survive result encoding.
 This protocol fixture does not claim verification against every third-party
 language server.
+
+An interrupted awaiting rename/code-action consults the shared Mutation receipt
+under the current Host permission policy. A proven result is returned without
+starting the language server or replaying edits. Missing evidence stays
+indeterminate; receipt lookup is not permission to repeat a side effect.
