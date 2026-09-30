@@ -16,7 +16,7 @@ import (
 // DefaultTools composes handlers once per session. The caller owns Close and must
 // close all handlers, which cancel and drain their own workers.
 func DefaultTools(ctx context.Context, config ToolConfig, disallowed []string) (Tools, error) {
-	files, err := mutation.New(mutation.Config{Root: config.Directory, Authorize: func(ctx context.Context, path string, write bool) error {
+	files, err := mutation.New(mutation.Config{Root: config.Directory, StateDir: config.MutationStateDirectory, Authorize: func(ctx context.Context, path string, write bool) error {
 		return permission.FromContext(ctx).CheckPath(path, write)
 	}})
 	if err != nil {

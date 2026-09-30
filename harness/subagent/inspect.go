@@ -63,6 +63,9 @@ func ReadChild(ctx context.Context, directory string, id session.ID, after sessi
 				if json.Unmarshal(record.Configuration, &config) == nil && config.Validate() == nil && config.ChildID == id {
 					result.Configuration = &config
 				}
+			case sessionstore.HostProjectInstructions:
+				metadata := record.ProjectInstructions.Metadata()
+				result.View.ProjectInstructions = &metadata
 			case "finish":
 				result.Finish = record.Finish
 			}

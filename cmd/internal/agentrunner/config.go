@@ -17,11 +17,12 @@ type Config struct {
 }
 
 type ToolConfig struct {
-	Directory   string
-	Translators tool.StaticTranslators
-	Names       []string
-	SessionID   session.ID
-	Getenv      func(string) string
+	Directory              string
+	MutationStateDirectory string
+	Translators            tool.StaticTranslators
+	Names                  []string
+	SessionID              session.ID
+	Getenv                 func(string) string
 }
 
 type Tools struct {

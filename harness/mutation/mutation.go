@@ -165,6 +165,9 @@ func New(config Config) (*Service, error) {
 	return &Service{root: root, alias: alias, state: state, authorize: config.Authorize}, nil
 }
 func (s *Service) Root() string { return s.root }
+
+// StateDirectory is the private shared lock and receipt directory, not a credential.
+func (s *Service) StateDirectory() string { return s.state }
 func (s *Service) Path(path string) (string, error) {
 	if path == "" || strings.IndexByte(path, 0) >= 0 {
 		return "", errors.New("invalid path")

@@ -28,6 +28,7 @@ type serveConfiguration struct {
 	Permissions     permission.Config
 	LanguageServers []lsp.ServerConfig
 	DebugAdapters   []dap.AdapterConfig
+	Subagents       map[string]childTemplate
 }
 
 func run(ctx context.Context, args []string, output io.Writer) error {
@@ -90,7 +91,15 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			return err
 		}
 		defer languageTools.Close()
-		factory, identity, err := agentrunner.NewRuntimeFactory(agentrunner.RuntimeConfig{Identity: config.Runtime, SessionDirectory: *directory, Providers: registry, Credentials: resolver, LanguageTools: languageTools, DebugAdapters: config.DebugAdapters})
+		runtimeConfig, templates, err := withParentSubagents(agentrunner.RuntimeConfig{Identity: config.Runtime, SessionDirectory: *directory, Providers: registry, Credentials: resolver, LanguageTools: languageTools, DebugAdapters: config.DebugAdapters}, config.Subagents, policy, *credentials)
+		if err != nil {
+			return err
+		}
+		factory, identity, err := agentrunner.NewRuntimeFactory(runtimeConfig)
+		if err != nil {
+			return err
+		}
+		identity, err = withSubagentIdentity(identity, templates)
 		if err != nil {
 			return err
 		}
@@ -137,7 +146,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		}
 		return tui.Terminal(ctx, tui.Config{Client: client, ID: view.Session.Session.ID})
 	case "child":
-		return errors.New("child stdio composition is provided by the subagent integration")
+		return runChild(ctx, args[1:], output)
 	default:
 		return errors.New("unsupported command: expected serve or attach")
 	}

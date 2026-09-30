@@ -95,3 +95,37 @@ Finish, cancellation, and child crashes. Unit tests cover framing bounds and
 partial/coalesced frames, channel identity, commit-before-ACK, peer provenance,
 cancellation arbitration, and Finish eligibility. Production provider/CLI
 composition is supplied by the command package; this package imports no command.
+
+## CLI templates and project instructions
+
+The unreal-agent serve configuration accepts a Subagents map. Each entry
+contains a Runtime identity and bounded Permissions; the model chooses the
+entry's name, never binary arguments, credential material, or capabilities.
+The CLI composes subagent handlers into the same RuntimeFactory as native tools,
+AST, LSP and DAP. An empty template map preserves the existing parent runtime.
+Children have native/AST executors with bounded file access. External LSP/DAP
+resources and arbitrary child subprocesses require a sandbox and are rejected
+by the current bounded child policy.
+
+At spawn the parent Host supplies its canonical bound ProjectInstructionSnapshot
+as ChildConfig.ProjectInstructions. The child's Host binds that configuration
+atomically at Create and replays it on Resume. The delegated Peer task contains
+only task text, and parent conversation is never copied. An explicit none
+snapshot remains none after a new AGENTS.md appears on disk. Omitted snapshots
+in legacy configurations mean none and never trigger child discovery.
+
+The parent resolves each child's shared MutationStateDirectory using the same
+canonical workspace/cache rule as native and LSP tools. It is a nonsecret
+absolute lock/receipt directory recorded in the template/configuration and
+passed directly to the child executor. Child environment is explicitly limited
+to PATH and LANG: HOME, provider keys, proxy credentials and parent environment
+are not inherited. This keeps mutation locking shared without ambient home
+configuration. Changing a recorded template/configuration fails recovery
+explicitly, rather than replaying under a new runtime.
+
+CLI integration tests build and launch the actual serve and child --stdio
+commands against an HTTP fixture. They assert revision A after disk becomes B,
+inheritance of none, independent child transcript, one canonical binding/task/
+ready record, and Finish through the Operation result path. Three simultaneous
+real child processes also prove that C completes and wakes its parent while
+A/B remain idle.

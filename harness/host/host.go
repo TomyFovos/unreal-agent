@@ -141,31 +141,32 @@ type Subscription struct {
 	Cancel  func()
 }
 type Session struct {
-	ID             session.ID
-	Generation     string
-	StartAfter     sessionstore.Sequence
-	ctx            context.Context
-	cancel         context.CancelFunc
-	lock           *os.File
-	store          *localfile.Store
-	inbox          *inbox.Inbox
-	runtime        Runtime
-	lifecycle      string
-	finish         *sessionstore.FinishRecord
-	mu             sync.Mutex
-	snapshot       sessionstore.Snapshot
-	items          []sessionstore.Item
-	operations     map[operation.ID]operation.Operation
-	submissions    map[inbox.ID]*submission
-	subscribers    map[uint64]chan Event
-	nextSubscriber uint64
-	progress       *Progress
-	instructions   *projectinstructions.Metadata
-	progressEpoch  uint64
-	revision       uint64
-	done           chan struct{}
-	running        bool
-	err            error
+	ID                session.ID
+	Generation        string
+	StartAfter        sessionstore.Sequence
+	ctx               context.Context
+	cancel            context.CancelFunc
+	lock              *os.File
+	store             *localfile.Store
+	inbox             *inbox.Inbox
+	runtime           Runtime
+	lifecycle         string
+	finish            *sessionstore.FinishRecord
+	mu                sync.Mutex
+	snapshot          sessionstore.Snapshot
+	items             []sessionstore.Item
+	operations        map[operation.ID]operation.Operation
+	submissions       map[inbox.ID]*submission
+	subscribers       map[uint64]chan Event
+	nextSubscriber    uint64
+	progress          *Progress
+	instructions      *projectinstructions.Metadata
+	boundInstructions *projectinstructions.Snapshot
+	progressEpoch     uint64
+	revision          uint64
+	done              chan struct{}
+	running           bool
+	err               error
 }
 
 func New(ctx context.Context, c Config) (*Host, error) {
@@ -621,6 +622,8 @@ func (s *Session) rememberItem(item sessionstore.Item, notify bool) {
 		if r := item.Data.(sessionstore.HostRecord); r.Kind == sessionstore.HostProjectInstructions && s.instructions == nil {
 			metadata := r.ProjectInstructions.Metadata()
 			s.instructions = &metadata
+			snapshot := *r.ProjectInstructions
+			s.boundInstructions = &snapshot
 		}
 	}
 	if item.Kind == sessionstore.ItemToolCallStatus {
@@ -714,4 +717,16 @@ func (s *Session) completeStops(ctx context.Context) error {
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	return s.store.AppendHostRecord(ctx, s.ID, sessionstore.HostRecord{Version: 1, Kind: "stop_complete", Inputs: ids})
+}
+
+// BoundProjectInstructions distinguishes legacy sessions from an explicit none
+// binding without exposing internal mutable state.
+func (s *Session) BoundProjectInstructions() *projectinstructions.Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.boundInstructions == nil {
+		return nil
+	}
+	snapshot := *s.boundInstructions
+	return &snapshot
 }

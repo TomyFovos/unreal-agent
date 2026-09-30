@@ -268,7 +268,8 @@ func (m *Manager) spawn(j *job, p Plan, state *operation.RemoteJobState) (operat
 	if !ok || !sameJSON(actual, expected) {
 		return operation.StatusFailed, fmt.Errorf("child template changed")
 	}
-	child := ChildConfig{Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: j.operation.ID, SessionDirectory: m.config.Directory, Workspace: allowed.Workspace, Runtime: allowed.Runtime, Policy: allowed.Policy, ReadyID: inbox.ID("ready:" + string(j.operation.ID)), Task: p.Text}
+	snapshot := m.config.Owner.BoundProjectInstructions()
+	child := ChildConfig{MutationStateDirectory: allowed.MutationStateDirectory, ProjectInstructions: snapshot, Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: j.operation.ID, SessionDirectory: m.config.Directory, Workspace: allowed.Workspace, Runtime: allowed.Runtime, Policy: allowed.Policy, ReadyID: inbox.ID("ready:" + string(j.operation.ID)), Task: p.Text}
 	if err := child.Validate(); err != nil {
 		return operation.StatusFailed, err
 	}

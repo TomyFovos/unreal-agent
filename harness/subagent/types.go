@@ -13,6 +13,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"io"
@@ -25,9 +26,10 @@ const PlanVersion operation.RemoteJobPlanVersion = 1
 // Template is resolved by the Host, not supplied by model arguments. Runtime is
 // non-secret versioned provider/profile selection and configuration references.
 type Template struct {
-	Workspace string
-	Runtime   jsontext.Value
-	Policy    permission.Config
+	Workspace              string
+	MutationStateDirectory string `json:",omitzero"`
+	Runtime                jsontext.Value
+	Policy                 permission.Config
 }
 type Plan struct {
 	Version       uint32
@@ -41,16 +43,18 @@ type Plan struct {
 	Result        *sessionstore.FinishResult `json:",omitzero"`
 }
 type ChildConfig struct {
-	Version          uint32
-	ParentID         session.ID
-	ChildID          session.ID
-	OperationID      operation.ID
-	SessionDirectory string
-	Workspace        string
-	Runtime          jsontext.Value
-	Policy           permission.Config
-	ReadyID          inbox.ID
-	Task             string
+	Version                uint32
+	ParentID               session.ID
+	ChildID                session.ID
+	OperationID            operation.ID
+	SessionDirectory       string
+	Workspace              string
+	Runtime                jsontext.Value
+	Policy                 permission.Config
+	ReadyID                inbox.ID
+	Task                   string
+	MutationStateDirectory string                        `json:",omitzero"`
+	ProjectInstructions    *projectinstructions.Snapshot `json:",omitzero"`
 }
 type Handle struct {
 	Version     uint32
@@ -145,6 +149,14 @@ func DecodeHandle(op operation.Operation) (Handle, error) {
 func (c ChildConfig) Validate() error {
 	if c.Version != 1 || c.ParentID == "" || c.ChildID != ChildID(c.ParentID, c.OperationID) || c.OperationID == "" || c.ReadyID != inbox.ID("ready:"+string(c.OperationID)) || !filepath.IsAbs(c.SessionDirectory) || !filepath.IsAbs(c.Workspace) || !c.Runtime.IsValid() || c.Task == "" || len(c.Task) > 32768 {
 		return fmt.Errorf("invalid child handshake configuration")
+	}
+	if c.MutationStateDirectory != "" && !filepath.IsAbs(c.MutationStateDirectory) {
+		return fmt.Errorf("child mutation state directory must be absolute")
+	}
+	if c.ProjectInstructions != nil {
+		if err := c.ProjectInstructions.Validate(); err != nil {
+			return err
+		}
 	}
 	// This implementation offers bounded built-in file/network executors, not an
 	// arbitrary subprocess sandbox. No child can request ambient capabilities.

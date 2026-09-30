@@ -108,7 +108,7 @@ func TestChildServerHelper(t *testing.T) {
 			return nil, nil, err
 		}
 		data, _ := json.Marshal(c)
-		child, err := h.Open(ctx, host.Options{ID: c.ChildID, Lifecycle: "child", Policy: policy, Configuration: data, Initial: []inbox.Input{c.InitialInput()}})
+		child, err := h.Open(ctx, host.Options{ID: c.ChildID, Lifecycle: "child", Policy: policy, ProjectInstructions: c.ProjectInstructions, Configuration: data, Initial: []inbox.Input{c.InitialInput()}})
 		if err != nil {
 			h.Close()
 			policy.Close()
@@ -594,5 +594,82 @@ func TestChildCapabilityWideningRejectedBeforeSpawn(t *testing.T) {
 				t.Fatal("unauthorized child was spawned", err)
 			}
 		})
+	}
+}
+
+func TestParallelChildrenCompleteWithoutWaitingForIdleSiblings(t *testing.T) {
+	dir := t.TempDir()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	templates := map[string]sub.Template{"default": {Workspace: dir, Runtime: jsontext.Value("{}"), Policy: permission.Config{Tools: []string{"SendParent", "Finish"}}}}
+	var started, progressed atomic.Bool
+	model := adapter(func(ctx context.Context, r llm.Request, _ llm.RequestOptions) (llm.Response, error) {
+		if started.CompareAndSwap(false, true) {
+			var result llm.Response
+			for _, entry := range []struct{ id, task string }{{"a", "wait"}, {"b", "wait"}, {"c", "finish"}} {
+				args, _ := json.Marshal(map[string]string{"template": "default", "task": entry.task})
+				result.Output = append(result.Output, llm.Item{Type: llm.ItemToolCall, Data: llm.ToolCall{Name: "SubagentStart", CallID: entry.id, Arguments: string(args)}})
+			}
+			return result, nil
+		}
+		for _, item := range r.Input {
+			if result, ok := item.Data.(llm.ToolResult); ok && result.CallID == "c" {
+				for _, out := range result.Output {
+					if strings.Contains(out.Value, "child complete") {
+						progressed.Store(true)
+					}
+				}
+			}
+		}
+		return llm.Response{}, nil
+	})
+	h, err := host.New(t.Context(), host.Config{Directory: dir, Build: factory(sub.Config{Directory: dir, Binary: binary, Arguments: []string{"-test.run=^TestChildServerHelper$"}, Environment: append(os.Environ(), "UNREAL_SUBAGENT_HELPER=1"), Templates: templates}, model)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	payload, _ := json.Marshal("start parallel")
+	s, err := h.Create(t.Context(), host.Options{ID: "parallel", Policy: permission.Unrestricted(), Initial: []inbox.Input{{ID: "initial", Kind: inbox.InputExternal, Payload: payload}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
+	defer cancel()
+	for {
+		view, err := s.Inspect(0, 256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		waiting, finished, ready := 0, 0, 0
+		for _, op := range view.Operations {
+			p, err := sub.DecodePlan(op)
+			if err != nil || p.Action != "start" {
+				continue
+			}
+			if p.Text == "wait" && op.Status != operation.StatusCompleted && op.Status != operation.StatusFailed && op.Status != operation.StatusCanceled {
+				waiting++
+			}
+			if p.Text == "finish" && op.Status == operation.StatusCompleted {
+				finished++
+			}
+		}
+		for _, item := range view.History.Items {
+			if in, ok := item.Data.(inbox.Input); ok && in.Kind == inbox.InputPeer {
+				peer, _ := in.DecodePeerMessage()
+				if peer.Kind == "ready" {
+					ready++
+				}
+			}
+		}
+		if waiting == 2 && finished == 1 && ready == 3 && progressed.Load() {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("parent did not progress independently: waiting=%d finished=%d ready=%d progressed=%t", waiting, finished, ready, progressed.Load())
+		case <-time.After(time.Millisecond):
+		}
 	}
 }

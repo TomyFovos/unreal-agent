@@ -9,6 +9,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"strings"
 	"testing"
 	"time"
@@ -157,5 +158,20 @@ func TestLostAckRetryRejectsChangedPayload(t *testing.T) {
 	receipt, err := ep.send(t.Context(), first)
 	if err != nil || receipt.Sequence != 42 || writes != 2 {
 		t.Fatal(receipt, err, writes)
+	}
+}
+
+func TestChildHandshakeRejectsUnknownInstructionVersion(t *testing.T) {
+	id := operation.ID("operation")
+	c := ChildConfig{Version: 1, ParentID: "parent", ChildID: ChildID("parent", id), OperationID: id, SessionDirectory: t.TempDir(), Workspace: t.TempDir(), Runtime: []byte("{}"), ReadyID: "ready:operation", Task: "delegated", Policy: permission.Config{Tools: []string{"Finish"}}}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	// Omitted instructions remain compatible with legacy configurations.
+	snapshot := projectinstructions.None()
+	snapshot.Version++
+	c.ProjectInstructions = &snapshot
+	if err := c.Validate(); err == nil {
+		t.Fatal("unknown snapshot version accepted")
 	}
 }
