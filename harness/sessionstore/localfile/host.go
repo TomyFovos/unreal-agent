@@ -109,6 +109,7 @@ func (s *Store) Operations(ctx context.Context, id session.ID) ([]operation.Oper
 	}
 	return state.Operations, nil
 }
+
 // CreateWithHostRecords publishes a new session whose first items are the
 // given records, so a session never exists without its creation bindings.
 func (s *Store) CreateWithHostRecords(ctx context.Context, id session.ID, records ...sessionstore.HostRecord) (sessionstore.Snapshot, error) {

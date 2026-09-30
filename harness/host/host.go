@@ -92,6 +92,7 @@ func (o Options) creationRecords() ([]sessionstore.HostRecord, error) {
 	}
 	return []sessionstore.HostRecord{{Version: 1, Kind: sessionstore.HostProjectInstructions, ProjectInstructions: &snapshot}}, nil
 }
+
 type Host struct {
 	ctx      context.Context
 	cancel   context.CancelFunc

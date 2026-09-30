@@ -254,3 +254,67 @@ func TestProjectInstructionsCannotChangeCapabilities(t *testing.T) {
 		}
 	}
 }
+
+func TestProjectInstructionsSurviveDeletionWithoutDuplicatingHistory(t *testing.T) {
+	dir, workspace := t.TempDir(), t.TempDir()
+	writeAgents(t, workspace, "Persistent revision A")
+	model := &systemRecorder{}
+	h := recordingHost(t, dir, model)
+	s, err := h.Create(t.Context(), Options{ID: "deleted", Workspace: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runTurn(t, s, "first")
+	want := boundSnapshot(t, s)
+	if err = os.Remove(filepath.Join(workspace, projectinstructions.FileName)); err != nil {
+		t.Fatal(err)
+	}
+	restarted := recordingHost(t, dir, model)
+	resumed, err := restarted.Resume(t.Context(), Options{ID: "deleted", Workspace: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runTurn(t, resumed, "second")
+	if got := boundSnapshot(t, resumed); got != want {
+		t.Fatalf("snapshot = %+v, want %+v", got, want)
+	}
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	if len(model.systems) != 2 {
+		t.Fatalf("requests = %d, want 2", len(model.systems))
+	}
+	for _, text := range model.systems {
+		if strings.Count(text, "Persistent revision A") != 1 {
+			t.Fatalf("instructions lost or duplicated: %q", text)
+		}
+	}
+}
+
+func TestLegacySessionDoesNotDiscoverInstructionsOnResume(t *testing.T) {
+	dir, workspace := t.TempDir(), t.TempDir()
+	raw, err := localfile.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = raw.Create(t.Context(), "legacy"); err != nil {
+		t.Fatal(err)
+	}
+	writeAgents(t, workspace, "New disk instructions must not change old sessions")
+	model := &systemRecorder{}
+	h := recordingHost(t, dir, model)
+	s, err := h.Resume(t.Context(), Options{ID: "legacy", Workspace: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runTurn(t, s, "one")
+	if strings.Contains(model.last(t), "<project_instructions") {
+		t.Fatal("legacy resume discovered new instructions")
+	}
+	view, err := s.Inspect(0, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.ProjectInstructions != nil {
+		t.Fatalf("legacy metadata = %+v", view.ProjectInstructions)
+	}
+}

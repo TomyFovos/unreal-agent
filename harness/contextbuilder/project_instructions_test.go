@@ -19,7 +19,7 @@ func systemText(t *testing.T, current Builder) string {
 }
 
 func TestBuilderLayersProjectInstructionsBetweenSystemPromptAndSkills(t *testing.T) {
-	snapshot, err := projectinstructions.FromContent([]byte("﻿Use tabs.\n"))
+	snapshot, err := projectinstructions.FromContent([]byte("\uFEFFUse tabs.\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
