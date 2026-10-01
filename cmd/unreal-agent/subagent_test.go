@@ -110,7 +110,17 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			t.Cleanup(cancel)
-			socket := filepath.Join(workspace, "host.sock")
+			// t.TempDir includes the test name; keep Unix socket paths short on macOS.
+			socketDirectory, err := os.MkdirTemp("", "ua-cli-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.RemoveAll(socketDirectory); err != nil {
+					t.Error(err)
+				}
+			})
+			socket := filepath.Join(socketDirectory, "host.sock")
 			cmd := exec.CommandContext(ctx, binary, "serve", "--config", path, "--session-directory", store, "--socket", socket)
 			var diagnostics bytes.Buffer
 			cmd.Stderr = &diagnostics
