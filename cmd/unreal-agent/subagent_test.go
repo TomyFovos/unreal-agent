@@ -31,6 +31,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
@@ -266,9 +267,39 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 			if child.View.ProjectInstructions == nil || *child.View.ProjectInstructions != want.Metadata() {
 				t.Fatal("child metadata differs")
 			}
+			public, err := json.Marshal(child.View)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(public), "PROJECT_REVISION_A") {
+				t.Fatal("child view exposed project instructions")
+			}
+			canonicalStore, err := localfile.New(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			canonical, err := canonicalStore.Items(ctx, plan.ChildID, 0, 256)
+			if err != nil {
+				t.Fatal(err)
+			}
+			canonicalBindings := 0
+			for _, item := range canonical.Items {
+				if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Kind == sessionstore.HostProjectInstructions {
+					canonicalBindings++
+					if record.ProjectInstructions == nil || *record.ProjectInstructions != want {
+						t.Fatal("canonical child binding differs")
+					}
+				}
+			}
+			if canonicalBindings != 1 {
+				t.Fatalf("canonical bindings=%d", canonicalBindings)
+			}
 			bindings, tasks, ready := 0, 0, 0
 			for _, item := range child.View.History.Items {
-				if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Kind == sessionstore.HostProjectInstructions {
+				if record, ok := item.Data.(host.ProjectInstructionRecord); ok && record.Kind == sessionstore.HostProjectInstructions {
+					if record.ProjectInstructions == nil || *record.ProjectInstructions != want.Metadata() {
+						t.Fatal("child binding metadata differs")
+					}
 					bindings++
 				}
 				if in, ok := item.Data.(inbox.Input); ok && in.Kind == inbox.InputPeer {

@@ -42,7 +42,7 @@ func ReadChild(ctx context.Context, directory string, id session.ID, after sessi
 	if err != nil {
 		return ChildView{}, err
 	}
-	result := ChildView{View: host.View{Session: snapshot, History: page, Operations: ops}}
+	result := ChildView{View: host.View{Session: snapshot, History: host.ProjectHistoryPage(page), Operations: ops}}
 	for cursor := sessionstore.BeforeFirst; ; {
 		p, err := store.Items(ctx, id, cursor, 256)
 		if err != nil {

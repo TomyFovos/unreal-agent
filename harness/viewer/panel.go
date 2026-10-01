@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/host"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,7 +36,7 @@ type Panel struct {
 	workers      sync.WaitGroup
 	updates      chan struct{}
 	mu           sync.Mutex
-	transcript   *sessionstore.Page
+	transcript   *host.HistoryPage
 	transcriptID session.ID
 	retry        *panelRequest
 	problem      string
@@ -165,7 +166,7 @@ func clipLine(line string, width int) string {
 	}
 	return line[:end]
 }
-func describe(item sessionstore.Item) string {
+func describe(item host.HistoryItem) string {
 	text := string(item.Kind)
 	switch d := item.Data.(type) {
 	case inbox.Input:

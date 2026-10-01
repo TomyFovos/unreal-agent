@@ -7,6 +7,9 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/host"
+	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	"io"
 	"os"
 	"path/filepath"
@@ -126,10 +129,32 @@ description: Review code.
 		"input.control input.external input.external turn input.control model_response",
 		"input.control input.external input.external turn model_response input.control",
 	)
-	items := decodeLogItems(t, stdout.Bytes())
-	if items[0].Kind != sessionstore.ItemHostRecord || items[0].Data.(sessionstore.HostRecord).Kind != sessionstore.HostProjectInstructions ||
-		items[0].Data.(sessionstore.HostRecord).ProjectInstructions.Content != "Project rule: keep diffs small.\n" {
-		t.Fatal("missing project instructions binding")
+	items := decodeHostLogItems(t, stdout.Bytes())
+	binding, ok := items[0].Data.(host.ProjectInstructionRecord)
+	expected, err := projectinstructions.FromContent([]byte("Project rule: keep diffs small.\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items[0].Kind != sessionstore.ItemHostRecord || !ok || binding.ProjectInstructions == nil || *binding.ProjectInstructions != expected.Metadata() {
+		t.Fatal("missing project instruction binding metadata")
+	}
+	if strings.Contains(stdout.String(), "keep diffs small") {
+		t.Fatal("Host log exposed project instruction content")
+	}
+	store, err := localfile.New(sessions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordedSessions, err := store.ListSessions(t.Context())
+	if err != nil || len(recordedSessions) != 1 {
+		t.Fatalf("session log: %v %+v", err, recordedSessions)
+	}
+	canonical, err := store.Items(t.Context(), recordedSessions[0].ID, 0, 1)
+	if err != nil || len(canonical.Items) != 1 {
+		t.Fatalf("canonical history: %v", err)
+	}
+	if got := canonical.Items[0].Data.(sessionstore.HostRecord).ProjectInstructions; got == nil || *got != expected {
+		t.Fatal("public log lost canonical instructions")
 	}
 	if items[1].Kind != sessionstore.ItemHostRecord || items[1].Data.(sessionstore.HostRecord).Kind != "configuration" {
 		t.Fatal("missing Host configuration")
@@ -494,7 +519,7 @@ func assertItemSequence(t *testing.T, output string, want ...string) {
 	decoder := jsontext.NewDecoder(strings.NewReader(output))
 	var kinds []string
 	for {
-		var item sessionstore.Item
+		var item host.HistoryItem
 		if err := json.UnmarshalDecode(decoder, &item); err != nil {
 			if errors.Is(err, io.EOF) {
 				break
@@ -502,8 +527,17 @@ func assertItemSequence(t *testing.T, output string, want ...string) {
 			t.Fatal(err)
 		}
 		if item.Kind == sessionstore.ItemHostRecord {
-			if err := item.Data.(sessionstore.HostRecord).Validate(); err != nil {
-				t.Fatal(err)
+			switch record := item.Data.(type) {
+			case sessionstore.HostRecord:
+				if err := record.Validate(); err != nil {
+					t.Fatal(err)
+				}
+			case host.ProjectInstructionRecord:
+				if err := record.Validate(); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				t.Fatalf("invalid public host record %T", record)
 			}
 			continue
 		}
@@ -523,7 +557,7 @@ func itemKinds(t *testing.T, output string) []sessionstore.ItemKind {
 	decoder := jsontext.NewDecoder(strings.NewReader(output))
 	var kinds []sessionstore.ItemKind
 	for {
-		var item sessionstore.Item
+		var item host.HistoryItem
 		if err := json.UnmarshalDecode(decoder, &item); err != nil {
 			if errors.Is(err, io.EOF) {
 				return kinds
@@ -539,7 +573,7 @@ func inputIDs(t *testing.T, output string) []inbox.ID {
 	decoder := jsontext.NewDecoder(strings.NewReader(output))
 	var ids []inbox.ID
 	for {
-		var item sessionstore.Item
+		var item host.HistoryItem
 		if err := json.UnmarshalDecode(decoder, &item); err != nil {
 			if errors.Is(err, io.EOF) {
 				return ids
@@ -709,5 +743,21 @@ func TestResolveSessionDirectoryRejectsMissingStateLocation(t *testing.T) {
 				t.Fatalf("error = %v, want actionable state location error", err)
 			}
 		})
+	}
+}
+
+func decodeHostLogItems(t *testing.T, raw []byte) []host.HistoryItem {
+	t.Helper()
+	decoder := jsontext.NewDecoder(bytes.NewReader(raw))
+	var items []host.HistoryItem
+	for {
+		var item host.HistoryItem
+		if err := json.UnmarshalDecode(decoder, &item); err != nil {
+			if errors.Is(err, io.EOF) {
+				return items
+			}
+			t.Fatal(err)
+		}
+		items = append(items, item)
 	}
 }

@@ -26,7 +26,7 @@ type timing struct{ start, end time.Time }
 type projection struct {
 	view       host.View
 	cursor     sessionstore.Sequence
-	recent     []sessionstore.Item
+	recent     []host.HistoryItem
 	operations map[operation.ID]operation.Operation
 	times      map[operation.ID]timing
 	responses  map[responseKey]bool
@@ -62,7 +62,7 @@ func copyValue[T any](v T) (T, error) {
 	}
 	return out, err
 }
-func validPage(after sessionstore.Sequence, page sessionstore.Page) bool {
+func validPage(after sessionstore.Sequence, page host.HistoryPage) bool {
 	cursor := after
 	for _, item := range page.Items {
 		if cursor == sessionstore.Sequence(math.MaxUint64) || item.Sequence != cursor+1 {
@@ -230,7 +230,7 @@ func (m *Model) Invalidate(id session.ID) {
 		p.resync = true
 	}
 }
-func (m *Model) item(p *projection, item sessionstore.Item) error {
+func (m *Model) item(p *projection, item host.HistoryItem) error {
 	if item.Sequence != p.cursor+1 {
 		return ErrInvalidPage
 	}
@@ -250,7 +250,7 @@ func (m *Model) item(p *projection, item sessionstore.Item) error {
 	p.cursor = item.Sequence
 	p.recent = append(p.recent, item)
 	if len(p.recent) > m.options.RecentLimit {
-		p.recent = append([]sessionstore.Item(nil), p.recent[len(p.recent)-m.options.RecentLimit:]...)
+		p.recent = append([]host.HistoryItem(nil), p.recent[len(p.recent)-m.options.RecentLimit:]...)
 	}
 	switch data := item.Data.(type) {
 	case sessionstore.ModelResponse:
