@@ -115,7 +115,7 @@ func (m *Model) progress(e host.Event) bool {
 	s.Progress = e.Progress
 	return true
 }
-func itemLines(item sessionstore.Item) []string {
+func itemLines(item host.HistoryItem) []string {
 	switch item.Kind {
 	case sessionstore.ItemInput:
 		input := item.Data.(inbox.Input)

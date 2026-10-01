@@ -106,6 +106,29 @@ func (s Snapshot) Validate() error {
 	return nil
 }
 
+// Validate checks public identity fields without requiring persisted content.
+func (m Metadata) Validate() error {
+	if m.Version != Version {
+		return fmt.Errorf("unsupported project instruction metadata version %d", m.Version)
+	}
+	switch m.SourceKind {
+	case SourceNone:
+		if m.SourcePath != "" || m.Digest != "" || m.ByteLength != 0 {
+			return errors.New("metadata without a source carries content identity")
+		}
+	case SourceWorkspaceAgents:
+		if m.SourcePath != FileName || m.ByteLength < 0 || m.ByteLength > MaxBytes || len(m.Digest) != len("sha256:")+64 || m.Digest[:len("sha256:")] != "sha256:" {
+			return errors.New("invalid project instruction metadata")
+		}
+		if _, err := hex.DecodeString(m.Digest[len("sha256:"):]); err != nil {
+			return fmt.Errorf("invalid project instruction digest: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported project instruction metadata source %q", m.SourceKind)
+	}
+	return nil
+}
+
 func (s Snapshot) Metadata() Metadata {
 	return Metadata{Version: s.Version, SourceKind: s.SourceKind, SourcePath: s.SourcePath, Digest: s.Digest, ByteLength: s.ByteLength}
 }

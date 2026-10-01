@@ -144,3 +144,9 @@ An interrupted awaiting rename/code-action consults the shared Mutation receipt
 under the current Host permission policy. A proven result is returned without
 starting the language server or replaying edits. Missing evidence stays
 indeterminate; receipt lookup is not permission to repeat a side effect.
+
+Awaiting apply_code_action receipt recovery has a dedicated regression using a
+lost previous-generation action ID: applied receipt, missing receipt
+(indeterminate without replay), and current permission denial. It uses the
+durable Mutation receipt before consulting any transient action/server state.
+This fixture coverage does not validate a production language server.

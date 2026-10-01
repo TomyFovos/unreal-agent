@@ -43,7 +43,7 @@ func TestActualSubagentDecoderCanonicalFinishAndUnsupportedPlans(t *testing.T) {
 	v.Operations = []operation.Operation{op}
 	m := New(SubagentOptions())
 	must(t, m.Replace("parent", v))
-	finish := sessionstore.Item{Sequence: 1, RecordedAt: epoch.Add(time.Second), Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{Version: 1, Kind: "finish", Finish: &sessionstore.FinishRecord{Version: 1, OperationID: "child-finish", Result: sessionstore.FinishResult{Status: "completed", Summary: "child's explicit report", Tests: []string{"unit tests"}}}}}
+	finish := host.HistoryItem{Sequence: 1, RecordedAt: epoch.Add(time.Second), Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{Version: 1, Kind: "finish", Finish: &sessionstore.FinishRecord{Version: 1, OperationID: "child-finish", Result: sessionstore.FinishResult{Status: "completed", Summary: "child's explicit report", Tests: []string{"unit tests"}}}}}
 	must(t, m.Replace(child.ID, view(child.ID, "", 0, finish)))
 	got := row(t, m, child.ID)
 	if got.Finish == nil || got.Finish.OperationID != "child-finish" || got.ParentOperationID != "parent-start" || got.Runtime != RuntimeUnknown {

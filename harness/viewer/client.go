@@ -118,19 +118,19 @@ func (c *Client) Refresh(ctx context.Context, id session.ID) error {
 
 // History returns an explicit bounded persisted transcript page without changing
 // the live projection or token aggregates.
-func (c *Client) History(ctx context.Context, id session.ID, after sessionstore.Sequence, limit int) (sessionstore.Page, error) {
+func (c *Client) History(ctx context.Context, id session.ID, after sessionstore.Sequence, limit int) (host.HistoryPage, error) {
 	if c.Reader == nil {
-		return sessionstore.Page{}, ErrUnavailable
+		return host.HistoryPage{}, ErrUnavailable
 	}
 	if limit < 1 || limit > 4096 {
-		return sessionstore.Page{}, ErrInvalidPage
+		return host.HistoryPage{}, ErrInvalidPage
 	}
 	v, err := c.Reader.Inspect(ctx, id, after, limit)
 	if err != nil {
-		return sessionstore.Page{}, err
+		return host.HistoryPage{}, err
 	}
 	if v.Session.Session.ID != id || !validPage(after, v.History) {
-		return sessionstore.Page{}, ErrInvalidPage
+		return host.HistoryPage{}, ErrInvalidPage
 	}
 	return copyValue(v.History)
 }
