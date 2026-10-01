@@ -65,3 +65,28 @@ boundaries; they do not kill processes inside individual filesystem syscalls.
 Hardware/power-loss fault injection and production provider behavior are outside
 this evidence. Actual parent death, lock contention, EOF and interrupted shell
 effects are exercised by dedicated subprocess fixtures above.
+
+# Issue #4 acceptance evidence
+
+The issue explicitly requires observation, canonical projections, bounded
+transcripts, authorized controls, reconnect/gap recovery, and duplicate resume.
+It does not explicitly require independently respawning a stopped child. Supported
+child resume validates the existing parent owner; restarting a stopped parent
+uses explicit Host.Open/Resume and its operation recovery, not viewer observation.
+
+| Explicit AC / requested boundary | Existing evidence | Added evidence |
+|---|---|---|
+| Enumerate child sessions/operations | Viewer `TestActualSubagentDecoderCanonicalFinishAndUnsupportedPlans`, actual CLI fixture | None needed |
+| Canonical/live state; obsolete/out-of-order events; unknown runtime | `TestMissingCursorOutOfOrderAndGeneration`, `TestParentOperationFinishAndTransientRuntimeRemainSeparate`, `TestTransientProgressNeverAddsUsageOrCanonicalActivity` | None needed |
+| Bounded transcript and Human/Peer provenance | `TestPagingLatestSnapshotAndUsageDedup`, `TestRealHostProjectionPersistedHistoryRebuildWithoutLLMPolling`, actual CLI pagination/provenance | None needed |
+| Restart, subscriber gap, reconnect, usage dedup | `TestWatchGapReconnectAndPagedCanonicalDedup`, real Host rebuild | New real stopped-child refresh/reconnect test confirms no runtime side effect |
+| Steering/cancel persist normal inputs | `TestHostAdapterPersistsControlsAndChildReadDoesNotAcquireWriter`, `TestSocket`, actual CLI controls | None needed |
+| Resume through existing authorized Host; concurrent duplicate resume | Fake-client duplicate/pending/retry tests, sequential Host/socket/CLI checks, gateway `TestGatewayClientProcess` for explicit stopped-parent Open/Resume | `TestConcurrentViewerResumeViaGatewayKeepsSingleHostWriter`: eight independent clients, actual gateway/Host, unchanged generations/build count/logs, real flock still owned |
+| Observing stopped/unknown never auto-resumes | Existing snapshot-only ParentReader, unknown-liveness projection | `TestObservationReconnectAndRefreshNeverResumeStoppedChild`: stopped real child, held writer gate, new frontend after reconnect, refresh/watch/history, unchanged canonical logs and runtime count |
+| Viewer does not call Store.Create/Resume or acquire a writer | Production source audit: Reader exposes Inspect/Subscribe; ParentReader delegates read-only ReadChild; HostControls only attaches/delegates to existing Host owner | Dynamic runtime-count, canonical-log and writer-gate assertions in both new tests |
+| Parent LLM polling / direct canonical mutation absent | Existing real Host no-polling test and production dependency/source audit | No redundant implementation/test added |
+
+No viewer production code correction was needed. Independent child respawn is
+neither implemented by this change nor added as a requirement. The new gateway
+contention test adds confidence at the actual control boundary; it does not claim
+that an observation connection owns child execution.
