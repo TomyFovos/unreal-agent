@@ -328,7 +328,7 @@ func (m *Manager) start(ctx context.Context, r Request) (Result, error) {
 	succeeded := false
 	defer func() {
 		if !succeeded {
-			s.cancel()
+			s.interrupt()
 		}
 	}()
 	// Configuration is sent after initialized, while launch/attach is pending.

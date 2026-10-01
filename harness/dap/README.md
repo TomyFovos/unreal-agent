@@ -86,3 +86,10 @@ Owner cancellation and Close cancel active requests before graceful cleanup. Tho
 requests release the command lock while the adapter remains alive for a bounded
 disconnect; attach uses terminateDebuggee=false. Ordinary request cancellation,
 protocol failure, and the final cleanup deadline still expire/kill the adapter.
+
+Startup keeps the adapter under the manager's bounded shutdown ownership when
+its owner is canceled or Close interrupts initialize/launch/attach. This includes
+a sent attach/launch whose side effect may exist before its response arrives.
+Disconnect preserves attached debuggees (terminateDebuggee=false) and terminates
+owned launch targets. An ordinary startup rejection or caller cancellation still
+cancels the failed adapter. Shutdown is bounded even without a disconnect response.

@@ -27,7 +27,7 @@ func TestDAPAdapterProcess(t *testing.T) {
 	send := func(typ string, requestSeq int, command string, body any) {
 		seq++
 		raw, _ := json.Marshal(body)
-		msg := message{Seq: seq, Type: typ, RequestSeq: requestSeq, Command: command, Success: true, Body: raw}
+		msg := message{Seq: seq, Type: typ, RequestSeq: requestSeq, Command: command, Success: !(mode == "reject-start" && (command == "attach" || command == "launch")), Body: raw}
 		if typ == "event" {
 			msg.Event = command
 			msg.Command = ""
@@ -64,11 +64,22 @@ func TestDAPAdapterProcess(t *testing.T) {
 			send("response", msg.Seq, msg.Command, map[string]any{"supportsConfigurationDoneRequest": true})
 		case "launch", "attach":
 			launch = msg
+			if strings.HasPrefix(mode, "pending-start") {
+				if err := os.WriteFile(os.Getenv("UNREAL_DAP_TEST_CLEANUP")+".started", []byte(msg.Command), 0600); err != nil {
+					os.Exit(2)
+				}
+				if mode == "pending-start-configured" {
+					send("event", 0, "initialized", map[string]any{})
+				}
+				continue
+			}
 			send("event", 0, "initialized", map[string]any{})
 		case "configurationDone":
 			send("response", msg.Seq, msg.Command, map[string]any{})
 			send("event", 0, "stopped", map[string]any{"threadId": 1})
-			send("response", launch.Seq, launch.Command, map[string]any{})
+			if !strings.HasPrefix(mode, "pending-start") {
+				send("response", launch.Seq, launch.Command, map[string]any{})
+			}
 		case "threads":
 			if mode == "terminated" {
 				send("event", 0, "terminated", map[string]any{})
@@ -100,6 +111,9 @@ func TestDAPAdapterProcess(t *testing.T) {
 			if path := os.Getenv("UNREAL_DAP_TEST_CLEANUP"); path != "" {
 				_ = os.WriteFile(path, msg.Arguments, 0600)
 			}
+			if mode == "pending-start-no-disconnect-response" {
+				continue
+			}
 			send("response", msg.Seq, msg.Command, map[string]any{})
 			os.Exit(0)
 		default:
@@ -108,6 +122,9 @@ func TestDAPAdapterProcess(t *testing.T) {
 	}
 }
 func testManager(t *testing.T, mode string, policy *permission.Policy) (*Manager, string) {
+	return testManagerWithContext(t, t.Context(), mode, policy)
+}
+func testManagerWithContext(t *testing.T, ctx context.Context, mode string, policy *permission.Policy) (*Manager, string) {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -115,7 +132,7 @@ func testManager(t *testing.T, mode string, policy *permission.Policy) (*Manager
 	}
 	dir := t.TempDir()
 	cleanup := filepath.Join(dir, "cleanup.json")
-	m, err := NewManager(permission.WithPolicy(t.Context(), policy), AdapterConfig{ID: "test", Path: exe, Arguments: []string{"-test.run=^TestDAPAdapterProcess$"}, Directory: dir, Environment: []string{"UNREAL_DAP_TEST_MODE=" + mode, "UNREAL_DAP_TEST_CLEANUP=" + cleanup}, AllowedAttachPIDs: []int{1234}})
+	m, err := NewManager(permission.WithPolicy(ctx, policy), AdapterConfig{ID: "test", Path: exe, Arguments: []string{"-test.run=^TestDAPAdapterProcess$"}, Directory: dir, Environment: []string{"UNREAL_DAP_TEST_MODE=" + mode, "UNREAL_DAP_TEST_CLEANUP=" + cleanup}, AllowedAttachPIDs: []int{1234}})
 	if err != nil {
 		t.Fatal(err)
 	}

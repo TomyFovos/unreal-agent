@@ -104,7 +104,11 @@ func (s *liveSession) send(ctx context.Context, command string, args jsontext.Va
 	select {
 	case event := <-events:
 		if event.Type != primitives.PrimitiveEventProcessInputWritten {
-			s.cancel()
+			if ctx.Err() != nil {
+				s.interrupt()
+			} else {
+				s.cancel()
+			}
 			return nil, &Error{Code: "write_failed"}
 		}
 	case <-ctx.Done():
