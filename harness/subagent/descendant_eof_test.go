@@ -25,7 +25,9 @@ func TestDescendantChildHelper(t *testing.T) {
 	if os.Getenv("UNREAL_DESCENDANT_CHILD") == "" {
 		return
 	}
+	var directory string
 	err := sub.Serve(context.Background(), os.Stdin, os.Stdout, func(ctx context.Context, c sub.ChildConfig, send sub.Sender) (*host.Session, io.Closer, error) {
+		directory = c.SessionDirectory
 		model := adapter(func(context.Context, llm.Request, llm.RequestOptions) (llm.Response, error) {
 			return llm.Response{}, nil
 		})
@@ -61,6 +63,10 @@ func TestDescendantChildHelper(t *testing.T) {
 	if err == nil {
 		os.Exit(3)
 	} // Owner EOF is an explicit transport failure.
+	// Serve's deferred pipe cancellation and worker joins have also finished.
+	if err := os.WriteFile(filepath.Join(directory, "serve.closed"), []byte("closed"), 0600); err != nil {
+		os.Exit(4)
+	}
 	os.Exit(0)
 }
 
@@ -127,7 +133,7 @@ func TestParentDeathEOFCleanupWithSurvivingDescriptorDescendant(t *testing.T) {
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if _, err = os.Stat(filepath.Join(dir, "child.closed")); err == nil {
+		if _, err = os.Stat(filepath.Join(dir, "serve.closed")); err == nil {
 			break
 		}
 		select {
@@ -135,6 +141,9 @@ func TestParentDeathEOFCleanupWithSurvivingDescriptorDescendant(t *testing.T) {
 			t.Fatal("IPC EOF cleanup hung with inherited descriptor")
 		case <-ticker.C:
 		}
+	}
+	if _, err = os.Stat(filepath.Join(dir, "child.closed")); err != nil {
+		t.Fatal("Serve returned before child runtime cleanup", err)
 	}
 	if err = syscall.Kill(pid, 0); err != nil {
 		t.Fatal("fixture did not retain a surviving descendant", err)
