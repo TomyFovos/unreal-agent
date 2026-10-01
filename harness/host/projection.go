@@ -41,22 +41,49 @@ func ProjectHistoryItem(item sessionstore.Item) HistoryItem {
 			metadata := record.ProjectInstructions.Metadata()
 			out.Data = ProjectInstructionRecord{Version: record.Version, Kind: record.Kind, ProjectInstructions: &metadata}
 		} else if record.Kind == "configuration" {
-			// A child configuration can embed its inherited canonical snapshot. The
-			// public configuration retains its metadata; replay still uses the Store.
-			var fields map[string]jsontext.Value
-			if json.Unmarshal(record.Configuration, &fields) == nil {
-				if raw, ok := fields["ProjectInstructions"]; ok && raw.Kind() != jsontext.KindNull {
-					var snapshot projectinstructions.Snapshot
-					if json.Unmarshal(raw, &snapshot) == nil && snapshot.Validate() == nil {
-						fields["ProjectInstructions"], _ = json.Marshal(snapshot.Metadata())
-						record.Configuration, _ = json.Marshal(fields)
-						out.Data = record
-					}
-				}
-			}
+			record.Configuration = projectConfiguration(record.Configuration)
+			out.Data = record
 		}
 	}
 	return out
+}
+
+// projectConfiguration never returns an untrusted instruction value. Null keeps
+// the field's presence without claiming that an unknown snapshot has a valid
+// identity. Already-projected metadata is accepted strictly for idempotency.
+func projectConfiguration(raw jsontext.Value) jsontext.Value {
+	null := jsontext.Value("null")
+	var fields map[string]jsontext.Value
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		// An unreadable object cannot be inspected safely; retain the history
+		// envelope and redact only its public configuration.
+		return null
+	}
+	instructions, ok := fields["ProjectInstructions"]
+	if !ok {
+		return raw
+	}
+	fields["ProjectInstructions"] = null
+	var snapshot projectinstructions.Snapshot
+	var metadata projectinstructions.Metadata
+	valid := false
+	if json.Unmarshal(instructions, &snapshot) == nil && snapshot.Validate() == nil {
+		metadata, valid = snapshot.Metadata(), true
+	} else if json.Unmarshal(instructions, &metadata, json.RejectUnknownMembers(true)) == nil && metadata.Validate() == nil {
+		// Content (including malformed Content) is an unknown metadata member.
+		// It must not bypass full Snapshot validation via this fallback.
+		valid = true
+	}
+	if valid {
+		if data, err := json.Marshal(metadata); err == nil {
+			fields["ProjectInstructions"] = data
+		}
+	}
+	data, err := json.Marshal(fields)
+	if err != nil {
+		return null
+	}
+	return data
 }
 
 func ProjectHistoryPage(page sessionstore.Page) HistoryPage {
@@ -79,8 +106,13 @@ func (item HistoryItem) MarshalJSON() ([]byte, error) {
 		return json.Marshal(plain(item))
 	}
 	// Also project direct constructions at the serialization boundary.
-	if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Kind == sessionstore.HostProjectInstructions {
-		return json.Marshal(ProjectHistoryItem(sessionstore.Item(item)))
+	if record, ok := item.Data.(sessionstore.HostRecord); ok {
+		switch record.Kind {
+		case sessionstore.HostProjectInstructions:
+			return json.Marshal(ProjectHistoryItem(sessionstore.Item(item)))
+		case "configuration":
+			return json.Marshal(sessionstore.Item(ProjectHistoryItem(sessionstore.Item(item))))
+		}
 	}
 	return json.Marshal(sessionstore.Item(item))
 }
