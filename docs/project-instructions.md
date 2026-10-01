@@ -96,3 +96,13 @@ the only replay source for Resume, Restart, Fork and Coordinator binding.
 A public metadata record cannot be decoded as a complete canonical Snapshot.
 Inherited snapshots embedded in child configuration records are also projected
 to metadata; canonical configuration bytes remain unchanged.
+
+### Unreadable inherited configuration
+
+Public history projects a valid current configuration snapshot to metadata.
+If a ProjectInstructions field cannot be decoded or validated, its public value
+is null; its raw snapshot and Content are never returned. An unreadable
+configuration object is itself null in the public projection. The canonical
+Store bytes remain unchanged. Valid public metadata remains metadata when it
+is projected or serialized again, and direct HistoryItem serialization uses
+the same redaction boundary. History positions and pagination are preserved.
