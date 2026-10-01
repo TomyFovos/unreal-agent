@@ -174,27 +174,49 @@ func TestInterruptedChildShellRecoveryDoesNotReplaySideEffect(t *testing.T) {
 	if _, err = fmt.Sscan(string(data), &childPID); err != nil {
 		t.Fatal(err)
 	}
-	defer syscall.Kill(-state.ProcessGroupID, syscall.SIGKILL)
-	defer syscall.Kill(childPID, syscall.SIGKILL)
+	shellAlive, childAlive := true, true
+	defer func() {
+		if shellAlive {
+			syscall.Kill(-state.ProcessGroupID, syscall.SIGKILL)
+		}
+	}()
+	defer func() {
+		if childAlive {
+			syscall.Kill(childPID, syscall.SIGKILL)
+		}
+	}()
 	// Freeze both owners to prevent an EOF/exit notification from committing a
 	// terminal outcome during the deliberately interrupted persistence window.
-	if err = cmd.Process.Signal(syscall.SIGSTOP); err != nil {
-		t.Fatal(err)
-	}
 	if err = syscall.Kill(childPID, syscall.SIGSTOP); err != nil {
 		t.Fatal(err)
 	}
+	awaitBoundary(t, func() bool {
+		out, err := exec.Command("ps", "-o", "stat=", "-p", fmt.Sprint(childPID)).Output()
+		return err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "T")
+	})
+	if err = cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	awaitBoundary(t, func() bool {
+		out, err := exec.Command("ps", "-o", "stat=", "-p", fmt.Sprint(cmd.Process.Pid)).Output()
+		return err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "T")
+	})
 	parentLog, childLog := readLog(t, dir, "parent"), readLog(t, dir, childID)
+	// Kill the child while its parent is confirmed stopped. Parent death must
+	// not race EOF cleanup against our interruption, and parent recovery must
+	// not see a terminal checkpoint fabricated by the fixture's kill sequence.
+	if err = syscall.Kill(childPID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	childAlive = false
+	if err = syscall.Kill(-state.ProcessGroupID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	shellAlive = false
 	if err = cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
 	cmd.Wait()
-	if err = syscall.Kill(childPID, syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
-	if err = syscall.Kill(-state.ProcessGroupID, syscall.SIGKILL); err != nil {
-		t.Fatal(err)
-	}
 	for _, stage := range []string{"start_recorded", "start_not_recorded"} {
 		t.Run(stage, func(t *testing.T) {
 			restoreLog(t, dir, "parent", parentLog)
