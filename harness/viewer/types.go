@@ -45,7 +45,7 @@ type Finish struct {
 	Blockers     []string
 	RecordedAt   time.Time
 }
-type FinishDecoder func(sessionstore.Item) (*Finish, error)
+type FinishDecoder func(host.HistoryItem) (*Finish, error)
 type Options struct {
 	RecentLimit  int // bounded transcript cache; default 128, maximum 4096
 	DecodeChild  ChildDecoder
@@ -105,7 +105,7 @@ type Row struct {
 }
 type Detail struct {
 	Row         Row
-	Recent      []sessionstore.Item
+	Recent      []host.HistoryItem
 	RecentAfter sessionstore.Sequence // use Reader.Inspect for older pages
 }
 

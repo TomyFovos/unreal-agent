@@ -17,18 +17,18 @@ import (
 
 var epoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-func view(id session.ID, gen string, rev uint64, items ...sessionstore.Item) host.View {
+func view(id session.ID, gen string, rev uint64, items ...host.HistoryItem) host.View {
 	var after sessionstore.Sequence
 	if len(items) > 0 {
 		after = items[len(items)-1].Sequence
 	}
-	return host.View{Session: sessionstore.Snapshot{Session: session.Session{ID: id, CreatedAt: epoch}}, Generation: gen, Revision: rev, Running: gen != "", History: sessionstore.Page{Items: items, NextAfter: after}}
+	return host.View{Session: sessionstore.Snapshot{Session: session.Session{ID: id, CreatedAt: epoch}}, Generation: gen, Revision: rev, Running: gen != "", History: host.HistoryPage{Items: items, NextAfter: after}}
 }
-func response(seq sessionstore.Sequence, id string, in, out int64) sessionstore.Item {
-	return sessionstore.Item{Sequence: seq, RecordedAt: epoch.Add(time.Duration(seq) * time.Second), Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{ID: id, Usage: llm.Usage{InputTokens: in, OutputTokens: out}}}}
+func response(seq sessionstore.Sequence, id string, in, out int64) host.HistoryItem {
+	return host.HistoryItem{Sequence: seq, RecordedAt: epoch.Add(time.Duration(seq) * time.Second), Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{ID: id, Usage: llm.Usage{InputTokens: in, OutputTokens: out}}}}
 }
-func input(seq sessionstore.Sequence, text string) sessionstore.Item {
-	return sessionstore.Item{Sequence: seq, RecordedAt: epoch.Add(time.Duration(seq) * time.Second), Kind: sessionstore.ItemInput, Data: inbox.Input{ID: inbox.ID(text), Kind: inbox.InputExternal, Payload: jsontext.Value("\"" + text + "\"")}}
+func input(seq sessionstore.Sequence, text string) host.HistoryItem {
+	return host.HistoryItem{Sequence: seq, RecordedAt: epoch.Add(time.Duration(seq) * time.Second), Kind: sessionstore.ItemInput, Data: inbox.Input{ID: inbox.ID(text), Kind: inbox.InputExternal, Payload: jsontext.Value("\"" + text + "\"")}}
 }
 func must(t *testing.T, err error) {
 	t.Helper()
@@ -68,7 +68,7 @@ func TestPagingLatestSnapshotAndUsageDedup(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 	oldOp := operation.Operation{ID: "op", Status: operation.StatusReady}
-	status := sessionstore.Item{Sequence: 2, RecordedAt: epoch.Add(2 * time.Second), Kind: sessionstore.ItemToolCallStatus, Data: sessionstore.ToolCallStatus{Operations: []operation.Operation{oldOp}}}
+	status := host.HistoryItem{Sequence: 2, RecordedAt: epoch.Add(2 * time.Second), Kind: sessionstore.ItemToolCallStatus, Data: sessionstore.ToolCallStatus{Operations: []operation.Operation{oldOp}}}
 	final := view("one", "g", 9, status, response(3, "a", 100, 20), response(4, "b", 50, 10))
 	final.Operations = first.Operations
 	must(t, m.AppendPage("one", 1, final))
@@ -122,7 +122,7 @@ func TestMissingCursorOutOfOrderAndGeneration(t *testing.T) {
 	if err := m.AppendPage("s", 0, bad); !errors.Is(err, ErrInvalidPage) {
 		t.Fatal(err)
 	}
-	if validPage(0, sessionstore.Page{More: true}) || validPage(0, sessionstore.Page{NextAfter: 1}) {
+	if validPage(0, host.HistoryPage{More: true}) || validPage(0, host.HistoryPage{NextAfter: 1}) {
 		t.Fatal("invalid cursor accepted")
 	}
 }
@@ -155,7 +155,7 @@ func TestUnknownUsageTimingAndOverflow(t *testing.T) {
 	}
 }
 func TestParentOperationFinishAndTransientRuntimeRemainSeparate(t *testing.T) {
-	decodeFinish := func(i sessionstore.Item) (*Finish, error) {
+	decodeFinish := func(i host.HistoryItem) (*Finish, error) {
 		if in, ok := i.Data.(inbox.Input); ok && in.ID == "finish" {
 			return &Finish{OperationID: "child-finish-op", Status: "success", Summary: "explicit result"}, nil
 		}
@@ -197,7 +197,7 @@ func TestCanonicalInputsAreCopiedAndMalformedRejected(t *testing.T) {
 	if _, ok := m.Detail("s", epoch); !ok {
 		t.Fatal("input alias")
 	}
-	invalid := view("bad", "g", 0, sessionstore.Item{Sequence: 1, Kind: sessionstore.ItemInput, Data: 4})
+	invalid := view("bad", "g", 0, host.HistoryItem{Sequence: 1, Kind: sessionstore.ItemInput, Data: 4})
 	if m.Replace("bad", invalid) == nil {
 		t.Fatal("invalid data accepted")
 	}

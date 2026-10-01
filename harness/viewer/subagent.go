@@ -38,8 +38,11 @@ func DecodeSubagent(parent session.ID, op operation.Operation) (Child, bool, err
 	}
 	return Child{ID: plan.ChildID, Label: short(plan.Text)}, true, nil
 }
-func DecodeFinish(item sessionstore.Item) (*Finish, error) {
+func DecodeFinish(item host.HistoryItem) (*Finish, error) {
 	if item.Kind != sessionstore.ItemHostRecord {
+		return nil, nil
+	}
+	if _, ok := item.Data.(host.ProjectInstructionRecord); ok {
 		return nil, nil
 	}
 	record, ok := item.Data.(sessionstore.HostRecord)
