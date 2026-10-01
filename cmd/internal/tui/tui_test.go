@@ -81,7 +81,7 @@ func TestUnicodeEditingFragmentedPasteResizeAndTerminalEscapes(t *testing.T) {
 func TestProjectionNoDuplicatePagesAndLatestOperations(t *testing.T) {
 	m := NewModel("s")
 	payload, _ := json.Marshal("hello")
-	v := host.View{Generation: "one", Revision: 1, Running: true, History: sessionstore.Page{Items: []sessionstore.Item{{Sequence: 1, Kind: sessionstore.ItemInput, Data: inbox.Input{ID: "i", Kind: inbox.InputExternal, Payload: payload}}}, NextAfter: 1}, Operations: []operation.Operation{{ID: "op", Status: operation.StatusAwaiting}}}
+	v := host.View{Generation: "one", Revision: 1, Running: true, History: host.HistoryPage{Items: []host.HistoryItem{{Sequence: 1, Kind: sessionstore.ItemInput, Data: inbox.Input{ID: "i", Kind: inbox.InputExternal, Payload: payload}}}, NextAfter: 1}, Operations: []operation.Operation{{ID: "op", Status: operation.StatusAwaiting}}}
 	if err := m.apply(v); err != nil {
 		t.Fatal(err)
 	}

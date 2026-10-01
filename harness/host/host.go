@@ -117,7 +117,7 @@ type Event struct {
 	Generation string
 	Revision   uint64
 	Kind       string
-	Item       *sessionstore.Item   `json:",omitzero"`
+	Item       *HistoryItem         `json:",omitzero"`
 	Operation  *operation.Operation `json:",omitzero"`
 }
 type View struct {
@@ -125,7 +125,7 @@ type View struct {
 	Session    sessionstore.Snapshot
 	Generation string
 	Revision   uint64
-	History    sessionstore.Page
+	History    HistoryPage
 	Operations []operation.Operation
 	Running    bool
 	Failure    string `json:",omitzero"`
@@ -498,7 +498,7 @@ func (s *Session) view(after sessionstore.Sequence, limit int) (View, error) {
 	}
 	end := min(int(after)+limit, len(s.items))
 	v := View{Progress: s.progress, ProjectInstructions: s.instructions, Session: s.snapshot, Generation: s.Generation, Revision: s.revision, Running: s.running,
-		History: sessionstore.Page{Items: append([]sessionstore.Item(nil), s.items[int(after):end]...), NextAfter: sessionstore.Sequence(end), More: end < len(s.items)}}
+		History: ProjectHistoryPage(sessionstore.Page{Items: s.items[int(after):end], NextAfter: sessionstore.Sequence(end), More: end < len(s.items)})}
 	if s.err != nil {
 		v.Failure = s.err.Error()
 	}
@@ -600,7 +600,8 @@ func (s *Session) rememberItem(item sessionstore.Item, notify bool) {
 		}
 	}
 	if notify {
-		s.broadcast(Event{Kind: "item", Item: &item})
+		projected := ProjectHistoryItem(item)
+		s.broadcast(Event{Kind: "item", Item: &projected})
 	}
 }
 func (s *Session) configure(ctx context.Context, config jsontext.Value) error {
