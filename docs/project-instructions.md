@@ -83,3 +83,16 @@ fresh-session, and child inheritance across an on-disk change; symlink
 invalid UTF-8, unreadable, and invalid workspace; tampered snapshots;
 capability isolation under a deny-all policy; skills alongside AGENTS.md; and
 the one-shot runner's output stream.
+
+## Public history projection
+
+Host Inspect, Subscribe initial views/events, gateway frames, and Host-backed
+CLI logs use host.HistoryItem / host.HistoryPage. A project instruction history
+item keeps its canonical kind, sequence and timestamp, but contains a
+host.ProjectInstructionRecord with source kind/path, digest, byte length and
+snapshot version only. Paging cursors, revisions and gap handling are unchanged.
+Canonical sessionstore.HostRecord still persists the complete Snapshot and is
+the only replay source for Resume, Restart, Fork and Coordinator binding.
+A public metadata record cannot be decoded as a complete canonical Snapshot.
+Inherited snapshots embedded in child configuration records are also projected
+to metadata; canonical configuration bytes remain unchanged.

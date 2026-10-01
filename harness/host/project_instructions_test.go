@@ -76,7 +76,14 @@ func boundSnapshot(t *testing.T, s *Session) projectinstructions.Snapshot {
 		t.Fatal(err)
 	}
 	var found []projectinstructions.Snapshot
-	for _, item := range v.History.Items {
+	// Read replay content only from the internal canonical Store.
+	s.mu.Lock()
+	page, err := s.store.Items(t.Context(), s.ID, 0, 4096)
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range page.Items {
 		if r, ok := item.Data.(sessionstore.HostRecord); ok && r.Kind == sessionstore.HostProjectInstructions {
 			found = append(found, *r.ProjectInstructions)
 		}
