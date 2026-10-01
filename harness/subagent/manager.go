@@ -291,6 +291,23 @@ func (m *Manager) spawn(j *job, p Plan, state *operation.RemoteJobState) (operat
 		if err != nil {
 			return false, err
 		}
+		// Host creates the header (and optional instruction binding) before
+		// configure commits lineage. A crash between these writes leaves a
+		// legitimate, uninitialized child. Only that exact prefix may proceed
+		// to Host.Open, which acquires the process-shared writer gate first.
+		if view.Configuration == nil && view.Finish == nil && len(view.View.Operations) == 0 && !view.View.History.More {
+			initializing := len(view.View.History.Items) == 0
+			if len(view.View.History.Items) == 1 && child.ProjectInstructions != nil {
+				if record, ok := view.View.History.Items[0].Data.(host.ProjectInstructionRecord); ok {
+					got, _ := json.Marshal(record.ProjectInstructions)
+					want, _ := json.Marshal(child.ProjectInstructions.Metadata())
+					initializing = sameJSON(got, want)
+				}
+			}
+			if initializing {
+				return false, nil
+			}
+		}
 		if view.Configuration == nil || view.Configuration.ParentID != p.ParentID || view.Configuration.OperationID != j.operation.ID {
 			return false, fmt.Errorf("child canonical lineage mismatch")
 		}

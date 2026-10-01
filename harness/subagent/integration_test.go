@@ -88,6 +88,14 @@ func TestChildServerHelper(t *testing.T) {
 			if c.Task == "wait" {
 				return llm.Response{}, nil
 			}
+			if c.Task == "boundary-messages" {
+				for _, item := range r.Input {
+					if call, ok := item.Data.(llm.ToolCall); ok && call.Name == "SendParent" {
+						return llm.Response{}, nil
+					}
+				}
+				return response("SendParent", `{"text":"stable child message"}`), nil
+			}
 			if c.Task == "question" || c.Task == "recover" {
 				if n == 1 {
 					return response("SendParent", `{"text":"need answer"}`), nil
