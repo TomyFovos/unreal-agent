@@ -34,7 +34,7 @@ outgoing-intent log. Partial disk-tail recovery is already covered by localfile.
 | Property | Evidence |
 |---|---|
 | Simultaneous resume of the same child, exactly one writer, typed loser, same ID | Two independent OS processes call Host.Resume concurrently; winner retains the actual flock until both results are checked |
-| Owner death, IPC EOF, surviving descendant inheriting stdin/stdout/stderr | `TestParentDeathEOFCleanupWithSurvivingDescriptorDescendant`; escaped descendant stays alive while the child runtime closes and releases ownership within three seconds |
+| Owner death, IPC EOF, surviving descendant inheriting stdin/stdout/stderr | `TestParentDeathEOFCleanupWithSurvivingDescriptorDescendant`; escaped descendant stays alive while the child runtime closes, releases ownership, and Serve finishes its pipe cleanup and worker joins within three seconds |
 | Ordinary process-group descendant termination and inherited output-pipe drainage | Existing primitives `TestProcessExitTerminatesDescendantsWithoutWaitingForInheritedOutputPipes`, `TestCancelProcessTerminatesDescendants` |
 | Side effect followed by owner death before terminal persistence | `TestInterruptedChildShellRecoveryDoesNotReplaySideEffect`; real shell, frozen/killed owners, same child ID; recorded-start yields interrupted and missing-start yields unknown; no result/Finish fabricated |
 | Persisted cancel before canceling checkpoint and after it | `TestPersistedCancelChildRecoveryNeverRespawns`; child log unchanged, no writer, explicit resume rejected |
