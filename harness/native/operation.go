@@ -1,15 +1,14 @@
-package mutation
+package native
 
 import (
 	"context"
 	"encoding/json/v2"
 	"errors"
-	"sync"
-
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"sync"
 )
 
-const PlanType operation.RemoteJobPlanType = "file_mutation"
+const PlanType operation.RemoteJobPlanType = "native_file"
 
 func Spec(request Request) (operation.Spec, error) {
 	if err := request.Validate(); err != nil {
@@ -28,19 +27,19 @@ type Handler struct {
 	workers   sync.WaitGroup
 	closed    bool
 	closeOnce sync.Once
-	service   *Service
+	executor  Executor
 	namespace string
 	mu        sync.Mutex
 	jobs      map[operation.ID]context.CancelFunc
 	updates   chan operation.Operation
 }
 
-func NewHandler(ctx context.Context, service *Service, sessionID string) (*Handler, error) {
-	if service == nil || sessionID == "" {
-		return nil, errors.New("mutation handler requires service and stable session ID")
+func NewHandler(ctx context.Context, executor Executor, sessionID string) (*Handler, error) {
+	if executor.Files == nil || sessionID == "" {
+		return nil, errors.New("native handler requires file service and stable session ID")
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	return &Handler{ctx: ctx, cancel: cancel, service: service, namespace: sessionID, jobs: make(map[operation.ID]context.CancelFunc), updates: make(chan operation.Operation)}, nil
+	return &Handler{ctx: ctx, cancel: cancel, executor: executor, namespace: sessionID, jobs: make(map[operation.ID]context.CancelFunc), updates: make(chan operation.Operation)}, nil
 }
 func (h *Handler) RemoteJobPlanType() operation.RemoteJobPlanType       { return PlanType }
 func (h *Handler) RemoteJobPlanVersion() operation.RemoteJobPlanVersion { return Version }
@@ -82,22 +81,18 @@ func (h *Handler) AddRemoteJob(current operation.Operation) error {
 		defer h.workers.Done()
 		defer func() { h.mu.Lock(); delete(h.jobs, current.ID); h.mu.Unlock() }()
 		defer cancel()
-		var result Result
-		if current.Status == operation.StatusCanceling {
-			result = baseResult(request, Canceled)
-		} else {
-			result = h.service.Execute(ctx, h.namespace+"/"+string(current.ID), request)
+		result := Result{Version: Version, Code: "canceled"}
+		if current.Status != operation.StatusCanceling {
+			result = h.executor.Execute(ctx, h.namespace+"/"+string(current.ID), request)
 		}
 		current.Denial = result.Denial
-		encoded, _ := json.Marshal(result)
-		// Typed state is never truncated. Renderers may bound prose separately.
-		state.Handle = encoded
-		state.TerminalResult = string(result.Code)
+		state.Handle = EncodeResult(result)
+		state.TerminalResult = result.Code
 		status := operation.StatusFailed
-		if result.Code == Applied {
+		switch result.Code {
+		case "ok", "applied", "binary", "no_match":
 			status = operation.StatusCompleted
-		}
-		if result.Code == Canceled {
+		case "canceled":
 			status = operation.StatusCanceled
 		}
 		step, err := operation.UpdateRemoteJob(current, state, status)

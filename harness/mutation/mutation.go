@@ -10,6 +10,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"io"
 	"os"
 	"path/filepath"
@@ -101,9 +102,10 @@ type TargetResult struct {
 	Revision Revision `json:"revision"`
 }
 type Result struct {
-	Version int            `json:"version"`
-	Code    Code           `json:"code"`
-	Targets []TargetResult `json:"targets"`
+	Denial  *permission.Error `json:"denial,omitempty"`
+	Version int               `json:"version"`
+	Code    Code              `json:"code"`
+	Targets []TargetResult    `json:"targets"`
 }
 type Authorizer func(context.Context, string, bool) error
 type Config struct {
@@ -208,7 +210,7 @@ func (s *Service) Snapshot(ctx context.Context, path string) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	defer lock.Close()
-	parent, base, err := s.openParent(canonical)
+	parent, base, err := s.authorizedParent(ctx, canonical, false)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -302,13 +304,18 @@ func (s *Service) apply(ctx context.Context, request Request) Result {
 		}
 		if err := s.authorize(ctx, path, true); err != nil {
 			result.Code = Denied
+			result.Denial = permission.Failure(err)
 			result.Targets[i].Code = Denied
 			return result
 		}
-		parent, base, err := s.openParent(path)
+		parent, base, err := s.authorizedParent(ctx, path, true)
 		if err != nil {
 			result.Code = Invalid
-			result.Targets[i].Code = Invalid
+			result.Denial = permission.Failure(err)
+			if result.Denial != nil {
+				result.Code = Denied
+			}
+			result.Targets[i].Code = result.Code
 			return result
 		}
 		targets[i] = prepared{parent: parent, base: base, mode: 0600}
@@ -378,11 +385,50 @@ type receipt struct {
 // not a second scheduler or session history.
 func (s *Service) Execute(ctx context.Context, id string, request Request) Result {
 	result := baseResult(request, Invalid)
-	if id == "" || request.Validate() != nil {
+	if request.Validate() != nil {
 		return result
 	}
 	encoded, err := json.Marshal(request)
 	if err != nil {
+		return result
+	}
+	return s.execute(ctx, id, encoded, result, func() Result { return s.apply(ctx, request) })
+}
+
+// PrepareFailure is a typed validation outcome returned by a conditional edit builder.
+type PrepareFailure struct {
+	Code   Code
+	Denial *permission.Error
+}
+
+func (e PrepareFailure) Error() string { return string(e.Code) }
+
+// ExecutePrepared binds the receipt to an immutable edit/AST plan before reading
+// the source. On recovery it returns saved evidence without rebuilding from newer
+// bytes. Prepare performs no writes; Apply still validates all resulting revisions
+// and replacements under target locks.
+func (s *Service) ExecutePrepared(ctx context.Context, id string, identity []byte, prepare func(context.Context) (Request, error)) Result {
+	initial := Result{Version: Version, Code: Invalid}
+	if len(identity) == 0 || len(identity) > MaxFileBytes || prepare == nil {
+		return initial
+	}
+	return s.execute(ctx, id, identity, initial, func() Result {
+		request, err := prepare(ctx)
+		if err != nil {
+			result := initial
+			result.Code = Failed
+			var failure PrepareFailure
+			if errors.As(err, &failure) {
+				result.Code = failure.Code
+				result.Denial = failure.Denial
+			}
+			return result
+		}
+		return s.apply(ctx, request)
+	})
+}
+func (s *Service) execute(ctx context.Context, id string, encoded []byte, result Result, run func() Result) Result {
+	if id == "" {
 		return result
 	}
 	digest := sha256.Sum256(encoded)
@@ -436,7 +482,7 @@ func (s *Service) Execute(ctx context.Context, id string, request Request) Resul
 			return result
 		}
 	}
-	result = s.apply(ctx, request)
+	result = run()
 	if s.hook != nil {
 		if s.hook("before_receipt", -1) != nil {
 			result.Code = Indeterminate
@@ -461,4 +507,27 @@ func ReadBounded(reader io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("file exceeds %d bytes", MaxFileBytes)
 	}
 	return data, nil
+}
+
+// authorizedParent proves that the no-symlink walk and the policy's pinned root
+// identify the same parent, then uses the authorized descriptor for actual I/O.
+// Reopening a policy's pathname is never treated as an authorization grant.
+func (s *Service) authorizedParent(ctx context.Context, path string, write bool) (*os.File, string, error) {
+	approved, err := permission.FromContext(ctx).OpenParentFor(path, write)
+	if err != nil {
+		return nil, "", err
+	}
+	current, base, err := s.openParent(path)
+	if err != nil {
+		approved.Close()
+		return nil, "", err
+	}
+	defer current.Close()
+	a, ae := approved.Stat()
+	b, be := current.Stat()
+	if ae != nil || be != nil || !os.SameFile(a, b) {
+		approved.Close()
+		return nil, "", &permission.Error{Code: permission.Denied, Capability: "filesystem", Reason: "authorized directory identity changed"}
+	}
+	return approved, base, nil
 }

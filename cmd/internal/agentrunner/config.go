@@ -17,6 +17,7 @@ type Config struct {
 }
 
 type ToolConfig struct {
+	Directory   string
 	Translators tool.StaticTranslators
 	Names       []string
 	SessionID   session.ID
