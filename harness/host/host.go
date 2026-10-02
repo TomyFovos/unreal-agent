@@ -86,6 +86,7 @@ type submission struct {
 	committed bool
 }
 type Event struct {
+	Progress   *Progress `json:",omitzero"`
 	Generation string
 	Revision   uint64
 	Kind       string
@@ -93,6 +94,7 @@ type Event struct {
 	Operation  *operation.Operation `json:",omitzero"`
 }
 type View struct {
+	Progress   *Progress `json:",omitzero"`
 	Session    sessionstore.Snapshot
 	Generation string
 	Revision   uint64
@@ -123,6 +125,8 @@ type Session struct {
 	submissions    map[inbox.ID]*submission
 	subscribers    map[uint64]chan Event
 	nextSubscriber uint64
+	progress       *Progress
+	progressEpoch  uint64
 	revision       uint64
 	done           chan struct{}
 	running        bool
@@ -254,6 +258,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	if s.runtime.Builder == nil || s.runtime.LLM == nil || s.runtime.Tools == nil || s.runtime.Operations == nil {
 		return nil, fmt.Errorf("incomplete session runtime")
 	}
+	s.runtime.LLM = s.withProgress(s.runtime.LLM)
 	if o.Lifecycle == "" {
 		o.Lifecycle = "interactive"
 	}
@@ -297,6 +302,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		runErr = errors.Join(runErr, lock.Close())
 		s.mu.Lock()
 		s.running = false
+		s.progress = nil
 		s.err = runErr
 		s.broadcast(Event{Kind: "stopped"})
 		for id, ch := range s.subscribers {
@@ -451,7 +457,7 @@ func (s *Session) view(after sessionstore.Sequence, limit int) (View, error) {
 		return View{}, fmt.Errorf("history cursor beyond session")
 	}
 	end := min(int(after)+limit, len(s.items))
-	v := View{Session: s.snapshot, Generation: s.Generation, Revision: s.revision, Running: s.running,
+	v := View{Progress: s.progress, Session: s.snapshot, Generation: s.Generation, Revision: s.revision, Running: s.running,
 		History: sessionstore.Page{Items: append([]sessionstore.Item(nil), s.items[int(after):end]...), NextAfter: sessionstore.Sequence(end), More: end < len(s.items)}}
 	if s.err != nil {
 		v.Failure = s.err.Error()
@@ -523,6 +529,9 @@ func clone[T any](v T) T {
 func (s *Session) rememberItem(item sessionstore.Item, notify bool) {
 	item = clone(item)
 	s.items = append(s.items, item)
+	if item.Kind == sessionstore.ItemTurn || item.Kind == sessionstore.ItemModelResponse {
+		s.progress = nil
+	}
 	if item.Kind == sessionstore.ItemInput {
 		input, err := canonical(item.Data.(inbox.Input))
 		if err != nil {

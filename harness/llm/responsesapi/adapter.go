@@ -113,6 +113,7 @@ func (adapter *adapter) Respond(ctx context.Context, request llm.Request, option
 	if err != nil {
 		return llm.Response{}, err
 	}
+	ctx = context.WithValue(ctx, progressKey{}, options.Progress)
 	statusCode, responseBody, err := adapter.exchange(ctx, body, key)
 	if err != nil {
 		return llm.Response{}, err
