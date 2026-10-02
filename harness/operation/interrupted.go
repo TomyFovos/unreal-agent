@@ -8,6 +8,9 @@ func CancelUndispatched(current Operation) (Operation, error) {
 	var step Step
 	var err error
 	switch current.Type {
+	case TypeValue:
+		current.Status = StatusCanceled
+		return current, nil
 	case TypeShell:
 		var actor *Shell
 		actor, err = NewShell(current)

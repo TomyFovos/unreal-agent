@@ -383,7 +383,7 @@ func TestCoordinatorOverlaysResumedOperationsAfterHistorySnapshots(t *testing.T)
 		!reflect.DeepEqual(current.state.operations[second.ID], resumedSecond) {
 		t.Fatalf("restored operations = %#v", current.state.operations)
 	}
-	if err := current.dispatchOperationsToManager(); err != nil {
+	if err := current.dispatchOperationsToManager(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	want := map[operation.ID]operation.Operation{
@@ -2045,8 +2045,12 @@ func TestCoordinatorRunDispatchesRestoredNonTerminalOperations(t *testing.T) {
 		operation.StatusCanceled,
 	}
 	for _, status := range statuses {
+		typ := operation.TypeShell
+		if status == operation.StatusCanceling {
+			typ = operation.TypeValue
+		}
 		store.resume.Operations = append(store.resume.Operations, operation.Operation{
-			ID: operation.ID(status), Type: operation.TypeShell, Version: 1, Status: status,
+			ID: operation.ID(status), Type: typ, Version: 1, Status: status,
 		})
 	}
 	inboxContext, cancelInbox := context.WithCancel(t.Context())
@@ -2075,11 +2079,13 @@ func TestCoordinatorRunDispatchesRestoredNonTerminalOperations(t *testing.T) {
 	})
 	want := []operation.Operation{
 		{ID: "awaiting", Type: operation.TypeShell, Version: 1, Status: operation.StatusAwaiting},
-		{ID: "canceling", Type: operation.TypeShell, Version: 1, Status: operation.StatusCanceling},
 		{ID: "ready", Type: operation.TypeShell, Version: 1, Status: operation.StatusReady},
 	}
 	if !reflect.DeepEqual(operations.adds, want) {
 		t.Fatalf("dispatched operations = %#v, want %#v", operations.adds, want)
+	}
+	if len(store.savedOperations) != 1 || store.savedOperations[0].ID != "canceling" || store.savedOperations[0].Status != operation.StatusCanceled {
+		t.Fatal("restored cancellation was not recorded", store.savedOperations)
 	}
 	if len(adapter.requests) != 0 {
 		t.Fatalf("model requests = %#v", adapter.requests)
@@ -2165,7 +2171,7 @@ func TestCoordinatorClonesOperationDataBeforeDispatch(t *testing.T) {
 		Idempotency: jsontext.Value(`{"key":"original"}`),
 	})
 
-	if err := current.dispatchOperationsToManager(); err != nil {
+	if err := current.dispatchOperationsToManager(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	stored := current.state.operations[value.ID]

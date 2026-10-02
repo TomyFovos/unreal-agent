@@ -95,7 +95,7 @@ func TestCoordinatorStopsAfterCancellationIsRecorded(t *testing.T) {
 		run.update(t, 0, operation.StatusCanceled)
 		run.assertRunning(t)
 		run.update(t, 1, operation.StatusCompleted)
-		if len(run.store.savedOperations) != 2 || len(run.store.appendedStatuses) != 2 {
+		if len(run.store.savedOperations) != 4 || len(run.store.appendedStatuses) != 2 {
 			t.Fatal("stop did not persist terminal updates and tool results")
 		}
 		if len(run.calls) != 1 {

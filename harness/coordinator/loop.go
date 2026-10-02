@@ -29,10 +29,11 @@ const (
 const toolCallRunGracePeriod = time.Second
 
 type coordinator struct {
-	dependencies Dependencies
-	state        loopState
-	stop         stopState
-	cancelModel  context.CancelFunc
+	dependencies   Dependencies
+	state          loopState
+	stop           stopState
+	cancelModel    context.CancelFunc
+	pendingCancels map[operation.ID]string
 }
 
 type stopState struct {
@@ -66,6 +67,7 @@ type toolCallKey struct {
 }
 
 type toolCallContext struct {
+	canFinish  bool
 	operations []operation.Operation
 }
 
@@ -86,6 +88,9 @@ func newLoopState() loopState {
 }
 
 func (current *coordinator) Run(ctx context.Context) error {
+	if current.finished() {
+		return nil
+	}
 	if current.dependencies.ToolHeartbeatInterval < 0 {
 		return fmt.Errorf("tool heartbeat interval must not be negative")
 	}
@@ -134,6 +139,20 @@ func (current *coordinator) Run(ctx context.Context) error {
 		}
 		return nil
 	}
+	// No old local executor is owned by this restored Coordinator. Complete
+	// accepted targeted cancellations before an initial-phase actor can restart.
+	for _, op := range current.state.operations {
+		if op.Status != operation.StatusCanceling || op.Type == operation.TypeRemoteJob {
+			continue
+		}
+		canceled, err := operation.CancelUndispatched(op)
+		if err != nil {
+			return err
+		}
+		if err = current.handleOperationUpdate(ctx, canceled); err != nil {
+			return err
+		}
+	}
 	modelContext, cancelModels := context.WithCancel(ctx)
 	defer cancelModels()
 	defer current.interruptModel()
@@ -148,7 +167,7 @@ func (current *coordinator) Run(ctx context.Context) error {
 	if _, err := current.reconcileToolCalls(ctx); err != nil {
 		return err
 	}
-	if err := current.dispatchOperationsToManager(); err != nil {
+	if err := current.dispatchOperationsToManager(ctx); err != nil {
 		return err
 	}
 	if toolCallStatusesRequireModelResponse(statuses) || current.pendingInputs() > 0 {
@@ -221,7 +240,7 @@ func (current *coordinator) Run(ctx context.Context) error {
 			return err
 		}
 		if current.stop.request.Mode == inbox.StopHard {
-			stopped, err := current.handleStop()
+			stopped, err := current.handleStop(ctx)
 			if err != nil {
 				return err
 			}
@@ -229,6 +248,9 @@ func (current *coordinator) Run(ctx context.Context) error {
 				return ctx.Err()
 			}
 			continue
+		}
+		if current.finished() && !current.hasPendingOperations() {
+			return nil
 		}
 		if callModel {
 			err = current.requestModelResponse(modelContext, modelResponses)
@@ -296,7 +318,7 @@ func (current *coordinator) processModelResponse(ctx context.Context, modelRespo
 	}
 	for _, status := range statuses {
 		for _, value := range status.Operations {
-			if err := current.dispatchOperationToManager(value); err != nil {
+			if err := current.dispatchOperationToManager(ctx, value); err != nil {
 				return err
 			}
 		}
@@ -315,10 +337,10 @@ func (current *coordinator) clearToolGrace() {
 	current.state.grace = nil
 }
 
-func (current *coordinator) handleStop() (bool, error) {
+func (current *coordinator) handleStop(ctx context.Context) (bool, error) {
 	if !current.stop.cancellationRequested {
 		current.interruptModel()
-		if err := current.cancelOperations(); err != nil {
+		if err := current.cancelOperations(ctx); err != nil {
 			return false, err
 		}
 		current.stop.cancellationRequested = true
@@ -387,14 +409,26 @@ func (current *coordinator) hasPendingOperations() bool {
 	return false
 }
 
-func (current *coordinator) cancelOperations() error {
+func (current *coordinator) cancelOperations(ctx context.Context) error {
+	// Commit the whole stop decision before effects. On any storage error no
+	// cancellation effect is delivered and recovery can finish the intent.
+	for id, value := range current.state.operations {
+		if operationIsTerminal(value.Status) || value.Status == operation.StatusCanceling {
+			continue
+		}
+		value.Status = operation.StatusCanceling
+		if err := current.storeOperationInSessionStore(ctx, value); err != nil {
+			return err
+		}
+		current.state.operations[id] = value
+	}
 	var result error
 	for id, value := range current.state.operations {
 		if operationIsTerminal(value.Status) {
 			continue
 		}
 		if err := current.dependencies.Operations.Cancel(id, current.stop.request.Reason); err != nil {
-			result = errors.Join(result, fmt.Errorf("cancel operation %q: %w", id, err))
+			result = errors.Join(result, err)
 		}
 	}
 	return result
@@ -404,6 +438,9 @@ func (current *coordinator) requestModelResponse(
 	ctx context.Context,
 	results chan<- modelResponseResult,
 ) error {
+	if current.finished() {
+		return nil
+	}
 	current.interruptModel()
 	built, err := current.dependencies.ContextBuilder.Build()
 	if err != nil {
@@ -461,6 +498,14 @@ func (current *coordinator) handleInboxInput(ctx context.Context, input inbox.In
 			return err
 		}
 		switch request.Mode {
+		case inbox.DispatchOperation:
+			op, err := sessionstore.DecodeOperationIntent(input)
+			if err != nil {
+				return err
+			}
+			return current.dispatchOperationToManager(ctx, op)
+		case inbox.CancelOperation:
+			return current.cancelOperation(ctx, operation.ID(request.Parameters.(inbox.CancelRequest).OperationID), request.Reason)
 		case inbox.UpdateSettings:
 			return nil
 		case inbox.StopHard, inbox.StopWhenIdle:
@@ -476,7 +521,7 @@ func (current *coordinator) handleInboxInputs(ctx context.Context, inputs []inbo
 		if err := current.handleInboxInput(ctx, input); err != nil {
 			return err
 		}
-		if input.Kind == inbox.InputExternal {
+		if input.Kind == inbox.InputExternal || input.Kind == inbox.InputPeer {
 			current.state.callModel = true
 		}
 	}
@@ -536,16 +581,51 @@ func (current *coordinator) handleOperationUpdate(
 	ctx context.Context,
 	update operation.Operation,
 ) error {
-	update = current.addOperationToLocalState(update)
+	if prior, ok := current.state.operations[update.ID]; ok {
+		// The owner serializes outcomes. A committed terminal is immutable; an
+		// accepted cancellation cannot be overwritten by a late worker completion.
+		if operationIsTerminal(prior.Status) {
+			return nil
+		}
+		if prior.Status == operation.StatusCanceling {
+			if operationIsTerminal(update.Status) {
+				if update.Type == operation.TypeRemoteJob && update.Status != operation.StatusCanceled {
+					step, err := operation.CancelRemoteJob(update)
+					if err != nil {
+						return err
+					}
+					update = *step.Operation
+				} else {
+					update.Status = operation.StatusCanceled
+				}
+			} else {
+				update.Status = operation.StatusCanceling
+			}
+		}
+	}
+	current.addOperationToLocalState(update)
 	return current.storeOperationInSessionStore(ctx, update)
 }
 
 func (current *coordinator) restore(ctx context.Context) error {
+	current.pendingCancels = map[operation.ID]string{}
 	if err := current.loadHistory(ctx); err != nil {
 		return err
 	}
 	for _, value := range current.dependencies.Restored.Operations {
 		current.addOperationToLocalState(value)
+	}
+	// A committed cancel input may precede its canceling checkpoint at a crash.
+	// Complete that checkpoint before any restored executor is dispatched.
+	for id, reason := range current.pendingCancels {
+		if op, ok := current.state.operations[id]; ok && !operationIsTerminal(op.Status) {
+			op.Status = operation.StatusCanceling
+			if err := current.storeOperationInSessionStore(ctx, op); err != nil {
+				return err
+			}
+			current.addOperationToLocalState(op)
+		}
+		_ = reason
 	}
 	return nil
 }
@@ -628,6 +708,7 @@ func (current *coordinator) addItemToLocalState(
 		// FIXME: Forks leave inherited calls without results and retain pending-input accounting.
 		clear(current.state.toolCalls)
 		clear(current.state.operations)
+		clear(current.pendingCancels)
 		current.clearToolGrace()
 
 	case sessionstore.ItemInput:
@@ -651,10 +732,33 @@ func (current *coordinator) addItemToLocalState(
 			}
 			current.state.availableInputs++
 		}
+		if input.Kind == inbox.InputPeer {
+			peerBuilder, ok := current.dependencies.ContextBuilder.(interface{ AddPeerInput(inbox.Input) error })
+			if !ok {
+				return sessionstore.Item{}, fmt.Errorf("context builder does not support peer provenance")
+			}
+			if err := peerBuilder.AddPeerInput(input); err != nil {
+				return sessionstore.Item{}, err
+			}
+			current.state.availableInputs++
+		}
 		if input.Kind == inbox.InputControl {
 			request, err := input.DecodeControlMessage()
 			if err != nil {
 				return sessionstore.Item{}, err
+			}
+			if request.Mode == inbox.DispatchOperation {
+				op, err := sessionstore.DecodeOperationIntent(input)
+				if err != nil {
+					return sessionstore.Item{}, err
+				}
+				current.addOperationToLocalState(op)
+			}
+			if request.Mode == inbox.CancelOperation {
+				if current.pendingCancels == nil {
+					current.pendingCancels = map[operation.ID]string{}
+				}
+				current.pendingCancels[operation.ID(request.Parameters.(inbox.CancelRequest).OperationID)] = request.Reason
 			}
 			current.dependencies.ContextBuilder.AddControlMessage(request)
 			if request.Mode == inbox.Heartbeat {
@@ -862,7 +966,7 @@ func (current *coordinator) scheduleToolCall(
 	call llm.ToolCall,
 ) (sessionstore.ToolCallStatus, error) {
 	translator, exists := current.dependencies.Tools.Resolve(call.Name)
-	toolContext := &toolCallContext{}
+	toolContext := &toolCallContext{canFinish: len(current.state.toolCalls) == 1 && !current.hasPendingOperations()}
 	var status tool.CallStatus
 	if err := permission.FromContext(ctx).CheckTool(call.Name); err != nil {
 		status = tool.CallStatus{Error: err.Error(), Denial: permission.Failure(err)}
@@ -1022,16 +1126,33 @@ func (current *coordinator) storeOperationInSessionStore(
 	return nil
 }
 
-func (current *coordinator) dispatchOperationsToManager() error {
+func (current *coordinator) dispatchOperationsToManager(ctx context.Context) error {
 	for _, value := range current.state.operations {
-		if err := current.dispatchOperationToManager(value); err != nil {
+		if err := current.dispatchOperationToManager(ctx, value); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (current *coordinator) dispatchOperationToManager(value operation.Operation) error {
+func (current *coordinator) dispatchOperationToManager(ctx context.Context, value operation.Operation) error {
+	if latest, ok := current.state.operations[value.ID]; ok {
+		value = latest
+	}
+	if _, requested := current.pendingCancels[value.ID]; requested && !operationIsTerminal(value.Status) && value.Status != operation.StatusCanceling {
+		value.Status = operation.StatusCanceling
+		if err := current.storeOperationInSessionStore(ctx, value); err != nil {
+			return err
+		}
+		current.addOperationToLocalState(value)
+	}
+	if value.Status == operation.StatusCanceling && value.Type != operation.TypeRemoteJob {
+		canceled, err := operation.CancelUndispatched(value)
+		if err != nil {
+			return err
+		}
+		return current.handleOperationUpdate(ctx, canceled)
+	}
 	if operationIsTerminal(value.Status) {
 		return nil
 	}
@@ -1057,4 +1178,23 @@ func closedInputError(ctx context.Context, name string) error {
 		return err
 	}
 	return fmt.Errorf("%s closed", name)
+}
+
+func (current *toolCallContext) CanFinish() bool { return current.canFinish }
+func (current *coordinator) finished() bool {
+	return current.dependencies.Finished != nil && current.dependencies.Finished()
+}
+func (current *coordinator) cancelOperation(ctx context.Context, id operation.ID, reason string) error {
+	op, ok := current.state.operations[id]
+	if !ok || operationIsTerminal(op.Status) {
+		return nil
+	}
+	if op.Status != operation.StatusCanceling {
+		op.Status = operation.StatusCanceling
+		if err := current.storeOperationInSessionStore(ctx, op); err != nil {
+			return err
+		}
+		current.addOperationToLocalState(op)
+	}
+	return current.dependencies.Operations.Cancel(id, reason)
 }
