@@ -3,6 +3,7 @@ package openrouter
 import (
 	"encoding/json/jsontext"
 	"errors"
+	"net/http"
 	"strings"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -11,6 +12,7 @@ import (
 )
 
 type Config struct {
+	HTTPClient  *http.Client
 	APIKey      string
 	BaseURL     string
 	MaxAttempts *int
@@ -36,6 +38,10 @@ func NewClient(config Config) (*Client, error) {
 	}
 
 	remote := primitives.NewRemoteClient()
+	if config.HTTPClient != nil {
+		_ = remote.Close()
+		remote = primitives.NewRemoteClientWithHTTPClient(config.HTTPClient)
+	}
 	adapter, err := responsesapi.NewAdapter(remote, responsesapi.Config{
 		Endpoint: baseURL + "/responses",
 		Headers: map[string][]string{
