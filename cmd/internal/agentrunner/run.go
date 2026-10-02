@@ -24,6 +24,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm/responsesapi"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/profile"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
@@ -65,6 +66,10 @@ type Provider struct {
 }
 
 type Request struct {
+	ProfileID      string `json:"profile_id"`
+	ProfileVersion int    `json:"profile_version"`
+	ModelFamily    string `json:"model_family"`
+
 	Messages               []RequestMessage `json:"messages"`
 	Prompt                 *string          `json:"prompt"`
 	SystemPrompt           *string          `json:"system_prompt"`
@@ -387,26 +392,38 @@ func Run(
 	if parsed.SystemPrompt != nil {
 		systemPrompt = *parsed.SystemPrompt
 	}
+	if resolvedProvider.Version == 0 {
+		resolvedProvider = provider.Selection{Version: 1, Provider: selected.Name, Model: provider.Model{ID: model}, Endpoint: configuredBaseURL, MaxAttempts: maxAttempts, Source: "injected provider"}
+	}
+	resolvedProvider.Model.Family = parsed.ModelFamily
+	resolvedProfile, err := resolveRequestProfile(parsed, resolvedProvider)
+	if err != nil {
+		return err
+	}
+	definitions := registry.StaticDefinitions()
+	modelTools := make([]llm.Tool, 0, len(definitions))
+	for _, definition := range definitions {
+		modelTools = append(modelTools, definition.Tool)
+	}
+	systemPrompt, modelTools = resolvedProfile.Compose(systemPrompt, modelTools)
 	builder.SetSystemPrompt(systemPrompt)
-	for _, definition := range registry.StaticDefinitions() {
-		builder.AddTool(definition.Tool)
+	for _, definition := range modelTools {
+		builder.AddTool(definition)
 	}
 
 	currentHost, err := host.New(runContext, host.Config{Directory: storeDirectory, Build: func(sessionContext context.Context, _ session.ID) (host.Runtime, error) {
-		return host.Runtime{Builder: builder, LLM: client, Tools: registry, Operations: operation.NewLocalOperationManager(sessionContext, configuredTools.RemoteJobs...)}, nil
+		return host.Runtime{Builder: builder, LLM: client, Tools: registry, Close: configuredTools.Close, Operations: operation.NewLocalOperationManager(sessionContext, configuredTools.RemoteJobs...)}, nil
 	}})
 	if err != nil {
 		return err
 	}
 	defer currentHost.Close()
-	if resolvedProvider.Version == 0 {
-		resolvedProvider = provider.Selection{Version: 1, Provider: selected.Name, Model: provider.Model{ID: model}, Endpoint: configuredBaseURL, MaxAttempts: maxAttempts, Source: "injected provider"}
-	}
 	identity, err := json.Marshal(struct {
 		Version   int
 		Provider  provider.Selection
+		Profile   profile.Selection
 		Workspace string
-	}{1, resolvedProvider, workspace})
+	}{1, resolvedProvider, resolvedProfile.Selection(), workspace})
 	if err != nil {
 		return err
 	}

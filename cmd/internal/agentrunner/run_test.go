@@ -104,7 +104,7 @@ description: Review code.
 	if len(messages) != 3 || messages[0].Role != llm.RoleSystem ||
 		!strings.Contains(messages[0].Text, "<name>review</name>") ||
 		!strings.Contains(messages[0].Text, "<location>"+skillPath+"</location>") ||
-		!strings.HasSuffix(messages[0].Text, "\n\nbe concise") ||
+		!strings.Contains(messages[0].Text, "\n\nbe concise\n\nUse observed file contents and current revisions") ||
 		!slices.Equal(messages[1:], wantMessages) {
 		t.Fatalf("messages = %#v, want system preamble plus %#v", messages, wantMessages)
 	}
