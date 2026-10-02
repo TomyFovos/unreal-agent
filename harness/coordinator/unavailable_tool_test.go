@@ -45,7 +45,7 @@ func TestCoordinatorRejectsRestoreWhenRecordedCallRequiresUnavailableTool(t *tes
 				}),
 			}
 			current := newTestCoordinator(store, newTestInbox(t), newFakeOperationManager(), contextbuilder.NewBuilder(),
-				tool.NewRegistry(tool.StaticTranslators{Bash: &submittingTranslator{}}))
+				tool.NewRegistry(tool.StaticTranslators{}))
 			err := current.restore(t.Context())
 			if err == nil || !strings.Contains(err.Error(), `tool "Bash" required by recorded call "call-1" is not available`) {
 				t.Fatalf("restore error = %v", err)

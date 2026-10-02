@@ -8,9 +8,11 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 )
 
 type CallStatus struct {
+	Denial         *permission.Error `json:",omitzero"`
 	Error          string
 	ErrorTruncated bool           `json:",omitzero"`
 	WaitingFor     []operation.ID `json:",omitzero"`

@@ -23,6 +23,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/responsesapi"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
@@ -293,6 +294,9 @@ func Run(
 
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// The legacy sandbox runner explicitly preserves its unrestricted execution contract.
+	executionPolicy := permission.Unrestricted()
+	runContext = permission.WithPolicy(runContext, executionPolicy)
 	operationDirectory := filepath.Join(storeDirectory, "operations", string(sessionID))
 	if err := os.MkdirAll(operationDirectory, 0o700); err != nil {
 		return fmt.Errorf("create operation directory: %w", err)
@@ -401,7 +405,7 @@ func Run(
 	if err != nil {
 		return err
 	}
-	current, err := currentHost.Open(runContext, host.Options{Lifecycle: "one-shot", Configuration: identity, ID: sessionID, Initial: initialInputs, Heartbeat: *toolHeartbeatInterval})
+	current, err := currentHost.Open(runContext, host.Options{Policy: executionPolicy, Lifecycle: "one-shot", Configuration: identity, ID: sessionID, Initial: initialInputs, Heartbeat: *toolHeartbeatInterval})
 	if err != nil {
 		return err
 	}

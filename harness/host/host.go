@@ -20,6 +20,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
@@ -53,6 +54,10 @@ const (
 )
 
 type Options struct {
+	// Policy is an explicit immutable execution capability set. Nil denies all.
+	// Its owner closes it after Host execution has stopped.
+	Policy *permission.Policy
+
 	Lifecycle string
 	ID        session.ID
 	Mode      Mode
@@ -194,7 +199,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 			return nil, err
 		}
 	}
-	cctx, cancel := context.WithCancel(h.ctx)
+	cctx, cancel := context.WithCancel(permission.WithPolicy(h.ctx, o.Policy))
 	s := &Session{ID: o.ID, Generation: uuid.New().String(), ctx: cctx, cancel: cancel, lock: lock, store: raw,
 		snapshot: restored.Snapshot, operations: map[operation.ID]operation.Operation{}, submissions: map[inbox.ID]*submission{},
 		subscribers: map[uint64]chan Event{}, done: make(chan struct{}), running: true}

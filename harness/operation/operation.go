@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/primitives"
 )
 
@@ -36,7 +37,10 @@ type Spec struct {
 }
 
 type Operation struct {
-	MaxOutputLength int `json:",omitzero"`
+	// ToolName records origin for current-policy checks on resume; it is not a grant.
+	ToolName        string            `json:",omitzero"`
+	Denial          *permission.Error `json:",omitzero"`
+	MaxOutputLength int               `json:",omitzero"`
 	ID              ID
 	Type            Type
 	Version         Version

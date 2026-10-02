@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"golang.org/x/sys/unix"
 )
 
@@ -32,7 +33,7 @@ func createNewPath(ctx context.Context, request IOCreateRequest) (IOCreateResult
 		parentPath = "."
 	}
 
-	parent, err := openCreateDirectory(parentPath)
+	parent, err := permission.FromContext(ctx).OpenParent(path)
 	if err != nil {
 		return IOCreateResult{}, fmt.Errorf("open parent directory %q: %w", parentPath, err)
 	}

@@ -21,3 +21,7 @@ The one-shot runner consumes this same Host and outputs canonical items, includi
 ## Verification
 
 Race tests cover concurrent delivery, lost ACK after restart, conflict, stale generations, persistence failure, stop-effect recovery, snapshot/subscription barriers, operation notifications, slow subscribers, and real process lock death/reacquisition. Store tests cover v2 migration and unknown versions. Existing runner, fork/recovery, and execution-log fuzz regressions remain enabled.
+
+## Capabilities
+
+Host Options.Policy is an explicit immutable permission policy; nil denies all capabilities. The session context intersects this policy with the parent context before constructing the runtime. Executors and HTTP transports recheck it, including on Resume. Capability selection is re-evaluated and may narrow independently of the persisted model configuration. Policy root handles must remain open until Host execution stops. The legacy sandbox runner explicitly selects Unrestricted; it does not claim to sandbox arbitrary processes.
