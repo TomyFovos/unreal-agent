@@ -8,6 +8,9 @@ on:
 
 permissions: {}
 
+env:
+  CGO_ENABLED: '1'
+
 jobs:
   go:
     strategy:
@@ -26,6 +29,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      - name: Check native parser compiler
+        run: cc --version
       - run: make test check build
 
   fuzz:
@@ -44,6 +49,8 @@ jobs:
             package: ./cmd/internal/agentrunner
           - target: FuzzCoordinatorFaults
             package: ./harness/coordinator
+          - target: FuzzStructuralQuery
+            package: ./harness/ast
           - target: FuzzPrepareViewImage
             package: ./harness/operation
     steps:
