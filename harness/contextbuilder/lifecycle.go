@@ -23,6 +23,6 @@ func (current *builder) SetLifecycle(mode string) error {
 	}
 	current.preamble = strings.ReplaceAll(current.preamble, oneShotEnding, ending)
 	current.preamble = strings.ReplaceAll(current.preamble, "As a backup, if calls are active and nothing has happened for ten minutes, a heartbeat wakes you, and this is an opportunity to check that all is well.", "The host delivers meaningful input and operation events; do not poll for status.")
-	current.SetSystemPrompt(current.systemPrompt)
+	current.renderSystem()
 	return nil
 }

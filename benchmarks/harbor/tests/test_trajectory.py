@@ -85,6 +85,35 @@ class TrajectoryTests(unittest.TestCase):
         self.assertEqual(trajectory.extra["host_records"][1]["sequence"], 3)
         self.assertEqual(trajectory.final_metrics.total_prompt_tokens, 0)
 
+    def test_project_instructions_are_audit_metadata_not_model_steps(self):
+        lines = [
+            record(
+                1,
+                "host_record",
+                {
+                    "Version": 1,
+                    "Kind": "project_instructions",
+                    "ProjectInstructions": {
+                        "Version": 1,
+                        "SourceKind": "workspace_agents_md",
+                        "SourcePath": "AGENTS.md",
+                        "Content": "Use tabs.",
+                        "Digest": "sha256:0",
+                        "ByteLength": 9,
+                    },
+                },
+            ),
+            record(2, "input", {"Kind": "external", "Payload": "hello"}),
+        ]
+        trajectory = convert(
+            lines, Agent(name="unreal-agent", version="test"), "session"
+        )
+        self.assertEqual([step.message for step in trajectory.steps], ["hello"])
+        self.assertEqual(
+            trajectory.extra["host_records"][0]["data"]["Kind"],
+            "project_instructions",
+        )
+
     def test_unknown_host_record_version_fails_explicitly(self):
         with self.assertRaisesRegex(ValueError, "Unsupported Host metadata"):
             convert(

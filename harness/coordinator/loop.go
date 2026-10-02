@@ -51,6 +51,7 @@ type loopState struct {
 	callModel         bool
 	grace             <-chan time.Time
 	graceToolCalls    map[toolCallKey]struct{}
+	instructionsBound bool
 }
 
 type toolCallState struct {
@@ -605,6 +606,17 @@ func (current *coordinator) addItemToLocalState(
 		}
 		if err := r.Validate(); err != nil {
 			return sessionstore.Item{}, err
+		}
+		// The creation-time snapshot is replayed, never rediscovered, so resume,
+		// restart, and fork keep the revision the session started with.
+		if r.Kind == sessionstore.HostProjectInstructions {
+			if current.state.instructionsBound {
+				return sessionstore.Item{}, fmt.Errorf("duplicate project instructions record")
+			}
+			if err := current.dependencies.ContextBuilder.SetProjectInstructions(*r.ProjectInstructions); err != nil {
+				return sessionstore.Item{}, fmt.Errorf("bind project instructions: %w", err)
+			}
+			current.state.instructionsBound = true
 		}
 	case sessionstore.ItemFork:
 		if _, ok := item.Data.(sessionstore.Fork); !ok {

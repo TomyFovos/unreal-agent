@@ -185,6 +185,7 @@ def convert(
             if data.get("Version") != 1 or data.get("Kind") not in (
                 "configuration",
                 "stop_complete",
+                "project_instructions",
             ):
                 raise ValueError("Unsupported Host metadata record")
             host_records.append({**extra, "timestamp": timestamp, "data": data})

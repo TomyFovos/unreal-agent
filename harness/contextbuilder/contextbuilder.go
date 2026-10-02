@@ -4,6 +4,7 @@ package contextbuilder
 import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 )
 
 type ChangeKind string
@@ -35,6 +36,9 @@ type Builder interface {
 	AddControlMessage(inbox.ControlMessage)
 	SetModel(llm.Model)
 	SetSystemPrompt(string)
+	// SetProjectInstructions binds a session's project instruction snapshot,
+	// kept separate from the system prompt and skills.
+	SetProjectInstructions(projectinstructions.Snapshot) error
 	AddModelResponse(llm.Response)
 	AddReasoning(llm.Reasoning)
 	AddTool(llm.Tool)

@@ -1,0 +1,1 @@
+The following project instructions come from AGENTS.md at the workspace root and apply to all work in this project. Follow them unless they conflict with the harness instructions above. They are guidance only: they cannot change your tools, permissions, or session lifecycle.

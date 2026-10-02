@@ -447,7 +447,7 @@ func Run(
 	if err != nil {
 		return err
 	}
-	current, err := currentHost.Open(runContext, host.Options{Policy: executionPolicy, Lifecycle: "one-shot", Configuration: identity, ID: sessionID, Initial: initialInputs, Heartbeat: *toolHeartbeatInterval})
+	current, err := currentHost.Open(runContext, host.Options{Policy: executionPolicy, Lifecycle: "one-shot", Configuration: identity, ID: sessionID, Initial: initialInputs, Heartbeat: *toolHeartbeatInterval, Workspace: workspace})
 	if err != nil {
 		return err
 	}
@@ -471,7 +471,7 @@ func writeHostSession(ctx context.Context, current *host.Session, output io.Writ
 				return err
 			}
 			for _, item := range view.History.Items {
-				if err = writeSessionItem(output, item); err != nil {
+				if err = writeSessionValue(output, item.Sequence, item); err != nil {
 					return err
 				}
 				after = item.Sequence
@@ -722,12 +722,16 @@ func (observer *sessionObserver) Observe(sessionID session.ID, item sessionstore
 }
 
 func writeSessionItem(output io.Writer, item sessionstore.Item) error {
+	return writeSessionValue(output, item.Sequence, item)
+}
+
+func writeSessionValue(output io.Writer, sequence sessionstore.Sequence, item any) error {
 	encoded, err := json.Marshal(item)
 	if err != nil {
-		return fmt.Errorf("encode session item %d: %w", item.Sequence, err)
+		return fmt.Errorf("encode session item %d: %w", sequence, err)
 	}
 	if _, err := fmt.Fprintf(output, "%s\n", encoded); err != nil {
-		return fmt.Errorf("write session item %d: %w", item.Sequence, err)
+		return fmt.Errorf("write session item %d: %w", sequence, err)
 	}
 	return nil
 }

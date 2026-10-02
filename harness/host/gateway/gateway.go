@@ -19,6 +19,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
@@ -36,6 +37,8 @@ type Config struct {
 	Auth          *authflow.Service
 	// Extension serves separately authorized parent/child inspection/control APIs.
 	Extension http.Handler
+	// Workspace is where newly created sessions discover AGENTS.md.
+	Workspace string
 }
 type request struct {
 	ID              session.ID
@@ -63,6 +66,11 @@ func (e *Error) Is(target error) bool {
 	return (e.Code == "stale_generation" && target == host.ErrStaleGeneration) || (e.Code == "writer_owned" && target == localfile.ErrWriterOwned) || (e.Code == "stopped" && target == host.ErrStopped) || (e.Code == "conflict" && target == host.ErrConflict) || (e.Code == "not_found" && target == fs.ErrNotExist)
 }
 func errorCode(err error) string {
+	// Checked first: a discovery failure may wrap an unrelated fs error.
+	var pe *projectinstructions.Error
+	if errors.As(err, &pe) {
+		return "project_instructions_" + string(pe.Code)
+	}
 	switch {
 	case errors.Is(err, host.ErrStaleGeneration):
 		return "stale_generation"
@@ -198,7 +206,7 @@ func dispatch(ctx context.Context, c Config, path string, q request) (frame, *ho
 	var s *host.Session
 	var err error
 	if path == "/v1/open" {
-		s, err = c.Host.Open(ctx, host.Options{Policy: c.Policy, ID: q.ID, Mode: q.Mode, Configuration: c.Configuration})
+		s, err = c.Host.Open(ctx, host.Options{Policy: c.Policy, ID: q.ID, Mode: q.Mode, Configuration: c.Configuration, Workspace: c.Workspace})
 	} else {
 		s, err = c.Host.Attach(q.ID)
 	}

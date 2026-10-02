@@ -9,6 +9,7 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
 
@@ -20,10 +21,15 @@ var preambleFile string
 
 var preamble = strings.TrimSpace(preambleFile)
 
+// builder keeps each system layer separately: harness preamble, caller
+// system prompt, project instructions, then skills. They render into one
+// stable system message so the cached prefix changes only when a layer does.
 type builder struct {
 	request         llm.Request
 	preamble        string
 	systemPrompt    string
+	instructions    string
+	skills          string
 	committedPrefix []llm.Item
 	stagedSuffix    []llm.Item
 }
@@ -31,11 +37,7 @@ type builder struct {
 var _ Builder = (*builder)(nil)
 
 func NewBuilder(skills ...tool.Skill) Builder {
-	currentPreamble := preamble
-	if skillPrompt := formatSkillsForPrompt(skills); skillPrompt != "" {
-		currentPreamble += "\n\n" + skillPrompt
-	}
-	current := &builder{preamble: currentPreamble, committedPrefix: make([]llm.Item, 1)}
+	current := &builder{preamble: preamble, skills: formatSkillsForPrompt(skills), committedPrefix: make([]llm.Item, 1)}
 	current.SetSystemPrompt("")
 	return current
 }
@@ -79,9 +81,30 @@ func (current *builder) AddControlMessage(request inbox.ControlMessage) {
 
 func (current *builder) SetSystemPrompt(prompt string) {
 	current.systemPrompt = prompt
+	current.renderSystem()
+}
+
+// SetProjectInstructions binds the session's persisted snapshot. It is model
+// guidance only and changes no tool, permission, or lifecycle state.
+func (current *builder) SetProjectInstructions(snapshot projectinstructions.Snapshot) error {
+	if err := snapshot.Validate(); err != nil {
+		return err
+	}
+	current.instructions = formatProjectInstructions(snapshot)
+	current.renderSystem()
+	return nil
+}
+
+func (current *builder) renderSystem() {
+	var layers []string
+	for _, layer := range []string{current.preamble, current.systemPrompt, current.instructions, current.skills} {
+		if layer = strings.TrimSpace(layer); layer != "" {
+			layers = append(layers, layer)
+		}
+	}
 	current.committedPrefix[0] = llm.Item{Type: llm.ItemMessage, Data: llm.Message{
 		Role: llm.RoleSystem,
-		Text: strings.TrimSpace(current.preamble + "\n\n" + current.systemPrompt),
+		Text: strings.Join(layers, "\n\n"),
 	}}
 }
 
