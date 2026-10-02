@@ -146,8 +146,25 @@ func (h *Handler) AddRemoteJob(current operation.Operation) error {
 		if current.Status == operation.StatusCanceling {
 			result.Code = "canceled"
 		} else if current.Status != operation.StatusReady && (request.Action == "rename" || request.Action == "apply_code_action") {
-			result.Code = "indeterminate"
-			result.Message = "edit operation was interrupted; it is not automatically repeated"
+			// Awaiting means execution may have happened before the last Host
+			// checkpoint. Consult durable Mutation evidence without repeating LSP.
+			policy := permission.FromContext(h.manager.ctx).Intersect(permission.FromContext(ctx))
+			recoveryCtx := permission.WithPolicy(ctx, policy)
+			if err := operation.Authorize(permission.FromContext(ctx), current); err != nil {
+				result = resultError(result, err)
+			} else if err = policy.CheckTool("LSP"); err != nil {
+				result = resultError(result, err)
+			} else if err = policy.CheckProcess(); err != nil {
+				result = resultError(result, err)
+			} else if saved, found, err := h.manager.mutation.Recover(recoveryCtx, h.namespace+"/"+string(current.ID)); err != nil {
+				result = resultError(result, err)
+			} else if found {
+				result.Code = string(saved.Code)
+				result.Mutation = &saved
+			} else {
+				result.Code = "indeterminate"
+				result.Message = "edit operation was interrupted; it is not automatically repeated"
+			}
 		} else {
 			if err := operation.Authorize(permission.FromContext(ctx), current); err != nil {
 				result = resultError(result, err)
