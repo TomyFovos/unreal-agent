@@ -117,7 +117,10 @@ description: Review code.
 		"input.control input.external input.external turn model_response input.control",
 	)
 	items := decodeLogItems(t, stdout.Bytes())
-	control, err := items[0].Data.(inbox.Input).DecodeControlMessage()
+	if items[0].Kind != sessionstore.ItemHostRecord || items[0].Data.(sessionstore.HostRecord).Kind != "configuration" {
+		t.Fatal("missing Host configuration")
+	}
+	control, err := items[1].Data.(inbox.Input).DecodeControlMessage()
 	if err != nil || control.Mode != inbox.UpdateSettings || control.Parameters != (inbox.Settings{ReasoningEffort: llm.ReasoningEffortMedium}) {
 		t.Fatalf("initial settings = %#v, error = %v", control, err)
 	}
@@ -402,35 +405,23 @@ func TestValidateRequestRejectsNonUUIDMessageID(t *testing.T) {
 func TestLoadDotEnvUsesScopedOverrides(t *testing.T) {
 	t.Setenv("HARNESS_RUNNER_EXISTING", "outer")
 	t.Setenv("SANDBOX_EGRESS_PROXY", "outer-proxy")
-	t.Setenv("HTTPS_PROXY", "outer-https")
 	path := filepath.Join(t.TempDir(), ".env")
-	if err := os.WriteFile(path, []byte(
-		"HARNESS_RUNNER_EXISTING=inner\nSANDBOX_EGRESS_PROXY=https://proxy.example\n",
-	), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("HARNESS_RUNNER_EXISTING=inner\nSANDBOX_EGRESS_PROXY=https://proxy.example\nLOCAL_ONLY=one\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-
-	scope, err := loadDotEnv(path)
+	overlay, err := loadDotEnv(path, os.Getenv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := os.Getenv("HARNESS_RUNNER_EXISTING"); got != "outer" {
-		t.Fatalf("existing value = %q", got)
+	if overlay("HARNESS_RUNNER_EXISTING") != "outer" || overlay("LOCAL_ONLY") != "one" || overlay("SANDBOX_EGRESS_PROXY") != "https://proxy.example" {
+		t.Fatal("wrong overlay")
 	}
-	if got := os.Getenv("SANDBOX_EGRESS_PROXY"); got != "https://proxy.example" {
-		t.Fatalf("proxy value = %q", got)
+	if os.Getenv("LOCAL_ONLY") != "" || os.Getenv("SANDBOX_EGRESS_PROXY") != "outer-proxy" {
+		t.Fatal("process environment changed")
 	}
-	if got := os.Getenv("HTTPS_PROXY"); got != "https://proxy.example" {
-		t.Fatalf("HTTPS proxy value = %q", got)
-	}
-	if err := scope.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if got := os.Getenv("SANDBOX_EGRESS_PROXY"); got != "outer-proxy" {
-		t.Fatalf("restored proxy value = %q", got)
-	}
-	if got := os.Getenv("HTTPS_PROXY"); got != "outer-https" {
-		t.Fatalf("restored HTTPS proxy value = %q", got)
+	other, err := loadDotEnv(filepath.Join(t.TempDir(), "missing"), func(string) string { return "second" })
+	if err != nil || other("LOCAL_ONLY") != "second" {
+		t.Fatal("sessions not isolated")
 	}
 }
 
@@ -495,6 +486,12 @@ func assertItemSequence(t *testing.T, output string, want ...string) {
 				break
 			}
 			t.Fatal(err)
+		}
+		if item.Kind == sessionstore.ItemHostRecord {
+			if err := item.Data.(sessionstore.HostRecord).Validate(); err != nil {
+				t.Fatal(err)
+			}
+			continue
 		}
 		kind := string(item.Kind)
 		if item.Kind == sessionstore.ItemInput {

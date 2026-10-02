@@ -38,6 +38,14 @@ func (item *Item) UnmarshalJSON(encoded []byte) error {
 
 func (item Item) validateData() error {
 	switch item.Kind {
+	case ItemHostRecord:
+		r, ok := item.Data.(HostRecord)
+		if !ok {
+			return fmt.Errorf("host record has wrong data type")
+		}
+		if err := r.Validate(); err != nil {
+			return err
+		}
 	case ItemFork:
 		if _, ok := item.Data.(Fork); !ok {
 			return fmt.Errorf("fork data must be sessionstore.Fork, got %T", item.Data)
@@ -73,6 +81,15 @@ func decodeItemData(kind ItemKind, encoded jsontext.Value) (any, error) {
 		return nil, fmt.Errorf("%s data must not be null", kind)
 	}
 	switch kind {
+	case ItemHostRecord:
+		var r HostRecord
+		if err := json.Unmarshal(encoded, &r); err != nil {
+			return nil, err
+		}
+		if err := r.Validate(); err != nil {
+			return nil, err
+		}
+		return r, nil
 	case ItemFork:
 		var value Fork
 		if err := json.Unmarshal(encoded, &value); err != nil {

@@ -53,3 +53,7 @@ We intend to preserve these invariants:
 For example, a proxy operations manager can send serialized operations to a
 local operations manager running in a process inside a remote sandbox, allowing
 tools to execute there.
+
+## Interactive Host API
+
+See [Host lifecycle, delivery, subscriptions, and session migration](docs/host.md). The one-shot runner uses the same Host.

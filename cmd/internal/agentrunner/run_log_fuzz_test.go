@@ -174,11 +174,18 @@ func FuzzRunLogMatchesExecution(f *testing.F) {
 				if len(nextHistory) < len(history) || (len(history) != 0 && !reflect.DeepEqual(nextHistory[:len(history)], history)) {
 					t.Fatal("resuming changed existing history")
 				}
-				if !reflect.DeepEqual(nextHistory[len(history):], items) {
+				delta := nextHistory[len(history):]
+				if run == 0 && mode == 3 {
+					// A failed client is a projection: the owner may commit
+					// more history before detach. Its log must be a prefix.
+					if len(items) > len(delta) || !reflect.DeepEqual(delta[:len(items)], items) {
+						t.Fatal("failed client log is not a canonical prefix")
+					}
+				} else if !reflect.DeepEqual(delta, items) {
 					t.Fatal("file log does not exactly match newly persisted history")
 				}
+				allLogged = append(allLogged, delta...)
 				history = nextHistory
-				allLogged = append(allLogged, items...)
 				assertExecutionLog(t, allLogged, returned, requests, text, skillContent, validCalls, run+1, run > 0 || mode == 0)
 				if run > 0 {
 					resumed, err := store.Resume(t.Context(), id)
@@ -240,6 +247,10 @@ func assertExecutionLog(t *testing.T, items []sessionstore.Item, returned []llm.
 				}
 			default:
 				t.Fatalf("unexpected input kind %q", value.Kind)
+			}
+		case sessionstore.HostRecord:
+			if err := value.Validate(); err != nil {
+				t.Fatal(err)
 			}
 		case session.Turn:
 			if value.ID == "" || value.PreviousTurnID != previous || value.Type != session.TurnRegular {

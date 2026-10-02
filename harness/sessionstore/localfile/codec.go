@@ -12,7 +12,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 )
 
-const formatVersion = 2
+const formatVersion = 3
 
 type recordType string
 
@@ -116,7 +116,7 @@ func decodeLog(encoded []byte) (storedState, int64, error) {
 					"legacy session format version 1 cannot be resumed",
 				)
 			}
-			if header.Version != formatVersion {
+			if header.Version != formatVersion && header.Version != 2 {
 				return storedState{}, 0, fmt.Errorf("unsupported session format version %d", header.Version)
 			}
 			if err := validateSessionID(header.Session.ID); err != nil {
@@ -207,6 +207,14 @@ func decodeLog(encoded []byte) (storedState, int64, error) {
 
 func replayItem(state *storedState, record itemRecord) error {
 	switch record.Item.Kind {
+	case sessionstore.ItemHostRecord:
+		r := record.Item.Data.(sessionstore.HostRecord)
+		if err := r.Validate(); err != nil {
+			return err
+		}
+		item := state.sessionHead.appendItem(sessionstore.ItemHostRecord, r, record.Item.RecordedAt)
+		state.Items = append(state.Items, item)
+		return nil
 	case sessionstore.ItemInput:
 		return state.appendInput(record.Item.Data.(inbox.Input), record.Item.RecordedAt)
 	case sessionstore.ItemTurn:
