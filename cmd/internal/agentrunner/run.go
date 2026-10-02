@@ -338,6 +338,14 @@ func Run(
 	}
 	defer languageTools.Close()
 	newTools = languageTools.Wrap(newTools, parsed.DisallowedTools)
+	adapters, err := DebugAdapterConfiguration(getenv)
+	if err != nil {
+		return err
+	}
+	newTools, debugIdentity, err := DebugTools(newTools, adapters, parsed.DisallowedTools)
+	if err != nil {
+		return err
+	}
 	configuredTools, err := newTools(runContext, toolConfig)
 	if err != nil {
 		return err
@@ -434,7 +442,8 @@ func Run(
 		Profile         profile.Selection
 		Workspace       string
 		LanguageServers string `json:",omitempty"`
-	}{1, resolvedProvider, resolvedProfile.Selection(), workspace, languageTools.Identity()})
+		DebugAdapters   string `json:",omitempty"`
+	}{1, resolvedProvider, resolvedProfile.Selection(), workspace, languageTools.Identity(), debugIdentity})
 	if err != nil {
 		return err
 	}
