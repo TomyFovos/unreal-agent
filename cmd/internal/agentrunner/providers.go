@@ -104,6 +104,21 @@ func buildSessionClient(selected Provider, model, apiKey, endpoint string, attem
 		selection.Auth.ID = "external-codex"
 		resolver = provider.ExternalCodex(config)
 	}
+	if credentialID := getenv("UNREAL_HARNESS_CREDENTIAL_ID"); credentialID != "" {
+		if method != credential.APIKey {
+			return nil, provider.Selection{}, &credential.Error{Code: "unsupported_managed_provider"}
+		}
+		directory := getenv("UNREAL_HARNESS_CREDENTIAL_DIRECTORY")
+		if directory == "" {
+			return nil, provider.Selection{}, &credential.Error{Code: "store_required"}
+		}
+		store, err := credential.OpenLocal(directory)
+		if err != nil {
+			return nil, provider.Selection{}, err
+		}
+		selection.Auth.ID = credentialID
+		resolver = credential.NewManager(store, nil)
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	// Proxy configuration is scoped to this client; never set HTTPS_PROXY globally.
 	if proxy := getenv("SANDBOX_EGRESS_PROXY"); proxy != "" {
