@@ -122,3 +122,54 @@ a safe refusal. No PATH, existing Codex executable/auth/config, permissions,
 default Host, OS packages or Session Store are changed. Doctor executes only
 help/methods in an empty temporary HOME; auth contents and network/API access
 remain unchecked. Use the original Codex command to resume normal work.
+
+## Provider-specific Sandbox scripts
+
+The optional operator profiles reuse that existing binary installation. They
+contain only scripts, Japanese instructions and checksums; authentication,
+binary/config defaults and project files are not bundled or changed:
+
+```sh
+make test-pilot-provider
+# Include startup checks against the existing 6284e49 binaries (fake auth only):
+UNREAL_PILOT_KIT_DIRECTORY=/absolute/path/to/verified/extracted/kit make test-pilot-provider
+python3 scripts/provider_pilot_bundle.py --copy-to /mnt/c/work/unreal-agent-pilot
+```
+
+Each delivery reserves a new directory under `asp/` or `devlore/`, without
+overwriting previous kits. The Japanese README gives the `sbx cp` commands
+(Windows CLI availability remains unconfirmed) and a single Sandbox command.
+The historical `asp/6284e49-*` binary install can also be reused in a separate
+devlore home; it does not select the provider or the Session Store.
+
+`asp` fixes the provider to `openai-codex`; preflight checks only the existing
+External Codex auth file's path metadata. `devlore` fixes it to `claude-code`
+with the **structured** bridge. Before any Claude invocation, devlore requires
+both `--policy-audited` and `--trust-managed-policy`. The operator must first
+audit that Sandbox's local/remote administrative policy, managed hooks/helpers,
+environment configuration and telemetry. These flags attest review and opt in
+to the existing administrative trust boundary; they are not an automatic audit
+or a guarantee that remote policy remains unchanged. Missing CLI/login or
+unreviewed policy stops the script. It never enables a side-effecting built-in
+tool, requests MCP grants, or selects a fallback provider.
+
+An explicit `--model` is required. Both profiles use the existing `~/workspace`,
+only read/grep/glob permissions, and private per-Sandbox/per-instance config,
+state and socket paths. `Launcher.DiscoverProviders=false` prevents additional
+registration while retaining the existing isolated provider transport. It does
+not grant tool subprocess, write or unrestricted network/filesystem access.
+An existing config is reused only when identical; choose a new `--instance`
+for changed settings rather than overwriting canonical startup/history.
+
+`--preflight-only` does not start a Host or inference. A normal run verifies or
+starts the dedicated Host, submits one short text-only smoke in a fresh Session,
+checks the durable response and absence of Operations, then attaches the native
+TUI. `--smoke-only` omits the TUI; `--attach-only` reconnects to the last smoke
+Session without resubmission. Provider errors/timeouts are not retried, and
+history remains available. Existing incompatible/stale sockets and Hosts are
+not unlinked, killed or silently reused. Stop only the identified Pilot Host to
+return to the original Codex/Claude CLI; keep its state and existing credentials.
+
+Unit/native Host tests use dummy auth status and fake Claude only. WSL validation
+does not establish Sandbox login, API connectivity, model availability, managed
+policy approval or real inference success; those remain operator-run gates.

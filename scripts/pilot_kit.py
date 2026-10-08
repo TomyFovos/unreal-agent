@@ -114,14 +114,16 @@ def private_output(root):
     return Path(tempfile.mkdtemp(prefix="kit-", dir=parent))
 
 
-def copy_delivery(archive, destination):
+def copy_delivery(archive, destination, *, prefix=KIT_ROOT + "-"):
     # Reserve a new child directory so no previous Windows files are overwritten.
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}", prefix):
+        raise ValueError("delivery prefix must be a safe directory name")
     destination = destination.absolute()
     for parent in (*reversed(destination.parents), destination):
         if parent.is_symlink():
             raise ValueError("delivery parent must not be a symlink")
     destination.mkdir(parents=True, exist_ok=True)
-    delivery = Path(tempfile.mkdtemp(prefix=KIT_ROOT + "-", dir=destination))
+    delivery = Path(tempfile.mkdtemp(prefix=prefix, dir=destination))
     for source in (archive, archive.with_name(archive.name + ".sha256")):
         target = delivery / source.name
         with source.open("rb") as reader, target.open("xb") as writer:
