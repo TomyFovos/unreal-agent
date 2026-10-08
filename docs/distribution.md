@@ -91,3 +91,34 @@ add CLI version reporting if desired, and configure Fork-specific release
 ownership, signing/notarization, and Homebrew policy. The inherited workflow's
 upstream repository guard, CGO-disabled build matrix, and upstream Docker
 destination must be reviewed separately. Publishing remains a future task.
+
+## asp manual-install kit
+
+The pilot kit repackages an **existing** verified Linux amd64 snapshot at
+`6284e49e70fd603902133bc194ae1ca81c777edd`; it does not rebuild or connect to a
+Sandbox. Supply the archive alongside its original `SHA256SUMS`:
+
+```sh
+UNREAL_PILOT_SNAPSHOT=/absolute/path/to/existing/snapshot.tar.gz make test-pilot-kit
+python3 scripts/pilot_kit.py --snapshot /absolute/path/to/existing/snapshot.tar.gz \
+  --copy-to /mnt/c/work/unreal-agent-pilot/asp
+```
+
+The builder requires Python 3.12, Go (build-metadata inspection only), and
+`readelf` on WSL. It verifies the source checksum/inventory/provenance, four
+amd64 `GOAMD64=v1` / CGO binaries, tree-sitter dependency and actual glibc
+symbols. This baseline requires glibc 2.34 or newer; auth is statically linked.
+Fresh private `dist/pilot-kits/kit-*` and delivery subdirectories keep earlier
+files intact. The archive includes the original `SNAPSHOT.json`, `KIT.json`,
+four binaries, internal `SHA256SUMS`, LICENSE, installer, doctor and Japanese
+README. Its sibling `.tar.gz.sha256` verifies the whole archive.
+
+The README has two user operations: `sbx cp` from Windows (host CLI availability
+unconfirmed), then checksum/extraction/install/doctor inside asp. The installer
+checks OS/architecture/glibc/libraries before writing a private version under
+`$HOME/.local/opt/unreal-agent-pilot/asp/`. Identical installs are verified and
+reused; changed files, symlink redirects and an active/stale install lock cause
+a safe refusal. No PATH, existing Codex executable/auth/config, permissions,
+default Host, OS packages or Session Store are changed. Doctor executes only
+help/methods in an empty temporary HOME; auth contents and network/API access
+remain unchecked. Use the original Codex command to resume normal work.
