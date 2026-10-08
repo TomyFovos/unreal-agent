@@ -499,6 +499,22 @@ ambiguous-width rules/ellipsis as two cells. Conversation text remains Unicode.
 Disabling animation substitutes static marks while keeping phase/state words
 and known elapsed times.
 
+HTTP(S) Markdown links and bare URLs in public conversation text are clickable
+when the terminal advertises supported OSC 8 hyperlinks. URLs remain visible as
+plain text in unknown terminals, tmux/screen and plain mode. `NO_COLOR` removes
+colors but retains supported links; ASCII mode changes chrome, not conversation
+text. Links retain grapheme-safe wrapping in Tiny and Split views.
+
+Only the renderer generates OSC 8, after URL validation. Userinfo, malformed
+authorities, control/bidi characters and non-HTTP(S) schemes are rejected. Raw
+provider ANSI/OSC sequences are stripped; sanitized messages containing such
+input do not become clickable. URLs are limited to 4096 encoded bytes and bare
+link detection to 256 candidates per line. Non-ASCII hostnames must use their
+punycode form; Unicode paths and labels are supported. The composer and code
+examples stay text. Unreal never launches a browser: opening a link is an
+explicit terminal action. Canonical history and Markdown exports keep their
+original public message content.
+
 ## Model and reasoning selection
 
 `/model` opens a model picker. Up/Down select and keep the selection visible;

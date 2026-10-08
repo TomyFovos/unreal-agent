@@ -5,7 +5,7 @@ package tui
 // and is rebuilt on width/ASCII changes. Input, secrets and progress are excluded.
 type bodyKey struct {
 	role, text, peer, kind, code string
-	clipped                      bool
+	clipped, unsafeLinks         bool
 }
 type cachedBody struct {
 	rows []bodyLine
@@ -27,7 +27,7 @@ func (c *bodyCache) begin(width int, ascii bool) {
 	c.frame++
 }
 func (c *bodyCache) get(e Entry, width int, t Theme) []bodyLine {
-	k := bodyKey{e.Role, e.Text, e.PeerID, e.PeerKind, e.Code, e.Clipped}
+	k := bodyKey{e.Role, e.Text, e.PeerID, e.PeerKind, e.Code, e.Clipped, e.UnsafeLinks}
 	value, ok := c.entries[k]
 	if !ok {
 		value.rows = entryBody(e, width, t)

@@ -6,7 +6,7 @@ import (
 )
 
 // Theme controls only terminal presentation. No background colors are used.
-type Theme struct{ NoColor, Plain, ASCII, Still bool }
+type Theme struct{ NoColor, Plain, ASCII, Still, Hyperlinks bool }
 
 func EnvironmentTheme(getenv func(string) string) Theme {
 	locale := getenv("LC_ALL")
@@ -17,7 +17,28 @@ func EnvironmentTheme(getenv func(string) string) Theme {
 		locale = getenv("LANG")
 	}
 	locale = strings.ToLower(locale)
-	return Theme{NoColor: getenv("NO_COLOR") != "", Plain: getenv("TERM") == "dumb" || getenv("UNREAL_AGENT_TUI_PLAIN") == "1", ASCII: getenv("UNREAL_AGENT_TUI_ASCII") == "1" || !strings.Contains(strings.ReplaceAll(locale, "-", ""), "utf8"), Still: getenv("UNREAL_AGENT_TUI_NO_ANIMATION") == "1"}
+	t := Theme{NoColor: getenv("NO_COLOR") != "", Plain: getenv("TERM") == "dumb" || getenv("UNREAL_AGENT_TUI_PLAIN") == "1", ASCII: getenv("UNREAL_AGENT_TUI_ASCII") == "1" || !strings.Contains(strings.ReplaceAll(locale, "-", ""), "utf8"), Still: getenv("UNREAL_AGENT_TUI_NO_ANIMATION") == "1"}
+	t.Hyperlinks = !t.Plain && hyperlinkTerminal(getenv)
+	return t
+}
+
+// Conservative capability detection: an unknown terminal gets visible URLs
+// without OSC. Multiplexers require passthrough support we do not assume.
+func hyperlinkTerminal(getenv func(string) string) bool {
+	term := getenv("TERM")
+	if term == "" || term == "dumb" || term == "linux" || term == "vt100" ||
+		strings.HasPrefix(term, "screen") || strings.HasPrefix(term, "tmux") || getenv("TMUX") != "" || getenv("STY") != "" {
+		return false
+	}
+	switch getenv("TERM_PROGRAM") {
+	case "iTerm.app", "WezTerm", "vscode", "ghostty":
+		return true
+	}
+	if term == "xterm-kitty" || term == "foot" || term == "foot-extra" || getenv("WT_SESSION") != "" {
+		return true
+	}
+	vte, err := strconv.Atoi(getenv("VTE_VERSION"))
+	return err == nil && vte >= 5000
 }
 
 type style struct {

@@ -6,20 +6,22 @@ import (
 	"unicode"
 
 	"github.com/rivo/uniseg"
+	"github.com/unreallabsai/unreal-agent/cmd/internal/tui/terminaltext"
 )
 
 type glyph struct {
 	text  string
 	width int
 	style style
+	link  terminaltext.URL
 }
 type line []glyph
 
 func textLine(text string, s style) line {
 	var result line
-	g := uniseg.NewGraphemes(strings.ReplaceAll(SafeText(text), "\t", "    "))
+	g := uniseg.NewGraphemes(strings.ReplaceAll(terminaltext.Clean(text), "\t", "    "))
 	for g.Next() {
-		result = append(result, glyph{g.Str(), g.Width(), s})
+		result = append(result, glyph{text: g.Str(), width: g.Width(), style: s})
 	}
 	return result
 }
@@ -51,7 +53,15 @@ func (l line) clip(width int) line {
 func (l line) paint(t Theme) string {
 	var b strings.Builder
 	current := normal
+	var link terminaltext.URL
 	for _, g := range l {
+		if t.Hyperlinks && !t.Plain && g.link != link {
+			if !link.IsZero() {
+				b.WriteString(terminaltext.Close)
+			}
+			b.WriteString(g.link.Open())
+			link = g.link
+		}
 		if g.style != current && !t.Plain {
 			if current != normal {
 				b.WriteString("\x1b[0m")
@@ -60,6 +70,9 @@ func (l line) paint(t Theme) string {
 			current = g.style
 		}
 		b.WriteString(g.text)
+	}
+	if !link.IsZero() {
+		b.WriteString(terminaltext.Close)
 	}
 	if current != normal && !t.Plain {
 		b.WriteString("\x1b[0m")
@@ -168,7 +181,11 @@ var bulletRE = regexp.MustCompile(`^(?:[-*] |[0-9]+\. )`)
 
 func markdown(s string) line {
 	// Inline code is left verbatim; unsupported Markdown (including tables) is data.
+	clean := terminaltext.Clean(s)
+	unsafeLinks := clean != s
+	s = clean
 	var out line
+	bareLinks := 0
 	for len(s) > 0 {
 		if s[0] == '`' {
 			if end := strings.Index(s[1:], "`"); end >= 0 {
@@ -187,13 +204,30 @@ func markdown(s string) line {
 		}
 		if s[0] == '[' {
 			if end := strings.Index(s, "]("); end > 0 {
-				if close := strings.Index(s[end+2:], ")"); close >= 0 {
-					out = append(out, textLine(s[1:end]+" (", normal)...)
-					out = append(out, textLine(s[end+2:end+2+close], meta)...)
+				if close := linkEnd(s[end+2:]); close >= 0 {
+					target, _ := terminaltext.ParseURL(s[end+2 : end+2+close])
+					out = append(out, linkedText(s[1:end], normal, target)...)
+					out = append(out, textLine(" (", normal)...)
+					out = append(out, linkedText(s[end+2:end+2+close], meta, target)...)
 					out = append(out, textLine(")", normal)...)
 					s = s[end+3+close:]
 					continue
 				}
+			}
+		}
+		if len(s) >= 7 && strings.EqualFold(s[:7], "http://") || len(s) >= 8 && strings.EqualFold(s[:8], "https://") {
+			if match := webURLPattern.FindStringIndex(s); match != nil && match[0] == 0 {
+				part := textLine(s[:match[1]], normal)
+				if bareLinks < maxBareLinksPerLine {
+					part = webTextLine(s[:match[1]], normal)
+				}
+				bareLinks++
+				if len(out) > 0 && !webBoundary(out[len(out)-1].text) {
+					clearLinks(part)
+				}
+				out = append(out, part...)
+				s = s[match[1]:]
+				continue
 			}
 		}
 		g := uniseg.NewGraphemes(s)
@@ -201,6 +235,9 @@ func markdown(s string) line {
 		out = append(out, textLine(g.Str(), normal)...)
 		_, n := g.Positions()
 		s = s[n:]
+	}
+	if unsafeLinks {
+		clearLinks(out)
 	}
 	return out
 }
@@ -221,8 +258,10 @@ func entryBody(e Entry, width int, t Theme) []bodyLine {
 	if e.Role == "host" {
 		text = strings.Join(strings.Fields(text), " ")
 	}
+	unsafeLinks := e.UnsafeLinks || terminaltext.Clean(text) != text
+	text = terminaltext.Clean(text)
 	for _, raw := range strings.Split(text, "\n") {
-		l := textLine(raw, normal)
+		l := webTextLine(raw, normal)
 		hard, indent := false, 0
 		if e.Role == "host" {
 			l = textLine(raw, meta)
@@ -251,6 +290,9 @@ func entryBody(e Entry, width int, t Theme) []bodyLine {
 				}
 				indent = len(bulletRE.FindString(raw))
 			}
+		}
+		if unsafeLinks || code || hard {
+			clearLinks(l)
 		}
 		if e.PeerID != "" && len(result) == 0 {
 			for i := range l {

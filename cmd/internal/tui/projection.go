@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/rivo/uniseg"
+	"github.com/unreallabsai/unreal-agent/cmd/internal/tui/terminaltext"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -30,7 +31,9 @@ type Entry struct {
 	At               time.Time
 	Sequence         sessionstore.Sequence
 	Clipped          bool
-	Calls            []Receipt
+	// Sanitization must not turn a rejected provider URL into a clickable one.
+	UnsafeLinks bool
+	Calls       []Receipt
 }
 
 func cloneEntries(in []Entry) []Entry {
@@ -64,8 +67,8 @@ func clipBytes(s string, bound int) string {
 func entriesFor(item host.HistoryItem) []Entry {
 	var result []Entry
 	add := func(role, text, code string) {
-		safe := SafeText(text)
-		result = append(result, Entry{Role: role, Text: clipBytes(safe, messageDisplayBytes), Code: code, At: item.RecordedAt, Sequence: item.Sequence, Clipped: len(safe) > messageDisplayBytes})
+		safe := terminaltext.Clean(text)
+		result = append(result, Entry{Role: role, Text: clipBytes(safe, messageDisplayBytes), Code: code, At: item.RecordedAt, Sequence: item.Sequence, Clipped: len(safe) > messageDisplayBytes, UnsafeLinks: safe != text})
 	}
 	switch d := item.Data.(type) {
 	case inbox.Input:
