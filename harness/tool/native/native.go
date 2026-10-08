@@ -99,3 +99,18 @@ func (t translator) TranslateResult(id string, status tool.CallStatus, operation
 	}
 	return llm.ToolResult{CallID: id, Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: text}}}, nil
 }
+
+func (t translator) ResultFailed(status tool.CallStatus, operations []operation.Operation) bool {
+	if status.Error != "" || status.Denial != nil || len(operations) != 1 || operations[0].Denial != nil {
+		return true
+	}
+	state, err := operation.DecodeRemoteJobState(operations[0])
+	if err != nil || state.Plan.Type != files.PlanType || state.Plan.Version != files.Version {
+		return true
+	}
+	var result files.Result
+	if json.Unmarshal(state.Handle, &result) != nil || result.Version != files.Version {
+		return true
+	}
+	return result.Code != "ok" && result.Code != "applied" && result.Code != "binary"
+}

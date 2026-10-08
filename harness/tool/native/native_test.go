@@ -47,3 +47,40 @@ func TestInvalidArgumentsNeverSubmit(t *testing.T) {
 		}
 	}
 }
+
+func TestTypedOutcomeClassifiesNoMatchWithoutChangingOperation(t *testing.T) {
+	translator := New("edit").(tool.ResultFailureClassifier)
+	spec, err := files.Spec(files.Request{Version: files.Version, Action: "read", Path: "fixture.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		code   string
+		failed bool
+	}{{"ok", false}, {"applied", false}, {"binary", false}, {"no_match", true}, {"stale", true}, {"permission_denied", true}, {"unknown", true}} {
+		t.Run(tc.code, func(t *testing.T) {
+			op := operation.Operation{ID: "op", Type: spec.Type, Version: spec.Version, MaxOutputLength: spec.MaxOutputLength, Status: operation.StatusCompleted, State: spec.State}
+			state, err := operation.DecodeRemoteJobState(op)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state.Handle = files.EncodeResult(files.Result{Version: files.Version, Code: tc.code})
+			state.TerminalResult = tc.code
+			step, err := operation.UpdateRemoteJob(op, state, operation.StatusCompleted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, _ := json.Marshal(step.Operation)
+			if failed := translator.ResultFailed(tool.CallStatus{}, []operation.Operation{*step.Operation}); failed != tc.failed {
+				t.Fatal("typed outcome mismatch", failed)
+			}
+			after, _ := json.Marshal(step.Operation)
+			if string(before) != string(after) || step.Operation.Status != operation.StatusCompleted {
+				t.Fatal("outcome classifier mutated canonical Operation")
+			}
+		})
+	}
+	if !translator.ResultFailed(tool.CallStatus{}, nil) {
+		t.Fatal("missing typed receipt reported success")
+	}
+}
