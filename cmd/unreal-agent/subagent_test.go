@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -45,17 +46,26 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 		t.Fatalf("build: %v\n%s", err, data)
 	}
 	for _, scenario := range []struct {
-		present bool
-		control string
-	}{{true, ""}, {false, ""}, {true, "steer"}, {false, "cancel"}} {
+		present   bool
+		control   string
+		provider  string
+		childOnly bool
+	}{{present: true}, {}, {present: true, control: "steer"}, {control: "cancel"}, {present: true, provider: "openai-codex"}, {provider: "openai-codex", childOnly: true}, {present: true, provider: "openai"}} {
 		present := scenario.present
-		t.Run(fmt.Sprintf("present-%t-control-%s", present, scenario.control), func(t *testing.T) {
+		t.Run(fmt.Sprintf("present-%t-control-%s-provider-%s-childOnly-%t", present, scenario.control, scenario.provider, scenario.childOnly), func(t *testing.T) {
 			workspace := t.TempDir()
 			if err := os.Chmod(workspace, 0700); err != nil {
 				t.Fatal(err)
 			}
 			store := filepath.Join(workspace, "sessions")
 			const ruleA = "PROJECT_REVISION_A"
+			const token, account = "child-external-token-sensitive", "child-external-account-sensitive"
+			const managedKey = "child-managed-api-key-sensitive"
+			authPath := filepath.Join(t.TempDir(), "auth file.json")
+			if scenario.childOnly {
+				authPath = filepath.Join(t.TempDir(), "auth.json")
+			}
+			var hostPID atomic.Int64
 			var parentCalls, childCalls atomic.Int32
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				data, err := io.ReadAll(r.Body)
@@ -70,6 +80,17 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 					t.Error(err)
 					return
 				}
+				if scenario.provider == "openai-codex" && (!scenario.childOnly || request.Model == "child") {
+					if r.Header.Get("Authorization") != "Bearer "+token || r.Header.Get("ChatGPT-Account-ID") != account {
+						t.Error("parent/child lost external Codex credentials")
+					}
+					if request.Model == "child" {
+						assertChildCodexSource(t, binary, int(hostPID.Load()), authPath)
+					}
+				} else if scenario.provider == "openai" && r.Header.Get("Authorization") != "Bearer "+managedKey {
+					t.Error("child lost managed API-key credentials")
+				}
+				assertNoCredentialLeak(t, string(data), token, account, managedKey, "unused-external-refresh-secret", "ambient-inline-token-sensitive", "ambient-inline-account-sensitive")
 				var output []any
 				switch request.Model {
 				case "parent":
@@ -106,7 +127,16 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 			}))
 			t.Cleanup(upstream.Close)
 			identity := func(model string) agentrunner.RuntimeIdentity {
-				return agentrunner.RuntimeIdentity{Version: 1, Workspace: workspace, ReasoningEffort: llm.ReasoningEffort("low"), Profile: profile.Default(), Provider: provider.Selection{Version: 1, Provider: "ollama", Model: provider.Model{ID: model}, Endpoint: upstream.URL, Auth: credential.Reference{Method: credential.None}, Source: "test", MaxAttempts: 1}}
+				selected, auth := "ollama", credential.Reference{Method: credential.None}
+				if scenario.provider != "" && (!scenario.childOnly || model == "child") {
+					selected = scenario.provider
+					if selected == "openai-codex" {
+						auth = codexReference()
+					} else {
+						auth = credential.Reference{Provider: selected, Method: credential.APIKey, ID: "primary"}
+					}
+				}
+				return agentrunner.RuntimeIdentity{Version: 1, Workspace: workspace, ReasoningEffort: llm.ReasoningEffort("low"), Profile: profile.Default(), Provider: provider.Selection{Version: 1, Provider: selected, Model: provider.Model{ID: model}, Endpoint: upstream.URL, Auth: auth, Source: "test", MaxAttempts: 1}}
 			}
 			config := serveConfiguration{Runtime: identity("parent"), Permissions: permission.Config{Tools: []string{"SubagentStart", "SubagentSend", "SubagentCancel", "SendParent", "Finish"}, FilesystemUnrestricted: true, NetworkUnrestricted: true, ProcessMode: permission.ProcessUnrestricted}, Subagents: map[string]childTemplate{"worker": {Runtime: identity("child"), Permissions: permission.Config{Tools: []string{"Finish", "SendParent"}, ReadRoots: []string{workspace}, NetworkOrigins: []string{upstream.URL}}}}}
 			data, _ := json.Marshal(config)
@@ -133,11 +163,31 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 			})
 			socket := filepath.Join(socketDirectory, "host.sock")
 			cmd := exec.CommandContext(ctx, binary, "serve", "--config", path, "--session-directory", store, "--socket", socket)
+			if scenario.provider == "openai-codex" {
+				writeCodexAuth(t, authPath, token, account)
+				cmd.Env = append(os.Environ(), "OPENAI_CODEX_ACCESS_TOKEN=ambient-inline-token-sensitive", "OPENAI_CODEX_ACCOUNT_ID=ambient-inline-account-sensitive", "OPENAI_API_KEY=sk-ambient-sensitive", "OPENAI_CODEX_AUTH_FILE=")
+				if scenario.childOnly {
+					cmd.Env = append(cmd.Env, "CODEX_HOME="+filepath.Dir(authPath))
+				} else {
+					cmd.Args = append(cmd.Args, "--codex-auth-file", authPath)
+				}
+			} else if scenario.provider == "openai" {
+				credentialDirectory := filepath.Join(t.TempDir(), "credentials")
+				backend, err := credential.OpenLocal(credentialDirectory)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = credential.NewManager(backend, nil).Login(t.Context(), identity("parent").Provider.Auth, credential.Material{Token: credential.NewSecret(managedKey), Owner: credential.Managed}); err != nil {
+					t.Fatal(err)
+				}
+				cmd.Args = append(cmd.Args, "--credential-directory", credentialDirectory)
+			}
 			var diagnostics bytes.Buffer
 			cmd.Stderr = &diagnostics
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
+			hostPID.Store(int64(cmd.Process.Pid))
 			done := make(chan struct{})
 			var processErr error
 			go func() { processErr = cmd.Wait(); close(done) }()
@@ -148,6 +198,7 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 					if processErr != nil {
 						t.Errorf("CLI exit: %v\n%s", processErr, diagnostics.String())
 					}
+					assertNoCredentialLeak(t, diagnostics.String(), token, account, managedKey, "unused-external-refresh-secret", "ambient-inline-token-sensitive", "ambient-inline-account-sensitive", "sk-ambient-sensitive")
 				case <-time.After(5 * time.Second):
 					cancel()
 					<-done
@@ -371,6 +422,56 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 			if _, e = observer.Steer(ctx, plan.ChildID, "new-control", "too late"); e == nil {
 				t.Fatal("terminal child accepted new viewer input")
 			}
+			assertNoStoredCredentials(t, store, token, account, managedKey, "unused-external-refresh-secret", "ambient-inline-token-sensitive", "ambient-inline-account-sensitive", "sk-ambient-sensitive")
 		})
 	}
+}
+
+// Inspect the running child while its fake provider request is in flight. Linux
+// exposes children per thread, so inspect every Host thread's children list.
+func assertChildCodexSource(t *testing.T, binary string, parentPID int, authPath string) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		return
+	}
+	lists, err := filepath.Glob(fmt.Sprintf("/proc/%d/task/*/children", parentPID))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	for _, list := range lists {
+		data, err := os.ReadFile(list)
+		if err != nil {
+			continue
+		}
+		for _, pid := range strings.Fields(string(data)) {
+			arguments, err := os.ReadFile(filepath.Join("/proc", pid, "cmdline"))
+			if err != nil {
+				continue
+			}
+			args := strings.Split(strings.TrimRight(string(arguments), "\x00"), "\x00")
+			if len(args) < 2 || args[0] != binary || args[1] != "child" {
+				continue
+			}
+			if len(args) != 5 || args[2] != "--stdio" || args[3] != "--codex-auth-file" || args[4] != authPath {
+				t.Error("child did not receive only the explicit Codex auth file path")
+			}
+			environment, err := os.ReadFile(filepath.Join("/proc", pid, "environ"))
+			if err != nil {
+				t.Error("could not inspect child environment")
+				return
+			}
+			entries := strings.Split(strings.TrimRight(string(environment), "\x00"), "\x00")
+			if len(entries) != 2 {
+				t.Error("child environment inherited ambient entries")
+			}
+			for _, entry := range entries {
+				if entry != "PATH=/usr/bin:/bin" && entry != "LANG=C.UTF-8" {
+					t.Error("child environment contains an unauthorized entry")
+				}
+			}
+			return
+		}
+	}
+	t.Error("could not find the running Codex child")
 }

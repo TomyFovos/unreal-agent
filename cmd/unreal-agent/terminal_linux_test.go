@@ -145,7 +145,7 @@ func TestRealTerminalAttachResizePrivateAuthAndDetach(t *testing.T) {
 	send("こんにちは\r")
 	readUntil("terminal-response")
 	send("/login openai terminal\r")
-	readUntil("API key>")
+	readUntil("private: API key for openai/terminal")
 	send("never-display-this-key\r")
 	readUntil("API key stored")
 	if strings.Contains(output.String(), "never-display-this-key") {

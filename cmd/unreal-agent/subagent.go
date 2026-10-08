@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,6 +23,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 	subtool "github.com/unreallabsai/unreal-agent/harness/tool/subagent"
@@ -36,17 +38,46 @@ type childTemplate struct {
 
 func runtimeProviders(identity agentrunner.RuntimeIdentity) (*provider.Registry, error) {
 	selected := identity.Provider
-	return provider.New(provider.Defaults(map[string][]provider.Model{selected.Provider: {selected.Model}})...)
+	models := []provider.Model{selected.Model}
+	if selected.Provider == "claude-code" && identity.ClaudeCode != nil {
+		for _, m := range identity.ClaudeCode.Models {
+			if m.ID == selected.Model.ID {
+				continue
+			}
+			pm := selected.Model
+			pm.ID = m.ID
+			models = append(models, pm)
+		}
+	}
+	return provider.New(provider.Defaults(map[string][]provider.Model{selected.Provider: models})...)
 }
-func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]childTemplate, parentPolicy *permission.Policy, credentialDirectory string) (agentrunner.RuntimeConfig, map[string]subagent.Template, error) {
+func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]childTemplate, parentPolicy *permission.Policy, credentialDirectory, codexAuthFile string) (agentrunner.RuntimeConfig, map[string]subagent.Template, error) {
 	if len(configured) == 0 {
 		return c, nil, nil
+	}
+	if len(c.Backends) == 0 && c.Identity.Provider.Provider == "claude-code" && !c.ProviderSupportsTools("claude-code") {
+		return c, nil, errors.New("subagent: claude-code is text-only; tools unsupported without registered child runtimes")
+	}
+	// Canonical templates stay unchanged; additional provider bindings live in
+	// selected child configurations, so old children retain their exact identity.
+	c.Identity.Provider, _ = c.Providers.Resolve(c.Identity.Provider)
+	for id, p := range c.Backends {
+		var e error
+		p.Provider, e = c.Providers.Resolve(p.Provider)
+		if e != nil {
+			return c, nil, e
+		}
+		c.Backends[id] = p
 	}
 	if len(configured) > 32 {
 		return c, nil, errors.New("subagent: at most 32 templates are supported")
 	}
 	templates := map[string]subagent.Template{}
 	for name, source := range configured {
+		if len(c.Backends) == 0 && source.Runtime.Provider.Provider == "claude-code" && (source.Runtime.ClaudeCode == nil || !source.Runtime.ClaudeCode.ToolBridge.Enabled) {
+			return c, nil, errors.New("subagent: Claude text-only children require registered runtimes and response-based Finish")
+		}
+
 		if strings.TrimSpace(name) == "" || len(name) > 128 {
 			return c, nil, errors.New("subagent: invalid template name")
 		}
@@ -81,6 +112,10 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 		// Reuse the protocol validator for bounded child capabilities, including
 		// required Finish; this creates no Session or process.
 		check := subagent.ChildConfig{Version: 1, ParentID: "validation", OperationID: "validation", ChildID: subagent.ChildID("validation", "validation"), ReadyID: "ready:validation", Task: "validation", Workspace: template.Workspace, SessionDirectory: template.Workspace, Runtime: template.Runtime, Policy: template.Policy}
+		if resolved.Provider.Provider == "claude-code" {
+			check.TextOnly = !sessionstore.ToolBridgeEnabledFromConfiguration(identity)
+			check.ProviderProcess = true
+		}
 		if err = check.Validate(); err != nil {
 			return c, nil, err
 		}
@@ -91,6 +126,25 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 		policy.Close()
 		for _, capability := range template.Policy.Tools {
 			if err = parentPolicy.CheckTool(capability); err != nil {
+				return c, nil, err
+			}
+		}
+		for _, root := range template.Policy.ReadRoots {
+			if err = parentPolicy.CheckPath(root, false); err != nil {
+				return c, nil, err
+			}
+		}
+		for _, root := range template.Policy.WriteRoots {
+			if err = parentPolicy.CheckPath(root, true); err != nil {
+				return c, nil, err
+			}
+		}
+		for _, origin := range template.Policy.NetworkOrigins {
+			u, e := url.Parse(origin)
+			if e != nil {
+				return c, nil, e
+			}
+			if err = parentPolicy.CheckURL(u); err != nil {
 				return c, nil, err
 			}
 		}
@@ -116,9 +170,17 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 		}
 		arguments = append(arguments, "--credential-directory", credentialDirectory)
 	}
+	if codexAuthFile != "" {
+		arguments = append(arguments, "--codex-auth-file", codexAuthFile)
+	}
 	// An explicit nonempty, nonsecret environment prevents os/exec's nil-env
 	// inheritance, including provider tokens, .env overlays and proxy credentials.
-	execution := subagent.Config{Directory: directory, Binary: binary, Arguments: arguments, Environment: []string{"PATH=/usr/bin:/bin", "LANG=C.UTF-8"}, Templates: templates}
+	execution := subagent.Config{Directory: directory, Binary: binary, Arguments: arguments, Environment: childEnvironment(c), Templates: templates, ResolveRuntime: childRuntimeResolver(c), ValidateTemplate: childTemplateValidator(c)}
+	if len(c.Backends) == 0 {
+		execution.ResolveRuntime = nil
+		execution.ValidateTemplate = nil
+	}
+	c.ControlTools = true
 	c.NewTools = withSubagentTools(c.NewTools, execution, c.Identity.DisallowedTools)
 	return c, templates, nil
 }
@@ -131,7 +193,7 @@ func withSubagentTools(base agentrunner.ToolFactory, configuration subagent.Conf
 	}
 	return func(ctx context.Context, c agentrunner.ToolConfig) (agentrunner.Tools, error) {
 		owner, ok := host.SessionFromContext(ctx)
-		if !ok {
+		if !ok && !c.CatalogOnly {
 			return agentrunner.Tools{}, errors.New("subagent: Host owner context required")
 		}
 		configured, err := base(ctx, c)
@@ -149,6 +211,7 @@ func withSubagentTools(base agentrunner.ToolFactory, configuration subagent.Conf
 		if err != nil {
 			return fail(err)
 		}
+		subtool.BindRuntime(extensions, ctx, owner, configuration.ResolveRuntime)
 		for i := range extensions {
 			name := extensions[i].Definition.Tool.Name
 			if slices.Contains(disabled, name) || (name == "SubagentStart" && len(configuration.Templates) == 0) {
@@ -158,6 +221,9 @@ func withSubagentTools(base agentrunner.ToolFactory, configuration subagent.Conf
 		configured.Registry, err = tool.WithExtensions(configured.Registry, extensions)
 		if err != nil {
 			return fail(err)
+		}
+		if c.CatalogOnly {
+			return configured, nil // same schemas, no owner or child manager
 		}
 		execution := configuration
 		execution.Owner = owner
@@ -192,6 +258,7 @@ func runChild(ctx context.Context, args []string, diagnostics io.Writer) error {
 	flags.SetOutput(diagnostics)
 	stdio := flags.Bool("stdio", false, "serve one parent-bound child protocol connection")
 	directory := flags.String("credential-directory", "", "explicit managed credential store, never credential material")
+	codexFile := flags.String("codex-auth-file", "", "explicit existing private Codex auth file path, never credential material")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -208,6 +275,12 @@ func runChild(ctx context.Context, args []string, diagnostics io.Writer) error {
 			return err
 		}
 		resolver = credential.NewManager(store, nil)
+	}
+	if *codexFile != "" {
+		if !filepath.IsAbs(*codexFile) {
+			return errors.New("child Codex auth file path must be absolute")
+		}
+		resolver = withExternalCodexCredentials(resolver, *codexFile)
 	}
 	return subagent.Serve(ctx, os.Stdin, os.Stdout, childFactory(resolver))
 }
@@ -230,10 +303,14 @@ func childFactory(resolver credential.Resolver) subagent.ChildFactory {
 		if err != nil {
 			return nil, nil, err
 		}
-		factory, resolved, err := agentrunner.NewRuntimeFactory(agentrunner.RuntimeConfig{Identity: identity, SessionDirectory: c.SessionDirectory, Providers: registry, Credentials: resolver, NewTools: withSubagentTools(func(ctx context.Context, tools agentrunner.ToolConfig) (agentrunner.Tools, error) {
-			tools.MutationStateDirectory = c.MutationStateDirectory
-			return agentrunner.DefaultTools(ctx, tools, identity.DisallowedTools)
-		}, subagent.Config{Child: &c, SendParent: send}, identity.DisallowedTools)})
+		var tools agentrunner.ToolFactory
+		if !c.TextOnly {
+			tools = withSubagentTools(func(ctx context.Context, tools agentrunner.ToolConfig) (agentrunner.Tools, error) {
+				tools.MutationStateDirectory = c.MutationStateDirectory
+				return agentrunner.DefaultTools(ctx, tools, identity.DisallowedTools)
+			}, subagent.Config{Child: &c, SendParent: send}, identity.DisallowedTools)
+		}
+		factory, resolved, err := agentrunner.NewRuntimeFactory(agentrunner.RuntimeConfig{Identity: identity, SessionDirectory: c.SessionDirectory, Providers: registry, Credentials: resolver, NewTools: tools, ProviderProcess: c.ProviderProcess, TaskInput: c.InitialInput().ID})
 		if err != nil {
 			return nil, nil, err
 		}
@@ -266,7 +343,7 @@ func childFactory(resolver credential.Resolver) subagent.ChildFactory {
 		if c.ProjectInstructions != nil {
 			snapshot = *c.ProjectInstructions
 		}
-		current, err := owner.Open(ctx, host.Options{ProjectInstructions: &snapshot, Workspace: c.Workspace, ID: c.ChildID, Lifecycle: "child", Policy: policy, Configuration: configuration, Initial: []inbox.Input{c.InitialInput()}, Heartbeat: 0})
+		current, err := owner.Open(ctx, host.Options{TextOnlyChild: c.TextOnly, ProjectInstructions: &snapshot, Workspace: c.Workspace, ID: c.ChildID, Lifecycle: "child", Policy: policy, Configuration: configuration, Initial: []inbox.Input{c.InitialInput()}, Heartbeat: 0})
 		if err != nil {
 			closeOwner.Close()
 			return nil, nil, err
@@ -278,3 +355,19 @@ func childFactory(resolver credential.Resolver) subagent.ChildFactory {
 type closeFunc func() error
 
 func (f closeFunc) Close() error { return f() }
+
+// Only nonsecret account source locations cross the restricted process boundary.
+// API keys, OAuth tokens, proxy credentials and parent OTEL settings do not.
+func childEnvironment(c agentrunner.RuntimeConfig) []string {
+	env := []string{"PATH=/usr/bin:/bin", "LANG=C.UTF-8"}
+	if c.Identity.Provider.Provider != "claude-code" && c.Backends["claude-code"].Provider.Provider == "" {
+		return env
+	}
+	if home, e := os.UserHomeDir(); e == nil && filepath.IsAbs(home) && !strings.ContainsAny(home, "\x00\r\n") {
+		env = append(env, "HOME="+home)
+	}
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); filepath.IsAbs(dir) && !strings.ContainsAny(dir, "\x00\r\n") {
+		env = append(env, "CLAUDE_CONFIG_DIR="+dir)
+	}
+	return env
+}
