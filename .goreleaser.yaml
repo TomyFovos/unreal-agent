@@ -1,0 +1,73 @@
+# Fork-local snapshots only. Publishing is deliberately not configured.
+version: 2
+project_name: unreal-agent
+# GoReleaser does not template this field. The wrapper changes only this path
+# in a private copy of the configuration for each independently reserved run.
+dist: dist/snapshot-direct
+
+env:
+  - CGO_ENABLED=1
+  - GOAMD64=v1
+
+before:
+  hooks:
+    - python3 scripts/snapshot.py prepare --snapshot={{ .IsSnapshot }} --version={{ .Version }} --commit={{ .FullCommit }} --date={{ .Date }}
+
+builds:
+  # argv[0] selects the normal launcher. This is the same Host executable,
+  # built under both names, not a separate TUI or a replacement Host CLI.
+  - id: launcher
+    main: ./cmd/unreal-agent
+    binary: unreal
+    goos: [linux]
+    goarch: [amd64]
+    flags: [-mod=readonly, -trimpath, -buildvcs=true]
+    ldflags: [-s -w]
+  - id: host
+    main: ./cmd/unreal-agent
+    binary: unreal-agent
+    goos: [linux]
+    goarch: [amd64]
+    flags: [-mod=readonly, -trimpath, -buildvcs=true]
+    ldflags: [-s -w]
+  - id: runner
+    main: ./cmd/unreal-agent-runner
+    binary: unreal-agent-runner
+    goos: [linux]
+    goarch: [amd64]
+    flags: [-mod=readonly, -trimpath, -buildvcs=true]
+    ldflags: [-s -w]
+  - id: auth
+    main: ./cmd/unreal-agent-auth
+    binary: unreal-agent-auth
+    goos: [linux]
+    goarch: [amd64]
+    flags: [-mod=readonly, -trimpath, -buildvcs=true]
+    ldflags: [-s -w]
+
+archives:
+  - id: snapshot
+    ids: [launcher, host, runner, auth]
+    formats: [tar.gz]
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    files:
+      - LICENSE
+      - src: '{{ .Env.UNREAL_SNAPSHOT_ROOT }}/package/SNAPSHOT.json'
+        dst: .
+        strip_parent: true
+      - src: docs/distribution.md
+        dst: docs
+        strip_parent: true
+
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+
+snapshot:
+  version_template: '{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}'
+
+changelog:
+  disable: true
+
+release:
+  disable: true

@@ -1,4 +1,12 @@
-.PHONY: build test check test-claude-structured-unit test-claude-structured
+.PHONY: build test check test-claude-structured-unit test-claude-structured snapshot test-snapshot
+
+GORELEASER ?= goreleaser
+
+snapshot:
+	python3 scripts/snapshot.py build --goreleaser "$(GORELEASER)"
+
+test-snapshot:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_snapshot.py'
 
 build:
 	go build -trimpath -o bin/unreal-agent ./cmd/unreal-agent
