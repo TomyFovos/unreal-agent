@@ -49,12 +49,40 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 	s.progressEpoch++
 	epoch := s.progressEpoch
 	turn := s.currentTurn()
+	origin := turn
 	s.progress = &Progress{TurnID: turn, Epoch: epoch, Mode: "completed_response"}
 	s.broadcast(Event{Kind: "progress", Progress: s.progress})
 	s.mu.Unlock()
 	lastBroadcast := time.Time{}
 	done := false // accessed only with s.mu
 	prior := o.Progress
+	if tools := o.Tools; tools != nil {
+		o.Tools = func(callCtx context.Context, public llm.Response) ([]llm.ToolOutcome, error) {
+			outcomes, err := tools(callCtx, public)
+			if err != nil {
+				return outcomes, err
+			}
+			s.mu.Lock()
+			// The Coordinator has committed a continuation before returning its
+			// canonical receipts. Start a new ephemeral display epoch for that
+			// turn; never keep an old draft alive after its response is durable.
+			if !done && ctx.Err() == nil && s.running && s.progressEpoch == epoch {
+				for i := len(s.items) - 1; i >= 0; i-- {
+					if next, ok := s.items[i].Data.(session.Turn); ok {
+						if next.ToolContinuation == origin {
+							s.progressEpoch++
+							epoch, turn = s.progressEpoch, next.ID
+							s.progress = &Progress{TurnID: turn, Epoch: epoch, Mode: "completed_response"}
+							s.broadcast(Event{Kind: "progress", Progress: s.progress})
+						}
+						break
+					}
+				}
+			}
+			s.mu.Unlock()
+			return outcomes, nil
+		}
+	}
 	o.Progress = func(p llm.Progress) {
 		s.mu.Lock()
 		if !done && ctx.Err() == nil && s.running && s.currentTurn() == turn && s.progress != nil && s.progress.Epoch == epoch {

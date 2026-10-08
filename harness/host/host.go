@@ -16,6 +16,7 @@ import (
 	"uuid"
 
 	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/coordinator"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -35,10 +36,15 @@ var (
 )
 
 type Runtime struct {
-	Builder    contextbuilder.Builder
-	LLM        llm.Adapter
-	Tools      tool.Registry
-	Operations operation.Manager
+	ContextEngine     *contextengine.Engine
+	ContextCache      *contextengine.Cache
+	Selection         *sessionstore.RuntimeSelection
+	ApplySelection    func(sessionstore.RuntimeSelection) error
+	ValidateSelection func(sessionstore.RuntimeSelection) error
+	Builder           contextbuilder.Builder
+	LLM               llm.Adapter
+	Tools             tool.Registry
+	Operations        operation.Manager
 	// Close must cancel/drain its own handlers; it must not wait for Session.Wait.
 	// Normal completion calls it before the session context is canceled.
 	Close func() error
@@ -57,6 +63,7 @@ const (
 )
 
 type Options struct {
+	TextOnlyChild bool
 	// Policy is an explicit immutable execution capability set. Nil denies all.
 	// Its owner closes it after Host execution has stopped.
 	Policy *permission.Policy
@@ -123,7 +130,8 @@ type Event struct {
 	Operation  *operation.Operation `json:",omitzero"`
 }
 type View struct {
-	Progress   *Progress `json:",omitzero"`
+	Context    *contextengine.Diagnostics `json:",omitzero"`
+	Progress   *Progress                  `json:",omitzero"`
 	Session    sessionstore.Snapshot
 	Generation string
 	Revision   uint64
@@ -160,6 +168,7 @@ type Session struct {
 	subscribers       map[uint64]chan Event
 	nextSubscriber    uint64
 	progress          *Progress
+	contextReport     *contextengine.Diagnostics
 	instructions      *projectinstructions.Metadata
 	boundInstructions *projectinstructions.Snapshot
 	progressEpoch     uint64
@@ -167,6 +176,8 @@ type Session struct {
 	done              chan struct{}
 	running           bool
 	err               error
+	selection         *sessionstore.RuntimeSelection
+	pendingSelection  *sessionstore.RuntimeSelection
 }
 
 func New(ctx context.Context, c Config) (*Host, error) {
@@ -274,6 +285,9 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		after = page.NextAfter
 	}
 	ops, e := raw.Operations(ctx, o.ID)
+	if err = s.verifyRuntimeSelections(); err != nil {
+		return nil, err
+	}
 	if e != nil {
 		return nil, e
 	}
@@ -309,6 +323,9 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	if s.runtime.Builder == nil || s.runtime.LLM == nil || s.runtime.Tools == nil || s.runtime.Operations == nil {
 		return nil, fmt.Errorf("incomplete session runtime")
 	}
+	if s.selection == nil {
+		s.selection = s.runtime.Selection
+	}
 	s.runtime.LLM = s.withProgress(s.runtime.LLM)
 	if o.Lifecycle == "" {
 		o.Lifecycle = "interactive"
@@ -332,8 +349,29 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	}
 	pending := s.pendingStop()
 	dependencies := coordinator.Dependencies{SessionID: o.ID, Inbox: s.inbox, Restored: restored,
-		Sessions: &serializedStore{s}, ContextBuilder: s.runtime.Builder, LLM: s.runtime.LLM, Tools: s.runtime.Tools,
+		ContextBuilt: s.contextBuilt,
+		BeforeTurn:   s.beginTurn,
+		Sessions:     &serializedStore{s}, ContextBuilder: s.runtime.Builder, LLM: s.runtime.LLM, Tools: s.runtime.Tools,
 		Finished: func() bool { return s.Finish() != nil }, Operations: s.runtime.Operations, ToolHeartbeatInterval: o.Heartbeat, RestoredStop: pending, InitialInputs: initial}
+	if o.TextOnlyChild {
+		if o.Lifecycle != "child" {
+			return nil, fmt.Errorf("text completion requires child lifecycle")
+		}
+		dependencies.AfterResponse = s.commitTextFinish
+		// Recover a crash between durable response and completion, without
+		// replaying inference or fabricating a Finish tool operation.
+		for i := len(s.items) - 1; i >= 0; i-- {
+			if s.items[i].Kind == sessionstore.ItemFork {
+				break
+			}
+			if r, ok := s.items[i].Data.(sessionstore.ModelResponse); ok {
+				if err = s.commitTextFinish(ctx, r.TurnID); err != nil {
+					return nil, err
+				}
+				break
+			}
+		}
+	}
 	h.sessions[o.ID] = s
 	go func() {
 		runErr := coordinator.New(dependencies).Run(cctx)
@@ -514,7 +552,7 @@ func (s *Session) view(after sessionstore.Sequence, limit int) (View, error) {
 		return View{}, fmt.Errorf("history cursor beyond session")
 	}
 	end := min(int(after)+limit, len(s.items))
-	v := View{Progress: s.progress, ProjectInstructions: s.instructions, Session: s.snapshot, Generation: s.Generation, Revision: s.revision, Running: s.running,
+	v := View{Context: s.contextReport, Progress: s.progress, ProjectInstructions: s.instructions, Session: s.snapshot, Generation: s.Generation, Revision: s.revision, Running: s.running,
 		History: ProjectHistoryPage(sessionstore.Page{Items: s.items[int(after):end], NextAfter: sessionstore.Sequence(end), More: end < len(s.items)})}
 	if s.err != nil {
 		v.Failure = s.err.Error()
@@ -592,15 +630,37 @@ func (s *Session) rememberItem(item sessionstore.Item, notify bool) {
 	if item.Kind == sessionstore.ItemFork {
 		clear(s.operations)
 		s.finish = nil
+		s.selection = nil
+		s.pendingSelection = nil
 	}
 	if item.Kind == sessionstore.ItemHostRecord {
 		r := item.Data.(sessionstore.HostRecord)
+		if r.Kind == "configuration" && s.selection == nil {
+			s.selection = sessionstore.SelectionFromConfiguration(r.Configuration)
+		}
 		if r.Kind == "finish" {
 			s.finish = r.Finish
+		}
+		if r.Kind == sessionstore.HostRuntimeSelection {
+			s.pendingSelection = r.Selection
+		}
+		if r.Kind == sessionstore.HostRuntimeApplied {
+			s.selection = r.Selection
+			if s.pendingSelection != nil && s.pendingSelection.Revision <= r.Selection.Revision {
+				s.pendingSelection = nil
+			}
 		}
 	}
 	if item.Kind == sessionstore.ItemInput {
 		input, err := canonical(item.Data.(inbox.Input))
+		// Existing durable settings controls remain authoritative. Their order
+		// relative to a runtime activation determines the effective effort, on
+		// replay as well as during a live run.
+		if control, e := input.DecodeControlMessage(); e == nil && control.Mode == inbox.UpdateSettings && s.selection != nil {
+			choice := *s.selection
+			choice.Effort = control.Parameters.(inbox.Settings).ReasoningEffort
+			s.selection = &choice
+		}
 		if op, e := sessionstore.DecodeOperationIntent(input); e == nil {
 			s.operations[op.ID] = op
 		}

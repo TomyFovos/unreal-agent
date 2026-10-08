@@ -101,3 +101,30 @@ func TestCanceledOldInvocationCannotReplaceNewProgress(t *testing.T) {
 		t.Fatal("late scheduling overwrote current progress")
 	}
 }
+
+func TestProgressToolContinuationGetsItsOwnEphemeralEpoch(t *testing.T) {
+	s := progressSession()
+	a := s.withProgress(modelFunc(func(ctx context.Context, _ llm.Request, o llm.RequestOptions) (llm.Response, error) {
+		o.Progress(llm.Progress{Attempt: 1, Delta: "old draft"})
+		first, _ := s.Inspect(0, 1)
+		if _, err := o.Tools(ctx, llm.Response{}); err != nil {
+			t.Fatal(err)
+		}
+		o.Progress(llm.Progress{Attempt: 1, Delta: "new draft"})
+		v, _ := s.Inspect(0, 10)
+		if v.Progress == nil || v.Progress.TurnID != "turn2" || v.Progress.Epoch <= first.Progress.Epoch || v.Progress.Text != "new draft" {
+			t.Fatal("continuation dropped streaming or retained a canonicalized draft", v.Progress)
+		}
+		return llm.Response{}, nil
+	}))
+	_, err := a.Respond(t.Context(), llm.Request{}, llm.RequestOptions{Tools: func(context.Context, llm.Response) ([]llm.ToolOutcome, error) {
+		s.mu.Lock()
+		s.rememberItem(sessionstore.Item{Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{TurnID: "turn1"}}, false)
+		s.rememberItem(sessionstore.Item{Kind: sessionstore.ItemTurn, Data: session.Turn{ID: "turn2", PreviousTurnID: "turn1", ToolContinuation: "turn1"}}, false)
+		s.mu.Unlock()
+		return nil, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

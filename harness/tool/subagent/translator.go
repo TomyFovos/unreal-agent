@@ -3,8 +3,10 @@
 package subagent
 
 import (
+	"context"
 	"encoding/json/v2"
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
@@ -17,6 +19,26 @@ type translator struct {
 	action    string
 	owner     session.ID
 	templates map[string]runtime.Template
+	resolve   func(runtime.Template, *runtime.RuntimeRequest) (runtime.Template, error)
+}
+
+// BindRuntime adds optional, provider-neutral runtime arguments. Translation is
+// still inert: only the existing Operation Manager executes the resulting plan.
+func BindRuntime(extensions []tool.Extension, ctx context.Context, owner *host.Session, resolve runtime.RuntimeResolver) {
+	if resolve == nil {
+		return
+	}
+	for i := range extensions {
+		t, ok := extensions[i].Translator.(*translator)
+		if !ok || t.action != "start" {
+			continue
+		}
+		t.resolve = func(base runtime.Template, r *runtime.RuntimeRequest) (runtime.Template, error) {
+			return resolve(ctx, owner, base, r)
+		}
+		params := extensions[i].Definition.Tool.Parameters
+		params["properties"].(map[string]any)["runtime"] = map[string]any{"type": "object", "properties": map[string]any{"provider": map[string]any{"type": "string"}, "model": map[string]any{"type": "string"}, "effort": map[string]any{"type": "string"}}, "required": []string{"provider", "model", "effort"}, "additionalProperties": false}
+	}
 }
 
 // Extensions returns codecs for all five tools; child mode advertises only
@@ -44,21 +66,22 @@ func Extensions(owner session.ID, templates map[string]runtime.Template, child b
 	}
 	var result []tool.Extension
 	for _, d := range definitions {
-		result = append(result, tool.Extension{Definition: tool.Definition{Tool: llm.Tool{Type: llm.ToolFunction, Name: d.name, Description: d.description, Parameters: map[string]any{"type": "object", "properties": d.properties, "required": d.required, "additionalProperties": false}}}, Translator: &translator{d.action, owner, copied}, Enabled: d.isChild == child})
+		result = append(result, tool.Extension{Definition: tool.Definition{Tool: llm.Tool{Type: llm.ToolFunction, Name: d.name, Description: d.description, Parameters: map[string]any{"type": "object", "properties": d.properties, "required": d.required, "additionalProperties": false}}}, Translator: &translator{action: d.action, owner: owner, templates: copied}, Enabled: d.isChild == child})
 	}
 	return result, nil
 }
 func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallStatus {
 	var args struct {
-		Template     string       `json:"template"`
-		Task         string       `json:"task"`
-		Handle       operation.ID `json:"handle"`
-		Text         string       `json:"text"`
-		Status       string       `json:"status"`
-		Summary      string       `json:"summary"`
-		ChangedFiles []string     `json:"changedFiles"`
-		Tests        []string     `json:"tests"`
-		Blockers     []string     `json:"blockers"`
+		Template     string                  `json:"template"`
+		Task         string                  `json:"task"`
+		Handle       operation.ID            `json:"handle"`
+		Text         string                  `json:"text"`
+		Status       string                  `json:"status"`
+		Summary      string                  `json:"summary"`
+		ChangedFiles []string                `json:"changedFiles"`
+		Tests        []string                `json:"tests"`
+		Blockers     []string                `json:"blockers"`
+		Runtime      *runtime.RuntimeRequest `json:"runtime"`
 	}
 	if err := json.Unmarshal([]byte(call.Arguments), &args, json.RejectUnknownMembers(true)); err != nil {
 		return tool.ErrorStatus("Invalid subagent arguments", 0)
@@ -70,6 +93,16 @@ func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallSta
 			return tool.ErrorStatus("Unknown child template", 0)
 		}
 		p.Template = args.Template
+		if t.resolve != nil {
+			var e error
+			config, e = t.resolve(config, args.Runtime)
+			if e != nil {
+				return tool.ErrorStatus(e.Error(), 0)
+			}
+			p.RuntimeBound = true
+		} else if args.Runtime != nil {
+			return tool.ErrorStatus("Child runtime selection unsupported", 0)
+		}
 		p.Configuration = &config
 		p.Text = args.Task
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"io/fs"
 	"path/filepath"
 	"sync"
@@ -18,14 +19,16 @@ import (
 )
 
 type Config struct {
-	Owner       *host.Session
-	Directory   string
-	Binary      string
-	Arguments   []string
-	Environment []string
-	Templates   map[string]Template
-	Child       *ChildConfig
-	SendParent  Sender
+	Owner            *host.Session
+	Directory        string
+	Binary           string
+	Arguments        []string
+	Environment      []string
+	Templates        map[string]Template
+	Child            *ChildConfig
+	SendParent       Sender
+	ValidateTemplate func(Template, Template) error
+	ResolveRuntime   RuntimeResolver
 }
 type job struct {
 	operation  operation.Operation
@@ -265,11 +268,23 @@ func (m *Manager) spawn(j *job, p Plan, state *operation.RemoteJobState) (operat
 	allowed, ok := m.config.Templates[p.Template]
 	actual, _ := json.Marshal(p.Configuration)
 	expected, _ := json.Marshal(allowed)
-	if !ok || !sameJSON(actual, expected) {
+	if !ok {
+		return operation.StatusFailed, fmt.Errorf("child template changed")
+	}
+	if p.RuntimeBound && m.config.ValidateTemplate != nil {
+		if err := m.config.ValidateTemplate(allowed, *p.Configuration); err != nil {
+			return operation.StatusFailed, err
+		}
+		allowed = *p.Configuration
+	} else if !sameJSON(actual, expected) {
 		return operation.StatusFailed, fmt.Errorf("child template changed")
 	}
 	snapshot := m.config.Owner.BoundProjectInstructions()
 	child := ChildConfig{MutationStateDirectory: allowed.MutationStateDirectory, ProjectInstructions: snapshot, Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: j.operation.ID, SessionDirectory: m.config.Directory, Workspace: allowed.Workspace, Runtime: allowed.Runtime, Policy: allowed.Policy, ReadyID: inbox.ID("ready:" + string(j.operation.ID)), Task: p.Text}
+	if s := sessionstore.SelectionFromConfiguration(allowed.Runtime); s != nil && s.Provider == "claude-code" {
+		child.TextOnly = !sessionstore.ToolBridgeEnabledFromConfiguration(child.Runtime)
+		child.ProviderProcess = true
+	}
 	if err := child.Validate(); err != nil {
 		return operation.StatusFailed, err
 	}

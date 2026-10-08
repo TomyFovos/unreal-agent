@@ -41,6 +41,7 @@ type Plan struct {
 	Handle        operation.ID               `json:",omitzero"`
 	Text          string                     `json:",omitzero"`
 	Result        *sessionstore.FinishResult `json:",omitzero"`
+	RuntimeBound  bool                       `json:",omitzero"`
 }
 type ChildConfig struct {
 	Version                uint32
@@ -55,6 +56,10 @@ type ChildConfig struct {
 	Task                   string
 	MutationStateDirectory string                        `json:",omitzero"`
 	ProjectInstructions    *projectinstructions.Snapshot `json:",omitzero"`
+	// A text-only child completes from a canonical model response, without a
+	// synthetic tool call. ProviderProcess authorizes only its isolated CLI.
+	TextOnly        bool `json:",omitzero"`
+	ProviderProcess bool `json:",omitzero"`
 }
 type Handle struct {
 	Version     uint32
@@ -166,8 +171,17 @@ func (c ChildConfig) Validate() error {
 			canFinish = true
 		}
 	}
-	if !canFinish {
+	if !canFinish && !c.TextOnly {
 		return fmt.Errorf("child policy must enable Finish")
+	}
+	if c.TextOnly || c.ProviderProcess {
+		s := sessionstore.SelectionFromConfiguration(c.Runtime)
+		if s == nil || s.Provider != "claude-code" || !c.ProviderProcess {
+			return fmt.Errorf("invalid text-only child transport")
+		}
+		if c.TextOnly == sessionstore.ToolBridgeEnabledFromConfiguration(c.Runtime) {
+			return fmt.Errorf("child transport capability disagrees with runtime")
+		}
 	}
 	if c.Policy.ProcessMode != permission.ProcessDenied || c.Policy.FilesystemUnrestricted || c.Policy.NetworkUnrestricted {
 		return &permission.Error{Code: permission.Unsupported, Capability: "child process", Reason: "bounded child executors required"}
