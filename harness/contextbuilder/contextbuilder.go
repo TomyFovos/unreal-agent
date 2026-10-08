@@ -2,6 +2,7 @@
 package contextbuilder
 
 import (
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
@@ -23,11 +24,13 @@ type Change struct {
 
 type Report struct {
 	Changes []Change
+	Context *contextengine.Diagnostics `json:",omitzero"`
 }
 
 type Result struct {
 	Request llm.Request
 	Report  Report
+	Package *contextengine.Package `json:"-"`
 }
 
 // Builder retains model request state without performing I/O.
