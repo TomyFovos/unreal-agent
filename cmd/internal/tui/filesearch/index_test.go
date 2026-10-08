@@ -223,7 +223,7 @@ func TestScanAndSearchCancellationDiscardPartialResults(t *testing.T) {
 
 func TestSafeNamesRejectTerminalControlsAndBidiPreserveGraphemes(t *testing.T) {
 	root := t.TempDir()
-	for _, name := range []string{"猫👩🏽‍💻é.md", "space file", "quote\"file", "back\\slash", "unsafe\x1b[31m", "unsafe\nfile", "unsafe\u202efile", string([]byte{0xff})} {
+	for _, name := range []string{"猫👩🏽‍💻é.md", "space file", "quote\"file", "back\\slash", "unsafe\x1b[31m", "unsafe\nfile", "unsafe\u202efile"} {
 		fixtureFile(t, root, name, "data")
 	}
 	r, err := Scan(context.Background(), root, DefaultLimits())
@@ -233,6 +233,16 @@ func TestSafeNamesRejectTerminalControlsAndBidiPreserveGraphemes(t *testing.T) {
 	for _, name := range r.Index.files {
 		if !SafePath(name) {
 			t.Fatal(name)
+		}
+	}
+}
+
+func TestSafePathRejectsInvalidUTF8WithoutFilesystemSupport(t *testing.T) {
+	// APFS refuses these names before Scan can see them. The pure path boundary
+	// must still reject invalid bytes on every OS, including when no file exists.
+	for _, name := range []string{string([]byte{0xff}), "dir/" + string([]byte{0xc3, 0x28}), "file" + string([]byte{0xe2, 0x82})} {
+		if SafePath(name) || Eligible(t.TempDir(), name) {
+			t.Fatal("invalid UTF-8 accepted as a file candidate")
 		}
 	}
 }
