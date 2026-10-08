@@ -17,6 +17,7 @@ type HostRecord struct {
 	Finish              *FinishRecord                 `json:",omitzero"`
 	Inputs              []inbox.ID                    `json:",omitzero"`
 	ProjectInstructions *projectinstructions.Snapshot `json:",omitzero"`
+	Selection           *RuntimeSelection             `json:",omitzero"`
 }
 
 const HostProjectInstructions = "project_instructions"
@@ -30,7 +31,15 @@ func (r HostRecord) Validate() error {
 	if r.Kind != HostProjectInstructions && r.ProjectInstructions != nil {
 		return fmt.Errorf("host record %q carries project instructions", r.Kind)
 	}
+	if r.Kind != HostRuntimeSelection && r.Kind != HostRuntimeApplied && r.Selection != nil {
+		return fmt.Errorf("unexpected runtime selection")
+	}
 	switch r.Kind {
+	case HostRuntimeSelection, HostRuntimeApplied:
+		if r.Selection == nil || r.Selection.Revision == 0 || r.Selection.RequestID == "" || len(r.Configuration) != 0 || r.Finish != nil || len(r.Inputs) != 0 || r.ProjectInstructions != nil {
+			return fmt.Errorf("invalid runtime selection record")
+		}
+		return r.Selection.Validate()
 	case HostProjectInstructions:
 		if r.ProjectInstructions == nil || len(r.Configuration) != 0 || len(r.Inputs) != 0 || r.Finish != nil {
 			return fmt.Errorf("invalid project instructions record")

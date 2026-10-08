@@ -28,6 +28,13 @@ type ResultTranslator interface {
 	TranslateResult(string, CallStatus, []operation.Operation) (llm.ToolResult, error)
 }
 
+// ResultFailureClassifier optionally interprets a tool's typed terminal receipt.
+// A completed Operation may still report unsuccessful work (for example an edit
+// with no matching text). This derived observation does not rewrite its status.
+type ResultFailureClassifier interface {
+	ResultFailed(CallStatus, []operation.Operation) bool
+}
+
 type Translator interface {
 	ResultTranslator
 	Translate(Context, llm.ToolCall) CallStatus

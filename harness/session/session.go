@@ -23,4 +23,10 @@ type Turn struct {
 	ID             TurnID
 	PreviousTurnID TurnID
 	Type           TurnType
+	// References a canonical runtime selection; zero denotes creation identity.
+	RuntimeRevision uint64 `json:",omitzero"`
+	// A continuation remains inside the original model request. Its input
+	// watermark excludes user inputs queued while that request is executing.
+	ToolContinuation TurnID `json:",omitzero"`
+	InputWatermark   int    `json:",omitzero"`
 }

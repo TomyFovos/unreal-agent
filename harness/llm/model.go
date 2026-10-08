@@ -117,6 +117,7 @@ const (
 
 type Response struct {
 	ID      string
+	Model   string `json:",omitzero"`
 	Stop    StopReason
 	Output  []Item `json:",omitzero"`
 	Usage   Usage
@@ -131,8 +132,21 @@ type Usage struct {
 	CacheWriteInputTokens int64
 	OutputTokens          int64
 	ReasoningTokens       int64
-	Raw                   jsontext.Value `json:",omitzero"`
+	// Unknown marks fields a provider did not report. Their numeric zero is not
+	// a measured zero. Empty preserves the existing adapters' usage contract.
+	Unknown []UsageField   `json:",omitzero"`
+	Raw     jsontext.Value `json:",omitzero"`
 }
+
+type UsageField string
+
+const (
+	UsageInput           UsageField = "input"
+	UsageCachedInput     UsageField = "cached_input"
+	UsageCacheWriteInput UsageField = "cache_write_input"
+	UsageOutput          UsageField = "output"
+	UsageReasoning       UsageField = "reasoning"
+)
 
 type Failure struct {
 	Code    string
