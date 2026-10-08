@@ -102,6 +102,8 @@ func Run(ctx context.Context, c Config) error {
 	var editor Editor
 	defer editor.Clear()
 	u := UIState{cache: &bodyCache{}}
+	files := newFileCompletion(ctx)
+	defer files.close(&u)
 	if c.Theme != nil {
 		u.Theme = *c.Theme
 	}
@@ -196,6 +198,7 @@ func Run(ctx context.Context, c Config) error {
 				u.LegacyPanel = c.Panel(width, height)
 			}
 			s := m.Snapshot()
+			files.sync(s, &u, &editor)
 			streaming := s.Progress != nil && s.Progress.Mode == "streaming" && !s.Progress.Done
 			frame = RenderFrame(s, u, width, height)
 			if c.ViewChanged != nil && frame.View != previousView {
@@ -242,6 +245,11 @@ func Run(ctx context.Context, c Config) error {
 				dirty = true
 			}
 		case <-changes:
+			dirty = true
+		case result := <-files.events:
+			// Revalidate scope/cursor before accepting asynchronous candidates.
+			files.sync(m.Snapshot(), &u, &editor)
+			files.apply(result)
 			dirty = true
 		case _, ok := <-c.Updates:
 			if !ok {
@@ -302,6 +310,10 @@ func Run(ctx context.Context, c Config) error {
 			dirty = true
 			s := m.Snapshot()
 			u.Input, u.Pasted = editor.Text(), editor.Pasted
+			files.sync(s, &u, &editor)
+			if files.key(key, &u, &editor, width, height) {
+				continue
+			}
 			if !key.Paste && u.Private == nil && u.Sheet != nil && u.Sheet.Analysis == "" {
 				if key.Name == "escape" {
 					u.Sheet = nil

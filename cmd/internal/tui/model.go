@@ -49,6 +49,7 @@ type Snapshot struct {
 	PendingSelection   *sessionstore.RuntimeSelection
 	ContextPackage     *contextengine.Diagnostics
 	TurnID             session.TurnID // observed canonical turn, for frontend topology
+	Workspace          string         // immutable Session configuration, for filename completion only
 }
 type Model struct {
 	mu                sync.Mutex
@@ -159,6 +160,7 @@ func (m *Model) apply(v host.View) error {
 		m.analysis.Apply(item)
 		if item.Kind == sessionstore.ItemFork {
 			s.Selection, s.PendingSelection = nil, nil
+			s.Workspace = ""
 		}
 		s.LatestKind, s.LatestAt = item.Kind, item.RecordedAt
 		switch data := item.Data.(type) {
@@ -167,6 +169,7 @@ func (m *Model) apply(v host.View) error {
 		case sessionstore.HostRecord:
 			switch data.Kind {
 			case "configuration":
+				s.Workspace = fileWorkspace(data.Configuration)
 				if s.Selection == nil {
 					s.Selection = sessionstore.SelectionFromConfiguration(data.Configuration)
 				}

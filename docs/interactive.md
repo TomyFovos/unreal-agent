@@ -254,6 +254,47 @@ The existing bounded child policy still applies.
 - PgUp/PgDn scroll the bounded conversation window by a page. Enter submits and returns to live following. The display retains the most recent 1,024 transcript entries, clips each displayed entry at a grapheme boundary to 4 KiB, and leaves full canonical history available through paged Inspect. Multiline pasted input wraps in a composer that follows the editing caret; the Rule shows hidden lines. The hardware cursor marks the editing position.
 - Resize is detected without changing session state. Output is bounded to terminal rows/cells, and provider/tool text cannot inject terminal escapes. Native terminal writes observe cancellation and a two-second deadline. Rendering is independent of the subscription receiver.
 
+## Workspace file selection
+
+Type `@` at the start of a composer token (or after whitespace) to open **Files**.
+Continue typing to fuzzy-search workspace-relative filenames; filename matches
+rank ahead of directory-only matches. Up/Down select, PgUp/PgDn page the picker,
+and Enter or Tab inserts the selected path followed by a space. Escape closes
+the picker without changing the composer. A later Enter submits the completed
+input through the usual message/command classifier. The first Enter used to
+choose a path never submits input or runs a slash command.
+
+Space/quote/backslash-containing paths are quoted; CJK, combining characters
+and emoji remain intact. Use `@"docs/space fi` to search names containing spaces.
+Mentions work in multiline and pasted input; paste itself never confirms a
+candidate. Private input and other modal pickers take precedence. Chat, Split
+and Orchestration use the same composer/picker. At fewer than 20 columns or
+8 rows, confirmation waits for a larger terminal; Escape/Ctrl-D still work.
+
+The root comes from the Session's immutable canonical workspace, including on
+attach/resume; it never falls back to the attaching terminal's current directory.
+Only regular files are indexed. All symlinks (including links inside the
+workspace), VCS/private credential directories, common credential/key files,
+`.env`/`.env.*` and unsafe terminal/bidi filenames are excluded. Nested
+`.gitignore`, `.ignore` and the root `.git/info/exclude` apply with ordered
+negation, anchoring, directory patterns and `**`; ignored directories are not
+traversed. Invalid, oversized, unreadable or symlinked ignore files cause that
+subtree to be omitted. Global Git excludes outside the workspace are not read.
+
+Scanning is asynchronous and bounded to 10,000 files, 20,000 directory entries,
+32 directory levels, 4 KiB paths and a one-second cooperative deadline. Ignore
+metadata is limited to 64 KiB per file, 512 KiB total and 4,096 rules. Searches
+accept up to 256 UTF-8 query bytes, return at most 32 candidates, and have a
+250 ms cooperative deadline. Partial scans are identified in the picker.
+Escape, scope/connection changes and detach cancel workers; generation/query
+IDs discard stale responses. Reopening scans afresh. Candidate insertion
+rechecks that the path is still a regular, non-symlink workspace file.
+
+The index reads filenames and bounded ignore metadata, never source file
+contents. Inserting a path creates no ToolCall, Operation, receipt, model call
+or Bash execution, and grants no permission. Subsequent model/tool requests
+retain the existing Registry/Permission/Operation boundary.
+
 ## Live Dock presentation
 
 The terminal implements **C. Live Dock** from

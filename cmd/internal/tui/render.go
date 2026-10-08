@@ -534,6 +534,9 @@ func rule(u UIState, l layout, overflow int, label string) line {
 	switch {
 	case u.Picker != nil:
 		value = "selection; Esc back/cancel"
+		if u.Picker.Kind == "file" {
+			value = "files; Enter/Tab inserts path; Esc closes"
+		}
 	case u.Sheet != nil && u.Sheet.Analysis != "":
 		value = "PgUp/PgDn scroll  Esc/Enter back  ^D detach"
 	case u.Private != nil:
@@ -584,6 +587,9 @@ func keybar(s Snapshot, u UIState, l layout, label string) line {
 		}
 		if u.Picker.Kind == "view" {
 			value = u.Theme.symbol("↑↓", "up/down") + " select  " + enter + " apply  Esc cancel  ^D detach"
+		}
+		if u.Picker.Kind == "file" {
+			value = u.Theme.symbol("↑↓", "up/down") + " select  Enter/Tab insert  Esc close  ^D detach"
 		}
 	case u.Sheet != nil && u.Sheet.Analysis != "":
 		value = "PgUp/PgDn scroll  Esc/Enter back  ^D detach"
