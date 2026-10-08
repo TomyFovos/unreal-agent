@@ -45,6 +45,13 @@ func Terminal(ctx context.Context, c Config) error {
 				return
 			}
 			if ready == 0 {
+				for _, key := range decoder.FlushEscape() {
+					select {
+					case keys <- key:
+					case <-ctx.Done():
+						return
+					}
+				}
 				continue
 			}
 			n, err := unix.Read(fd, buffer)
@@ -66,6 +73,10 @@ func Terminal(ctx context.Context, c Config) error {
 	}()
 	defer func() { cancel(); <-done }()
 	c.Keys = keys
+	if c.Theme == nil {
+		theme := EnvironmentTheme(os.Getenv)
+		c.Theme = &theme
+	}
 	c.Output = terminalWriter{ctx: ctx, fd: fd}
 	c.Size = func() (int, int) {
 		w, h, e := term.GetSize(fd)
@@ -74,7 +85,7 @@ func Terminal(ctx context.Context, c Config) error {
 		}
 		return w, h
 	}
-	if _, err = c.Output.Write([]byte("\x1b[?1049h\x1b[?25l\x1b[?2004h")); err != nil {
+	if _, err = c.Output.Write([]byte("\x1b[?1049h\x1b[?2004h")); err != nil {
 		return err
 	}
 	defer func() {

@@ -57,7 +57,7 @@ func TestUnicodeEditingFragmentedPasteResizeAndTerminalEscapes(t *testing.T) {
 	if !e.Pasted || e.Text() != "/stop\n猫" {
 		t.Fatal(e.Text())
 	}
-	raw := "]52;c;secret猫👩🏽‍💻é" // model data cannot execute terminal clipboard commands
+	raw := "]52;c;secret猫👩🏽‍💻é" // model data cannot execute terminal control commands
 	for width := 1; width < 15; width++ {
 		for _, line := range Wrap(raw, width) {
 			if strings.ContainsAny(line, "") || !utf8.ValidString(line) || uniseg.StringWidth(line) > width {
@@ -73,8 +73,8 @@ func TestUnicodeEditingFragmentedPasteResizeAndTerminalEscapes(t *testing.T) {
 		if !utf8.ValidString(frame) {
 			t.Fatal("invalid rendering")
 		}
-		if !strings.HasPrefix(frame, "\x1b[H\x1b[2J") {
-			t.Fatal("missing frame prefix")
+		if !strings.HasPrefix(frame, "\x1b[H") || strings.Contains(frame, "\x1b[2J") {
+			t.Fatal("frame must address home without clearing the screen")
 		}
 	}
 }
@@ -188,25 +188,34 @@ func TestPrivateAuthCancelAndSubmitRetryUseSeparateChannels(t *testing.T) {
 	f := newFake()
 	f.failSubmit = true
 	keys := make(chan Key, 64)
-	out := &capture{}
+	out := &screenObserver{}
 	done := make(chan error, 1)
 	go func() { done <- Run(t.Context(), Config{Client: f, ID: "s", Keys: keys, Output: out}) }()
-	waitFor(t, func() bool { return strings.Contains(out.String(), "connected") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "connected") })
 	command := func(s string) { keys <- Key{Text: s}; keys <- Key{Name: "enter"} }
 	command("/login openai key")
-	waitFor(t, func() bool { return strings.Contains(out.String(), "API key>") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "private: API key for openai/key") })
 	keys <- Key{Text: "canceled-secret"}
 	keys <- Key{Name: "cancel"}
-	waitFor(t, func() bool { return strings.Contains(out.String(), "login canceled") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "key entry canceled") })
 	command("/login openai key")
 	keys <- Key{Text: "private-value"}
 	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool { return strings.Contains(out.String(), "API key stored") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "API key stored") })
 	command("hello")
-	waitFor(t, func() bool { return strings.Contains(out.String(), "same input ID") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "same input ID") })
 	command("/retry")
 	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.inputs) == 2 })
-	waitFor(t, func() bool { return strings.Contains(out.String(), "input committed") })
+	waitFor(t, func() bool {
+		// Submit reaching the fake does not mean Run has consumed its result.
+		// Old output may still contain an earlier idle keybar; require the
+		// current screen to leave both the command menu and pending request.
+		value := out.text()
+		return strings.Contains(value, "you › Ask, or type / for commands") && strings.Contains(value, "^C stop session") && !strings.Contains(value, "^C cancel waiting")
+	})
+	if strings.Contains(out.rawText(), "input committed") {
+		t.Fatal("ACK must not become a display notification")
+	}
 	keys <- Key{Name: "cancel"}
 	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.inputs) == 3 })
 	keys <- Key{Name: "detach"}
@@ -221,7 +230,7 @@ func TestPrivateAuthCancelAndSubmitRetryUseSeparateChannels(t *testing.T) {
 	if f.inputs[0].ID != f.inputs[1].ID || f.inputs[0].Kind != inbox.InputExternal || f.inputs[2].Kind != inbox.InputControl {
 		t.Fatal("retry/control routing")
 	}
-	transcript := out.String()
+	transcript := out.rawText()
 	if strings.Contains(transcript, "private-value") || strings.Contains(transcript, "canceled-secret") {
 		t.Fatal("secret displayed")
 	}

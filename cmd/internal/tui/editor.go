@@ -23,8 +23,9 @@ func (e *Editor) Display(secret bool) string {
 	if secret {
 		return "API key> " + strings.Repeat("*", min(64, uniseg.GraphemeClusterCount(string(e.data))))
 	}
-	return "> " + string(e.data[:e.cursor]) + "▏" + string(e.data[e.cursor:])
+	return "> " + string(e.data)
 }
+func (e *Editor) replace(text string) { e.Clear(); e.Apply(Key{Text: text}) }
 func (e *Editor) Apply(k Key) {
 	boundaries := []int{0}
 	g := uniseg.NewGraphemes(string(e.data))
@@ -79,6 +80,16 @@ type Decoder struct {
 	paste   bool
 }
 
+// FlushEscape is called only after an idle read deadline. Split CSI/paste
+// sequences remain buffered; a lone nonpasted Escape cancels a UI picker.
+func (d *Decoder) FlushEscape() []Key {
+	if !d.paste && len(d.pending) == 1 && d.pending[0] == 27 {
+		d.pending = nil
+		return []Key{{Name: "escape"}}
+	}
+	return nil
+}
+
 func (d *Decoder) Feed(data []byte) []Key {
 	d.pending = append(d.pending, data...)
 	var keys []Key
@@ -114,7 +125,7 @@ func (d *Decoder) Feed(data []byte) []Key {
 				continue
 			}
 			if !d.paste {
-				if name := map[string]string{"\x1b[D": "left", "\x1b[C": "right", "\x1b[H": "home", "\x1b[F": "end"}[sequence]; name != "" {
+				if name := map[string]string{"\x1b[A": "up", "\x1b[B": "down", "\x1b[D": "left", "\x1b[C": "right", "\x1b[H": "home", "\x1b[F": "end", "\x1b[5~": "pageup", "\x1b[6~": "pagedown"}[sequence]; name != "" {
 					keys = append(keys, Key{Name: name})
 				}
 			}
@@ -129,7 +140,7 @@ func (d *Decoder) Feed(data []byte) []Key {
 			keys = append(keys, Key{Text: string(r), Paste: true})
 			continue
 		}
-		name := map[rune]string{3: "cancel", 4: "detach", 13: "enter", 10: "enter", 127: "backspace", 8: "backspace"}[r]
+		name := map[rune]string{3: "cancel", 4: "detach", 9: "tab", 13: "enter", 10: "enter", 127: "backspace", 8: "backspace"}[r]
 		if name != "" {
 			keys = append(keys, Key{Name: name})
 		} else if r >= 32 {
