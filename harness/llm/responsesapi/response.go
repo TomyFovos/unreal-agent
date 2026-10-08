@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/internal/apijson"
 	"github.com/unreallabsai/unreal-agent/internal/openaiapi"
 )
 
@@ -18,7 +19,7 @@ func decodeResponse(body []byte) (llm.Response, error) {
 		return llm.Response{}, fmt.Errorf("decode response: %w", err)
 	}
 	var source openaiapi.Response
-	if err := json.Unmarshal(body, &source); err != nil {
+	if err := apijson.Unmarshal(body, &source); err != nil {
 		return llm.Response{}, fmt.Errorf("decode response: %w", err)
 	}
 	converted, err := response(source)

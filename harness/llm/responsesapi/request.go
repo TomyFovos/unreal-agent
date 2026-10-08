@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/internal/apijson"
 	"github.com/unreallabsai/unreal-agent/internal/openaiapi"
 )
 
@@ -54,7 +55,7 @@ func requestBody(request llm.Request, promptCacheKey string, extensions map[stri
 	if len(tools) != 0 {
 		params.Tools = &tools
 	}
-	body, err := json.Marshal(params, json.Deterministic(true))
+	body, err := apijson.Marshal(params)
 	if err != nil {
 		return nil, fmt.Errorf("encode response request: %w", err)
 	}
@@ -338,7 +339,7 @@ func requestTool(source llm.Tool) (openaiapi.Tool, error) {
 }
 
 func setUnion(destination json.Unmarshaler, source any) error {
-	body, err := json.Marshal(source, json.Deterministic(true))
+	body, err := apijson.Marshal(source)
 	if err != nil {
 		return err
 	}
