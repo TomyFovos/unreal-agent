@@ -33,6 +33,15 @@ func TestPanelSelectionPagingAndStableRetry(t *testing.T) {
 	if p.transcript.NextAfter != 2 {
 		t.Fatal("page cursor did not advance")
 	}
+	projection := p.Snapshot(time.Now())
+	if projection.ParentID != "parent" || projection.Selected != "child" || projection.Transcript == nil || projection.TranscriptAfter != 1 || projection.Transcript.NextAfter != 2 {
+		t.Fatalf("structured projection lost paging/selection: %+v", projection)
+	}
+	projection.Transcript.Items = nil
+	projection.Rows[0].Operations = nil
+	if len(p.transcript.Items) == 0 {
+		t.Fatal("frontend snapshot mutated panel history")
+	}
 	controls.err = errors.New("connection lost")
 	text, ok = p.Command(t.Context(), "/child-send ask parent")
 	if !ok || !strings.Contains(text, "/child-retry") || len(controls.calls) != 1 {
@@ -40,7 +49,7 @@ func TestPanelSelectionPagingAndStableRetry(t *testing.T) {
 	}
 	controls.err = nil
 	text, ok = p.Command(t.Context(), "/child-retry")
-	if !ok || !strings.Contains(text, "committed") || len(controls.calls) != 2 || controls.calls[0] != controls.calls[1] {
+	if !ok || !strings.Contains(text, "sent to child") || len(controls.calls) != 2 || controls.calls[0] != controls.calls[1] {
 		t.Fatal("retry changed input", text)
 	}
 	rendered := p.Render(100, 40)
@@ -95,6 +104,12 @@ func TestTransientProgressNeverAddsUsageOrCanonicalActivity(t *testing.T) {
 }
 
 func TestPanelTerminalColumnBounds(t *testing.T) {
+	if got := short(strings.Repeat("a", 159) + "érest"); got != strings.Repeat("a", 159)+"..." {
+		t.Fatalf("activity split grapheme: %q", got)
+	}
+	if strings.ContainsAny(SafeText("\u200e\u200f\u061c\u202e\u2066"), "\u200e\u200f\u061c\u202e\u2066") {
+		t.Fatal("bidi control escaped viewer sanitization")
+	}
 	for _, text := range []string{"日本語の表示", "👩‍💻🙂👨‍👩‍👧‍👦", "ééé"} {
 		for _, width := range []int{1, 2, 3, 8} {
 			clipped := clipLine(text, width)

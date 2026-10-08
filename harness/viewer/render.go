@@ -2,7 +2,9 @@ package viewer
 
 import (
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/session"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -12,7 +14,7 @@ import (
 // should never render raw provider text, paths, IDs, or failure strings directly.
 func SafeText(value string) string {
 	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 || r >= 0x202a && r <= 0x202e || r >= 0x2066 && r <= 0x2069 {
+		if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 || r >= 0x202a && r <= 0x202e || r >= 0x2066 && r <= 0x2069 || r == 0x200e || r == 0x200f || r == 0x061c {
 			return ' '
 		}
 		return r
@@ -26,7 +28,16 @@ func FormatUsage(u Usage) string {
 	if u.Partial {
 		suffix = " (partial)"
 	}
-	return fmt.Sprintf("in %d / out %d%s", u.Input, u.Output, suffix)
+	field := func(n int64, f llm.UsageField) string {
+		if slices.Contains(u.Unknown, f) {
+			if n == 0 {
+				return "unknown"
+			}
+			return "~" + fmt.Sprint(n)
+		}
+		return fmt.Sprint(n)
+	}
+	return fmt.Sprintf("in %s / out %s%s", field(u.Input, llm.UsageInput), field(u.Output, llm.UsageOutput), suffix)
 }
 func FormatDuration(d Duration) string {
 	if !d.Known {
@@ -46,6 +57,9 @@ func RenderRows(rows []Row, selected session.ID) string {
 		fmt.Fprintf(&b, "%s %s%s", marker, strings.Repeat("  ", min(r.Depth, 32)), SafeText(string(r.ID)))
 		if r.Label != "" {
 			fmt.Fprintf(&b, " (%s)", SafeText(r.Label))
+		}
+		if r.Selection != nil {
+			fmt.Fprintf(&b, " | %s / %s / %s", SafeText(r.Selection.Provider), SafeText(r.Selection.Model), SafeText(string(r.Selection.Effort)))
 		}
 		if r.ParentID != "" {
 			fmt.Fprintf(&b, " | parent op: %s", SafeText(string(r.ParentOperationStatus)))

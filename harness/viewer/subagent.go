@@ -36,7 +36,7 @@ func DecodeSubagent(parent session.ID, op operation.Operation) (Child, bool, err
 	if plan.Action != "start" {
 		return Child{}, false, nil
 	}
-	return Child{ID: plan.ChildID, Label: short(plan.Text)}, true, nil
+	return Child{ID: plan.ChildID, Label: short(plan.Text), Selection: sessionstore.SelectionFromConfiguration(plan.Configuration.Runtime)}, true, nil
 }
 func DecodeFinish(item host.HistoryItem) (*Finish, error) {
 	if item.Kind != sessionstore.ItemHostRecord {

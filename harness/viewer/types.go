@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"github.com/unreallabsai/unreal-agent/harness/session"
@@ -29,8 +30,9 @@ type Reader interface {
 
 // DecodeChild validates a supported canonical plan, never guesses from tool names.
 type Child struct {
-	ID    session.ID
-	Label string
+	ID        session.ID
+	Label     string
+	Selection *sessionstore.RuntimeSelection
 }
 type ChildDecoder func(session.ID, operation.Operation) (Child, bool, error)
 
@@ -68,6 +70,7 @@ type Usage struct {
 	CacheWriteInput int64
 	Output          int64
 	Reasoning       int64
+	Unknown         []llm.UsageField `json:",omitzero"`
 	Responses       int
 }
 type Duration struct {
@@ -75,14 +78,19 @@ type Duration struct {
 	Value time.Duration
 }
 type OperationRow struct {
-	ID      operation.ID
-	Tool    string
-	Type    operation.Type
-	Status  operation.Status
-	Elapsed Duration
+	ID       operation.ID
+	Tool     string
+	Target   string // whitelisted public display argument; never raw tool state
+	Type     operation.Type
+	Status   operation.Status
+	Elapsed  Duration
+	Sequence sessionstore.Sequence // last observed canonical status, if known
 }
 type Row struct {
+	Selection             *sessionstore.RuntimeSelection `json:",omitzero"`
+	ObservedModel         string                         `json:",omitzero"`
 	ProjectInstructions   *projectinstructions.Metadata
+	ManagedPolicyMode     string `json:",omitzero"`
 	ID                    session.ID
 	ParentID              session.ID
 	ParentOperationID     operation.ID

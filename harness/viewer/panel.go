@@ -29,21 +29,25 @@ type panelRequest struct {
 // Panel supplies render/command/update hooks without owning the frontend's
 // terminal or editor. Close joins all read subscriptions; it never stops a Host.
 type Panel struct {
-	client       *Client
-	parent       session.ID
-	ctx          context.Context
-	cancel       context.CancelFunc
-	workers      sync.WaitGroup
-	updates      chan struct{}
-	mu           sync.Mutex
-	transcript   *host.HistoryPage
-	transcriptID session.ID
-	retry        *panelRequest
-	problem      string
+	client          *Client
+	parent          session.ID
+	ctx             context.Context
+	cancel          context.CancelFunc
+	workers         sync.WaitGroup
+	updates         chan struct{}
+	mu              sync.Mutex
+	transcript      *host.HistoryPage
+	transcriptID    session.ID
+	transcriptAfter sessionstore.Sequence
+	retry           *panelRequest
+	problem         string
+	topologyVisible bool
+	topologyCursor  int
 }
 
-// NewPanel watches the parent and refreshes only the selected child's canonical
-// snapshot once per second. It does not send polling input to either agent.
+// NewPanel watches the parent and refreshes the selected child once per second.
+// Visible topology additionally observes a bounded batch of direct children.
+// Every child refresh is inspection only; it never opens/resumes or sends input.
 func NewPanel(ctx context.Context, parent session.ID, client *Client) *Panel {
 	ctx, cancel := context.WithCancel(ctx)
 	p := &Panel{client: client, parent: parent, ctx: ctx, cancel: cancel, updates: make(chan struct{}, 1)}
@@ -57,17 +61,68 @@ func NewPanel(ctx context.Context, parent session.ID, client *Client) *Panel {
 	})
 	p.workers.Go(func() {
 		for pause(ctx, time.Second) {
-			id := client.Model.Selected()
-			if id != "" && id != parent {
-				err := client.Refresh(ctx, id)
-				if !errors.Is(err, ErrWatching) {
-					p.setProblem(err)
-					p.notify()
-				}
-			}
+			p.refreshChildren()
 		}
 	})
 	return p
+}
+
+// SetTopologyVisible is a frontend observation preference, never a Host control.
+// Unselected child polls are capped and round-robin; Chat retains its old scope.
+func (p *Panel) SetTopologyVisible(visible bool) {
+	p.mu.Lock()
+	p.topologyVisible = visible
+	p.mu.Unlock()
+}
+
+func (p *Panel) refreshTargets() []session.ID {
+	selected := p.client.Model.Selected()
+	var targets []session.ID
+	if selected != "" && selected != p.parent {
+		targets = append(targets, selected)
+	}
+	p.mu.Lock()
+	visible, cursor := p.topologyVisible, p.topologyCursor
+	p.mu.Unlock()
+	if !visible {
+		return targets
+	}
+	var candidates []session.ID
+	for _, r := range p.client.Model.Rows(time.Now()) {
+		// The existing gateway's scoped reader authorizes direct children. A
+		// child snapshot can expose nested lineage, but we do not widen that
+		// authorization or guess an unobserved grandchild's activities.
+		if r.ParentID == p.parent && r.ID != selected && r.Finish == nil {
+			candidates = append(candidates, r.ID)
+		}
+	}
+	if len(candidates) == 0 {
+		return targets
+	}
+	cursor %= len(candidates)
+	count := min(8, len(candidates))
+	for i := range count {
+		targets = append(targets, candidates[(cursor+i)%len(candidates)])
+	}
+	p.mu.Lock()
+	p.topologyCursor = (cursor + count) % len(candidates)
+	p.mu.Unlock()
+	return targets
+}
+
+func (p *Panel) refreshChildren() {
+	for _, id := range p.refreshTargets() {
+		if p.ctx.Err() != nil {
+			return
+		}
+		err := p.client.Refresh(p.ctx, id)
+		if !errors.Is(err, ErrWatching) {
+			if id == p.client.Model.Selected() {
+				p.setProblem(err)
+			}
+			p.notify()
+		}
+	}
 }
 func pause(ctx context.Context, d time.Duration) bool {
 	timer := time.NewTimer(d)
@@ -266,6 +321,7 @@ func (p *Panel) Command(ctx context.Context, line string) (string, bool) {
 		}
 		p.mu.Lock()
 		p.transcript = &page
+		p.transcriptAfter = after
 		p.transcriptID = id
 		p.mu.Unlock()
 		p.notify()
@@ -305,10 +361,10 @@ func (p *Panel) execute(ctx context.Context, r panelRequest) string {
 	p.mu.Unlock()
 	p.notify()
 	if err != nil {
-		return "Child request failed: " + SafeText(err.Error()) + "; /child-retry reuses its input ID"
+		return "child request failed: " + SafeText(err.Error()) + "; /child-retry reuses its input ID"
 	}
 	if r.action == "/child-resume" {
-		return "Parent ownership confirmed; existing child recovery is owned by the Host."
+		return "parent ownership confirmed; child recovery is owned by the host"
 	}
-	return "Child request committed; canonical state will update when execution advances."
+	return "sent to " + SafeText(string(r.child)) + "; its state updates as it runs"
 }

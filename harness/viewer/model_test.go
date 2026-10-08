@@ -1,7 +1,9 @@
 package viewer
 
 import (
+	jsonv1 "encoding/json"
 	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
@@ -16,6 +18,29 @@ import (
 )
 
 var epoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+func TestManagedPolicyMetadataSurvivesBoundedCacheAndResync(t *testing.T) {
+	m := New(Options{RecentLimit: 1})
+	configuration := host.HistoryItem{Sequence: 1, Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{Version: 1, Kind: "configuration", Configuration: []byte(`{"Provider":{"provider":"claude-code","model":{"id":"configured-a"}},"ReasoningEffort":"medium","ClaudeCode":{"managedPolicyMode":"trust","env":{"OTEL_EXPORTER_OTLP_ENDPOINT":"endpoint-sensitive"}},"SystemPrompt":"prompt-sensitive"}`)}}
+	v := view("s", "g", 1, configuration, input(2, "body-sensitive"))
+	must(t, m.Replace("s", v))
+	for _, reset := range []func(){func() { m.Disconnect("s") }, func() { m.Invalidate("s") }, func() { must(t, m.Replace("s", v)) }} {
+		reset()
+		r := row(t, m, "s")
+		if r.ManagedPolicyMode != "trust" {
+			t.Fatal("viewer lost trust mode after cache eviction/disconnect/resync")
+		}
+		b, err := json.Marshal(r, jsonv1.FormatDurationAsNano(true))
+		if err != nil || strings.Contains(string(b), "endpoint-sensitive") || strings.Contains(string(b), "prompt-sensitive") {
+			t.Fatal("runtime metadata exposed configuration contents", err)
+		}
+	}
+	fork := host.HistoryItem{Sequence: 3, Kind: sessionstore.ItemFork, Data: sessionstore.Fork{}}
+	must(t, m.Apply("s", host.Event{Kind: "item", Generation: "g", Revision: 2, Item: &fork}))
+	if row(t, m, "s").ManagedPolicyMode != "" {
+		t.Fatal("fork retained inherited trust metadata")
+	}
+}
 
 func view(id session.ID, gen string, rev uint64, items ...host.HistoryItem) host.View {
 	var after sessionstore.Sequence

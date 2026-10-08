@@ -3,6 +3,7 @@ package viewer
 import (
 	"encoding/json/v2"
 	"fmt"
+	"github.com/rivo/uniseg"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -10,10 +11,12 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 type responseKey struct {
@@ -24,19 +27,26 @@ type responseKey struct {
 
 type timing struct{ start, end time.Time }
 type projection struct {
-	view       host.View
-	cursor     sessionstore.Sequence
-	recent     []host.HistoryItem
-	operations map[operation.ID]operation.Operation
-	times      map[operation.ID]timing
-	responses  map[responseKey]bool
-	usage      Usage
-	finish     *Finish
-	activity   string
-	runtime    Liveness
-	resync     bool
-	more       bool
-	problem    string
+	view              host.View
+	cursor            sessionstore.Sequence
+	recent            []host.HistoryItem
+	operations        map[operation.ID]operation.Operation
+	times             map[operation.ID]timing
+	callTargets       map[string]string
+	callOrder         []string
+	targets           map[operation.ID]string
+	opSequences       map[operation.ID]sessionstore.Sequence
+	responses         map[responseKey]bool
+	usage             Usage
+	finish            *Finish
+	activity          string
+	runtime           Liveness
+	resync            bool
+	more              bool
+	problem           string
+	managedPolicyMode string
+	selection         *sessionstore.RuntimeSelection
+	observedModel     string
 }
 type Model struct {
 	mu       sync.Mutex
@@ -85,7 +95,8 @@ func (m *Model) Replace(id session.ID, view host.View) error {
 	if err != nil {
 		return err
 	}
-	p := &projection{operations: map[operation.ID]operation.Operation{}, times: map[operation.ID]timing{}, responses: map[responseKey]bool{}, runtime: RuntimeUnknown}
+	p := &projection{operations: map[operation.ID]operation.Operation{}, times: map[operation.ID]timing{}, responses: map[responseKey]bool{}, runtime: RuntimeUnknown,
+		callTargets: map[string]string{}, targets: map[operation.ID]string{}, opSequences: map[operation.ID]sessionstore.Sequence{}}
 	m.sessions[id] = p
 	if m.selected == "" {
 		m.selected = id
@@ -253,7 +264,28 @@ func (m *Model) item(p *projection, item host.HistoryItem) error {
 		p.recent = append([]host.HistoryItem(nil), p.recent[len(p.recent)-m.options.RecentLimit:]...)
 	}
 	switch data := item.Data.(type) {
+	case sessionstore.HostRecord:
+		if data.Kind == "configuration" {
+			p.managedPolicyMode = sessionstore.ManagedPolicyModeFromConfiguration(data.Configuration)
+			p.selection = sessionstore.SelectionFromConfiguration(data.Configuration)
+		} else if data.Kind == sessionstore.HostRuntimeApplied && data.Selection != nil {
+			copy := *data.Selection
+			p.selection = &copy
+			p.observedModel = ""
+			if copy.Binding != "" {
+				p.managedPolicyMode = sessionstore.ManagedPolicyModeFromConfiguration([]byte(copy.Binding))
+			} else if copy.Provider != "claude-code" {
+				p.managedPolicyMode = ""
+			}
+		}
+	case sessionstore.Fork:
+		p.managedPolicyMode = ""
+		p.selection = nil
+		p.observedModel = ""
 	case sessionstore.ModelResponse:
+		if data.Response.Model != "" {
+			p.observedModel = SafeText(data.Response.Model)
+		}
 		key := responseKey{Turn: data.TurnID, ID: data.Response.ID}
 		if data.Response.ID == "" {
 			key = responseKey{Sequence: item.Sequence}
@@ -268,6 +300,15 @@ func (m *Model) item(p *projection, item host.HistoryItem) error {
 			}
 			if call, ok := out.Data.(llm.ToolCall); ok {
 				p.activity = "tool: " + short(call.Name)
+				if _, exists := p.callTargets[call.CallID]; !exists {
+					p.callOrder = append(p.callOrder, call.CallID)
+				}
+				p.callTargets[call.CallID] = SafeToolTarget(call)
+				// This is a disposable display linkage cache, not tool state.
+				if len(p.callOrder) > 4096 {
+					delete(p.callTargets, p.callOrder[0])
+					p.callOrder = p.callOrder[1:]
+				}
 			}
 		}
 	case inbox.Input:
@@ -283,7 +324,16 @@ func (m *Model) item(p *projection, item host.HistoryItem) error {
 			p.activity = "crash recorded"
 		}
 	case sessionstore.ToolCallStatus:
+		if target, ok := p.callTargets[data.CallID]; ok {
+			for _, id := range data.Status.WaitingFor {
+				p.targets[id] = target
+			}
+			for _, op := range data.Operations {
+				p.targets[op.ID] = target
+			}
+		}
 		for _, op := range data.Operations {
+			p.opSequences[op.ID] = item.Sequence
 			t := p.times[op.ID]
 			if !item.RecordedAt.IsZero() {
 				if op.Status == operation.StatusReady && t.start.IsZero() {
@@ -300,14 +350,28 @@ func (m *Model) item(p *projection, item host.HistoryItem) error {
 }
 func short(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
-	r := []rune(s)
-	if len(r) > 160 {
-		return string(r[:160]) + "..."
+	if utf8.RuneCountInString(s) > 160 {
+		g := uniseg.NewGraphemes(s)
+		runes, end := 0, 0
+		for g.Next() {
+			runes += utf8.RuneCountInString(g.Str())
+			if runes > 160 {
+				break
+			}
+			_, end = g.Positions()
+		}
+		return s[:end] + "..."
 	}
 	return s
 }
 func addUsage(total *Usage, u llm.Usage) {
 	total.Responses++
+	for _, field := range u.Unknown {
+		if !slices.Contains(total.Unknown, field) {
+			total.Unknown = append(total.Unknown, field)
+		}
+	}
+	total.Partial = total.Partial || len(u.Unknown) > 0
 	if u.InputTokens < 0 || u.OutputTokens < 0 || u.CachedInputTokens < 0 || u.CacheWriteInputTokens < 0 || u.ReasoningTokens < 0 {
 		total.Partial = true
 		return
@@ -330,6 +394,9 @@ func addUsage(total *Usage, u llm.Usage) {
 		*targets[i] += v
 	}
 }
+
+// AddUsage shares the existing Known/Partial/overflow rules with read-only analyses.
+func AddUsage(total *Usage, u llm.Usage) { addUsage(total, u) }
 func terminal(s operation.Status) bool {
 	return s == operation.StatusCompleted || s == operation.StatusFailed || s == operation.StatusCanceled
 }
@@ -354,6 +421,13 @@ func (m *Model) base(id session.ID, p *projection, now time.Time) Row {
 		return r
 	}
 	r.ProjectInstructions = p.view.ProjectInstructions
+	r.ManagedPolicyMode = p.managedPolicyMode
+	if p.selection != nil {
+		copy := *p.selection
+		copy.Binding = ""
+		r.Selection = &copy
+	}
+	r.ObservedModel = p.observedModel
 	r.Generation = p.view.Generation
 	r.Runtime = p.runtime
 	r.Failure = p.view.Failure
@@ -376,7 +450,7 @@ func (m *Model) base(id session.ID, p *projection, now time.Time) Row {
 		if terminal(op.Status) && t.end.IsZero() {
 			runtime = RuntimeUnknown
 		}
-		r.Operations = append(r.Operations, OperationRow{ID: op.ID, Tool: op.ToolName, Type: op.Type, Status: op.Status, Elapsed: elapsed(t.start, t.end, now, runtime)})
+		r.Operations = append(r.Operations, OperationRow{ID: op.ID, Tool: op.ToolName, Target: p.targets[op.ID], Type: op.Type, Status: op.Status, Sequence: p.opSequences[op.ID], Elapsed: elapsed(t.start, t.end, now, runtime)})
 	}
 	sort.Slice(r.Operations, func(i, j int) bool { return r.Operations[i].ID < r.Operations[j].ID })
 	return r
@@ -429,6 +503,11 @@ func (m *Model) rows(now time.Time) []Row {
 				r.ParentOperationID = op.ID
 				r.ParentOperationStatus = op.Status
 				r.Label = child.Label
+				if r.Selection == nil && child.Selection != nil {
+					copy := *child.Selection
+					copy.Binding = ""
+					r.Selection = &copy
+				}
 
 				byID[child.ID] = r
 			}
