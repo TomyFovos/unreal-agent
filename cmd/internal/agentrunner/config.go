@@ -2,6 +2,7 @@ package agentrunner
 
 import (
 	"context"
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"io"
 	"slices"
 
@@ -11,6 +12,8 @@ import (
 )
 
 type Config struct {
+	// Context selects the rebuildable strategy; zero uses bounded v1 defaults.
+	Context      contextengine.Config
 	Name         string
 	Providers    []Provider
 	ParseRequest func(io.Reader) (Request, ToolFactory, error)
@@ -23,6 +26,9 @@ type ToolConfig struct {
 	Names                  []string
 	SessionID              session.ID
 	Getenv                 func(string) string
+	// CatalogOnly composes inert schemas for a private registration probe.
+	// No owner-bound subagent manager may be created by this composition.
+	CatalogOnly bool
 }
 
 type Tools struct {

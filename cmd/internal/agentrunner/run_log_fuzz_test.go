@@ -15,6 +15,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -115,13 +116,18 @@ func FuzzRunLogMatchesExecution(f *testing.F) {
 				if run == 0 && mode == 3 {
 					destination = &fuzzLogOutput{output: &stdout, responses: failAt, err: outputFailure}
 				}
+				// This execution/codec fuzzer intentionally accepts 128 KiB inputs.
+				// Give its injected fake model an explicit window; real unknown
+				// models still use the conservative v1 budget, tested separately.
+				configured := testConfig(client)
+				configured.Context = contextengine.Config{FallbackWindow: 524288, InputBudget: 262144}
 				err := Run(ctx, []string{"-workspace", workspace, "-session-directory", sessions, "-log-directory", logDirectory, "-tool-heartbeat-interval", "0"},
 					func(name string) string {
 						if name == llmAPIKeyEnvironment {
 							return "secret"
 						}
 						return ""
-					}, func() []string { return nil }, bytes.NewReader(encodedRequest), destination, io.Discard, testConfig(client))
+					}, func() []string { return nil }, bytes.NewReader(encodedRequest), destination, io.Discard, configured)
 				cancel()
 				synctest.Wait()
 				var wantErr error

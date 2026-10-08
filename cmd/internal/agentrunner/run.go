@@ -18,6 +18,7 @@ import (
 	"uuid"
 
 	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -429,8 +430,32 @@ func Run(
 		builder.AddTool(definition)
 	}
 
-	currentHost, err := host.New(runContext, host.Config{Directory: storeDirectory, Build: func(sessionContext context.Context, _ session.ID) (host.Runtime, error) {
-		return host.Runtime{Builder: builder, LLM: client, Tools: registry, Close: configuredTools.Close, Operations: operation.NewLocalOperationManager(sessionContext, configuredTools.RemoteJobs...)}, nil
+	currentHost, err := host.New(runContext, host.Config{Directory: storeDirectory, Build: func(sessionContext context.Context, id session.ID) (host.Runtime, error) {
+		constraints := contextengine.Constraints{ToolPolicy: "enforced-by-Unreal", Filesystem: "enforced-by-Unreal", Network: "enforced-by-Unreal", Process: "enforced-by-Unreal"}
+		engine, e := contextbuilder.EnableCompaction(builder, config.Context, constraints)
+		if e != nil {
+			return host.Runtime{}, e
+		}
+		builder.(interface{ SetRuntimeProvider(string) }).SetRuntimeProvider(resolvedProvider.Provider)
+		builder.(interface {
+			SetContextRuntime(sessionstore.RuntimeSelection, bool)
+		}).SetContextRuntime(sessionstore.RuntimeSelection{Version: 1, Provider: resolvedProvider.Provider, Model: model, Effort: reasoningEffort(parsed.ThinkingLevel)}, true)
+		var cache *contextengine.Cache
+		if engine != nil {
+			cache = contextengine.OpenCache(storeDirectory, string(id))
+			engine.SetCacheStatus(cache.Status())
+		}
+		closeRuntime := func() error {
+			var err error
+			if configuredTools.Close != nil {
+				err = configuredTools.Close()
+			}
+			if cache != nil {
+				err = errors.Join(err, cache.Close())
+			}
+			return err
+		}
+		return host.Runtime{ContextEngine: engine, ContextCache: cache, Builder: builder, LLM: client, Tools: registry, Close: closeRuntime, Operations: operation.NewLocalOperationManager(sessionContext, configuredTools.RemoteJobs...)}, nil
 	}})
 	if err != nil {
 		return err
