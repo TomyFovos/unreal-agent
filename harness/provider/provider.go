@@ -12,6 +12,7 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
 	"github.com/unreallabsai/unreal-agent/harness/llm/responsesapi"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 )
@@ -41,6 +42,7 @@ type BuildConfig struct {
 	Selection  Selection
 	Resolver   credential.Resolver
 	HTTPClient *http.Client
+	ClaudeCode claudecode.Config
 }
 type Factory func(BuildConfig, credential.Material) (Client, error)
 type Descriptor struct {
@@ -50,8 +52,38 @@ type Descriptor struct {
 	Capabilities []string
 	Models       []Model
 	New          Factory
+	// LocalProcess has no HTTP endpoint. ExternalAuth delegates authentication
+	// to the installed executable without obtaining credential material.
+	LocalProcess bool
+	ExternalAuth bool
+	// ToolCapability is an explicit runtime opt-in, independent of model names.
+	// Static capabilities remain the backwards-compatible default.
+	ToolCapability func(BuildConfig) bool
 }
 type Registry struct{ entries map[string]Descriptor }
+
+// WithModel extends a registered adapter's read-only catalog while retaining
+// its factory, authentication contract and capabilities. It registers no new
+// provider; the caller must authorize discovery before constructing a request.
+func (r *Registry) WithModel(s Selection) (*Registry, error) {
+	d, ok := r.entries[s.Provider]
+	if !ok {
+		return nil, &Error{Code: "provider_unregistered"}
+	}
+	copy := &Registry{entries: make(map[string]Descriptor, len(r.entries))}
+	for id, v := range r.entries {
+		copy.entries[id] = v
+	}
+	d.Models = slices.Clone(d.Models)
+	for _, m := range d.Models {
+		if m.ID == s.Model.ID {
+			return r, nil
+		}
+	}
+	d.Models = append(d.Models, s.Model)
+	copy.entries[s.Provider] = d
+	return copy, nil
+}
 
 func New(descriptors ...Descriptor) (*Registry, error) {
 	r := &Registry{entries: map[string]Descriptor{}}
@@ -133,6 +165,15 @@ func (r *Registry) Resolve(s Selection) (Selection, error) {
 	if s.Endpoint == "" {
 		s.Endpoint = d.Endpoint
 	}
+	if d.LocalProcess {
+		if s.Endpoint != "" {
+			return Selection{}, &Error{Code: "invalid_endpoint"}
+		}
+		if d.ExternalAuth && s.Auth.ID != "external-claude-code" {
+			return Selection{}, &Error{Code: "unsupported_auth_reference"}
+		}
+		return s, nil
+	}
 	u, err := url.Parse(s.Endpoint)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return Selection{}, &Error{Code: "invalid_endpoint"}
@@ -146,12 +187,29 @@ func ValidateResume(recorded, requested Selection) error {
 	}
 	return nil
 }
+func (r *Registry) RequiresResolver(s Selection) bool {
+	return s.Auth.Method != credential.None && !r.entries[s.Provider].ExternalAuth
+}
+
+// SupportsTools reports the adapter's tool capability for runtime composition.
+// Model metadata can omit optional capabilities; that does not disable tools on
+// an existing tool-capable adapter. Resolve validates model declarations first.
+func (r *Registry) SupportsTools(s Selection) bool {
+	d, ok := r.entries[s.Provider]
+	return ok && slices.Contains(d.Capabilities, "tools")
+}
+
+func (r *Registry) SupportsRuntimeTools(c BuildConfig) bool {
+	d, ok := r.entries[c.Selection.Provider]
+	return ok && (r.SupportsTools(c.Selection) || d.ToolCapability != nil && d.ToolCapability(c))
+}
+
 func (r *Registry) Build(c BuildConfig) (Client, Selection, error) {
 	s, err := r.Resolve(c.Selection)
 	if err != nil {
 		return nil, Selection{}, err
 	}
-	if s.Auth.Method != credential.None && c.Resolver == nil {
+	if r.RequiresResolver(s) && c.Resolver == nil {
 		return nil, Selection{}, &Error{Code: "credential_resolver_required"}
 	}
 	c.Selection = s
@@ -164,16 +222,35 @@ func (r *Registry) Build(c BuildConfig) (Client, Selection, error) {
 	}
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	c.HTTPClient = &hc
-	return &adapter{config: c, factory: r.entries[s.Provider].New}, s, nil
+	a := &adapter{config: c, factory: r.entries[s.Provider].New, externalAuth: r.entries[s.Provider].ExternalAuth}
+	if r.entries[s.Provider].LocalProcess {
+		a.processes = &processRequests{cancels: make(map[*context.CancelFunc]context.CancelFunc)}
+	}
+	return a, s, nil
 }
 
 type adapter struct {
-	config  BuildConfig
-	factory Factory
+	config       BuildConfig
+	factory      Factory
+	externalAuth bool
+	processes    *processRequests
 }
 
-func (a *adapter) Close() error { return nil }
+func (a *adapter) Close() error {
+	if a.processes != nil {
+		a.processes.close()
+	}
+	return nil
+}
 func (a *adapter) Respond(ctx context.Context, req llm.Request, opt llm.RequestOptions) (llm.Response, error) {
+	if a.processes != nil {
+		requestCtx, release, err := a.processes.begin(ctx)
+		if err != nil {
+			return llm.Response{}, err
+		}
+		defer release()
+		ctx = requestCtx
+	}
 	if err := ctx.Err(); err != nil {
 		return llm.Response{}, err
 	}
@@ -181,7 +258,7 @@ func (a *adapter) Respond(ctx context.Context, req llm.Request, opt llm.RequestO
 		return llm.Response{}, &Error{Code: "model_selection_mismatch"}
 	}
 	var material credential.Material
-	if a.config.Selection.Auth.Method != credential.None {
+	if a.config.Selection.Auth.Method != credential.None && !a.externalAuth {
 		var err error
 		material, err = a.config.Resolver.Resolve(ctx, a.config.Selection.Auth)
 		if err != nil {
@@ -222,6 +299,10 @@ func normalize(err error) error {
 		return context.DeadlineExceeded
 	}
 	var ce *credential.Error
+	var cli *claudecode.Error
+	if errors.As(err, &cli) {
+		return cli
+	}
 	if errors.As(err, &ce) {
 		return ce
 	}

@@ -1,0 +1,137 @@
+{
+  "Arguments": [
+    "--safe-mode",
+    "--restricted",
+    "--setting-sources",
+    "",
+    "--settings",
+    "{\"disableAllHooks\":true,\"autoMemoryEnabled\":false,\"disableClaudeAiConnectors\":true,\"syncClaudeAiSkills\":false,\"syncClaudeAiPlugins\":false}",
+    "--tools",
+    "",
+    "--disallowedTools",
+    "Bash,Read,Write,Edit,MultiEdit,Glob,Grep,Agent,Task,WebFetch,WebSearch,ToolSearch,Skill,NotebookEdit,AskUserQuestion,TodoWrite,mcp__*",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "--disable-slash-commands",
+    "--no-chrome",
+    "--allowedTools",
+    "StructuredOutput",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--no-session-persistence",
+    "--permission-prompts",
+    "none",
+    "--max-turns",
+    "5",
+    "--system-prompt-file",
+    "/private-temp/system.txt",
+    "-p",
+    "--model",
+    "synthetic-model",
+    "--effort",
+    "high"
+  ],
+  "Environment": [
+    "HOME=/synthetic-home",
+    "CLAUDE_CONFIG_DIR=/synthetic-home/.claude",
+    "PATH=/usr/bin:/bin",
+    "LANG=C.UTF-8",
+    "TERM=dumb",
+    "NO_COLOR=1",
+    "CLAUDE_CODE_SAFE_MODE=1",
+    "CLAUDE_CODE_SKIP_PROMPT_HISTORY=1",
+    "DISABLE_AUTOUPDATER=1",
+    "DISABLE_COMPACT=1",
+    "DISABLE_AUTO_COMPACT=1",
+    "CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1",
+    "CLAUDE_CODE_AUTO_CONNECT_IDE=false",
+    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false"
+  ],
+  "Initialize": {
+    "request": {
+      "hooks": {},
+      "jsonSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "additionalProperties": false,
+            "properties": {
+              "arguments": {
+                "additionalProperties": false,
+                "properties": {
+                  "lines": {
+                    "type": "integer"
+                  },
+                  "max_bytes": {
+                    "type": "integer"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "start_line": {
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              },
+              "id": {
+                "type": "string"
+              },
+              "tool": {
+                "enum": [
+                  "read"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "tool",
+              "arguments"
+            ],
+            "type": "object"
+          },
+          "final": {
+            "additionalProperties": false,
+            "properties": {
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "message"
+            ],
+            "type": "object"
+          },
+          "type": {
+            "enum": [
+              "final",
+              "action"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "sdkMcpServers": [],
+      "subtype": "initialize"
+    },
+    "request_id": "unreal_structured_init",
+    "type": "control_request"
+  },
+  "Input": {
+    "message": {
+      "content": "public task\n日本語",
+      "role": "user"
+    },
+    "type": "user"
+  }
+}

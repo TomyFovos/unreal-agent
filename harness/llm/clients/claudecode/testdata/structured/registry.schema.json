@@ -1,0 +1,967 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "final": {
+          "additionalProperties": false,
+          "properties": {
+            "message": {
+              "maxLength": 1048576,
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "final"
+        }
+      },
+      "required": [
+        "type",
+        "final"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {
+              "properties": {
+                "command": {
+                  "description": "The shell command to execute.",
+                  "type": "string"
+                },
+                "max_output_length": {
+                  "default": 40000,
+                  "description": "Maximum characters per output text field. Truncated text keeps its head and tail, around a marker stating how much was omitted, and path to the file with the complete stream. Defaults to 40000.",
+                  "maximum": 1000000,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "tool": {
+              "const": "Bash",
+              "description": "Execute a shell command in background. Independent commands may be issued as parallel tool calls in one turn. Command child processes are killed when the shell exits."
+            }
+          },
+          "required": [
+            "id",
+            "tool",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "action"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {
+              "properties": {
+                "path": {
+                  "description": "Image file path, absolute or relative to the workspace.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "tool": {
+              "const": "ViewImage",
+              "description": "View a local JPEG, PNG, BMP, TIFF, or WebP image."
+            }
+          },
+          "required": [
+            "id",
+            "tool",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "action"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {
+              "properties": {
+                "name": {
+                  "description": "The exact name of the skill to load.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "tool": {
+              "const": "SkillUse",
+              "description": "Load the instructions for a registered skill."
+            }
+          },
+          "required": [
+            "id",
+            "tool",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "action"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {
+              "additionalProperties": false,
+              "properties": {
+                "lines": {
+                  "maximum": 10000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "start_line": {
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "tool": {
+              "const": "read",
+              "description": "Read a text file and its whole-file SHA-256 revision. Binary files return metadata. Limits are explicit; range reads carry the whole snapshot revision."
+            }
+          },
+          "required": [
+            "id",
+            "tool",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "action"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "expected": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "digest": {
+                      "type": "string"
+                    },
+                    "exists": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "exists"
+                  ],
+                  "type": "object"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "expected",
+                "content"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "tool": {
+              "const": "write",
+              "description": "Conditionally replace a file through the shared mutation lock. Supply expected revision from read, or exists:false for creation."
+            }
+          },
+          "required": [
+            "id",
+            "tool",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "action"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {
+              "additionalProperties": false,
+              "properties": {
+                "expected": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "digest": {
+                      "type": "string"
+                    },
+                    "exists": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "exists"
+                  ],
+                  "type": "object"
+                },
+                "new_text": {
+                  "type": "string"
+                },
+                "old_text": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "replace_all": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "path",
+                "expected",
+                "old_text",
+                "new_text"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "tool": {
+              "const": "edit",
+              "description": "Conditionally replace exact text using the revision from read. Multiple occurrences require replace_all:true. Stale edits never overwrite a cooperating update."
+            }
+          },
+          "required": [
+            "id",
+            "tool",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "action"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {
+              "additionalProperties": false,
+              "properties": {
+                "glob": {
+                  "type": "string"
+                },
+                "limit": {
+                  "maximum": 1000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "pattern": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "pattern"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "tool": {
+              "const": "grep",
+              "description": "Search UTF-8 text by RE2 regular expression in a directory. Glob uses slash paths and ** for recursive matching. Results and traversal are bounded."
+            }
+          },
+          "required": [
+            "id",
+            "tool",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "action"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {
+              "additionalProperties": false,
+              "properties": {
+                "glob": {
+                  "type": "string"
+                },
+                "limit": {
+                  "maximum": 1000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "tool": {
+              "const": "glob",
+              "description": "List matching regular file paths under a directory, in stable traversal order. ** matches recursive directories; symlinks are not followed."
+            }
+          },
+          "required": [
+            "id",
+            "tool",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "action"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {
+              "additionalProperties": false,
+              "properties": {
+                "language": {
+                  "enum": [
+                    "go",
+                    "javascript",
+                    "python"
+                  ],
+                  "type": "string"
+                },
+                "max_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "query": {
+                  "description": "Tree-sitter S-expression query. Capture exactly one node per match as @match; optional named captures support rewrite templates.",
+                  "type": "string"
+                },
+                "targets": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "expected": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "digest": {
+                            "type": "string"
+                          },
+                          "exists": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "exists"
+                        ],
+                        "type": "object"
+                      },
+                      "path": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "path"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 128,
+                  "minItems": 1,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "language",
+                "query",
+                "targets"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "tool": {
+              "const": "ast_grep",
+              "description": "Query actual syntax nodes in Go, JavaScript or Python. Returns bounded matches and whole-file revisions; rejects malformed syntax and ambiguous/overlapping captures."
+            }
+          },
+          "required": [
+            "id",
+            "tool",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "action"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {
+              "additionalProperties": false,
+              "properties": {
+                "apply": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "expected_matches": {
+                  "maximum": 1000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "language": {
+                  "enum": [
+                    "go",
+                    "javascript",
+                    "python"
+                  ],
+                  "type": "string"
+                },
+                "max_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "query": {
+                  "description": "Tree-sitter S-expression query. Capture exactly one node per match as @match; optional named captures support rewrite templates.",
+                  "type": "string"
+                },
+                "replacement": {
+                  "description": "Replacement template: ${capture} inserts matched source bytes; $$ escapes a dollar. The entire replacement file must parse successfully.",
+                  "type": "string"
+                },
+                "targets": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "expected": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "digest": {
+                            "type": "string"
+                          },
+                          "exists": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "exists"
+                        ],
+                        "type": "object"
+                      },
+                      "path": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "path"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 128,
+                  "minItems": 1,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "language",
+                "query",
+                "targets",
+                "replacement"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "tool": {
+              "const": "ast_edit",
+              "description": "Preview a structural rewrite, or apply with expected_matches and every target's expected revision from preview. All targets preflight before any change; replacement is atomic per file with reported partial failure."
+            }
+          },
+          "required": [
+            "id",
+            "tool",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "action"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {
+              "additionalProperties": false,
+              "properties": {
+                "task": {
+                  "type": "string"
+                },
+                "template": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "template",
+                "task"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "tool": {
+              "const": "SubagentStart",
+              "description": "Start an independent child agent. The operation remains running; ready messages expose its handle. End your turn to wait for events."
+            }
+          },
+          "required": [
+            "id",
+            "tool",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "action"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {
+              "additionalProperties": false,
+              "properties": {
+                "handle": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "handle",
+                "text"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "tool": {
+              "const": "SubagentSend",
+              "description": "Send a message to an owned child using its operation handle. Acknowledgement means durable receipt, not task completion."
+            }
+          },
+          "required": [
+            "id",
+            "tool",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "action"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {
+              "additionalProperties": false,
+              "properties": {
+                "handle": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "handle"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "tool": {
+              "const": "SubagentCancel",
+              "description": "Cancel an owned child by operation handle."
+            }
+          },
+          "required": [
+            "id",
+            "tool",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "action"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {
+              "additionalProperties": false,
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "tool": {
+              "const": "SendParent",
+              "description": "Send a progress update or question to the parent; end the turn to wait for its reply."
+            }
+          },
+          "required": [
+            "id",
+            "tool",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "action"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "additionalProperties": false,
+          "properties": {
+            "arguments": {
+              "additionalProperties": false,
+              "properties": {
+                "blockers": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "changedFiles": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "status": {
+                  "enum": [
+                    "completed",
+                    "failed"
+                  ],
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "tests": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "status",
+                "summary",
+                "changedFiles",
+                "tests",
+                "blockers"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "tool": {
+              "const": "Finish",
+              "description": "Finish delegated work with a canonical report, only after every other operation has completed. Call Finish alone; it stops this child."
+            }
+          },
+          "required": [
+            "id",
+            "tool",
+            "arguments"
+          ],
+          "type": "object"
+        },
+        "type": {
+          "const": "action"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "type": "object"
+    }
+  ],
+  "type": "object"
+}

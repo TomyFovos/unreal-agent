@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","model":"synthetic-model","tools":["StructuredOutput"],"mcp_servers":[],"permissionMode":"default"}
+{"type":"control_response","response":{"subtype":"success","request_id":"unreal_structured_init","response":{},"pending_permission_requests":[],"pending_user_dialog_requests":[]}}

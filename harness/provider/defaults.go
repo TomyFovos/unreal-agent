@@ -2,6 +2,7 @@ package provider
 
 import (
 	"github.com/unreallabsai/unreal-agent/harness/credential"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/fireworks"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/ollama"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openai"
@@ -9,11 +10,16 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openrouter"
 )
 
-// Defaults reuses the five existing clients. The caller supplies an explicit
+// Defaults reuses the existing clients and the installed Claude CLI, whose
+// Unreal-owned tool bridge requires explicit configuration.
+// The caller supplies an explicit
 // model catalog from its configuration/authority; this is not a stale hosted list.
 func Defaults(catalog map[string][]Model) []Descriptor {
 	caps := []string{"tools", "images", "reasoning"}
 	return []Descriptor{
+		{ID: "claude-code", AuthMethods: []credential.Method{credential.OAuth}, Capabilities: []string{"reasoning"}, Models: catalog["claude-code"], LocalProcess: true, ExternalAuth: true, ToolCapability: func(c BuildConfig) bool { return c.ClaudeCode.ToolBridge.Enabled }, New: func(c BuildConfig, _ credential.Material) (Client, error) {
+			return claudecode.NewClient(c.ClaudeCode)
+		}},
 		{ID: "openai", Endpoint: "https://api.openai.com/v1", AuthMethods: []credential.Method{credential.APIKey}, Capabilities: caps, Models: catalog["openai"], New: func(c BuildConfig, m credential.Material) (Client, error) {
 			return openai.NewClient(openai.Config{APIKey: m.Token.Reveal(), BaseURL: c.Selection.Endpoint, MaxAttempts: &c.Selection.MaxAttempts, HTTPClient: c.HTTPClient})
 		}},

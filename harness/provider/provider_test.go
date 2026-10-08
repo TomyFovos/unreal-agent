@@ -13,6 +13,7 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
 )
 
 func fixtureSelection(id, endpoint string) Selection {
@@ -29,6 +30,25 @@ func fixtureSelection(id, endpoint string) Selection {
 		auth.ID = "test"
 	}
 	return Selection{Version: 1, Provider: id, Model: Model{ID: "explicit-model"}, Endpoint: endpoint, Auth: auth, MaxAttempts: 1, Source: "test catalog"}
+}
+
+func TestRuntimeToolCapabilityIsExplicitAndPreservesCodex(t *testing.T) {
+	r, err := New(Defaults(map[string][]Model{"claude-code": {{ID: "configured"}}, "openai-codex": {{ID: "configured"}}})...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude := BuildConfig{Selection: Selection{Provider: "claude-code"}}
+	if r.SupportsTools(claude.Selection) || r.SupportsRuntimeTools(claude) {
+		t.Fatal("text-only default was silently enabled")
+	}
+	claude.ClaudeCode.ToolBridge = claudecode.ToolBridgeConfig{Enabled: true}
+	if !r.SupportsRuntimeTools(claude) || r.SupportsTools(claude.Selection) {
+		t.Fatal("opt-in mutated the registered default capability")
+	}
+	codex := BuildConfig{Selection: Selection{Provider: "openai-codex"}}
+	if !r.SupportsTools(codex.Selection) || !r.SupportsRuntimeTools(codex) {
+		t.Fatal("Codex tool capability was downgraded")
+	}
 }
 func TestFiveExistingProvidersResolveAtRequestTime(t *testing.T) {
 	for _, id := range []string{"openai", "openrouter", "fireworks", "ollama", "openai-codex"} {

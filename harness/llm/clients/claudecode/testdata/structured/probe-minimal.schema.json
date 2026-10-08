@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "properties": {
+    "type": {
+      "const": "final"
+    },
+    "final": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "type",
+    "final"
+  ],
+  "additionalProperties": false
+}
