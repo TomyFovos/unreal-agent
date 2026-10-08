@@ -11,7 +11,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -316,7 +315,7 @@ func TestStructuredOfficialControlProbeVariantBOutcomesAndIsolation(t *testing.T
 			if !reflect.DeepEqual(offline, normalizedProbeCall(t, call)) {
 				t.Fatal("variant CLI request differs from the existing offline audit request")
 			}
-			want, err := buildStructuredRequest(model, env, variant.Schema, filepath.Join(call.Directory, "system.txt"), structuredProbeInput, false)
+			want, err := buildStructuredRequest(model, env, variant.Schema, probeSystemPath(t, call), structuredProbeInput, false)
 			if err != nil || call.Initialize != string(want.Initialize) || call.UserFrame != string(want.Input) || !slices.Equal(call.Arguments, want.Arguments) || !slices.Equal(call.Environment, want.Environment) || call.System != structuredProbeSystem || call.Input != structuredProbeInput {
 				t.Fatal("variant adapter duplicated/changed the existing request builder")
 			}

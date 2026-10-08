@@ -248,7 +248,7 @@ func TestStructuredOfficialControlTransportVariants(t *testing.T) {
 			}
 			assertProbeVariantValueFree(t, report.Diagnostic)
 			call := f.Calls(t)[before]
-			want, err := buildStructuredRequest(model, env, v.Schema, call.Directory+"/system.txt", structuredProbeInput, false)
+			want, err := buildStructuredRequest(model, env, v.Schema, probeSystemPath(t, call), structuredProbeInput, false)
 			if err != nil || call.Initialize != string(want.Initialize) || call.Input != structuredProbeInput || call.System != structuredProbeSystem || call.ChildPID != 0 {
 				t.Fatal("fake transport request changed")
 			}

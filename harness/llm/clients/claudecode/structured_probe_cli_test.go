@@ -24,10 +24,8 @@ import (
 func normalizedProbeCall(t *testing.T, call testclaude.Call) testclaude.Call {
 	t.Helper()
 	call.Arguments = slices.Clone(call.Arguments)
+	probeSystemPath(t, call)
 	i := slices.Index(call.Arguments, "--system-prompt-file")
-	if i < 0 || i+1 >= len(call.Arguments) || call.Arguments[i+1] != filepath.Join(call.Directory, "system.txt") {
-		t.Fatal("unexpected system prompt transport")
-	}
 	// Only process identity and the random, already-removed temporary path are
 	// volatile. Never normalize schema, prompt, init IDs, env or session options.
 	call.Arguments[i+1] = "/private-temp/system.txt"
@@ -44,6 +42,86 @@ func normalizedProbeCall(t *testing.T, call testclaude.Call) testclaude.Call {
 	}
 	call.Schema = string(encoded)
 	return call
+}
+
+// getcwd records the physical directory, while argv can retain a TMPDIR alias
+// (notably /var -> /private/var on macOS). Validate directory identity and keep
+// the exact argv path when checking the independently built wire request.
+func probeSystemPath(t *testing.T, call testclaude.Call) string {
+	t.Helper()
+	path, err := probePromptPath(call)
+	if err != nil {
+		t.Fatal("unexpected system prompt transport")
+	}
+	return path
+}
+
+func probePromptPath(call testclaude.Call) (string, error) {
+	i := slices.Index(call.Arguments, "--system-prompt-file")
+	if i < 0 || i+1 >= len(call.Arguments) {
+		return "", errors.New("missing prompt path")
+	}
+	path := call.Arguments[i+1]
+	if !filepath.IsAbs(path) || filepath.Base(path) != "system.txt" || !filepath.IsAbs(call.Directory) {
+		return "", errors.New("unexpected prompt path")
+	}
+	parent, err := probePhysicalPath(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	directory, err := probePhysicalPath(call.Directory)
+	if err != nil || parent != directory {
+		return "", errors.New("prompt outside generation directory")
+	}
+	return path, nil
+}
+
+func probePhysicalPath(path string) (string, error) {
+	// Cleanup has removed the random leaf. Resolve its surviving ancestors,
+	// then append the absent suffix without changing any request metadata.
+	var missing []string
+	for {
+		physical, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				physical = filepath.Join(physical, missing[i])
+			}
+			return physical, nil
+		}
+		parent := filepath.Dir(path)
+		if !os.IsNotExist(err) || parent == path {
+			return "", err
+		}
+		missing = append(missing, filepath.Base(path))
+		path = parent
+	}
+}
+
+func TestStructuredLayerProbePromptPathsPreserveWireAndValidateAliases(t *testing.T) {
+	root := t.TempDir()
+	physical := filepath.Join(root, "physical")
+	if err := os.Mkdir(physical, 0700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(physical, alias); err != nil {
+		t.Fatal(err)
+	}
+	// Both suffixes are absent, as after generation cleanup.
+	directory := filepath.Join(physical, "removed-generation")
+	wirePath := filepath.Join(alias, "removed-generation", "system.txt")
+	call := testclaude.Call{Directory: directory, Arguments: []string{"--system-prompt-file", wirePath}}
+	path, err := probePromptPath(call)
+	if err != nil || path != wirePath {
+		t.Fatal("valid temp alias rejected or wire path changed", err)
+	}
+	for _, args := range [][]string{nil, {"--system-prompt-file"}, {"--system-prompt-file", "system.txt"}, {"--system-prompt-file", filepath.Join(alias, "other-generation", "system.txt")}, {"--system-prompt-file", filepath.Join(alias, "removed-generation", "other.txt")}} {
+		invalid := call
+		invalid.Arguments = args
+		if _, err := probePromptPath(invalid); err == nil {
+			t.Fatal("invalid system prompt transport accepted")
+		}
+	}
 }
 
 // This belongs to the fake-CLI gate (OfficialControl), after pure Layer units.
@@ -94,7 +172,7 @@ func TestStructuredOfficialControlProbeFreshProcessAndIdenticalPrefix(t *testing
 		}
 		level := max(1, i)
 		schema := structuredProbeSchema(t, level)
-		want, err := buildStructuredRequest(model, env, schema, filepath.Join(call.Directory, "system.txt"), structuredProbeInput, false)
+		want, err := buildStructuredRequest(model, env, schema, probeSystemPath(t, call), structuredProbeInput, false)
 		if err != nil || !slices.Equal(call.Arguments, want.Arguments) || !slices.Equal(call.Environment, want.Environment) || call.Initialize != string(want.Initialize) || call.UserFrame != string(want.Input) || call.System != structuredProbeSystem || call.Input != structuredProbeInput {
 			t.Fatal("actual request differs from independently tested builder contract")
 		}

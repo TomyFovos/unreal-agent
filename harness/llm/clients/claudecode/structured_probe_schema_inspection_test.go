@@ -306,7 +306,7 @@ func TestStructuredOfficialControlProbeOfflineSchemaVariants(t *testing.T) {
 		}
 		calls := f.Calls(t)
 		call := calls[len(calls)-1]
-		want, err := buildStructuredRequest(invocation.Model, env, variant.Schema, call.Directory+"/system.txt", invocation.Input, false)
+		want, err := buildStructuredRequest(invocation.Model, env, variant.Schema, probeSystemPath(t, call), invocation.Input, false)
 		if err != nil || call.Initialize != string(want.Initialize) || call.System != invocation.System || call.UserFrame != string(want.Input) ||
 			!slices.Equal(call.Arguments, want.Arguments) || !slices.Equal(call.Environment, want.Environment) {
 			t.Fatal("fake CLI received a different schema/request")
