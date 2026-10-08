@@ -92,6 +92,16 @@ func testClaudeBridgeHost(t *testing.T, mode string) {
 			t.Fatal(err)
 		}
 	}
+	// The surrounding suite builds with -race, but the project's Bash receipts
+	// deliberately run plain go test. Compile its test dependencies before the
+	// timed interaction; a cold cache must not turn compiler setup into a Host
+	// timeout. Do not run TestAnswer here: fail -> fix -> pass remains entirely
+	// inside canonical Operations, and the prepared binary stays outside Git.
+	prepare := exec.CommandContext(t.Context(), "go", "test", "-c", "-o", filepath.Join(t.TempDir(), "answer.test"), ".")
+	prepare.Dir = workspace
+	if output, err := prepare.CombinedOutput(); err != nil {
+		t.Fatalf("compile project fixture before interaction: %v\n%s", err, output)
+	}
 	steps := []testclaude.BridgeStep{
 		{Name: "read", Arguments: `{"path":"answer.go"}`, Contains: "return 0"},
 		{Name: "grep", Arguments: `{"path":".","pattern":"Answer","glob":"*.go"}`, Contains: "answer_test.go"},

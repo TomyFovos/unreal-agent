@@ -64,7 +64,10 @@ func waitInteractive(t *testing.T, ready func() bool) {
 
 func privateCLIDirectory(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "ua-codex-")
+	// macOS TMPDIR paths can consume the Unix socket's entire path budget.
+	// These Unix-only fixtures own a fresh private directory under /tmp;
+	// production path selection and its socket-length guard stay unchanged.
+	dir, err := os.MkdirTemp("/tmp", "ua-codex-")
 	if err != nil {
 		t.Fatal(err)
 	}
