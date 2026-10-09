@@ -228,13 +228,16 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 		active := base
 		if prior := host.ActiveRuntimeSelection(ctx); prior != nil {
 			active = *prior
-		} else if catalog, err := c.Catalog(ctx, base.Provider); err == nil && catalog.Available {
-			// Initial selection uses the same CLI-owned metadata as /model.
-			// Unknown catalogs retain the conservative fallback; canonical resume
-			// selections are never rewritten from newly discovered metadata.
-			if model, err := catalog.FindSelection(base.Model); err == nil && model.ContextWindow > 0 && model.ContextWindow <= 16<<20 {
-				base.ContextWindow = model.ContextWindow
-				active = base
+		}
+		if (host.IsNewSession(ctx) || host.ActiveRuntimeSelection(ctx) == nil) && active.Revision == 0 {
+			if catalog, err := c.Catalog(ctx, base.Provider); err == nil && catalog.Available {
+				// Initial selection uses the same CLI-owned metadata as /model.
+				// Unknown catalogs retain the conservative fallback; canonical resume
+				// selections are never rewritten from newly discovered metadata.
+				if model, err := catalog.FindSelection(base.Model); err == nil && model.ContextWindow > 0 && model.ContextWindow <= 16<<20 {
+					base.ContextWindow = model.ContextWindow
+					active = base
+				}
 			}
 		}
 		initialClient, err := selectionClient(c, active)

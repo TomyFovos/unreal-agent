@@ -131,3 +131,49 @@ func TestInitialRuntimeUsesKnownCatalogWindow(t *testing.T) {
 		})
 	}
 }
+
+func TestInitialCatalogWindowIsCanonicalThroughHostResume(t *testing.T) {
+	registry, err := provider.New(provider.Defaults(map[string][]provider.Model{"ollama": {{ID: "synthetic-model"}}})...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := RuntimeIdentity{Version: 1, Workspace: t.TempDir(), Provider: provider.Selection{Version: 1, Provider: "ollama", Model: provider.Model{ID: "synthetic-model"}, Auth: credential.Reference{Method: credential.None}, Source: "test", MaxAttempts: 1}, Profile: profile.Default(), ReasoningEffort: llm.ReasoningEffortLow}
+	window := int64(272000)
+	dir := t.TempDir()
+	factory, raw, err := NewRuntimeFactory(RuntimeConfig{Identity: identity, SessionDirectory: dir, Providers: registry, ModelCatalog: func(context.Context) (modelcatalog.Catalog, error) {
+		return modelcatalog.Catalog{Available: true, Models: []modelcatalog.Model{{ID: "synthetic-model", ContextWindow: window}}}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := host.New(t.Context(), host.Config{Directory: dir, Build: factory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := h.Create(t.Context(), host.Options{ID: "initial-window", Configuration: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, pending := s.RuntimeSelection()
+	if a == nil || a.ContextWindow != window || pending != nil {
+		t.Fatal("Host configuration projection discarded initial catalog metadata")
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	<-s.Done()
+	window = 65536 // external metadata changes must not rewrite old identity
+	h, err = host.New(t.Context(), host.Config{Directory: dir, Build: factory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	resumed, err := h.Resume(t.Context(), host.Options{ID: s.ID, Configuration: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, pending := resumed.RuntimeSelection()
+	if after == nil || *after != *a || pending != nil {
+		t.Fatal("resume changed canonical window or runtime identity")
+	}
+}

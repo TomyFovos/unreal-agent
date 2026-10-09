@@ -37,6 +37,15 @@ func (s *Session) verifyRuntimeSelections() error {
 	return nil
 }
 
+type newSessionKey struct{}
+
+// IsNewSession exposes only the creation boundary to the runtime factory.
+// Resumed canonical selections must not be refreshed from changing catalogs.
+func IsNewSession(ctx context.Context) bool {
+	created, _ := ctx.Value(newSessionKey{}).(bool)
+	return created
+}
+
 // ActiveRuntimeSelection lets a factory replay the applied selection without
 // relaxing validation of the immutable creation configuration.
 func ActiveRuntimeSelection(ctx context.Context) *sessionstore.RuntimeSelection {

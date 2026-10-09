@@ -30,6 +30,10 @@ Estimates remain conservative JSON/UTF-8 byte-based estimates, not measured
 tokens. Explicit budgets, unknown-window fallback, schema and private framing
 reserves remain. New initial selections use matching available CLI catalog
 windows; canonical resume selections retain their identity.
+The real Host creation path persists a same-model selection/applied pair before
+the first Turn when a known window exists. This keeps catalog metadata outside
+immutable configuration while binding it durably. Unknown windows keep revision
+zero and fallback; resume never silently refreshes the recorded window.
 
 ## Synthetic verification
 

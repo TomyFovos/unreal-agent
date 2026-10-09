@@ -333,6 +333,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		s.lifecycle = "interactive"
 	}
 	cctx = context.WithValue(cctx, sessionContextKey{}, s)
+	cctx = context.WithValue(cctx, newSessionKey{}, created)
 	s.ctx = cctx
 	s.runtime, err = h.config.Build(cctx, o.ID)
 	if err != nil {
@@ -343,6 +344,20 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	}
 	if s.selection == nil {
 		s.selection = s.runtime.Selection
+	}
+	if created && s.selection != nil && s.runtime.Selection != nil && s.selection.ContextWindow == 0 && s.runtime.Selection.ContextWindow > 0 && s.runtime.ApplySelection != nil {
+		// Catalog metadata is not part of immutable configuration identity. Bind
+		// the initial known window through the existing canonical selection and
+		// activation records, before any Turn. Resume replays those exact records.
+		choice := *s.selection
+		choice.ContextWindow = s.runtime.Selection.ContextWindow
+		choice.RequestID = "initial-catalog-window"
+		if err = s.SelectRuntime(ctx, s.Generation, choice.Revision, choice); err != nil {
+			return nil, err
+		}
+		if _, err = s.beginTurn(ctx, true); err != nil {
+			return nil, err
+		}
 	}
 	s.runtime.LLM = s.withProgress(s.runtime.LLM)
 	if o.Lifecycle == "" {
