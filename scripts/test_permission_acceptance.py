@@ -7,6 +7,8 @@ import http.server
 import io
 import json
 import os
+import pty
+import select
 from pathlib import Path
 import subprocess
 import sys
@@ -95,12 +97,18 @@ class PermissionAcceptanceTests(unittest.TestCase):
         stdin, stdout = TTY("\n"), TTY()
         with patch.object(sys,"stdin",stdin), patch.object(sys,"stdout",stdout):
             gate.instructions(self.package,wait=True)
-        self.assertIn("日本語の受入手順",stdout.getvalue())
-        self.assertIn("EnterでTUI",stdout.getvalue())
+        self.assertNotIn("日本語の受入手順",stdout.getvalue())
+        self.assertIn("[Enterで起動]",stdout.getvalue())
         self.assertEqual(stdin.tell(),1)
-        for contents in ("", "typed input\n"):
+        for contents in ("", "typed input\n", "x"*512+"\n"):
             with patch.object(sys,"stdin",TTY(contents)), patch.object(sys,"stdout",TTY()), self.assertRaises(pilot.PilotError):
                 gate.instructions(self.package,wait=True)
+        for contents in ("typed input\n\n", "expired-confirmation\n\n", "x"*512+"\n\n", "\r\n"):
+            stdout=TTY()
+            with patch.object(sys,"stdin",TTY(contents)), patch.object(sys,"stdout",stdout), patch.object(time,"monotonic",side_effect=AssertionError("no deadline before human Enter")):
+                gate.instructions(self.package,wait=True)
+            self.assertNotIn("typed input",stdout.getvalue())
+            self.assertNotIn("expired-confirmation",stdout.getvalue())
         with patch.object(sys,"stdin",io.StringIO("do not consume")), patch.object(sys,"stdout",TTY()):
             gate.instructions(self.package,wait=True)
             self.assertEqual(sys.stdin.tell(),0)
@@ -108,22 +116,102 @@ class PermissionAcceptanceTests(unittest.TestCase):
             gate.instructions(self.package,wait=True)
             self.assertEqual(sys.stdin.tell(),0)
 
+    def test_quick_start_does_not_display_readme(self):
+        (self.package / "README.md").write_text("private-readme-marker\n", encoding="utf-8")
+        output = io.StringIO()
+        with patch.object(sys, "stdout", output):
+            gate.instructions(self.package)
+        self.assertIn("Unreal Agent - Quick Start", output.getvalue())
+        self.assertNotIn("private-readme-marker", output.getvalue())
+
+    def test_readme_replay_and_ctrl_c_do_not_launch_or_grant(self):
+        (self.package / "README.md").write_text("日本語の受入手順\n", encoding="utf-8")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output): gate.readme(self.package)
+        self.assertIn("日本語の受入手順", output.getvalue())
+        stdin = io.StringIO(); stdin.isatty = lambda: True
+        stdin.readline = lambda *args: (_ for _ in ()).throw(KeyboardInterrupt())
+        stdout = io.StringIO(); stdout.isatty = lambda: True
+        with patch.object(sys, "stdin", stdin), patch.object(sys, "stdout", stdout), self.assertRaises(pilot.PilotError) as failed:
+            gate.instructions(self.package, wait=True)
+        self.assertEqual(failed.exception.code, "gate_instructions_canceled")
+
+    def test_quick_start_pty_requires_a_separate_empty_enter(self):
+        master, slave = pty.openpty()
+        self.addCleanup(os.close, master)
+        script = "import pathlib,sys; sys.path.insert(0,sys.argv[1]); import permission_acceptance as g; g.instructions(pathlib.Path('.'),wait=True); print('LAUNCH_CONFIRMED',flush=True)"
+        child = subprocess.Popen([sys.executable, "-B", "-c", script, str(Path(gate.__file__).parent)], stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        def stop_child():
+            if child.poll() is None: child.kill()
+            child.wait(timeout=5)
+        self.addCleanup(stop_child)
+        captured = bytearray()
+        def until(marker, count=1):
+            deadline=time.monotonic()+5
+            while captured.count(marker) < count:
+                if time.monotonic() >= deadline: self.fail("PTY prompt not observed")
+                readable, _, _ = select.select([master], [], [], max(0, deadline-time.monotonic()))
+                if readable: captured.extend(os.read(master, 4096))
+        until("[Enterで起動]".encode())
+        self.assertIsNone(child.poll())
+        os.write(master, b"expired-confirmation\n")
+        until("[Enterで起動]".encode(), 2)
+        # An arbitrary input cannot launch; no timeout or pending challenge is
+        # involved. A distinct empty Enter is still required.
+        self.assertIsNone(child.poll())
+        os.write(master, b"\n")
+        until(b"LAUNCH_CONFIRMED")
+        self.assertEqual(child.wait(timeout=5), 0)
+        self.assertNotIn(b"policy-audited", captured)
+
+    def test_failed_view_diagnostics_are_closed_and_read_only(self):
+        self.setup_gate()
+        (self.p["workspace"] / "sample.txt").write_bytes(b"after\n")
+        op={"ID":"private-operation-id","ToolName":"write","Status":"completed","State":{"Plan":{"Data":{"path":"private-path","content":"private-body"}}}}
+        view={"Failure":'call model for turn "private-turn-id": provider: remote_failure stage=http_status status=502 reason=server_error retryable=true',"Operations":[op], "History":{"More":False}}
+        result=gate.safe_diagnosis(self.p,view)
+        self.assertEqual(result["stage"],"http_status")
+        self.assertEqual(result["status"],502)
+        self.assertEqual(result["reason"],"server_error")
+        self.assertTrue(result["retryable"])
+        self.assertEqual(result["receipts"],{"write:completed":1})
+        self.assertEqual(result["sample_state"],"expected_after")
+        self.assertNotIn("private",json.dumps(result))
+        for field in ("stage", "reason"):
+            changed=copy.deepcopy(view)
+            changed["Failure"]=view["Failure"].replace(field+"="+result[field],field+"=private_payload")
+            summary=gate.safe_diagnosis(self.p,changed)
+            self.assertEqual(summary[field],"unknown")
+            self.assertNotIn("private",json.dumps(summary))
+        legacy=copy.deepcopy(view);legacy["Failure"]="provider: remote_failure"
+        summary=gate.safe_diagnosis(self.p,legacy)
+        self.assertIsNone(summary["status"]);self.assertIsNone(summary["retryable"])
+        legacy["Operations"].append(op)
+        self.assertEqual(gate.safe_diagnosis(self.p,legacy)["duplicate_operation_count"],1)
+        (self.p["workspace"] / "sample.txt").unlink()
+        (self.p["workspace"] / "sample.txt").symlink_to(self.home / "secret-missing")
+        self.assertEqual(gate.safe_diagnosis(self.p,view)["sample_state"],"unreadable")
+        # Failed sessions remain failed evidence, even if actual work succeeded.
+        with patch.object(gate,"inspect_view",return_value=view),self.assertRaises(pilot.PilotError): gate.view(self.p,{"CodexFile":""},"gate-e")
+
     def test_open_displays_and_confirms_instructions_before_exec(self):
         self.setup_gate()
         order=[]
         with patch.dict(os.environ,self.env,clear=True), patch.object(gate,"kit",return_value=(self.installed,self.meta)), \
                 patch.object(gate,"preflight",side_effect=lambda *a:order.append("preflight")), \
-                patch.object(gate,"instructions",side_effect=lambda *a,**k:order.append(("readme",k))), \
+                patch.object(gate,"instructions",side_effect=lambda *a,**k:order.append(("quick-start",k))), \
                 patch.object(os,"chdir"),patch.object(os,"execve",side_effect=lambda *a:order.append("exec")):
             self.assertEqual(gate.main(["open","gate-e","--instance",self.args.instance]),0)
-        self.assertEqual(order,["preflight",("readme",{"wait":True}),"exec"])
+        self.assertEqual(order,[("quick-start",{"wait":True}),"preflight","exec"])
         with patch.dict(os.environ,self.env,clear=True), patch.object(gate,"kit",return_value=(self.installed,self.meta)), \
-                patch.object(gate,"preflight"),patch.object(gate,"instructions",side_effect=pilot.PilotError("gate_instructions_canceled","No TUI started.")), \
+                patch.object(gate,"preflight") as probe,patch.object(gate,"instructions",side_effect=pilot.PilotError("gate_instructions_canceled","No TUI started.")), \
                 patch.object(os,"execve") as execute, contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(gate.main(["open","gate-e","--instance",self.args.instance]),1)
             execute.assert_not_called()
+            probe.assert_not_called()
         # Readme replay does not require a Session, authentication or any Host.
-        with patch.object(gate,"kit",return_value=(self.package,self.meta)), patch.object(gate,"instructions") as show, patch.object(gate,"binding",side_effect=AssertionError("not needed")):
+        with patch.object(gate,"kit",return_value=(self.package,self.meta)), patch.object(gate,"readme") as show, patch.object(gate,"binding",side_effect=AssertionError("not needed")):
             self.assertEqual(gate.main(["readme"]),0)
             show.assert_called_once_with(self.package)
 

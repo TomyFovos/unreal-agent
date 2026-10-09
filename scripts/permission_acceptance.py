@@ -178,27 +178,108 @@ def session_id(value):
     return value
 
 
-def instructions(package, *, wait=False):
-    # Only the verified local operator README is displayed. No provider output,
-    # configuration or credential is involved in this launch pause.
+QUICK_START = """Unreal Agent - Quick Start
+
+Enter          メッセージ送信
+/model         モデル変更
+/permissions   権限変更
+Ctrl+D         detach
+
+注意：Full AccessはOS隔離を提供しない。
+"""
+
+
+def readme(package):
+    # The verified local operator README can be replayed without authentication,
+    # a Session, an inference request or a human permission challenge.
     print(files.read_owned(package / "README.md", limit=32768).decode("utf-8"), flush=True)
+
+
+def instructions(package, *, wait=False):
+    print(QUICK_START, flush=True)
     if wait and sys.stdin.isatty() and sys.stdout.isatty():
-        print("上の手順を読んでください。EnterでTUIを起動、Ctrl+Cで中止。後から gate.sh readme で再表示できます。", flush=True)
-        try:
-            line = sys.stdin.readline(256)
-        except KeyboardInterrupt:
-            pilot.fail("gate_instructions_canceled", "No TUI started; all state retained.")
-        if line not in ("\n", "\r\n"):
-            pilot.fail("gate_instructions_unconfirmed", "Enter is required; no TUI started, all state retained.")
+        # No expiring challenge is created before this pause. Only a fresh,
+        # empty Enter confirms launching, never policy trust or Full Access.
+        while True:
+            print("[Enterで起動]  Ctrl+Cで中止 / 手順全文: gate.sh readme", flush=True)
+            try:
+                line = sys.stdin.readline(256)
+                if not line:
+                    pilot.fail("gate_instructions_unconfirmed", "Enter is required; no TUI started, all state retained. Run the same launcher to confirm again.")
+                # Drain an overlong line without accidentally treating its
+                # final newline as an empty Enter. Never echo typed contents.
+                complete = line.endswith("\n")
+                if line in ("\n", "\r\n"):
+                    return
+                while not complete:
+                    fragment = sys.stdin.readline(256)
+                    if not fragment:
+                        pilot.fail("gate_instructions_unconfirmed", "Input closed; no TUI started, all state retained. Run the same launcher to confirm again.")
+                    complete = fragment.endswith("\n")
+            except KeyboardInterrupt:
+                pilot.fail("gate_instructions_canceled", "No TUI started; all state retained.")
+
+
+def inspect_view(p, b, session):
+    g = pilot.Gateway(p["socket"])
+    g.call("extension", pilot.host_binding(p, b["CodexFile"]))
+    return g.call("inspect", {"ID": session_id(session), "After": 0, "Limit": 256})["View"]
 
 
 def view(p, b, session):
-    g = pilot.Gateway(p["socket"])
-    g.call("extension", pilot.host_binding(p, b["CodexFile"]))
-    v = g.call("inspect", {"ID": session_id(session), "After": 0, "Limit": 256})["View"]
+    v = inspect_view(p, b, session)
     if v.get("Failure") or v.get("History", {}).get("More"):
-        pilot.fail("gate_incomplete_evidence", "Inspect the gate's /analyze Errors; preserve history, no inference retry.")
+        pilot.fail("gate_incomplete_evidence", "Run gate.sh diagnose gate-e (or gate-d); preserve history, no inference retry.")
     return v
+
+
+def safe_diagnosis(p, v):
+    # Failed Views are intentionally allowed here, never by verify/checkpoint.
+    # No raw failure, arguments, file contents, IDs or provider metadata leave
+    # this function. Only closed categories/counters are printed; no evidence
+    # is written back to the Session Store.
+    failure = v.get("Failure")
+    failure = failure if isinstance(failure, str) else ""
+    result = {"failed": bool(failure), "provider_code": "unknown", "stage": "unknown",
+              "status": None, "reason": "unknown", "retryable": None,
+              "history_partial": v.get("History", {}).get("More") is True}
+    code = re.search(r"\bprovider: ([a-z_]+)(?=\s|$)", failure)
+    if code and code.group(1) in {"remote_failure", "request_failed", "unauthenticated", "forbidden", "invalid_request", "rate_limited", "proxy_unavailable"}:
+        result["provider_code"] = code.group(1)
+        for field, allowed in {
+            "stage": {"request_build", "http_status", "stream_error", "stream_decode", "stream_incomplete", "response_decode", "transport"},
+            "reason": {"server_error", "server_is_overloaded", "slow_down", "rate_limit_exceeded", "context_length_exceeded", "invalid_prompt", "invalid_token", "invalid_api_key", "authentication_error", "permission_error", "insufficient_quota", "usage_limit_reached", "timeout", "connection_error", "tls_error", "invalid_response", "incomplete_stream", "unknown"},
+        }.items():
+            match = re.search(r"(?:^|\s)"+field+r"=([a-z_]+)(?=\s|$)", failure)
+            if match and match.group(1) in allowed: result[field] = match.group(1)
+        status = re.search(r"(?:^|\s)status=([0-9]{3})(?=\s|$)", failure)
+        if status and 100 <= int(status.group(1)) <= 599: result["status"] = int(status.group(1))
+        retry = re.search(r"(?:^|\s)retryable=(true|false)(?=\s|$)", failure)
+        if retry: result["retryable"] = retry.group(1) == "true"
+    ops = v.get("Operations") or []
+    ids = [op.get("ID") for op in ops]
+    result["operation_count"] = len(ops)
+    result["duplicate_operation_count"] = len(ids)-len(set(ids))
+    result["receipts"] = {}
+    for op in ops:
+        tool = op.get("ToolName")
+        tool = tool if tool in {"read", "grep", "glob", "write", "edit", "Bash"} else "other"
+        state = op.get("Status")
+        state = state if state in {"completed", "failed", "canceled", "initial", "running", "canceling"} else "other"
+        key = tool+":"+state
+        result["receipts"][key] = result["receipts"].get(key, 0)+1
+    sample = p["workspace"] / "sample.txt"
+    result["sample_state"] = "missing"
+    if os.path.lexists(sample):
+        try:
+            result["sample_state"] = "expected_after" if files.read_owned(sample, limit=4096) == b"after\n" else "other"
+        except (OSError, pilot.PilotError, ValueError):
+            result["sample_state"] = "unreadable"
+    return result
+
+
+def diagnose(p, b, session):
+    print(json.dumps(safe_diagnosis(p, inspect_view(p, b, session)), sort_keys=True))
 
 
 def operations(v):
@@ -337,7 +418,7 @@ def stop(package, p, b):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("setup", "open", "readme", "prompt", "verify", "checkpoint", "resume-check", "stop"))
+    parser.add_argument("command", choices=("setup", "open", "readme", "prompt", "verify", "diagnose", "checkpoint", "resume-check", "stop"))
     parser.add_argument("value", nargs="?", default="gate-d")
     parser.add_argument("--instance")
     parser.add_argument("--model")
@@ -351,7 +432,7 @@ def main(argv=None):
             if args.value not in PROMPTS: pilot.fail("gate_prompt_invalid", "Use d/read/deny/ask/work/full/restart.")
             print(PROMPTS[args.value]); return 0
         package, meta = kit(Path(__file__).absolute().parent)
-        if args.command == "readme": instructions(package); return 0
+        if args.command == "readme": readme(package); return 0
         args.instance = args.instance or "permissions-"+meta["baseline"][:7]
         home = Path(os.environ.get("HOME", ""))
         if not home.is_absolute() or not home.is_dir() or home.is_symlink(): pilot.fail("gate_home_invalid", "Existing absolute user HOME required.")
@@ -362,13 +443,16 @@ def main(argv=None):
         if installed != meta:
             pilot.fail("gate_binding_mismatch", "Installed kit identity changed; keep existing state and do not start/stop a Host.")
         if args.command == "open":
-            preflight(package, meta, p, b)
             session = session_id(args.value)
             instructions(package, wait=True)
+            # Recheck external auth/policy after an arbitrarily long human
+            # reading pause. Audit/trust opt-in remains bound and mandatory.
+            preflight(package, meta, p, b)
             env = {k:v for k,v in os.environ.items() if k in ("HOME", "PATH", "TERM", "LANG", "COLORTERM", "NO_COLOR", "CLAUDE_CONFIG_DIR", "SBX_CRED_OPENAI_MODE", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR")}
             os.chdir(p["workspace"])
             os.execve(str(package / "unreal"), pilot.launcher_arguments(package, p, b["CodexFile"], session), env)
         elif args.command == "verify": verify_stage(p, view(p, b, "gate-d" if args.value == "d" else "gate-e"), args.value)
+        elif args.command == "diagnose": diagnose(p, b, session_id(args.value))
         elif args.command == "checkpoint": checkpoint(p, b, session_id(args.value))
         elif args.command == "resume-check": verify_resume(p, b, session_id(args.value))
         elif args.command == "stop": stop(package, p, b)

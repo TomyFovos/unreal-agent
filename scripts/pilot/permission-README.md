@@ -42,8 +42,11 @@ restricted preflightで確認し、Structured Bridge/managedPolicyMode=trustを�
 MCPや他providerへfallbackしません。未認証・未監査はfail-closedです。
 
 setupは実推論を送りません。表示された`LAUNCH:`の専用`unreal`のパスを使用します。
-起動直前にこのREADMEを表示し、対話端末では**Enterまで待機**します。Ctrl+C/EOFは
-TUIを起動せず終了します。非対話環境の自動試験は待機しません。
+起動直前には短いQuick Startだけ表示し、対話端末では**Enterまで期限なしで待機**します。
+別の入力は承認にせず再度Enterを求めます。Ctrl+C/EOFはTUIを起動せず終了します。
+同じlauncherを再実行すれば安全に再確認できます。認証/policy preflightはEnter後に
+新しく実施します。この確認でtrustやFull Accessは付与しません。
+非対話環境の自動試験は待機しません。README全文は`gate.sh readme`で表示できます。
 `~/.local/bin/unreal`やshell設定は置換しません。configは0600、各専用directoryは0700。
 state/workspaceは専用の新しい一時Git repoであり、既存`~/workspace`は使用しません。
 証拠保持のためworkspace/stateは永続で、削除しません。
@@ -112,6 +115,28 @@ workspaceにはなりません。新規writeの`expected:{exists:false}`は正�
 入力が空ならHome/Endと上下キーも履歴操作です。入力中のHome/Endはcomposer操作を維持。
 Splitの右ペイン上のホイールはOrchestrationをスクロールします。コピー機能は不要です。
 端末のテキスト選択が必要ならShiftを押してドラッグしてください（端末のmouse override）。
+
+## 継続推論が失敗した場合
+
+`provider: remote_failure`はtoolの失敗とは別です。新binaryでは`stage`、HTTP `status`、
+閉じた`reason`、model-requestの`retryable`を表示します。`http_status`と`stream_error`
+（HTTP 200内のAPI error）を区別します。502/既知server errorは上流障害の候補ですが、
+この表示だけで実機の原因を断定しません。tool receiptが成功なら、その副作用は既に
+完了しています。`/resume`は履歴/完了Operationを再利用し、同じ副作用を再実行しません。
+Host再起動後はRead Onlyへ戻ります。`retryable`はOperationの再実行許可ではありません。
+
+失敗時はdetachし、次の読み取り専用コマンドでsafe分類とreceipt件数だけ確認できます。
+本文・arguments・ID・環境・認証headerは表示しません。`sample_state=expected_after`は
+専用workspaceの固定sample.txtの実内容がafterと改行に一致することを示します。
+旧binaryの失敗からHTTP statusを復元することはできません。旧Sessionを削除せず、
+新キットの専用Sessionで1回だけ再試験し、必要ならこのsafe結果だけを共有してください。
+
+```sh
+bash "$permission_package/gate.sh" diagnose gate-e
+```
+
+`verify`はfailed SessionをPASS扱いしません。request本文、raw provider response、
+認証ファイルやHost log全文を共有しないでください。
 
 ```sh
 # STAGEごとのFinal後、detachして実行
