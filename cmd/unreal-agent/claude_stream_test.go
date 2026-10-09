@@ -97,6 +97,9 @@ func TestClaudeRefreshModelInferenceAndFullHostRestartKeepStreamsSeparate(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Creation now obtains the same catalog window as /model. A refresh must
+	// add exactly one metadata request, never an inference/continuation.
+	creationCatalogCalls := len(f.CatalogCalls(t))
 	refresh := func(c *gateway.Client) {
 		t.Helper()
 		out, err := modelExchange(t.Context(), c.Extension, modelRequest{Action: "model.catalog", ID: "stream-isolation", Refresh: true})
@@ -112,7 +115,7 @@ func TestClaudeRefreshModelInferenceAndFullHostRestartKeepStreamsSeparate(t *tes
 	waitInteractive(t, func() bool { return len(f.Calls(t)) == 1 })
 	// Refresh independently while the already initialized text subprocess waits.
 	refresh(c)
-	if len(f.CatalogCalls(t)) != 2 || len(f.Calls(t)) != 1 {
+	if len(f.CatalogCalls(t)) != creationCatalogCalls+2 || len(f.Calls(t)) != 1 {
 		t.Fatal("refresh reused/continued inference")
 	}
 	if err = os.WriteFile(gate, []byte("ready"), 0600); err != nil {

@@ -117,10 +117,15 @@ func FuzzRunLogMatchesExecution(f *testing.F) {
 					destination = &fuzzLogOutput{output: &stdout, responses: failAt, err: outputFailure}
 				}
 				// This execution/codec fuzzer intentionally accepts 128 KiB inputs.
-				// Give its injected fake model an explicit window; real unknown
-				// models still use the conservative v1 budget, tested separately.
+				// This is a log/codec oracle, not a budget-overflow oracle: a failed
+				// response can leave several full unreceived groups mandatory. Size
+				// its fake window for the bounded input, repeated public text/private
+				// summaries and receipts, including JSON escaping. The original 256
+				// KiB fixture could not hold its 70 KiB failure/resume seed intact.
+				// Real defaults and dedicated true-overflow tests remain unchanged.
 				configured := testConfig(client)
-				configured.Context = contextengine.Config{FallbackWindow: 524288, InputBudget: 262144}
+				budget := int64(65536) + 4*contextengine.Estimate(text)*int64(len(actions)+2)
+				configured.Context = contextengine.Config{FallbackWindow: budget + 8192, InputBudget: budget}
 				err := Run(ctx, []string{"-workspace", workspace, "-session-directory", sessions, "-log-directory", logDirectory, "-tool-heartbeat-interval", "0"},
 					func(name string) string {
 						if name == llmAPIKeyEnvironment {
