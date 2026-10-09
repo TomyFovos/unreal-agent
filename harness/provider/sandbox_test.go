@@ -16,6 +16,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openaicodex"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/internal/testcodex"
 )
 
 func sandboxSource(t *testing.T) openaicodex.DockerSandboxSource {
@@ -141,5 +142,60 @@ func TestDockerSandboxOAuthReferenceAndMaterialIsolation(t *testing.T) {
 		if !credential.IsCode(err, "invalid_docker_sandbox_material") {
 			t.Fatal("mixed source material accepted", err)
 		}
+	}
+}
+
+func TestDockerSandboxForwardProxyProviderErrorsAreSafe(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		code   string
+	}{
+		{"success", http.StatusOK, ""},
+		{"unauthorized", http.StatusUnauthorized, "unauthenticated"},
+		{"forbidden", http.StatusForbidden, "forbidden"},
+		{"missing-proxy", http.StatusOK, "proxy_unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HTTPS_PROXY", testcodex.DockerProxyURL)
+			t.Setenv("https_proxy", "")
+			if test.name == "missing-proxy" {
+				t.Setenv("HTTPS_PROXY", "")
+			}
+			proxy := testcodex.NewOAuthProxy(t, openaicodex.SandboxAccessSentinel)
+			proxy.Status.Store(int32(test.status))
+			source := sandboxSource(t)
+			ref := credential.Reference{Provider: "openai-codex", ID: "docker-sandbox-oauth", Method: credential.DockerSandboxOAuth}
+			registry, err := New(Defaults(map[string][]Model{"openai-codex": {{ID: "gpt-6.1-sol"}}})...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client, _, err := registry.Build(BuildConfig{Selection: Selection{Version: 1, Provider: "openai-codex", Model: Model{ID: "gpt-6.1-sol"}, Auth: ref, MaxAttempts: 1, Source: "OAuth forward fixture"}, Resolver: DockerSandboxCodex(source), HTTPClient: &http.Client{Transport: proxy.Transport}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			policy, err := permission.New(permission.Config{NetworkOrigins: []string{"https://chatgpt.com"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer policy.Close()
+			response, err := client.Respond(permission.WithPolicy(t.Context(), policy), llm.Request{Model: llm.Model{ID: "gpt-6.1-sol", ReasoningEffort: llm.ReasoningEffortMedium}}, llm.RequestOptions{})
+			var failure *Error
+			if test.code == "" {
+				if err != nil || response.Stop != llm.StopComplete || !proxy.RequestOK.Load() {
+					t.Fatal("provider forward exchange failed")
+				}
+			} else if !errors.As(err, &failure) || failure.Code != test.code || strings.Contains(err.Error(), "private-fixture") || strings.Contains(err.Error(), openaicodex.SandboxAccessSentinel) {
+				t.Fatal("provider error lost its safe closed type")
+			}
+			expected := int32(1)
+			if test.code == "proxy_unavailable" {
+				expected = 0
+			}
+			if proxy.Requests.Load() != expected || proxy.DirectRequests.Load() != 0 {
+				t.Fatal("provider retried or used direct egress")
+			}
+		})
 	}
 }

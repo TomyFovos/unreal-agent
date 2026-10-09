@@ -75,12 +75,19 @@ func NewClient(config Config) (*Client, error) {
 		headers["Authorization"] = []string{"Bearer " + SandboxAccessSentinel}
 		base := httpClient.Transport
 		if config.HTTPClient == nil || base == nil {
-			transport := http.DefaultTransport.(*http.Transport).Clone()
-			transport.Proxy = nil
-			base = transport
-		} else if transport, ok := base.(*http.Transport); ok {
+			base = http.DefaultTransport.(*http.Transport)
+		}
+		if transport, ok := base.(*http.Transport); ok {
+			proxy, err := DockerSandboxProxyURL(nil)
+			if err != nil {
+				return nil, err
+			}
 			clone := transport.Clone()
-			clone.Proxy = nil
+			clone.Proxy = http.ProxyURL(proxy)
+			// No proxy credentials or caller-supplied CONNECT headers. Only the
+			// fixed HTTPS authority crosses this public, runtime-owned relay.
+			clone.ProxyConnectHeader = nil
+			clone.GetProxyConnectHeader = nil
 			base = clone
 		}
 		httpClient.Transport = sandboxTransport{base: base}

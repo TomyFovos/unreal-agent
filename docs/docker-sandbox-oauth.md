@@ -30,7 +30,7 @@ an isolated Pilot config/state/socket for this route.
 Non-inference preflight (path only, no credential values on stdout):
 
 ```sh
-unreal-agent-auth check-docker-sandbox-oauth --codex-auth-file "$CODEX_HOME/auth.json"
+unreal-agent-auth check-docker-sandbox-oauth --codex-auth-file "$CODEX_HOME/auth.json" --check-forward-proxy
 ```
 
 The existing file-path resolution (`--codex-auth-file`,
@@ -44,11 +44,44 @@ nonsecret marker/config; native token files still require private permissions.
 
 The resolver returns an owner marker with **no token or account ID**. The
 protocol adapter emits only the fixed public sentinel, omits
-`ChatGPT-Account-ID`, rejects alternate URLs and unexpected headers, disables
-cookies and redirects, and does not enable ambient HTTP proxies. The existing
-Permission transport still authorizes every exchange. Docker's transparent
-host proxy remains responsible for OAuth substitution; network reachability
-inside a particular Sandbox requires operator verification.
+`ChatGPT-Account-ID`, rejects alternate URLs and unexpected headers, and disables
+cookies and redirects. Docker's **forward** proxy performs OAuth substitution;
+the transparent path enforces network policy but **does not inject credentials**.
+Disabling the forward proxy sends the public sentinel to the backend unchanged,
+producing a 401 even when the original Codex CLI successfully authenticates.
+See [Docker network isolation](https://docs.docker.com/ai/sandboxes/security/isolation)
+and [credential-proxy troubleshooting](https://docs.docker.com/ai/sandboxes/troubleshooting/#agent-authentication-failure).
+
+Only this explicitly selected authentication route reads `HTTPS_PROXY` (or
+`https_proxy` when uppercase is absent). Standard HTTP transports require one
+of the exact public Docker listener URLs `http://host.docker.internal:3128` or
+`http://gateway.docker.internal:3128`. Conflicting case variants, missing values,
+credentials/userinfo, alternate schemes/hosts/ports, paths, queries and fragments
+are rejected without a request. The port is Docker's documented forward listener;
+the two Docker-owned host/gateway aliases are described in
+[Docker's Sandbox architecture](https://www.docker.com/ja-jp/blog/untrusted-autonomous-workload-ai-sandboxes/)
+and [Docker networking](https://docs.docker.com/desktop/features/networking/networking-how-tos/).
+No proxy URL is stored in runtime identity or Session history. `NO_PROXY`,
+`HTTP_PROXY`, `ALL_PROXY` and corporate/system proxies cannot redirect or bypass
+this route. The runtime's existing environment is not rewritten.
+
+The proxy is pinned in a private transport clone, with CONNECT credentials and
+custom CONNECT headers removed. CONNECT targets only `chatgpt.com:443`; the
+application request still targets only the exact HTTPS `/backend-api/codex/responses`
+endpoint. TLS certificate verification uses the existing trust configuration;
+it is never disabled and no CA is installed by Unreal. Native ExternalCodex and
+its transport/authentication behavior remain unchanged. A trusted custom host
+RoundTripper remains injectable for fixtures, under the same endpoint/header guard.
+The existing Permission transport still authorizes every backend exchange; the
+fix does not add an origin or grant network/process/filesystem permissions.
+Children receive only the validated public Docker proxy URL, never arbitrary
+parent proxy settings, bypass rules or proxy credentials.
+
+Missing/unrecognized inference routing is the safe typed error
+`provider: proxy_unavailable`. The optional non-inference preflight flag reports
+`credential: docker_sandbox_proxy_unavailable` before the Pilot starts. Neither
+path falls back to direct traffic or another provider. A nonstandard listener
+needs separate review instead of expanding the allowlist automatically.
 
 No API-key fallback, dummy account ID, token extraction, auth-file copying,
 managed token store, OAuth refresh, permission import, foreign MCP invocation
@@ -59,10 +92,11 @@ provider failure, without exposing response bodies or retrying authorization.
 
 ## Verification
 
-Unit/Host fixtures cover an OAuth proxy exchange, exact endpoint/headers,
+Unit/Host fixtures cover a real loopback CONNECT/TLS proxy exchange, exact endpoint/headers,
 API-key-mode refusal, duplicate/malformed configuration, reread between
-generations, mixed native/proxy material, unauthorized responses, cancellation,
-Permission denial, startup and `/model` catalog access. All fixture tokens and
+generations, mixed native/proxy material, 401/403 responses, cancellation,
+Permission denial, mandatory relay/no-direct-fallback, startup, durable Final,
+resume/input deduplication and `/model` catalog access. All fixture tokens and
 accounts are dummy values; tests do not contact Docker or a real provider.
 Sandbox connection and real inference are deliberately left to the operator.
 

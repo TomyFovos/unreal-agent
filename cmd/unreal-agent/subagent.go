@@ -19,6 +19,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openaicodex"
 	"github.com/unreallabsai/unreal-agent/harness/mutation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
@@ -364,6 +365,11 @@ func childEnvironment(c agentrunner.RuntimeConfig) []string {
 	// independently validates the explicitly selected source before each turn.
 	if (isDockerSandboxCodex(c.Identity.Provider.Auth) || isDockerSandboxCodex(c.Backends["openai-codex"].Provider.Auth)) && os.Getenv("SBX_CRED_OPENAI_MODE") == "oauth" {
 		env = append(env, "SBX_CRED_OPENAI_MODE=oauth")
+		// Forward only a validated, public Docker relay. No arbitrary proxy
+		// URL, proxy credential, NO_PROXY bypass, or parent environment crosses.
+		if proxy, err := openaicodex.DockerSandboxProxyURL(nil); err == nil {
+			env = append(env, "HTTPS_PROXY="+proxy.String())
+		}
 	}
 	if c.Identity.Provider.Provider != "claude-code" && c.Backends["claude-code"].Provider.Provider == "" {
 		return env

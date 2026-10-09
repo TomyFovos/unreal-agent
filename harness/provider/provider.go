@@ -13,6 +13,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openaicodex"
 	"github.com/unreallabsai/unreal-agent/harness/llm/responsesapi"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 )
@@ -300,6 +301,10 @@ func normalize(err error) error {
 	}
 	var ce *credential.Error
 	var cli *claudecode.Error
+	var proxy *openaicodex.SandboxProxyError
+	if errors.As(err, &proxy) {
+		return &Error{Code: "proxy_unavailable"}
+	}
 	if errors.As(err, &cli) {
 		return cli
 	}

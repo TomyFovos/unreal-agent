@@ -30,7 +30,7 @@ class AspOAuthTests(unittest.TestCase):
         self.auth.parent.mkdir()
         self.auth.write_text('{"OPENAI_API_KEY":"proxy-managed"}')
         self.auth.chmod(0o644)
-        self.env = {"HOME": str(self.home), "PATH": os.environ["PATH"], "SBX_CRED_OPENAI_MODE": "oauth"}
+        self.env = {"HOME": str(self.home), "PATH": os.environ["PATH"], "SBX_CRED_OPENAI_MODE": "oauth", "HTTPS_PROXY": "http://host.docker.internal:3128"}
 
     def test_exact_reference_and_readonly_policy(self):
         cfg = asp.configuration(self.home / "workspace", "gpt-6.1-sol", "medium")
@@ -60,11 +60,15 @@ class AspOAuthTests(unittest.TestCase):
         with patch.object(pilot, "bounded_probe", side_effect=probe), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(asp.preflight(self.root, self.home, dict(self.env, OPENAI_API_KEY="PRIVATE_DUMMY", GITHUB_TOKEN="PRIVATE_DUMMY")), str(self.auth))
         args, env = calls[0]
-        self.assertEqual(args, [str(self.root / "unreal-agent-auth"), "check-docker-sandbox-oauth", "--codex-auth-file", str(self.auth)])
-        self.assertEqual(set(env), {"HOME", "PATH", "SBX_CRED_OPENAI_MODE"})
+        self.assertEqual(args, [str(self.root / "unreal-agent-auth"), "check-docker-sandbox-oauth", "--codex-auth-file", str(self.auth), "--check-forward-proxy"])
+        self.assertEqual(set(env), {"HOME", "PATH", "SBX_CRED_OPENAI_MODE", "HTTPS_PROXY"})
         self.assertNotIn("PRIVATE_DUMMY", json.dumps(env))
         with patch.object(pilot, "bounded_probe", return_value=(b"PRIVATE_DUMMY", 1)), self.assertRaises(pilot.PilotError) as error:
             asp.preflight(self.root, self.home, self.env)
+        self.assertNotIn("PRIVATE_DUMMY", str(error.exception))
+        with patch.object(pilot, "bounded_probe", return_value=(b"credential: docker_sandbox_proxy_unavailable PRIVATE_DUMMY", 1)), self.assertRaises(pilot.PilotError) as error:
+            asp.preflight(self.root, self.home, self.env)
+        self.assertEqual(error.exception.code, "docker_sandbox_proxy_unavailable")
         self.assertNotIn("PRIVATE_DUMMY", str(error.exception))
 
     def test_config_creation_rerun_and_existing_config_preserved(self):
@@ -144,7 +148,7 @@ class AspOAuthNativeKitTests(unittest.TestCase):
             "models_cache.json": '{"models":[{"slug":"gpt-6.1-sol","visibility":"list","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"medium"}]}]}',
         }.items():
             (codex / name).write_text(content); (codex / name).chmod(0o644)
-        self.env = {"PATH": os.environ["PATH"], "HOME": str(self.home), "SBX_CRED_OPENAI_MODE": "oauth", "PYTHONDONTWRITEBYTECODE": "1"}
+        self.env = {"PATH": os.environ["PATH"], "HOME": str(self.home), "SBX_CRED_OPENAI_MODE": "oauth", "HTTPS_PROXY": "http://host.docker.internal:3128", "PYTHONDONTWRITEBYTECODE": "1"}
         self.before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in codex.iterdir()}
 
     def run_driver(self, *args, env=None):
@@ -169,6 +173,11 @@ class AspOAuthNativeKitTests(unittest.TestCase):
         denied = self.run_driver("--setup-only", env=dict(self.env, SBX_CRED_OPENAI_MODE="apikey"))
         self.assertNotEqual(denied.returncode, 0)
         self.assertIn("docker_sandbox_oauth_unavailable", denied.stderr)
+        for proxy in ("", "http://PRIVATE_DUMMY:secret@host.docker.internal:3128", "http://untrusted.invalid:3128"):
+            denied = self.run_driver("--setup-only", env=dict(self.env, HTTPS_PROXY=proxy))
+            self.assertNotEqual(denied.returncode, 0)
+            self.assertIn("docker_sandbox_proxy_unavailable", denied.stderr)
+            self.assertNotIn("PRIVATE_DUMMY", denied.stdout + denied.stderr)
 
     def test_real_binary_idle_host_catalog_session_and_drain_no_inference(self):
         result = self.run_driver("--setup-only", "--model", "gpt-6.1-sol")
@@ -199,10 +208,12 @@ class AspOAuthNativeKitTests(unittest.TestCase):
         self.assertTrue(paths["sessions"].is_dir())
 
     def test_update_instance_missing_cache_model_list_and_old_history_preserved(self):
-        old = self.home / ".local/state/unreal-agent-pilot/asp/oauth-v1/sessions"
-        old.mkdir(parents=True)
-        marker = old / "existing-history"; marker.write_bytes(b"immutable synthetic history")
-        old_before = (marker.read_bytes(), marker.stat().st_mtime_ns)
+        old_before = {}
+        for instance in ('oauth-v1', 'oauth-catalog-v1'):
+            old = self.home / '.local/state/unreal-agent-pilot/asp' / instance / 'sessions'
+            old.mkdir(parents=True)
+            marker = old / 'existing-history'; marker.write_bytes(b'immutable synthetic history')
+            old_before[marker] = (marker.read_bytes(), marker.stat().st_mtime_ns)
         (self.home / ".codex/models_cache.json").unlink()  # custom providers need not write this cache
         binary_dir = self.home / "fake-cli"; binary_dir.mkdir()
         codex = binary_dir / "codex"
@@ -220,10 +231,10 @@ for line in sys.stdin:
 ''')
         codex.chmod(0o700)
         env = dict(self.env, PATH=str(binary_dir)+os.pathsep+self.env['PATH'])
-        result = self.run_driver('--setup-only', '--model', 'gpt-6.1-sol', '--instance', 'oauth-catalog-v1', env=env)
+        result = self.run_driver('--setup-only', '--model', 'gpt-6.1-sol', '--instance', 'oauth-inference-v1', env=env)
         self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
-        state = self.home / '.local/state/unreal-agent-pilot/asp/oauth-catalog-v1'
-        paths = {'home':self.home,'config':self.home/'.config/unreal-agent-pilot/asp/oauth-catalog-v1/runtime.json','state':state,'sessions':state/'sessions','socket':state/'run/host.sock'}
+        state = self.home / '.local/state/unreal-agent-pilot/asp/oauth-inference-v1'
+        paths = {'home':self.home,'config':self.home/'.config/unreal-agent-pilot/asp/oauth-inference-v1/runtime.json','state':state,'sessions':state/'sessions','socket':state/'run/host.sock'}
         process = subprocess.Popen(pilot.host_arguments(self.kit, paths, str(self.home/'.codex/auth.json')), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         gateway = pilot.Gateway(paths['socket'])
         try:
@@ -245,7 +256,7 @@ for line in sys.stdin:
         finally:
             process.terminate(); process.wait(timeout=10)
         self.assertEqual(process.returncode, 0)
-        self.assertEqual((marker.read_bytes(), marker.stat().st_mtime_ns), old_before)
+        self.assertEqual({marker: (marker.read_bytes(), marker.stat().st_mtime_ns) for marker in old_before}, old_before)
         for path, before in self.before.items():
             if path.name!='models_cache.json': self.assertEqual((path.read_bytes(),path.stat().st_mtime_ns),before)
 

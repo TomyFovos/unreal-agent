@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 
@@ -14,6 +15,37 @@ import (
 // Public protocol placeholders, never bearer credentials from an account.
 // Source: docker/sbx-kits-contrib codex/spec.yaml, eeaf96617172b3544e846378e6f7dca73c9db6c8.
 const SandboxAccessSentinel = "oai-oat01-proxy-managed"
+
+// SandboxProxyError contains no environment value, URL, or credential. A
+// missing/unrecognized forward proxy must not cause a direct sentinel request.
+type SandboxProxyError struct{}
+
+func (*SandboxProxyError) Error() string { return "codex Docker Sandbox forward proxy unavailable" }
+
+// DockerSandboxProxyURL accepts only Docker's host/gateway proxy listener.
+// These are public routing metadata, not credentials. HTTPS_PROXY is the
+// runtime-provided route for the fixed HTTPS backend; NO_PROXY and ALL_PROXY
+// cannot bypass credential injection or select an arbitrary relay. Native
+// ExternalCodex never calls this function.
+func DockerSandboxProxyURL(getenv func(string) string) (*url.URL, error) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	upper, lower := getenv("HTTPS_PROXY"), getenv("https_proxy")
+	if upper != "" && lower != "" && upper != lower {
+		return nil, &SandboxProxyError{}
+	}
+	value := upper
+	if value == "" {
+		value = lower
+	}
+	switch value {
+	case "http://host.docker.internal:3128", "http://gateway.docker.internal:3128":
+		return url.Parse(value)
+	default:
+		return nil, &SandboxProxyError{}
+	}
+}
 
 // DockerSandboxSource validates only the selected kit's authentication routing.
 // It never imports permissions, MCP servers, CLI instructions or credentials.
@@ -102,8 +134,9 @@ func reservedProxyToken(token string) bool {
 }
 
 // Restrict every exchange, including exchanges produced by a future adapter,
-// before passing it to a trusted, injectable host transport. Never enable an
-// ambient proxy or change the existing Permission network boundary here.
+// before passing it to a trusted, injectable host transport. Standard network
+// transports use only the validated Docker forward proxy; arbitrary ambient
+// proxies remain unavailable. Permission still checks the backend on each call.
 type sandboxTransport struct{ base http.RoundTripper }
 
 func (t sandboxTransport) RoundTrip(request *http.Request) (*http.Response, error) {

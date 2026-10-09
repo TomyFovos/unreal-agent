@@ -67,12 +67,17 @@ def auth_path(home, environ):
 def preflight(kit, home, environ):
     path = auth_path(home, environ)
     env = {"PATH": environ["PATH"], "HOME": str(home), "SBX_CRED_OPENAI_MODE": "oauth"}
+    for key in ("HTTPS_PROXY", "https_proxy"):
+        if key in environ:
+            env[key] = environ[key]
     # The script inspects only path metadata. The native protocol adapter owns
     # the bounded JSON/TOML checks, so there is one interpretation of the kit.
-    _, code = pilot.bounded_probe([str(kit / "unreal-agent-auth"), "check-docker-sandbox-oauth", "--codex-auth-file", path], env)
+    output, code = pilot.bounded_probe([str(kit / "unreal-agent-auth"), "check-docker-sandbox-oauth", "--codex-auth-file", path, "--check-forward-proxy"], env)
     if code:
+        if b"docker_sandbox_proxy_unavailable" in output:
+            pilot.fail("docker_sandbox_proxy_unavailable", "Existing Docker HTTPS proxy is missing or unrecognized. Keep authentication/config unchanged; no direct sentinel request or arbitrary proxy fallback.")
         pilot.fail("docker_sandbox_oauth_unavailable", "Native kit/routing validation failed. Keep existing authentication/config; no provider/API-key fallback.")
-    print("PASS: explicit Docker host-owned ChatGPT OAuth routing; no token/account import; connectivity unproven")
+    print("PASS: explicit Docker host-owned ChatGPT OAuth and forward proxy routing; no token/account import; connectivity unproven")
     return path
 
 
