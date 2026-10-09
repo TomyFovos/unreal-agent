@@ -65,3 +65,8 @@ generations, mixed native/proxy material, unauthorized responses, cancellation,
 Permission denial, startup and `/model` catalog access. All fixture tokens and
 accounts are dummy values; tests do not contact Docker or a real provider.
 Sandbox connection and real inference are deliberately left to the operator.
+
+For `/model`, the existing CLI cache is preferred. If it is missing/incompatible,
+this explicit proxy route can use a bounded metadata-only `model/list` process;
+see [Codex model catalog](codex-model-catalog.md). It does not run inference,
+create threads, import credentials or grant tool permissions.

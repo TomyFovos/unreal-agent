@@ -98,6 +98,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			return err
 		}
 		var claudeClient *claudecode.Client
+		codexRead := codexCatalogReader(codexPath, isDockerSandboxCodex(config.Runtime.Provider.Auth) || isDockerSandboxCodex(config.Providers["openai-codex"].Provider.Auth), os.Getenv)
 		var readClaudeCatalog func(context.Context) (modelcatalog.Catalog, error)
 		health := map[string]func(context.Context) error{}
 		claudeConfig := config.Runtime.ClaudeCode
@@ -145,8 +146,8 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			return err
 		}
 		defer languageTools.Close()
-		runtimeConfig, templates, err := withParentSubagents(agentrunner.RuntimeConfig{Context: config.Context, Identity: config.Runtime, SessionDirectory: *directory, Providers: registry, Credentials: resolver, LanguageTools: languageTools, DebugAdapters: config.DebugAdapters, Backends: config.Providers, Health: health, Catalogs: map[string]func(context.Context) (modelcatalog.Catalog, error){"claude-code": readClaudeCatalog, "openai-codex": func(context.Context) (modelcatalog.Catalog, error) {
-			return modelcatalog.ReadCodexCache(codexModelCache(codexPath)), nil
+		runtimeConfig, templates, err := withParentSubagents(agentrunner.RuntimeConfig{Context: config.Context, Identity: config.Runtime, SessionDirectory: *directory, Providers: registry, Credentials: resolver, LanguageTools: languageTools, DebugAdapters: config.DebugAdapters, Backends: config.Providers, Health: health, Catalogs: map[string]func(context.Context) (modelcatalog.Catalog, error){"claude-code": readClaudeCatalog, "openai-codex": func(readCtx context.Context) (modelcatalog.Catalog, error) {
+			return codexRead(readCtx, false)
 		}}}, config.Subagents, policy, *credentials, codexPath)
 		if err != nil {
 			return err
@@ -204,7 +205,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			}
 		}
 		binding := launcherHostBinding{Configuration: absolutePath(*path), Sessions: absolutePath(*directory), Credentials: absolutePath(*credentials), CodexFile: absolutePath(*codexFile), Normal: *normal}
-		models := modelUI{binding: &binding, owner: owner, runtime: runtimeConfig, templates: templates, policy: policy, cache: codexModelCache(codexPath), claude: claudeCatalog, next: gatewayConfig.Extension}
+		models := modelUI{binding: &binding, owner: owner, runtime: runtimeConfig, templates: templates, policy: policy, cache: codexModelCache(codexPath), codexRead: codexRead, claude: claudeCatalog, next: gatewayConfig.Extension}
 		if claudeClient != nil {
 			models.claudeRead = func(readCtx context.Context, refresh bool) (modelcatalog.Catalog, error) {
 				if refresh {

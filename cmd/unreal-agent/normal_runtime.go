@@ -101,7 +101,7 @@ func discoverCodexSource(ctx context.Context, option string, getenv func(string)
 	if _, err = resolver.Resolve(ctx, ref); err != nil {
 		return agentrunner.ProviderRuntime{}, err
 	}
-	catalog := modelcatalog.ReadCodexCache(codexModelCache(path))
+	catalog, _ := codexCatalogReader(path, sandbox, getenv)(ctx, false)
 	model, err := initialCatalogModel(catalog, "")
 	if err != nil {
 		return agentrunner.ProviderRuntime{}, err
@@ -255,7 +255,7 @@ func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProvid
 		var catalog modelcatalog.Catalog
 		if id == "openai-codex" {
 			path, _ := externalCodexAuthFile(o.codexFile, getenv)
-			catalog = modelcatalog.ReadCodexCache(codexModelCache(path))
+			catalog, err = codexCatalogReader(path, isDockerSandboxCodex(p.Provider.Auth), getenv)(ctx, false)
 		} else {
 			cli, e := claudecode.NewClient(claudeTransportConfig(*p.ClaudeCode, getenv))
 			if e != nil {

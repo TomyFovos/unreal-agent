@@ -535,9 +535,16 @@ with an explanation in the effort picker. The list is not a subscription/quota
 check or a promise that an old CLI cache still matches the backend.
 
 When the cache is missing, invalid or unavailable for the current provider,
-the picker says `catalog unavailable` and offers only the current model and
+the picker says `catalog unavailable` with a safe reason and offers only the current model and
 its current effort. It does not substitute a guessed catalog. A nonstandard
 auth-file directory without a CLI model cache has the same behavior.
+
+The explicit Docker Sandbox OAuth route can additionally obtain metadata through
+Codex CLI `model/list` when its cache is missing/incompatible. This process sends
+no prompt or thread/tool request and does not alter authentication. Native WSL
+ExternalCodex keeps the cache-only behavior above. The CLI may return a bundled
+catalog, so availability of an entry is not proof of model entitlement. See
+[Codex model catalog](codex-model-catalog.md) for limits and failure behavior.
 
 For `claude-code`, `/model` discovers selectable models/efforts through the
 installed CLI's isolated `initialize`/`list_models` control metadata, without

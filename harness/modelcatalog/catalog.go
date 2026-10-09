@@ -1,5 +1,5 @@
 // Package modelcatalog reads nonsecret model metadata owned by external CLIs.
-// It never fetches models, reads credentials, or manufactures fallback lists.
+// It never performs inference, decodes credentials, or manufactures model lists.
 package modelcatalog
 
 import (
@@ -32,7 +32,8 @@ type Catalog struct {
 	Source        string
 	FetchedAt     time.Time
 	Problem       string
-	Authoritative bool `json:",omitzero"`
+	ProblemCode   string `json:",omitzero"` // closed, nonsecret catalog failure reason
+	Authoritative bool   `json:",omitzero"`
 }
 
 // Provider namespaces catalogs: model aliases are not globally unique.
@@ -108,24 +109,34 @@ func (c Catalog) FindSelection(id string) (Model, error) {
 // reasoning metadata. Identity, instructions and other cache fields are ignored.
 func ReadCodexCache(path string) Catalog {
 	c := Catalog{Source: path, Problem: "catalog unavailable"}
+	fail := func(code string) Catalog {
+		return Catalog{Source: path, Problem: "catalog unavailable", ProblemCode: code}
+	}
 	// Reject nonregular sources before opening them (a FIFO must not block a
 	// picker), and recheck the descriptor before reading bounded metadata.
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return c
+	if errors.Is(err, os.ErrNotExist) {
+		return fail("codex_cache_missing")
 	}
+	if err != nil || !info.Mode().IsRegular() {
+		return fail("codex_cache_unreadable")
+	}
+	before := info
 	f, err := os.Open(path)
 	if err != nil {
-		return c
+		return fail("codex_cache_unreadable")
 	}
 	defer f.Close()
 	info, err = f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 16<<20 {
-		return c
+	if err != nil || !os.SameFile(before, info) || !info.Mode().IsRegular() {
+		return fail("codex_cache_unreadable")
+	}
+	if info.Size() > 16<<20 {
+		return fail("codex_cache_oversized")
 	}
 	b, err := io.ReadAll(io.LimitReader(f, 16<<20+1))
 	if err != nil || len(b) > 16<<20 {
-		return c
+		return fail("codex_cache_oversized")
 	}
 	var raw struct {
 		FetchedAt time.Time `json:"fetched_at"`
@@ -142,7 +153,7 @@ func ReadCodexCache(path string) Catalog {
 		} `json:"models"`
 	}
 	if json.Unmarshal(b, &raw) != nil {
-		return c
+		return fail("codex_cache_invalid")
 	}
 	sort.SliceStable(raw.Models, func(i, j int) bool { return raw.Models[i].Priority < raw.Models[j].Priority })
 	seen := map[string]bool{}
@@ -151,7 +162,7 @@ func ReadCodexCache(path string) Catalog {
 			continue
 		}
 		if !validID(m.ID) || seen[m.ID] {
-			return Catalog{Source: path, Problem: "catalog unavailable"}
+			return fail("codex_cache_invalid")
 		}
 		seen[m.ID] = true
 		model := Model{ID: m.ID, Name: m.Name, DefaultEffort: m.Default, ContextWindow: max(0, m.Context)}
@@ -174,7 +185,7 @@ func ReadCodexCache(path string) Catalog {
 		}
 	}
 	if len(c.Models) == 0 {
-		return Catalog{Source: path, Problem: "catalog unavailable"}
+		return fail("codex_cache_no_selectable_models")
 	}
 	c.Available, c.Problem, c.FetchedAt = true, "", raw.FetchedAt
 	return c

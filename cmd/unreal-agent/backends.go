@@ -44,6 +44,9 @@ func (h modelUI) catalog(ctx context.Context, id string, refresh bool) (modelcat
 		return h.claude, nil
 	}
 	if id == "openai-codex" && h.cache != "" {
+		if h.codexRead != nil {
+			return h.codexRead(ctx, refresh)
+		}
 		return modelcatalog.ReadCodexCache(h.cache), nil
 	}
 	return modelcatalog.Catalog{Problem: "catalog unavailable"}, nil

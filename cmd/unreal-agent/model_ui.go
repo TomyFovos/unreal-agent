@@ -47,6 +47,7 @@ type modelUI struct {
 	cache      string
 	claude     modelcatalog.Catalog
 	claudeRead func(context.Context, bool) (modelcatalog.Catalog, error)
+	codexRead  func(context.Context, bool) (modelcatalog.Catalog, error)
 	next       http.Handler
 	runtime    agentrunner.RuntimeConfig
 	templates  map[string]subagent.Template

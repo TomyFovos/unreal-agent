@@ -68,6 +68,11 @@ func modelPicker(c modelcatalog.Catalog, current *sessionstore.RuntimeSelection,
 	p.ToolBridge = len(tools) > 0 && tools[0]
 	if !c.Available {
 		p.Hint = "catalog unavailable; current selection only"
+		if reason := modelcatalog.CodexProblemHint(c.ProblemCode); reason != "" {
+			p.Hint = "catalog unavailable · " + reason + "; current selection only"
+		}
+	} else if strings.HasPrefix(c.Source, "Codex CLI model/list") {
+		p.Hint = "Codex CLI catalog · model access unverified"
 	}
 	if current != nil {
 		p.Provider = current.Provider
@@ -100,6 +105,9 @@ func modelPicker(c modelcatalog.Catalog, current *sessionstore.RuntimeSelection,
 	}
 	if len(p.Options) == 0 {
 		p.Hint = "catalog unavailable; no observed current selection"
+		if reason := modelcatalog.CodexProblemHint(c.ProblemCode); reason != "" {
+			p.Hint = "catalog unavailable · " + reason + "; no observed current selection"
+		}
 		if c.Authoritative {
 			p.Hint = "Claude Code · discovered catalog; no selectable models"
 		}
