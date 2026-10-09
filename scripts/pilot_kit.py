@@ -55,12 +55,21 @@ def binary_requirements(directory, revision):
     return ".".join(map(str, minimum))
 
 
-def assemble(source, output, templates):
+def assemble(source, output, templates, *, revision=BASELINE, extra_files=None, readme=None):
+    extra_files = dict(extra_files or {})
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("expected a full source revision")
+    if any(not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", name)
+           or name in (*FILES, "SHA256SUMS", "auth.json", "config.toml") for name in extra_files):
+        raise ValueError("invalid additional kit member")
+    kit_root = KIT_ROOT if revision == BASELINE and not extra_files else "unreal-agent-asp-oauth-" + revision[:7]
+    archive_name = kit_root + ".tar.gz"
+    files = (*FILES, *sorted(extra_files))
     archive, metadata = snapshot.inspect_archive(source.parent)
-    if archive != source or metadata.get("revision") != BASELINE:
-        raise ValueError("use the verified 6284e49 baseline snapshot")
+    if archive != source or metadata.get("revision") != revision:
+        raise ValueError("snapshot baseline revision mismatch")
     source_digest = digest(archive)
-    package = output / KIT_ROOT
+    package = output / kit_root
     package.mkdir(mode=0o700)
     with tarfile.open(archive, "r:gz") as bundle:
         for name in (*snapshot.BINARIES, "LICENSE", "SNAPSHOT.json"):
@@ -68,38 +77,41 @@ def assemble(source, output, templates):
                 # The inspected source contains exactly seven regular members.
                 while chunk := stream.read(1024 * 1024):
                     target.write(chunk)
-    minimum = binary_requirements(package, BASELINE)
+    minimum = binary_requirements(package, revision)
     values = {"MIN_GLIBC": minimum, "GLIBC_MAJOR": minimum.split(".")[0], "GLIBC_MINOR": minimum.split(".")[1],
-              "REVISION": BASELINE, "REVISION_SHORT": BASELINE[:7], "ARCHIVE": ARCHIVE_NAME, "KIT_ROOT": KIT_ROOT}
+              "REVISION": revision, "REVISION_SHORT": revision[:7], "ARCHIVE": archive_name, "KIT_ROOT": kit_root,
+              "EXTRA_FILES": " ".join(sorted(extra_files))}
     for name in ("install.sh", "doctor.sh", "README.md"):
-        text = (templates / name).read_text(encoding="utf-8")
+        text = readme if name == "README.md" and readme is not None else (templates / name).read_text(encoding="utf-8")
         for key, value in values.items():
             text = text.replace("@" + key + "@", value)
         if re.search(r"@[A-Z_]+@", text):
             raise ValueError("unexpanded kit template")
         (package / name).write_text(text, encoding="utf-8")
-    manifest = {"format_version": 1, "kind": "asp-pilot-kit", "baseline": BASELINE,
+    for name, content in extra_files.items():
+        (package / name).write_bytes(content)
+    manifest = {"format_version": 1, "kind": "asp-oauth-kit" if extra_files else "asp-pilot-kit", "baseline": revision,
                 "source_archive_sha256": source_digest, "minimum_glibc": minimum,
                 "target": "linux/amd64", "goamd64": "v1", "cgo_enabled": True, "formal_release": False}
     (package / "KIT.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="ascii")
-    for name in FILES:
-        (package / name).chmod(0o700 if name in (*snapshot.BINARIES, "install.sh", "doctor.sh") else 0o600)
-    sums = "".join(f"{digest(package / name)}  {name}\n" for name in FILES)
+    for name in files:
+        (package / name).chmod(0o700 if name in snapshot.BINARIES or name.endswith(".sh") else 0o600)
+    sums = "".join(f"{digest(package / name)}  {name}\n" for name in files)
     (package / "SHA256SUMS").write_text(sums, encoding="ascii")
     (package / "SHA256SUMS").chmod(0o600)
-    target = output / ARCHIVE_NAME
+    target = output / archive_name
     with target.open("xb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
         with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as bundle:
-            for name in (*FILES, "SHA256SUMS"):
-                info = bundle.gettarinfo(str(package / name), KIT_ROOT + "/" + name)
+            for name in (*files, "SHA256SUMS"):
+                info = bundle.gettarinfo(str(package / name), kit_root + "/" + name)
                 info.uid = info.gid = 0
                 info.uname = info.gname = ""
                 info.mtime = 0
                 with (package / name).open("rb") as stream:
                     bundle.addfile(info, stream)
     target.chmod(0o600)
-    checksum = output / (ARCHIVE_NAME + ".sha256")
-    checksum.write_text(f"{digest(target)}  {ARCHIVE_NAME}\n", encoding="ascii")
+    checksum = output / (archive_name + ".sha256")
+    checksum.write_text(f"{digest(target)}  {archive_name}\n", encoding="ascii")
     checksum.chmod(0o600)
     return target
 

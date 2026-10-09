@@ -1,4 +1,4 @@
-.PHONY: build test check test-claude-structured-unit test-claude-structured snapshot test-snapshot test-pilot-kit test-pilot-provider
+.PHONY: build test check test-claude-structured-unit test-claude-structured snapshot test-snapshot test-pilot-kit test-pilot-provider test-asp-oauth
 
 GORELEASER ?= goreleaser
 
@@ -14,6 +14,10 @@ test-pilot-kit:
 test-pilot-provider:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_pilot_provider.py'
 	go test ./cmd/unreal-agent -run '^TestPilotProvider'
+
+test-asp-oauth:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_asp_oauth.py'
+	go test ./cmd/internal/authcli ./cmd/unreal-agent ./harness/credential ./harness/provider ./harness/llm/clients/openaicodex -run '^TestDockerSandbox'
 
 build:
 	go build -trimpath -o bin/unreal-agent ./cmd/unreal-agent

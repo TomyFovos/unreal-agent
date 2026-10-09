@@ -3,7 +3,7 @@
 set -euo pipefail
 umask 077
 KIT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-FILES=(unreal unreal-agent unreal-agent-runner unreal-agent-auth LICENSE SNAPSHOT.json KIT.json README.md install.sh doctor.sh)
+FILES=(unreal unreal-agent unreal-agent-runner unreal-agent-auth LICENSE SNAPSHOT.json KIT.json README.md install.sh doctor.sh @EXTRA_FILES@)
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 pass() { printf 'PASS: %s\n' "$1"; }
 [[ $# -eq 0 || ( $# -eq 1 && $1 == --preflight ) ]] || fail 'usage: doctor.sh [--preflight]'

@@ -1,5 +1,34 @@
 # Local snapshot distribution
 
+For an existing **asp** Sandbox using Docker host-owned ChatGPT OAuth, see
+[Docker Sandbox OAuth compatibility](docker-sandbox-oauth.md). Old 6284e49
+binaries cannot use the new explicit `docker_sandbox_oauth` route. Build a new
+snapshot from the validated OAuth implementation revision and package it with:
+
+```sh
+python3 scripts/asp_oauth_bundle.py --snapshot /absolute/path/to/snapshot.tar.gz \
+  --revision <full-snapshot-revision> --copy-to /mnt/c/work/unreal-agent-pilot/asp
+make test-asp-oauth
+# Optional native install/reinstall/preflight/idle Host tests, no inference:
+UNREAL_ASP_OAUTH_KIT=/absolute/path/to/extracted/kit make test-asp-oauth
+```
+
+The new kit contains all four CGO Linux amd64 binaries, bounded native auth
+preflight, a read-only asp profile and Japanese instructions. Packaging uses
+the same snapshot/checksum/ELF/libc validators and reserves fresh output and
+Windows delivery directories. It never updates the devlore kit. The existing
+6284e49 installer and provider profiles retain their default behavior.
+
+The operator explicitly sources `activate.sh --model <id>` inside asp, then
+uses `unreal <session>` and `/model`. Activation installs into a new private,
+content-addressed directory and defines `unreal` in **that shell only**. It
+does not change PATH, shell startup files, Codex auth/config, default runtime
+configuration or old Session stores. The wrapper invokes native `unreal`
+with a dedicated config/state/socket, no automatic prompt. `--smoke-only` is
+an explicit operator opt-in to one short real request; WSL tests never send
+that request to a real provider. `unset -f unreal` restores shell command
+resolution. The Pilot history is retained.
+
 Build the Fork's current worktree on **Linux amd64** with Go 1.27, a working
 C compiler, Python 3.12 or newer, and **GoReleaser 2.18.2**:
 

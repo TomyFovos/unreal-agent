@@ -37,7 +37,7 @@ trap cleanup EXIT
 kit_id=$(sha256sum -- "$KIT_DIR/SHA256SUMS")
 kit_id=${kit_id:0:16}
 destination=$base/@REVISION_SHORT@-$kit_id
-files=(unreal unreal-agent unreal-agent-runner unreal-agent-auth LICENSE SNAPSHOT.json KIT.json README.md install.sh doctor.sh SHA256SUMS)
+files=(unreal unreal-agent unreal-agent-runner unreal-agent-auth LICENSE SNAPSHOT.json KIT.json README.md install.sh doctor.sh @EXTRA_FILES@ SHA256SUMS)
 if [[ -e "$destination" || -L "$destination" ]]; then
     [[ -d "$destination" && ! -L "$destination" && -O "$destination" ]] || fail 'existing install is not a user-owned regular directory'
     [[ -f "$destination/SHA256SUMS" && ! -L "$destination/SHA256SUMS" ]] || fail 'existing install is incomplete; nothing overwritten'

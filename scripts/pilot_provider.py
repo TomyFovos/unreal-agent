@@ -320,7 +320,9 @@ def host_binding(paths, auth_file):
             "Credentials": "", "CodexFile": auth_file, "Normal": False}}
 
 
-def ensure_host(kit, paths, auth_file, environ):
+def ensure_host(kit, paths, auth_file, environ, *, docker_sandbox_oauth=False):
+    if docker_sandbox_oauth and environ.get("SBX_CRED_OPENAI_MODE") != "oauth":
+        fail("docker_sandbox_oauth_unavailable", "Docker kit must explicitly use OAuth; no API-key or provider fallback.")
     lock = paths["state"] / "provider-start.lock"
     fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
@@ -341,6 +343,8 @@ def ensure_host(kit, paths, auth_file, environ):
         log_fd = os.open(log, os.O_CREAT | os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, 0o600)
         env = {key: value for key, value in environ.items() if key in ("HOME", "PATH", "LANG", "TERM", "COLORTERM", "NO_COLOR", "CLAUDE_CONFIG_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR")}
         env["HOME"] = str(paths["home"])
+        if docker_sandbox_oauth:
+            env["SBX_CRED_OPENAI_MODE"] = "oauth"
         try:
             process = subprocess.Popen(host_arguments(kit, paths, auth_file), cwd=kit, env=env,
                                        stdin=subprocess.DEVNULL, stdout=log_fd, stderr=log_fd, start_new_session=True)
