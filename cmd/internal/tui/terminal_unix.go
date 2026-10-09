@@ -85,11 +85,11 @@ func Terminal(ctx context.Context, c Config) error {
 		}
 		return w, h
 	}
-	if _, err = c.Output.Write([]byte("\x1b[?1049h\x1b[?2004h")); err != nil {
+	if _, err = c.Output.Write([]byte("\x1b[?1049h\x1b[?2004h\x1b[?1000h\x1b[?1006h")); err != nil {
 		return err
 	}
 	defer func() {
-		_, _ = (terminalWriter{ctx: context.Background(), fd: fd}).Write([]byte("\x1b[?2004l\x1b[?25h\x1b[?1049l"))
+		_, _ = (terminalWriter{ctx: context.Background(), fd: fd}).Write([]byte("\x1b[?1006l\x1b[?1000l\x1b[?2004l\x1b[?25h\x1b[?1049l"))
 	}()
 	return Run(ctx, c)
 }

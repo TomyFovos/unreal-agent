@@ -41,6 +41,7 @@ type UIState struct {
 	Sheet                 *Sheet
 	Picker                *Picker
 	Scroll, MenuSelection int
+	HistoryTop            bool
 	Transcript            *transcriptPage
 	MenuOffset            int
 	MenuNavigated         bool
@@ -54,19 +55,20 @@ type UIState struct {
 }
 
 type Frame struct {
-	Lines                         []string
-	CursorX, CursorY              int // zero-based hardware cursor coordinates
-	Width, Height                 int
-	ConversationHeight, ScrollMax int
-	ConversationRows              int
-	MenuOffset                    int
-	PickerOffset                  int
-	SheetOffset                   int
-	SheetHeight                   int
-	View                          ViewMode
-	OrchestrationHeight           int
-	OrchestrationOffset           int
-	OrchestrationMax              int
+	Lines                            []string
+	CursorX, CursorY                 int // zero-based hardware cursor coordinates
+	Width, Height                    int
+	ConversationHeight, ScrollMax    int
+	ConversationRows                 int
+	ConversationY, ConversationWidth int
+	MenuOffset                       int
+	PickerOffset                     int
+	SheetOffset                      int
+	SheetHeight                      int
+	View                             ViewMode
+	OrchestrationHeight              int
+	OrchestrationOffset              int
+	OrchestrationMax                 int
 }
 
 type displayRow struct {
@@ -847,6 +849,7 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 		conversationRoom = max(0, room-1)
 	}
 	f.ConversationHeight = conversationRoom
+	f.ConversationY, f.ConversationWidth = 1+blank, l.main
 	var body []displayRow
 	if f.View != ViewOrchestration {
 		body = conversation(s, u, l)

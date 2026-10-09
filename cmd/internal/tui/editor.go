@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -10,6 +11,8 @@ import (
 type Key struct {
 	Text, Name string
 	Paste      bool
+	// Mouse positions are one-based SGR terminal cells, never composer text.
+	MouseX, MouseY int
 }
 type Editor struct {
 	data   []byte
@@ -99,6 +102,18 @@ func (d *Decoder) Feed(data []byte) []Key {
 			if len(d.pending) < 2 {
 				break
 			}
+			if d.pending[1] == 'O' { // xterm application-mode Home/End
+				if len(d.pending) < 3 {
+					break
+				}
+				if !d.paste {
+					if name := map[byte]string{'H': "home", 'F': "end"}[d.pending[2]]; name != "" {
+						keys = append(keys, Key{Name: name})
+					}
+				}
+				d.pending = d.pending[3:]
+				continue
+			}
 			if d.pending[1] != '[' {
 				d.pending = d.pending[2:]
 				continue
@@ -125,7 +140,9 @@ func (d *Decoder) Feed(data []byte) []Key {
 				continue
 			}
 			if !d.paste {
-				if name := map[string]string{"\x1b[A": "up", "\x1b[B": "down", "\x1b[D": "left", "\x1b[C": "right", "\x1b[H": "home", "\x1b[F": "end", "\x1b[5~": "pageup", "\x1b[6~": "pagedown"}[sequence]; name != "" {
+				if key, ok := mouseWheel(sequence); ok {
+					keys = append(keys, key)
+				} else if name := map[string]string{"\x1b[A": "up", "\x1b[B": "down", "\x1b[D": "left", "\x1b[C": "right", "\x1b[H": "home", "\x1b[F": "end", "\x1b[1~": "home", "\x1b[4~": "end", "\x1b[7~": "home", "\x1b[8~": "end", "\x1b[5~": "pageup", "\x1b[6~": "pagedown", "\x1b[1;5H": "historyhome", "\x1b[1;5F": "historyend", "\x1b[7;5~": "historyhome", "\x1b[8;5~": "historyend"}[sequence]; name != "" {
 					keys = append(keys, Key{Name: name})
 				}
 			}
@@ -148,4 +165,41 @@ func (d *Decoder) Feed(data []byte) []Key {
 		}
 	}
 	return keys
+}
+
+// Only wheel presses have meaning. Mouse clicks/releases/motion, malformed
+// parameters and pasted reports cannot select, approve, submit or insert text.
+func mouseWheel(sequence string) (Key, bool) {
+	if !strings.HasPrefix(sequence, "\x1b[<") || !strings.HasSuffix(sequence, "M") {
+		return Key{}, false
+	}
+	params := strings.Split(sequence[3:len(sequence)-1], ";")
+	if len(params) != 3 {
+		return Key{}, false
+	}
+	var values [3]int
+	for i, part := range params {
+		if len(part) == 0 || len(part) > 4 {
+			return Key{}, false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return Key{}, false
+			}
+		}
+		n, err := strconv.Atoi(part)
+		if err != nil {
+			return Key{}, false
+		}
+		values[i] = n
+	}
+	button := values[0]
+	if button & ^(64|1|4|8|16) != 0 || button&64 == 0 || values[1] < 1 || values[2] < 1 {
+		return Key{}, false
+	}
+	name := "wheelup"
+	if button&1 != 0 {
+		name = "wheeldown"
+	}
+	return Key{Name: name, MouseX: values[1], MouseY: values[2]}, true
 }

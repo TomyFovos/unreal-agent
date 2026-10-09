@@ -140,6 +140,7 @@ func Run(ctx context.Context, c Config) error {
 	}
 	send := func(input inbox.Input) {
 		u.Scroll = 0
+		u.HistoryTop = false
 		u.Transcript = nil
 		generation := m.Snapshot().Generation
 		var text string
@@ -274,6 +275,10 @@ func Run(ctx context.Context, c Config) error {
 			files.sync(s, &u, &editor)
 			streaming := s.Progress != nil && s.Progress.Mode == "streaming" && !s.Progress.Done
 			frame = RenderFrame(s, u, width, height)
+			if u.HistoryTop && frame.View != ViewOrchestration {
+				u.Scroll = frame.ScrollMax
+				frame = RenderFrame(s, u, width, height)
+			}
 			if c.ViewChanged != nil && frame.View != previousView {
 				c.ViewChanged(frame.View)
 			}
@@ -283,7 +288,7 @@ func Run(ctx context.Context, c Config) error {
 			if u.Sheet != nil {
 				u.Sheet.Offset = frame.SheetOffset
 			}
-			if frame.View != ViewOrchestration && previousView == frame.View && u.Scroll > 0 && previousWidth == width && previousHeight == height && (previousRows != frame.ConversationRows || previousStreaming != streaming) {
+			if !u.HistoryTop && frame.View != ViewOrchestration && previousView == frame.View && u.Scroll > 0 && previousWidth == width && previousHeight == height && (previousRows != frame.ConversationRows || previousStreaming != streaming) {
 				// Preserve the first visible canonical row when incoming data or
 				// the streaming pulse changes the available transcript height.
 				// Resize keeps the user's bottom-relative offset instead.
@@ -384,6 +389,7 @@ func Run(ctx context.Context, c Config) error {
 						u.Transcript = nil
 					}
 					u.Scroll = 0
+					u.HistoryTop = result.transcriptTop && u.Transcript != nil
 					if result.transcriptTop && u.Transcript != nil {
 						u.Scroll = RenderFrame(m.Snapshot(), u, width, height).ScrollMax
 					}
@@ -411,6 +417,33 @@ func Run(ctx context.Context, c Config) error {
 			s := m.Snapshot()
 			u.Input, u.Pasted = editor.Text(), editor.Pasted
 			files.sync(s, &u, &editor)
+			wheel := key.Name == "wheelup" || key.Name == "wheeldown"
+			if wheel {
+				// Wheel reports never interact with approval/model/file pickers,
+				// private inputs or the composer. Only the hovered history pane
+				// scrolls; synthetic keyboard-only tests may omit coordinates.
+				if key.Paste || u.Private != nil || u.Picker != nil || u.Sheet != nil {
+					continue
+				}
+				if key.MouseY != 0 {
+					if frame.View == ViewSplit && key.MouseX > frame.ConversationWidth+3 && key.MouseY > 1 && key.MouseY <= 1+frame.OrchestrationHeight {
+						delta := 3
+						if key.Name == "wheelup" {
+							delta = -delta
+						}
+						u.OrchestrationScroll = min(frame.OrchestrationMax, max(0, u.OrchestrationScroll+delta))
+						continue
+					}
+					if key.MouseX > frame.ConversationWidth || key.MouseY <= frame.ConversationY || key.MouseY > frame.ConversationY+frame.ConversationHeight {
+						continue
+					}
+				}
+				if key.Name == "wheelup" {
+					key.Name = "pageup"
+				} else {
+					key.Name = "pagedown"
+				}
+			}
 			if files.key(key, &u, &editor, width, height) {
 				continue
 			}
@@ -663,16 +696,66 @@ func Run(ctx context.Context, c Config) error {
 				u.Sheet = nil
 				u.Picker = nil
 				u.Scroll = 0
+				u.HistoryTop = false
 				u.Transcript = nil
 				stopSession(inbox.StopHard)
 				continue
 			}
-			if key.Name == "pageup" {
+			// Home/End retain composer semantics while editing. Ctrl+Home/End
+			// always navigate history, and plain Home/End do so on empty input.
+			if !key.Paste && (key.Name == "historyhome" || key.Name == "home" && editor.Text() == "") {
 				if u.View.effective(width) == ViewOrchestration {
-					u.OrchestrationScroll = max(0, u.OrchestrationScroll-max(1, frame.OrchestrationHeight))
+					u.OrchestrationScroll = 0
 					continue
 				}
-				step := max(1, frame.ConversationHeight)
+				u.HistoryTop = true
+				if s.OlderDropped && !u.Busy && u.Private == nil {
+					start("loading first canonical history page", func(ctx context.Context) commandResult {
+						page, err := loadTranscriptPage(ctx, c.Client, c.ID, 0, s.After, false)
+						return commandResult{transcript: page, transcriptTop: true, err: err}
+					})
+				} else {
+					u.Scroll = frame.ScrollMax
+				}
+				continue
+			}
+			if !key.Paste && (key.Name == "historyend" || key.Name == "end" && editor.Text() == "") {
+				if u.View.effective(width) == ViewOrchestration {
+					u.OrchestrationScroll = frame.OrchestrationMax
+					continue
+				}
+				u.Scroll, u.Transcript = 0, nil
+				u.HistoryTop = false
+				previousWidth = -1
+				continue
+			}
+			// Some terminals synthesize arrows for a wheel in an alternate screen.
+			// Empty-composer arrows scroll a line; command completion keeps its keys.
+			lineScroll := !key.Paste && editor.Text() == "" && (key.Name == "up" || key.Name == "down")
+			if lineScroll {
+				if key.Name == "up" {
+					key.Name = "pageup"
+				} else {
+					key.Name = "pagedown"
+				}
+			}
+			scrollStep := max(1, frame.ConversationHeight)
+			if wheel {
+				scrollStep = 3
+			} else if lineScroll {
+				scrollStep = 1
+			}
+			if key.Name == "pageup" {
+				u.HistoryTop = false
+				if u.View.effective(width) == ViewOrchestration {
+					step := max(1, frame.OrchestrationHeight)
+					if wheel || lineScroll {
+						step = scrollStep
+					}
+					u.OrchestrationScroll = max(0, u.OrchestrationScroll-step)
+					continue
+				}
+				step := scrollStep
 				older, boundary := s.OlderDropped, sessionstore.Sequence(0)
 				if len(s.Entries) > 0 {
 					boundary = s.Entries[0].Sequence
@@ -691,8 +774,13 @@ func Run(ctx context.Context, c Config) error {
 				continue
 			}
 			if key.Name == "pagedown" {
+				u.HistoryTop = false
 				if u.View.effective(width) == ViewOrchestration {
-					u.OrchestrationScroll = min(frame.OrchestrationMax, u.OrchestrationScroll+max(1, frame.OrchestrationHeight))
+					step := max(1, frame.OrchestrationHeight)
+					if wheel || lineScroll {
+						step = scrollStep
+					}
+					u.OrchestrationScroll = min(frame.OrchestrationMax, u.OrchestrationScroll+step)
 					continue
 				}
 				if u.Scroll == 0 && u.Transcript != nil && u.Transcript.Last < s.After && !u.Busy && u.Private == nil {
@@ -702,7 +790,7 @@ func Run(ctx context.Context, c Config) error {
 						return commandResult{transcript: page, transcriptTop: true, err: err}
 					})
 				} else {
-					u.Scroll = max(0, u.Scroll-max(1, frame.ConversationHeight))
+					u.Scroll = max(0, u.Scroll-scrollStep)
 					if u.Scroll == 0 && u.Transcript != nil && u.Transcript.Last >= s.After {
 						u.Transcript = nil
 						previousWidth = -1
