@@ -55,7 +55,7 @@ def binary_requirements(directory, revision):
     return ".".join(map(str, minimum))
 
 
-def assemble(source, output, templates, *, revision=BASELINE, extra_files=None, readme=None):
+def assemble(source, output, templates, *, revision=BASELINE, extra_files=None, readme=None, kit_name=None, kind=None, sandbox="asp"):
     extra_files = dict(extra_files or {})
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("expected a full source revision")
@@ -63,6 +63,10 @@ def assemble(source, output, templates, *, revision=BASELINE, extra_files=None, 
            or name in (*FILES, "SHA256SUMS", "auth.json", "config.toml") for name in extra_files):
         raise ValueError("invalid additional kit member")
     kit_root = KIT_ROOT if revision == BASELINE and not extra_files else "unreal-agent-asp-oauth-" + revision[:7]
+    if kit_name is not None:
+        if not re.fullmatch(r"unreal-agent-[a-z0-9-]{1,80}", kit_name) or sandbox not in ("asp", "devlore") or kind != "permission-acceptance-kit":
+            raise ValueError("invalid acceptance kit identity")
+        kit_root = kit_name
     archive_name = kit_root + ".tar.gz"
     files = (*FILES, *sorted(extra_files))
     archive, metadata = snapshot.inspect_archive(source.parent)
@@ -83,6 +87,8 @@ def assemble(source, output, templates, *, revision=BASELINE, extra_files=None, 
               "EXTRA_FILES": " ".join(sorted(extra_files))}
     for name in ("install.sh", "doctor.sh", "README.md"):
         text = readme if name == "README.md" and readme is not None else (templates / name).read_text(encoding="utf-8")
+        if name == "install.sh" and kit_name is not None:
+            text = text.replace("for part in .local opt unreal-agent-pilot asp;", "for part in .local opt unreal-agent-pilot " + sandbox + ";")
         for key, value in values.items():
             text = text.replace("@" + key + "@", value)
         if re.search(r"@[A-Z_]+@", text):
@@ -90,9 +96,11 @@ def assemble(source, output, templates, *, revision=BASELINE, extra_files=None, 
         (package / name).write_text(text, encoding="utf-8")
     for name, content in extra_files.items():
         (package / name).write_bytes(content)
-    manifest = {"format_version": 1, "kind": "asp-oauth-kit" if extra_files else "asp-pilot-kit", "baseline": revision,
+    manifest = {"format_version": 1, "kind": kind or ("asp-oauth-kit" if extra_files else "asp-pilot-kit"), "baseline": revision,
                 "source_archive_sha256": source_digest, "minimum_glibc": minimum,
                 "target": "linux/amd64", "goamd64": "v1", "cgo_enabled": True, "formal_release": False}
+    if kit_name is not None:
+        manifest["sandbox"] = sandbox
     (package / "KIT.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="ascii")
     for name in files:
         (package / name).chmod(0o700 if name in snapshot.BINARIES or name.endswith(".sh") else 0o600)
