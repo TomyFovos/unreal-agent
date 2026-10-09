@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"encoding/json/v2"
 	"errors"
-	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"io"
 	"os"
@@ -105,6 +104,7 @@ type Result struct {
 	Denial  *permission.Error `json:"denial,omitempty"`
 	Version int               `json:"version"`
 	Code    Code              `json:"code"`
+	Reason  Reason            `json:"reason,omitempty"`
 	Targets []TargetResult    `json:"targets"`
 }
 type Authorizer func(context.Context, string, bool) error
@@ -170,7 +170,7 @@ func (s *Service) Root() string { return s.root }
 func (s *Service) StateDirectory() string { return s.state }
 func (s *Service) Path(path string) (string, error) {
 	if path == "" || strings.IndexByte(path, 0) >= 0 {
-		return "", errors.New("invalid path")
+		return "", diagnosticError{ReasonInvalidRequest}
 	}
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(s.root, path)
@@ -186,11 +186,11 @@ func (s *Service) Path(path string) (string, error) {
 	}
 	rel, err := filepath.Rel(s.root, path)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", errors.New("path outside workspace")
+		return "", diagnosticError{ReasonWorkspaceBoundary}
 	}
 	stateRel, err := filepath.Rel(s.state, path)
 	if err == nil && stateRel != ".." && !strings.HasPrefix(stateRel, ".."+string(filepath.Separator)) {
-		return "", errors.New("mutation state is not a tool target")
+		return "", diagnosticError{ReasonInternalState}
 	}
 	return path, nil
 }
@@ -253,6 +253,7 @@ type prepared struct {
 func (s *Service) apply(ctx context.Context, request Request) Result {
 	result := baseResult(request, Invalid)
 	if request.Validate() != nil {
+		result.Reason = requestReason(request)
 		return result
 	}
 	paths := make([]string, len(request.Changes))
@@ -260,6 +261,7 @@ func (s *Service) apply(ctx context.Context, request Request) Result {
 		path, err := s.Path(c.Path)
 		if err != nil {
 			result.Targets[i].Code = Invalid
+			result.Reason = FailureReason(err)
 			return result
 		}
 		paths[i] = path
@@ -271,6 +273,7 @@ func (s *Service) apply(ctx context.Context, request Request) Result {
 	slices.SortFunc(order, func(a, b int) int { return strings.Compare(paths[a], paths[b]) })
 	for i := 1; i < len(order); i++ {
 		if paths[order[i]] == paths[order[i-1]] {
+			result.Reason = ReasonDuplicateTarget
 			return result
 		}
 	}
@@ -309,10 +312,12 @@ func (s *Service) apply(ctx context.Context, request Request) Result {
 			result.Code = Denied
 			result.Denial = permission.Failure(err)
 			result.Targets[i].Code = Denied
+			result.Reason = ReasonPermissionDenied
 			return result
 		}
 		parent, base, err := s.authorizedParent(ctx, path, true)
 		if err != nil {
+			result.Reason = FailureReason(err)
 			result.Code = Invalid
 			result.Denial = permission.Failure(err)
 			if result.Denial != nil {
@@ -324,6 +329,7 @@ func (s *Service) apply(ctx context.Context, request Request) Result {
 		targets[i] = prepared{parent: parent, base: base, mode: 0600}
 		data, exists, mode, err := readTarget(parent, base)
 		if err != nil {
+			result.Reason = FailureReason(err)
 			result.Code = Invalid
 			result.Targets[i].Code = Invalid
 			return result
@@ -335,6 +341,7 @@ func (s *Service) apply(ctx context.Context, request Request) Result {
 		}
 		result.Targets[i].Revision = revision
 		if revision != request.Changes[i].Expected {
+			result.Reason = ReasonRevisionConflict
 			result.Code = Stale
 			result.Targets[i].Code = Stale
 			return result
@@ -389,6 +396,7 @@ type receipt struct {
 func (s *Service) Execute(ctx context.Context, id string, request Request) Result {
 	result := baseResult(request, Invalid)
 	if request.Validate() != nil {
+		result.Reason = requestReason(request)
 		return result
 	}
 	encoded, err := json.Marshal(request)
@@ -402,6 +410,7 @@ func (s *Service) Execute(ctx context.Context, id string, request Request) Resul
 type PrepareFailure struct {
 	Code   Code
 	Denial *permission.Error
+	Reason Reason
 }
 
 func (e PrepareFailure) Error() string { return string(e.Code) }
@@ -424,6 +433,7 @@ func (s *Service) ExecutePrepared(ctx context.Context, id string, identity []byt
 			if errors.As(err, &failure) {
 				result.Code = failure.Code
 				result.Denial = failure.Denial
+				result.Reason = failure.Reason
 			}
 			return result
 		}
@@ -507,7 +517,7 @@ func ReadBounded(reader io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	if len(data) > MaxFileBytes {
-		return nil, fmt.Errorf("file exceeds %d bytes", MaxFileBytes)
+		return nil, diagnosticError{ReasonTargetTooLarge}
 	}
 	return data, nil
 }

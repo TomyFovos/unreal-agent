@@ -30,6 +30,22 @@ Native operations retain typed results in RemoteJob.Handle; TerminalResult is
 only a small summary. This avoids corrupting JSON through string truncation.
 Unexpected filesystem errors are bounded codes rather than raw sensitive paths.
 
+Native file mutations retain the immutable Session workspace, including in
+human-approved Full Access. Use workspace-relative paths. An absolute `/tmp`
+path outside that root remains `code=invalid`, not a permission decision; Bash's
+ambient filesystem access does not change the native root. For creation supply
+`expected:{exists:false}` with no digest and an existing parent. Edit must use the
+whole-file revision returned by read. Upper denies, nofollow traversal and stale
+revision checks remain in force.
+
+Receipts also carry a closed `reason` (mirrored under `mutation`) for validation
+failures: `workspace_boundary`, `internal_state_path`, `invalid_revision`,
+`invalid_request`, `duplicate_target`, `parent_missing`, `unsafe_parent`,
+`invalid_target`, `target_too_large`, `target_unavailable`, `revision_conflict`,
+or `permission_denied`. Diagnostics do not copy filesystem error text, contents
+or environment. Existing durable receipts are replayed as recorded, including
+older receipts without a reason; adding a diagnostic never authorizes a retry.
+
 Tests include real competing processes through native edit, native operation
 serialization/Manager integration, durable outcome replay, simulated missing
 outcome receipts (combined with real crash-window tests in mutation), whole-file

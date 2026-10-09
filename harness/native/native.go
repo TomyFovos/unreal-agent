@@ -90,6 +90,7 @@ type Result struct {
 	Denial    *permission.Error  `json:"denial,omitempty"`
 	Version   int                `json:"version"`
 	Code      string             `json:"code"`
+	Reason    mutation.Reason    `json:"reason,omitempty"`
 	Path      string             `json:"path,omitempty"`
 	Revision  *mutation.Revision `json:"revision,omitempty"`
 	Content   string             `json:"content,omitempty"`
@@ -105,6 +106,10 @@ type Executor struct{ Files *mutation.Service }
 func (e Executor) Execute(ctx context.Context, id string, r Request) Result {
 	result := Result{Version: Version, Code: "invalid"}
 	if r.Validate() != nil || e.Files == nil {
+		result.Reason = mutation.ReasonInvalidRequest
+		if r.Expected != nil && r.Expected.Validate() != nil {
+			result.Reason = mutation.ReasonInvalidRevision
+		}
 		return result
 	}
 	if ctx.Err() != nil {
@@ -129,11 +134,13 @@ func (e Executor) Execute(ctx context.Context, id string, r Request) Result {
 		result.Code = string(m.Code)
 		result.Mutation = &m
 		result.Denial = m.Denial
+		result.Reason = m.Reason
 		return result
 	}
 	snap, err := e.Files.Snapshot(ctx, r.Path)
 	if err != nil {
 		result.Code = errorCode(ctx, err)
+		result.Reason = mutation.FailureReason(err)
 		result.Denial = permission.Failure(err)
 		return result
 	}
@@ -318,11 +325,15 @@ func (e Executor) edit(ctx context.Context, id string, r Request) Result {
 	identity, _ := json.Marshal(r)
 	m := e.Files.ExecutePrepared(ctx, id, identity, func(ctx context.Context) (mutation.Request, error) {
 		fail := func(code string) (mutation.Request, error) {
-			return mutation.Request{}, mutation.PrepareFailure{Code: mutation.Code(code)}
+			reason := mutation.Reason("")
+			if code == "stale" {
+				reason = mutation.ReasonRevisionConflict
+			}
+			return mutation.Request{}, mutation.PrepareFailure{Code: mutation.Code(code), Reason: reason}
 		}
 		snap, err := e.Files.Snapshot(ctx, r.Path)
 		if err != nil {
-			return mutation.Request{}, mutation.PrepareFailure{Code: mutation.Code(errorCode(ctx, err)), Denial: permission.Failure(err)}
+			return mutation.Request{}, mutation.PrepareFailure{Code: mutation.Code(errorCode(ctx, err)), Denial: permission.Failure(err), Reason: mutation.FailureReason(err)}
 		}
 		if snap.Revision != *r.Expected {
 			return fail("stale")
@@ -343,5 +354,5 @@ func (e Executor) edit(ctx context.Context, id string, r Request) Result {
 		content := strings.ReplaceAll(string(snap.Data), r.OldText, r.NewText)
 		return mutation.Request{Version: mutation.Version, Changes: []mutation.Change{{Path: r.Path, Expected: *r.Expected, Content: []byte(content)}}}, nil
 	})
-	return Result{Version: Version, Code: string(m.Code), Path: r.Path, Mutation: &m, Denial: m.Denial}
+	return Result{Version: Version, Code: string(m.Code), Reason: m.Reason, Path: r.Path, Mutation: &m, Denial: m.Denial}
 }

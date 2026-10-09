@@ -27,12 +27,12 @@ func nativeDefinitions() []Definition {
 			properties["lines"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 10000}
 			properties["max_bytes"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 65536}
 		case WriteName:
-			description = "Conditionally replace a file through the shared mutation lock. Supply expected revision from read, or exists:false for creation."
+			description = "Conditionally replace a file inside the session workspace through the shared mutation lock. Use a workspace-relative path; absolute paths must still belong to that workspace even in Full Access. The parent directory must already exist. Supply expected revision from read for replacement, or expected:{exists:false} without a digest for creation."
 			properties["expected"] = revision
 			properties["content"] = text()
 			required = append(required, "expected", "content")
 		case EditName:
-			description = "Conditionally replace exact text using the revision from read. Multiple occurrences require replace_all:true. Stale edits never overwrite a cooperating update."
+			description = "Conditionally replace exact text inside the session workspace using the whole-file revision from read. Use a workspace-relative path; Full Access does not remove this tool's workspace boundary. Multiple occurrences require replace_all:true. Stale edits never overwrite a cooperating update."
 			properties["expected"] = revision
 			properties["old_text"] = text()
 			properties["new_text"] = text()

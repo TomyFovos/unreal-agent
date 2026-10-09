@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/mutation"
+	files "github.com/unreallabsai/unreal-agent/harness/native"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
@@ -53,6 +55,14 @@ func receiptStatus(ops []operation.Operation) operation.Status {
 func operationReason(op operation.Operation) string {
 	if op.Denial != nil {
 		return clipBytes(op.Denial.Error(), 4096)
+	}
+	if state, err := operation.DecodeRemoteJobState(op); err == nil && state.Plan.Type == files.PlanType && state.Plan.Version == files.Version {
+		var result struct {
+			Reason mutation.Reason `json:"reason"`
+		}
+		if json.Unmarshal(state.Handle, &result) == nil && result.Reason.Valid() {
+			return "native reason=" + string(result.Reason)
+		}
 	}
 	// Known terminal-error field only. Tool stdout, stderr and opaque state stay out.
 	var state struct{ TerminalError string }

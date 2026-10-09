@@ -88,7 +88,7 @@ func readTarget(parent *os.File, base string) ([]byte, bool, os.FileMode, error)
 		return nil, false, 0, err
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Nlink != 1 {
-		return nil, false, 0, errors.New("only regular single-link files are supported")
+		return nil, false, 0, diagnosticError{ReasonInvalidTarget}
 	}
 	data, err := ReadBounded(f)
 	return data, true, os.FileMode(st.Mode) & 0777, err
