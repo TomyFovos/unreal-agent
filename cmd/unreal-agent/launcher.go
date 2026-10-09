@@ -27,6 +27,8 @@ type launchOptions struct {
 	timeout                                                 time.Duration
 	help                                                    bool
 	normal                                                  bool
+	bootstrapDocker, bootstrapAudited, bootstrapTrust       bool
+	bootstrapClaude                                         string
 }
 
 // Dependency hooks are local composition, not Host or gateway state.
@@ -119,6 +121,10 @@ func parseLaunchOptions(args []string, output io.Writer, getenv func(string) str
 	flags.StringVar(&o.socket, "socket", "", "private socket (default XDG_RUNTIME_DIR/unreal-agent/host.sock or STATE/run/host.sock)")
 	flags.StringVar(&o.credentials, "credential-directory", "", "optional managed API-key store")
 	flags.StringVar(&o.codexFile, "codex-auth-file", "", "external Codex auth file; uses existing Codex discovery by default")
+	flags.BoolVar(&o.bootstrapDocker, "bootstrap-codex-docker-oauth", false, "first-run discovery: explicitly use Docker Sandbox OAuth and validated forward proxy")
+	flags.BoolVar(&o.bootstrapAudited, "bootstrap-claude-policy-audited", false, "first-run discovery: operator attests Claude managed policy audit")
+	flags.BoolVar(&o.bootstrapTrust, "bootstrap-claude-managed-trust", false, "first-run discovery: explicit managed policy trust (requires audit)")
+	flags.StringVar(&o.bootstrapClaude, "bootstrap-claude-binary", "", "first-run discovery: optional external Claude executable")
 	flags.DurationVar(&o.timeout, "startup-timeout", o.timeout, "maximum wait for gateway readiness")
 	flags.BoolVar(&o.help, "help", false, "show usage")
 	flags.BoolVar(&o.help, "h", false, "show usage")
@@ -141,7 +147,13 @@ func parseLaunchOptions(args []string, output io.Writer, getenv func(string) str
 		options = append(options, a)
 		name, _, hasValue := strings.Cut(strings.TrimLeft(a, "-"), "=")
 		f := flags.Lookup(name)
-		if f != nil && name != "help" && name != "h" && !hasValue && i+1 < len(args) {
+		isBool := false
+		if f != nil {
+			if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok {
+				isBool = b.IsBoolFlag()
+			}
+		}
+		if f != nil && !isBool && !hasValue && i+1 < len(args) {
 			i++
 			options = append(options, args[i])
 		}
@@ -164,6 +176,9 @@ func parseLaunchOptions(args []string, output io.Writer, getenv func(string) str
 	}
 	if o.timeout <= 0 {
 		return o, errors.New("startup-timeout must be positive")
+	}
+	if o.bootstrapTrust != o.bootstrapAudited {
+		return o, errors.New("Claude managed trust requires both explicit audit and trust; no configuration changed")
 	}
 	home := getenv("HOME")
 	if home == "" {

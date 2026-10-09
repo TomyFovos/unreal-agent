@@ -42,6 +42,9 @@ requires_openai_auth=false
 func TestDockerSandboxCodexDiscoveryIsExplicit(t *testing.T) {
 	path := sandboxCodexFixture(t)
 	getenv := func(key string) string {
+		if key == "HTTPS_PROXY" {
+			return "http://host.docker.internal:3128"
+		}
 		if key == "SBX_CRED_OPENAI_MODE" {
 			return "oauth"
 		}

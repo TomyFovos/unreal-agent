@@ -76,7 +76,7 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if json.Unmarshal(body, &q, json.RejectUnknownMembers(true)) != nil {
 		out.Error = "invalid_request"
 	} else if peek.Action == "launcher.check" {
-		if q.HostBinding == nil || h.binding == nil || *q.HostBinding != *h.binding {
+		if q.HostBinding == nil || h.binding == nil || q.HostBinding.Identity.Build == "" || q.HostBinding.Identity.Protocol != 1 || *q.HostBinding != *h.binding {
 			out.Error = "host_configuration_mismatch"
 		}
 	} else if peek.Action == "runtime.health" {

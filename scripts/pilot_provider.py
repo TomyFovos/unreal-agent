@@ -3,6 +3,7 @@
 
 import argparse
 import fcntl
+import hashlib
 import http.client
 import json
 import os
@@ -317,9 +318,20 @@ def launcher_arguments(kit, paths, auth_file, session_id):
     return [*args, session_id]
 
 
-def host_binding(paths, auth_file):
+def host_binding(paths, auth_file, binary):
+    # Native launcher.check requires exact executable/protocol identity even
+    # on this compatibility control path. Paths alone cannot prove ownership.
+    try:
+        fd = os.open(binary, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or not 0 < info.st_size <= 200 << 20:
+                fail("pilot_host_identity_unavailable", "Cannot verify the matching executable; existing Host/history preserved.")
+            identity = hashlib.file_digest(stream, "sha256").hexdigest()
+    except OSError:
+        fail("pilot_host_identity_unavailable", "Cannot verify the matching executable; existing Host/history preserved.")
     return {"Action": "launcher.check", "HostBinding": {"Configuration": str(paths["config"]), "Sessions": str(paths["sessions"]),
-            "Credentials": "", "CodexFile": auth_file, "Normal": False}}
+            "Credentials": "", "CodexFile": auth_file, "Normal": False, "Identity": {"Protocol": 1, "Build": identity}}}
 
 
 def ensure_host(kit, paths, auth_file, environ, *, docker_sandbox_oauth=False):
@@ -337,7 +349,7 @@ def ensure_host(kit, paths, auth_file, environ, *, docker_sandbox_oauth=False):
             if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
                 fail("pilot_socket_invalid", "Keep the existing path; a private user-owned socket is required.")
             # Never unlink a socket, kill an existing owner or reuse a mismatch.
-            gateway.call("extension", host_binding(paths, auth_file))
+            gateway.call("extension", host_binding(paths, auth_file, kit / "unreal-agent"))
             return gateway
         log = paths["state"] / "host.log"
         if log.exists() and (not stat.S_ISREG(log.lstat().st_mode) or log.stat().st_uid != os.getuid() or log.stat().st_mode & 0o077):
@@ -359,7 +371,7 @@ def ensure_host(kit, paths, auth_file, environ, *, docker_sandbox_oauth=False):
                     fail("pilot_host_start_failed", "Pilot startup failed; inspect its private host.log. No inference/fallback was sent.")
                 try:
                     gateway.call("auth/methods", {})
-                    gateway.call("extension", host_binding(paths, auth_file))
+                    gateway.call("extension", host_binding(paths, auth_file, kit / "unreal-agent"))
                     print("PASS: private Pilot Host ready; default Host untouched")
                     return gateway
                 except (OSError, http.client.HTTPException):

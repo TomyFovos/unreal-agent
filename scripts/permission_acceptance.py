@@ -222,7 +222,7 @@ def instructions(package, *, wait=False, readme_command="gate.sh readme"):
 
 def inspect_view(p, b, session):
     g = pilot.Gateway(p["socket"])
-    g.call("extension", pilot.host_binding(p, b["CodexFile"]))
+    g.call("extension", pilot.host_binding(p, b["CodexFile"], Path(b["BinaryDirectory"]) / "unreal-agent"))
     return g.call("inspect", {"ID": session_id(session), "After": 0, "Limit": 256})["View"]
 
 
@@ -394,7 +394,7 @@ def validate_pid(pid, package, p, b):
 
 
 def stop(package, p, b):
-    pilot.Gateway(p["socket"]).call("extension", pilot.host_binding(p, b["CodexFile"]))
+    pilot.Gateway(p["socket"]).call("extension", pilot.host_binding(p, b["CodexFile"], package / "unreal-agent"))
     pid = peer_pid(p["socket"]); start = validate_pid(pid, package, p, b)
     if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
         pilot.fail("gate_pidfd_unavailable", "Safe PID-bound SIGTERM requires Linux pidfd support; no fallback kill.")

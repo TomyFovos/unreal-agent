@@ -1,5 +1,10 @@
 # Multi-provider runtime と subagents
 
+共通Linuxキットは同じ通常provider登録と初回選択を使用し、Sandbox名で
+providerを決めません。model/effortのinstall時指定は不要です。
+初期の既知catalog windowはcanonical selection/appliedで束縛し、
+resumeはその記録を維持します。変更済みcatalogで既存Turnを再解釈しません。
+
 通常利用は `unreal` / `unreal my-project` です。通常 launcher は既存設定の
 初期 runtime を維持し、利用可能な external providers を追加登録します。
 初回 bootstrap、Team trust の一度だけの設定、Tool Bridge policy status は

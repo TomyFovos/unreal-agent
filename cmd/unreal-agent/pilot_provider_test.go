@@ -171,10 +171,27 @@ func TestPilotProviderScriptSmokeThroughFakeClaudeHost(t *testing.T) {
 	directory := filepath.Dir(store)
 	pointer := filepath.Join(directory, "latest-smoke.json")
 	root, _ := filepath.Abs(filepath.Join("..", ".."))
+	// The in-process Host advertises this exact test executable. The Python
+	// compatibility client must prove the same build, not only matching paths.
+	kit := filepath.Join(directory, "synthetic-kit")
+	if err := os.Mkdir(kit, 0700); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(kit, "unreal-agent"), image, 0700); err != nil {
+		t.Fatal(err)
+	}
 	// Exercise the actual Python control-plane requests and binding check against
 	// the native Host, with a fake Claude CLI and no network/backend inference.
-	code := `import sys; from pathlib import Path; sys.path.insert(0,sys.argv[1]); import pilot_provider as p; d=Path(sys.argv[2]); paths={"home":Path(sys.argv[3]),"config":d/"config.json","state":d,"sessions":d/"sessions","socket":d/"host.sock"}; gateway=p.ensure_host(Path("/unused"),paths,"",{}); p.smoke(gateway,"devlore",d/"latest-smoke.json",timeout=30)`
-	cmd := exec.CommandContext(t.Context(), "python3", "-c", code, filepath.Join(root, "scripts"), directory, f.Home)
+	code := `import sys; from pathlib import Path; sys.path.insert(0,sys.argv[1]); import pilot_provider as p; d=Path(sys.argv[2]); paths={"home":Path(sys.argv[3]),"config":d/"config.json","state":d,"sessions":d/"sessions","socket":d/"host.sock"}; gateway=p.ensure_host(Path(sys.argv[4]),paths,"",{}); p.smoke(gateway,"devlore",d/"latest-smoke.json",timeout=30)`
+	cmd := exec.CommandContext(t.Context(), "python3", "-c", code, filepath.Join(root, "scripts"), directory, f.Home, kit)
 	cmd.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("pilot script/native Host integration failed: %v %s", err, output)

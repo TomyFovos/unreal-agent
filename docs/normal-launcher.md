@@ -1,5 +1,24 @@
 # Normal launcher
 
+The common Linux amd64 kit reuses this launcher/discovery, rather than the old
+provider-specific daily config. It installs one verified `unreal` wrapper for
+Git-root workspace and repo-specific config/state/socket isolation. See
+[repair and common distribution](provider-reliability-repair.md).
+
+First-run-only options `--bootstrap-codex-docker-oauth`,
+`--bootstrap-claude-policy-audited` plus `--bootstrap-claude-managed-trust`, and
+optional `--bootstrap-claude-binary` record explicit operator discovery choices.
+They do not grant tool permissions, overwrite existing runtime.json, infer trust
+from authentication, or select a provider/model on failure. Both trust flags are
+required together. Docker discovery validates its exact forward-proxy contract
+before registering it available. Default External Codex is unchanged.
+
+Private gateway reuse compares the running executable digest and protocol
+revision as well as config/store/auth-reference paths. An old/unverifiable Host
+is refused and left running. Use an explicitly separate state/socket to preserve
+old history, or explicitly stop that known Host before updating. No automatic
+Session migration or config identity relaxation occurs.
+
 ```sh
 unreal
 unreal my-project

@@ -230,7 +230,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 				return err
 			}
 		}
-		binding := launcherHostBinding{Configuration: absolutePath(*path), Sessions: absolutePath(*directory), Credentials: absolutePath(*credentials), CodexFile: absolutePath(*codexFile), Normal: *normal}
+		binding := launcherHostBinding{Configuration: absolutePath(*path), Sessions: absolutePath(*directory), Credentials: absolutePath(*credentials), CodexFile: absolutePath(*codexFile), Normal: *normal, Identity: ownLauncherIdentity()}
 		models := modelUI{binding: &binding, owner: owner, runtime: runtimeConfig, templates: templates, policy: policy, cache: codexModelCache(codexPath), codexRead: codexRead, claude: claudeCatalog, next: gatewayConfig.Extension}
 		if claudeClient != nil {
 			models.claudeRead = func(readCtx context.Context, refresh bool) (modelcatalog.Catalog, error) {

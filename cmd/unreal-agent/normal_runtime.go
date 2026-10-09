@@ -102,6 +102,11 @@ func discoverCodexSource(ctx context.Context, option string, getenv func(string)
 	if _, err = resolver.Resolve(ctx, ref); err != nil {
 		return agentrunner.ProviderRuntime{}, err
 	}
+	if sandbox {
+		if _, err = openaicodex.DockerSandboxProxyURL(getenv); err != nil {
+			return agentrunner.ProviderRuntime{}, err
+		}
+	}
 	catalog, _ := codexCatalogReader(path, sandbox, getenv)(ctx, false)
 	model, err := initialCatalogModel(catalog, "")
 	if err != nil {
@@ -225,6 +230,15 @@ func chooseInitialProvider(out io.Writer) initialProviderChooser {
 func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProviderChooser, getenv func(string) string) (serveConfiguration, error) {
 	var config serveConfiguration
 	config.Launcher = &normalLauncherConfig{Version: 1}
+	config.Launcher.CodexDockerSandboxOAuth = o.bootstrapDocker
+	if o.bootstrapTrust || o.bootstrapClaude != "" {
+		c := normalClaudeConfig(config)
+		c.Binary = o.bootstrapClaude
+		if o.bootstrapTrust && o.bootstrapAudited {
+			c.ManagedPolicyMode = claudecode.ManagedPolicyTrust
+		}
+		config.Launcher.ClaudeCode = &c
+	}
 	config, err := registerNormalProviders(ctx, config, o.codexFile, getenv)
 	if err != nil {
 		return config, err

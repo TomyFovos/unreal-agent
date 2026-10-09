@@ -88,6 +88,7 @@ func TestDockerSandboxCatalogMissingCacheMetadataAndSelectionNoInference(t *test
 
 func TestDockerSandboxCatalogFailureKeepsCurrentAndNativeNeverStartsCLI(t *testing.T) {
 	t.Setenv("SBX_CRED_OPENAI_MODE", "oauth")
+	t.Setenv("HTTPS_PROXY", "http://host.docker.internal:3128")
 	path := sandboxCodexFixture(t)
 	if err := os.Remove(codexModelCache(path)); err != nil {
 		t.Fatal(err)

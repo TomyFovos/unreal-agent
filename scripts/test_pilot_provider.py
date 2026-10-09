@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -200,7 +201,22 @@ class ProviderPilotTests(unittest.TestCase):
         self.assertIn("--codex-auth-file", launch)
         self.assertNotIn("--normal-runtime", serve)
         self.assertEqual(launch[-1], "test-session")
-        self.assertEqual(pilot.host_binding(paths, "/existing/auth.json")["HostBinding"]["Normal"], False)
+        binary = self.root / "synthetic-binary"; binary.write_bytes(b"not a credential")
+        binding = pilot.host_binding(paths, "/existing/auth.json", binary)["HostBinding"]
+        self.assertEqual(binding["Normal"], False)
+        self.assertEqual(binding["Identity"], {"Protocol": 1, "Build": hashlib.sha256(binary.read_bytes()).hexdigest()})
+
+    def test_host_binding_unknown_executable_or_redirect_is_not_path_only_fallback(self):
+        paths = {"config": self.root / "config", "state": self.root / "state",
+                 "sessions": self.root / "sessions", "socket": self.root / "socket"}
+        for name in ("missing", "redirect", "directory"):
+            binary = self.root / name
+            if name == "redirect": binary.symlink_to(self.root / "missing")
+            elif name == "directory": binary.mkdir()
+            with self.subTest(name=name), self.assertRaises(pilot.PilotError) as failure:
+                pilot.host_binding(paths, "/SYNTHETIC_PRIVATE_AUTH_PATH", binary)
+            self.assertEqual(failure.exception.code, "pilot_host_identity_unavailable")
+            self.assertNotIn("SYNTHETIC_PRIVATE", str(failure.exception))
 
     def test_smoke_outcomes_do_not_publish_provider_text(self):
         self.assertEqual(pilot.smoke_outcome(final_view("expected"), "expected"), "pass")

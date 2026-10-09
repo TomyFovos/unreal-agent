@@ -1,6 +1,7 @@
 .PHONY: build test check test-claude-structured-unit test-claude-structured snapshot test-snapshot test-pilot-kit test-pilot-provider test-asp-oauth test-devlore-launcher test-daily-development
 
 GORELEASER ?= goreleaser
+BIN_DIR ?= bin
 
 snapshot:
 	python3 scripts/snapshot.py build --goreleaser "$(GORELEASER)"
@@ -28,10 +29,11 @@ test-daily-development:
 	go test ./cmd/unreal-agent -run '^TestDailyDevelopment'
 
 build:
-	go build -trimpath -o bin/unreal-agent ./cmd/unreal-agent
-	ln -sf unreal-agent bin/unreal
-	go build -trimpath -o bin/unreal-agent-runner ./cmd/unreal-agent-runner
-	go build -trimpath -o bin/unreal-agent-auth ./cmd/unreal-agent-auth
+	mkdir -p "$(BIN_DIR)"
+	go build -trimpath -o "$(BIN_DIR)/unreal-agent" ./cmd/unreal-agent
+	ln -sf unreal-agent "$(BIN_DIR)/unreal"
+	go build -trimpath -o "$(BIN_DIR)/unreal-agent-runner" ./cmd/unreal-agent-runner
+	go build -trimpath -o "$(BIN_DIR)/unreal-agent-auth" ./cmd/unreal-agent-auth
 
 test:
 	go test -race ./...
