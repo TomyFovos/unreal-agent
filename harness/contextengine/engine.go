@@ -330,6 +330,9 @@ type BuildInput struct {
 	Instructions     llm.Item
 	SchemaTokens     int64
 	TransportReserve int64
+	// Request-local dependencies reconstructed from canonical turns/responses.
+	// These bodies cannot be referenced or evicted as optional history.
+	RequiredGroups map[string]bool
 	// Cost includes renderer framing and any same-provider transient replay.
 	Cost func(Unit, string, bool) int64
 }
@@ -383,6 +386,34 @@ func (e *Engine) Build(in BuildInput) (Package, Diagnostics, error) {
 			mandatory += in.Cost(u, "pin", u.Class == Reference)
 		}
 	}
+	var dependencies []Unit
+	counted := map[string]bool{}
+	for _, u := range persistent {
+		counted[u.ID] = true
+	}
+	for _, id := range e.staged {
+		if e.units[id].Required {
+			counted[id] = true
+		}
+	}
+	for group := range in.RequiredGroups {
+		for _, id := range e.groups[group] {
+			u, exists := e.units[id]
+			if !exists || u.RetrievalOnly {
+				continue
+			}
+			if u.Class == Omit {
+				return Package{}, Diagnostics{}, &Error{"sensitive_continuation"}
+			}
+			u.Required, u.Class = true, Keep
+			dependencies = append(dependencies, u)
+			if !counted[id] {
+				mandatory += in.Cost(u, "pin", false)
+				counted[id] = true
+			}
+		}
+	}
+	slices.SortFunc(dependencies, func(a, b Unit) int { return cmp.Compare(a.ID, b.ID) })
 	state = budgetState(state, instructions, available-mandatory)
 	base := Estimate(instructions) + Estimate(StateItem(state))
 	if base+mandatory > available {
@@ -399,6 +430,9 @@ func (e *Engine) Build(in BuildInput) (Package, Diagnostics, error) {
 		}
 	}
 	pinned = append(pinned, persistent...)
+	// Insert full dependency bodies first, so duplicate staged Reference entries
+	// cannot win the selector's first-occurrence decision.
+	pinned = append(dependencies, pinned...)
 	// Candidate construction visits only a bounded recent suffix, not old bodies.
 	weight := int64(0)
 	for i := len(e.order) - 1; i >= 0; i-- {
@@ -646,29 +680,62 @@ func closeGroups(selected []Selected, groups map[string][]string, units map[stri
 		seen[s.Unit.ID] = true
 		used += cost(s.Unit, s.Reason, s.ReferenceOnly)
 	}
-	for _, s := range slices.Clone(selected) {
-		if s.Unit.Group == "" || s.Reason == "retrieved" {
+	processed := map[string]bool{}
+	for _, candidate := range slices.Clone(selected) {
+		group := candidate.Unit.Group
+		if group == "" || processed[group] {
 			continue
 		}
+		processed[group] = true
+		portable := false
+		calls, results := map[string]bool{}, map[string]bool{}
 		var partners []Unit
 		extra := int64(0)
-		for _, id := range groups[s.Unit.Group] {
+		for _, s := range selected {
+			if s.Unit.Group == group && (s.Reason == "retrieved" || s.Reason == "recent-portable") {
+				portable = true
+			}
+		}
+		for _, id := range groups[group] {
 			u, exists := units[id]
-			if exists && !seen[id] && u.Class != Omit {
+			if !exists {
+				continue
+			}
+			if u.Class == Omit {
+				portable = true
+				continue
+			}
+			switch v := u.Item.Data.(type) {
+			case llm.ToolCall:
+				calls[v.CallID] = true
+			case llm.ToolResult:
+				results[v.CallID] = true
+			}
+			if !seen[id] {
 				partners = append(partners, u)
 				extra += cost(u, "recent", u.Class == Reference)
 			}
 		}
-		if used+extra <= budget {
+		for id := range calls {
+			if !results[id] {
+				portable = true
+			}
+		}
+		for id := range results {
+			if !calls[id] {
+				portable = true
+			}
+		}
+		if !portable && used+extra <= budget {
 			for _, u := range partners {
-				seen[u.ID] = true
 				selected = append(selected, Selected{u, "recent", u.Class == Reference})
+				seen[u.ID] = true
 			}
 			used += extra
 		} else {
-			for i := range selected {
-				if selected[i].Unit.Group == s.Unit.Group {
-					selected[i].Reason = "recent-portable"
+			for index := range selected {
+				if selected[index].Unit.Group == group && selected[index].Reason != "retrieved" {
+					selected[index].Reason = "recent-portable"
 				}
 			}
 		}

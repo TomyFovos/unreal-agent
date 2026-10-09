@@ -101,6 +101,9 @@ func NewAdapter(remote *primitives.RemoteClient, config Config) (llm.Adapter, er
 }
 
 func (adapter *adapter) Respond(ctx context.Context, request llm.Request, options llm.RequestOptions) (llm.Response, error) {
+	if err := llm.ValidateContinuation(request.Input); err != nil {
+		return llm.Response{}, diagnosed(err, FailureDiagnostic{Stage: "request_build", Reason: "invalid_continuation"})
+	}
 	key := ""
 	if options.CacheKey != "" {
 		key = fmt.Sprintf("%x", sha256.Sum256([]byte(options.CacheKey)))

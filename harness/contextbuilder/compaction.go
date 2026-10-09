@@ -17,6 +17,8 @@ import (
 type nativeReplay struct {
 	origin, providerID string
 	extra              []llm.Item
+	after              []llm.Item
+	only               bool
 	charge             int64
 }
 
@@ -45,6 +47,8 @@ func EnableCompaction(b Builder, config contextengine.Config, constraints contex
 	concrete.runningUnits = map[string][]string{}
 	concrete.blockedCalls = map[string]bool{}
 	concrete.callGroups = map[string]string{}
+	concrete.continuations = map[string]*continuationGroup{}
+	concrete.turnBounds = map[session.TurnID]string{}
 	return e, nil
 }
 
@@ -140,6 +144,7 @@ func (b *builder) addUnit(item llm.Item, kind contextengine.Kind, class contexte
 	}
 	u := contextengine.Unit{Kind: kind, Class: class, Source: b.sourceRef(), Origin: b.historyProvider, Group: group, Item: item, Staged: staged, Required: required}
 	id := b.engine.Add(u, sourceKey(b.source))
+	b.lastUnit = id
 	charge := int64(0)
 	for _, private := range extra {
 		charge += contextengine.Estimate(private)
@@ -190,46 +195,56 @@ func (b *builder) contextResponse(response llm.Response) {
 	if b.engine == nil {
 		return
 	}
+	b.acknowledgeContinuation(response)
+	b.responseSerial++
+	groupID := fmt.Sprintf("response:%s:%d", b.historyProvider, b.responseSerial)
+	group := &continuationGroup{calls: map[string]*continuationCall{}}
+	b.continuations[groupID] = group
 	var private []llm.Item
-	for _, item := range response.Output {
+	last := ""
+	for index, item := range response.Output {
+		b.sourceOutputIndex = index
 		if item.Type == llm.ItemReasoning {
 			private = append(private, item)
+			continue
 		}
-	}
-	attach := -1
-	for i, item := range response.Output {
-		if item.Type == llm.ItemToolCall {
-			attach = i
-			break
-		}
-	}
-	if attach < 0 {
-		for i, item := range response.Output {
-			if item.Type == llm.ItemMessage {
-				attach = i
-				break
-			}
-		}
-	}
-	for i, item := range response.Output {
-		b.sourceOutputIndex = i
-		kind, group := contextengine.ModelMessage, ""
+		kind := contextengine.ModelMessage
 		switch v := item.Data.(type) {
 		case llm.Message:
 		case llm.ToolCall:
 			kind = contextengine.ToolRequest
-			group = b.historyProvider + ":" + b.sourceRef().TurnID + ":" + v.CallID
-			b.callGroups[v.CallID] = group
+			b.callGroups[v.CallID] = groupID
+			group.calls[v.CallID] = &continuationCall{}
+			group.chain = true
 			_, eligible := contextengine.PublicItem(item)
 			b.blockedCalls[v.CallID] = !eligible
 		default:
 			continue
 		}
-		var extra []llm.Item
-		if i == attach {
-			extra = private
+		if _, safe := contextengine.PublicItem(item); !safe {
+			// Preserve eligibility accounting without retaining the original body
+			// in the public index or adding an OMIT member to a native group.
+			b.addUnit(item, kind, contextengine.Omit, false, false, "", nil)
+			// Never send redacted arguments under the original native provider ID.
+			group.portable = true
+			item = llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "[Prior Unreal response content redacted; sensitive data omitted.]"}}
 		}
-		b.addUnit(item, kind, contextengine.Keep, false, false, group, extra)
+		last = b.addUnit(item, kind, contextengine.Keep, false, false, groupID, private)
+		private = nil
+	}
+	if len(private) > 0 {
+		if last == "" {
+			last = b.addUnit(llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant}}, contextengine.ModelMessage, contextengine.Keep, false, false, groupID, nil)
+			replay := b.native[last]
+			replay.only = true
+			b.native[last] = replay
+		}
+		replay := b.native[last]
+		replay.after = private
+		for _, item := range private {
+			replay.charge += contextengine.Estimate(item)
+		}
+		b.native[last] = replay
 	}
 	if response.Failure != nil {
 		b.sourceOutputIndex = len(response.Output)
@@ -246,6 +261,20 @@ func (b *builder) contextReceipt(callID string, output []llm.ToolResultOutput, r
 	}
 	delete(b.runningUnits, callID)
 	item := llm.Item{Type: llm.ItemToolResult, Data: llm.ToolResult{CallID: callID, Output: output}}
+	if _, safe := contextengine.PublicItem(item); !safe || b.blockedCalls[callID] {
+		b.addUnit(item, contextengine.ToolResult, contextengine.Omit, false, false, "", nil)
+		if stub, present := b.redactedReceipt(running); present {
+			output = stub
+			item.Data = llm.ToolResult{CallID: callID, Output: output}
+		} else {
+			// No canonical receipt means no claim of execution/completion.
+			output = stub
+			item.Data = llm.ToolResult{CallID: callID, Output: stub}
+			if group := b.continuations[b.callGroups[callID]]; group != nil {
+				group.portable = true
+			}
+		}
+	}
 	class := contextengine.Keep
 	failed := false
 	if status, ok := b.source.Data.(sessionstore.ToolCallStatus); ok {
@@ -278,10 +307,15 @@ func (b *builder) contextReceipt(callID string, output []llm.ToolResultOutput, r
 	if group == "" {
 		group = b.callOrigins[callID] + ":" + b.sourceRef().TurnID + ":" + callID
 	}
-	if b.blockedCalls[callID] {
-		class = contextengine.Omit
-	}
 	id := b.addUnit(item, contextengine.ToolResult, class, true, image && !b.textOnly, group, nil)
+	if replayGroup := b.continuations[group]; replayGroup != nil {
+		if call := replayGroup.calls[callID]; call != nil {
+			call.receipt, call.terminal, call.received = id, !running, false
+		}
+	}
+	replay := b.native[id]
+	replay.origin = b.callOrigins[callID]
+	b.native[id] = replay
 	if running {
 		b.runningUnits[callID] = append(b.runningUnits[callID], id)
 	}
@@ -312,23 +346,38 @@ func (b *builder) contextReceipt(callID string, output []llm.ToolResultOutput, r
 }
 
 func (b *builder) renderSelected(s contextengine.Selected) []llm.Item {
+	return b.renderContinuation(s, nil)
+}
+
+func (b *builder) renderContinuation(s contextengine.Selected, quoted map[string]bool) []llm.Item {
 	u := s.Unit
-	native := b.native[u.ID]
+	replay := b.native[u.ID]
+	portable := quoted[u.Group] || b.textOnly || replay.origin != b.provider || s.Reason == "retrieved" || s.Reason == "recent-portable" || u.RetrievalOnly
+	if group := b.continuations[u.Group]; group != nil {
+		portable = portable || group.portable
+	}
+	if portable && replay.only {
+		return nil // private-only reasoning has no provider-neutral rendering
+	}
 	if s.ReferenceOnly {
 		text := contextengine.ReferenceText(u)
-		if !b.textOnly && native.origin == b.provider && s.Reason != "retrieved" {
+		if !portable {
 			if receipt, ok := u.Item.Data.(llm.ToolResult); ok {
 				return []llm.Item{{Type: llm.ItemToolResult, Data: llm.ToolResult{CallID: receipt.CallID, Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: text}}}}}
 			}
 		}
 		return []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: text}}}
 	}
-	if b.textOnly || native.origin != b.provider || s.Reason == "retrieved" || s.Reason == "recent-portable" || u.RetrievalOnly {
+	if portable {
 		return []llm.Item{contextengine.Portable(u, s.Reason == "retrieved")}
 	}
-	item := u.Item
-	item.ProviderID = native.providerID
-	return append(slices.Clone(native.extra), item)
+	result := slices.Clone(replay.extra)
+	if !replay.only {
+		item := u.Item
+		item.ProviderID = replay.providerID
+		result = append(result, item)
+	}
+	return append(result, replay.after...)
 }
 
 func (b *builder) buildCompacted() (Result, error) {
@@ -357,11 +406,19 @@ func (b *builder) buildCompactedReserve(reserve int64) (Result, error) {
 	if len(b.request.Tools) > 0 {
 		schema = contextengine.Estimate(b.request.Tools) + 512
 	}
+	quoted := map[string]bool{}
 	cost := func(u contextengine.Unit, reason string, ref bool) int64 {
 		// Use a worst-case charge so changing an incomplete group to quoted
 		// historical evidence cannot exceed the selector's budget.
 		if ref {
 			return contextengine.Estimate(llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: contextengine.ReferenceText(u)}}) + 128
+		}
+		if quoted[u.Group] {
+			var charge int64
+			for _, item := range b.renderContinuation(contextengine.Selected{Unit: u, Reason: "recent-portable"}, quoted) {
+				charge += contextengine.Estimate(item)
+			}
+			return charge
 		}
 		charge := u.Tokens
 		private := b.native[u.ID]
@@ -370,7 +427,21 @@ func (b *builder) buildCompactedReserve(reserve int64) (Result, error) {
 		}
 		return charge
 	}
-	p, d, err := b.engine.Build(contextengine.BuildInput{Runtime: runtime, Instructions: b.committedPrefix[0], SchemaTokens: schema, Cost: cost, TransportReserve: reserve})
+	required, err := b.requiredContinuations()
+	if err != nil {
+		return Result{}, err
+	}
+	p, d, err := b.engine.Build(contextengine.BuildInput{Runtime: runtime, Instructions: b.committedPrefix[0], SchemaTokens: schema, Cost: cost, TransportReserve: reserve, RequiredGroups: required})
+	if contextengine.IsBudgetError(err) {
+		// Private provider replay may exhaust the budget even when every public
+		// receipt body fits. Retry a request-local, whole-group portable projection
+		// before refusing. This drops no read body/revision and never changes the
+		// canonical history, native arguments, or provider IDs in place.
+		for group := range required {
+			quoted[group] = true
+		}
+		p, d, err = b.engine.Build(contextengine.BuildInput{Runtime: runtime, Instructions: b.committedPrefix[0], SchemaTokens: schema, Cost: cost, TransportReserve: reserve, RequiredGroups: required})
+	}
 	if err != nil {
 		return Result{}, err
 	}
@@ -381,7 +452,7 @@ func (b *builder) buildCompactedReserve(reserve int64) (Result, error) {
 	request.Input = []llm.Item{{Type: llm.ItemMessage, Data: instructions}}
 	var changes []Change
 	for _, selected := range p.Selected {
-		request.Input = append(request.Input, b.renderSelected(selected)...)
+		request.Input = append(request.Input, b.renderContinuation(selected, quoted)...)
 		if selected.ReferenceOnly {
 			changes = append(changes, Change{Kind: ChangeOmitted, Source: selected.Unit.ID, Reason: "referenced"})
 		}
@@ -394,6 +465,9 @@ func (b *builder) buildCompactedReserve(reserve int64) (Result, error) {
 	if actualEstimate > p.Budget.Input {
 		return Result{}, &contextengine.Error{Code: "required_context_exceeds_budget"}
 	}
+	if err := llm.ValidateContinuation(request.Input); err != nil {
+		return Result{}, err
+	}
 	return Result{Request: request, Report: Report{Changes: changes, Context: &d}, Package: &p}, nil
 }
 
@@ -404,6 +478,9 @@ func (b *builder) commitContext() {
 	var turn string
 	if t, ok := b.source.Data.(session.Turn); ok {
 		turn = string(t.ID)
+	}
+	if t, ok := b.source.Data.(session.Turn); ok {
+		b.turnBounds[t.ID] = b.lastUnit
 	}
 	b.engine.Commit(turn)
 }

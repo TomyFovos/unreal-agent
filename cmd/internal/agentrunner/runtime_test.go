@@ -3,6 +3,7 @@ package agentrunner
 import (
 	"context"
 	"encoding/json/v2"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/lsp"
+	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/profile"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
@@ -92,5 +94,40 @@ func TestRuntimeFactoryOwnsFreshSessionComponentsAndIdentity(t *testing.T) {
 	defer replacement.Close()
 	if _, err = replacement.Resume(t.Context(), host.Options{ID: "identity", Configuration: changed}); err == nil {
 		t.Fatal("prompt drift allowed on resume")
+	}
+}
+
+func TestInitialRuntimeUsesKnownCatalogWindow(t *testing.T) {
+	registry, err := provider.New(provider.Defaults(map[string][]provider.Model{"ollama": {{ID: "synthetic-model", Family: "custom"}}})...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, window := range []int64{0, 32768, 272000} {
+		t.Run(fmt.Sprint(window), func(t *testing.T) {
+			identity := RuntimeIdentity{Version: 1, Workspace: t.TempDir(), Provider: provider.Selection{Version: 1, Provider: "ollama", Model: provider.Model{ID: "synthetic-model", Family: "custom"}, Auth: credential.Reference{Method: credential.None}, Source: "test", MaxAttempts: 1}, Profile: profile.Default(), ReasoningEffort: llm.ReasoningEffortLow}
+			factory, _, err := NewRuntimeFactory(RuntimeConfig{Identity: identity, SessionDirectory: t.TempDir(), Providers: registry, ModelCatalog: func(context.Context) (modelcatalog.Catalog, error) {
+				return modelcatalog.Catalog{Available: true, Models: []modelcatalog.Model{{ID: "synthetic-model", ContextWindow: window}}}, nil
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(permission.WithPolicy(t.Context(), permission.Unrestricted()))
+			defer cancel()
+			r, err := factory(ctx, "catalog-fixture")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			if r.Selection.ContextWindow != window {
+				t.Fatal("initial runtime ignored trusted catalog window")
+			}
+			built, err := r.Builder.Build()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if window > 0 && built.Report.Context.Budget.Window != window {
+				t.Fatal("initial context budget ignored catalog window")
+			}
+		})
 	}
 }

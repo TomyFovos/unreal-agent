@@ -11,6 +11,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
@@ -54,6 +55,10 @@ type builder struct {
 	runningUnits              map[string][]string
 	blockedCalls              map[string]bool
 	callGroups                map[string]string
+	continuations             map[string]*continuationGroup
+	turnBounds                map[session.TurnID]string
+	lastUnit                  string
+	responseSerial            uint64
 }
 
 var _ Builder = (*builder)(nil)

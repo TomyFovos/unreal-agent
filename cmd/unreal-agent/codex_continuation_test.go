@@ -30,22 +30,32 @@ import (
 // receives real credentials. Model request failures cannot undo, obscure or
 // reexecute the already committed mutations on explicit Session resume.
 func TestDockerOAuthMultiToolContinuationFailureAndResume(t *testing.T) {
-	for _, failure := range []string{"none", "http-502", "stream-server-error", "stream-unknown"} {
-		t.Run(failure, func(t *testing.T) {
+	for _, tc := range []struct {
+		failure string
+		size    int
+		partial bool
+	}{{"none", 128, false}, {"none", 4096, false}, {"none", 8192, false}, {"none", 8192, true}, {"http-502", 4096, false}, {"stream-server-error", 4096, false}, {"stream-unknown", 4096, false}} {
+		t.Run(fmt.Sprintf("%s/%d/partial=%t", tc.failure, tc.size, tc.partial), func(t *testing.T) {
+			failure := tc.failure
 			t.Setenv("SBX_CRED_OPENAI_MODE", "oauth")
 			t.Setenv("HTTPS_PROXY", testcodex.DockerProxyURL)
 			t.Setenv("https_proxy", "")
 			auth := sandboxCodexFixture(t)
 			originalAuth, _ := os.ReadFile(auth)
 			originalInfo, _ := os.Stat(auth)
-			edit, _ := json.Marshal(map[string]any{"path": "unreal-gate-e-asp/sample.txt", "expected": mutation.RevisionOf([]byte("before\n")), "old_text": "before", "new_text": "after"})
+			initial := "before\n" + strings.Repeat("fixture line\n", tc.size/13)
+			write, _ := json.Marshal(map[string]any{"path": "unreal-gate-e-asp/sample.txt", "content": initial, "expected": mutation.Revision{}})
+			read := `{"path":"unreal-gate-e-asp/sample.txt"}`
+			if tc.partial {
+				read = `{"path":"unreal-gate-e-asp/sample.txt","start_line":1,"lines":2}`
+			}
 			steps := []struct{ tool, args, result string }{
 				{"Bash", `{"command":"mkdir unreal-gate-e-asp && printf 'CREATED\\n'"}`, "CREATED"},
-				{"write", `{"path":"unreal-gate-e-asp/sample.txt","content":"before\n","expected":{"exists":false}}`, "applied"},
-				{"read", `{"path":"unreal-gate-e-asp/sample.txt"}`, "before"},
-				{"edit", string(edit), "applied"},
-				{"read", `{"path":"unreal-gate-e-asp/sample.txt"}`, "after"},
-				{"Bash", `{"command":"test \"$(cat unreal-gate-e-asp/sample.txt)\" = after && printf 'FILE_VERIFIED\\n'"}`, "FILE_VERIFIED"},
+				{"write", string(write), "applied"},
+				{"read", read, "before"},
+				{"edit", "", "applied"},
+				{"read", read, "after"},
+				{"Bash", `{"command":"test \"$(head -n 1 unreal-gate-e-asp/sample.txt)\" = after && printf 'FILE_VERIFIED\\n'"}`, "FILE_VERIFIED"},
 			}
 			var calls atomic.Int32
 			var resumed atomic.Bool
@@ -74,7 +84,11 @@ func TestDockerOAuthMultiToolContinuationFailureAndResume(t *testing.T) {
 				}
 				for i := range completed {
 					id := fmt.Sprint("fixture-call-", i)
-					if callCount[id] != 1 || resultCount[id] != 1 {
+					// Consumed terminal groups are optional bounded history, but
+					// the fresh result is mandatory and every retained native pair
+					// must be structurally complete. Canonical receipts are checked
+					// independently below, including after failure/resume.
+					if callCount[id] > 1 || callCount[id] != resultCount[id] || (i == completed-1 && !resumed.Load() && callCount[id] != 1) {
 						t.Error("continuation lost or duplicated a canonical call/result pair")
 					}
 				}
@@ -98,6 +112,36 @@ func TestDockerOAuthMultiToolContinuationFailureAndResume(t *testing.T) {
 				}
 				var output []any
 				if n < len(steps) {
+					if n == 3 {
+						// The fake model may use only what the actual native read sent
+						// on this wire. No separately calculated RevisionOf shortcut.
+						var observed files.Result
+						for _, item := range req.Input {
+							m, ok := item.(map[string]any)
+							if !ok || m["type"] != "function_call_output" || m["call_id"] != "fixture-call-2" {
+								continue
+							}
+							parts, _ := m["output"].([]any)
+							for _, part := range parts {
+								p, _ := part.(map[string]any)
+								value, _ := p["text"].(string)
+								if json.Unmarshal([]byte(value), &observed) != nil {
+									t.Error("read wire body was not a typed native result")
+								}
+							}
+						}
+						expectedBody := initial
+						if tc.partial {
+							expectedBody = "before\nfixture line\n"
+						}
+						if observed.Code != "ok" || observed.Revision == nil || observed.Content != expectedBody || observed.Truncated {
+							t.Error("received read lost exact body, range, revision or truncation metadata")
+							w.WriteHeader(400)
+							return
+						}
+						edit, _ := json.Marshal(map[string]any{"path": "unreal-gate-e-asp/sample.txt", "expected": observed.Revision, "old_text": strings.SplitN(observed.Content, "\n", 2)[0], "new_text": "after"})
+						steps[n].args = string(edit)
+					}
 					id := fmt.Sprint("fixture-call-", n)
 					output = []any{map[string]any{"type": "function_call", "id": id, "call_id": id, "name": steps[n].tool, "arguments": steps[n].args}}
 				} else {
@@ -219,7 +263,7 @@ func TestDockerOAuthMultiToolContinuationFailureAndResume(t *testing.T) {
 			}
 			file := filepath.Join(cfg.Runtime.Workspace, "unreal-gate-e-asp/sample.txt")
 			data, err := os.ReadFile(file)
-			if err != nil || string(data) != "after\n" {
+			if err != nil || string(data) != strings.Replace(initial, "before", "after", 1) {
 				t.Fatal("receipts disagree with actual file", err)
 			}
 			if err = owner.Close(); err != nil {
@@ -270,7 +314,7 @@ func TestDockerOAuthMultiToolContinuationFailureAndResume(t *testing.T) {
 				t.Fatal("resume used fallback or repeated generation")
 			}
 			data, _ = os.ReadFile(file)
-			if string(data) != "after\n" {
+			if string(data) != strings.Replace(initial, "before", "after", 1) {
 				t.Fatal("resume repeated a side effect")
 			}
 			encoded, _ := json.Marshal(after)

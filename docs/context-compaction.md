@@ -113,7 +113,7 @@ fit remains searchable. Whole-source, repeated-content and overlapping-part
 duplication is removed before consuming retrieval slots or budget. Retrieved evidence is
 visibly quoted as historical data, not promoted to a new instruction.
 
-Successful large tool receipts normally become source references. Their exact
+Successfully consumed, terminal large tool receipts may become source references. Their exact
 eligible text parts remain searchable. Recent failures are prioritized; large
 failures retain fitting first/last original parts and can retrieve the rest.
 Existing canonical Operation evidence determines failure state; v1 does not
@@ -138,7 +138,8 @@ input budget = min(configured InputBudget,
 Trusted context-window metadata already recorded in RuntimeSelection is used
 when available. An unknown window uses the configurable conservative fallback;
 the engine does not invent a provider window or discover a catalog every turn.
-An initial selection without recorded catalog window metadata also uses fallback.
+New selections also use an already available matching CLI catalog window. Resume
+preserves the canonical selection; absent metadata still uses fallback.
 
 Costs use JSON/UTF-8 byte counts plus framing margins, rather than an optimistic
 characters/4 conversion. These are estimates, not actual token measurements.
@@ -167,9 +168,18 @@ Claude receives ordinary text context and quoted historical tool receipts with
 session persistence and execution-event rejection remain unchanged.
 
 Codex retains its selected native tool schemas, Translator and Operation path.
-Fitting same-provider call/result groups remain native; incomplete groups become
-quoted historical evidence. A large result may use a native result containing a
-source reference. Provider-neutral packages/index/checkpoints never contain
+Fitting same-provider response/receipt groups remain native and preserve the
+original reasoning/commentary/call order. Unfinished calls and fresh receipts
+are required until a later successful canonical model response consumes them.
+Building, attempting a send, or receiving new user input is not acknowledgement.
+Current read bodies, exact revisions and truncation metadata remain intact even
+above `LargeToolTokens`. If private replay exceeds the budget, a whole-group
+portable projection is tried before a typed budget refusal. Closed historical
+groups may be referenced/retrieved, with one rendering mode for both sides.
+Secret result bodies use fixed-vocabulary stubs derived from actual canonical
+states; secret arguments never retain the original native provider identity.
+The final projection is checked for preceding calls and following outputs,
+including legal running/final updates, before HTTP. Provider-neutral packages/index/checkpoints never contain
 private reasoning or provider replay IDs. The existing final Codex renderer may
 replay selected same-provider native reasoning/state, budgeted separately in
 transient provider-local memory; it cannot cross into Claude/another provider.

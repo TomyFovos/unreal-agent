@@ -242,6 +242,11 @@ func TestCompactionLargeReceiptReferenceAndCurrentFailure(t *testing.T) {
 	f.b.AddToolResult("build", []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: large}}, false)
 	f.b.ObserveHistory(record)
 	f.b.Commit()
+	// This is closed historical evidence, not a still-unreceived continuation.
+	// A successful recorded response after the receipt establishes that boundary;
+	// Commit/Build or a new user input alone must not do so.
+	f.item(t, sessionstore.ItemTurn, session.Turn{ID: "historical-consumer", Type: session.TurnRegular})
+	f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "historical-consumer", Response: llm.Response{Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "Build output observed."}}}}})
 	f.user(t, "latest", "What did TOOL-9876 say?")
 	r, err := f.b.Build()
 	if err != nil {
