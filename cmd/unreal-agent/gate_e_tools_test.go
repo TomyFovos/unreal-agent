@@ -27,6 +27,11 @@ import (
 // path. The model cannot approve Full Access, change the mutation root or
 // transform a Bash-created outside directory into a native-tool workspace.
 func TestGateECreateEditReadProcessAndWorkspaceBoundaryBothProviders(t *testing.T) {
+	checkWorkspaceToolReceipts(t, func(_ *testing.T, cfg serveConfiguration) serveConfiguration { return humanModeConfiguration(cfg) })
+}
+
+func checkWorkspaceToolReceipts(t *testing.T, configure func(*testing.T, serveConfiguration) serveConfiguration) {
+	t.Helper()
 	for _, provider := range []string{"claude", "codex"} {
 		t.Run(provider, func(t *testing.T) {
 			outside := filepath.Join(t.TempDir(), "sample.txt")
@@ -90,7 +95,7 @@ func TestGateECreateEditReadProcessAndWorkspaceBoundaryBothProviders(t *testing.
 				auth = filepath.Join(t.TempDir(), "auth.json")
 				writeCodexAuth(t, auth, "gate-e-fake-secret", "gate-e-fake-account")
 			}
-			cfg = humanModeConfiguration(cfg)
+			cfg = configure(t, cfg)
 			var c *gateway.Client
 			if auth != "" {
 				c, _, _ = startInteractiveHost(t, cfg, "--codex-auth-file", auth)

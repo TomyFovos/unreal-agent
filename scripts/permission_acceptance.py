@@ -195,13 +195,13 @@ def readme(package):
     print(files.read_owned(package / "README.md", limit=32768).decode("utf-8"), flush=True)
 
 
-def instructions(package, *, wait=False):
+def instructions(package, *, wait=False, readme_command="gate.sh readme"):
     print(QUICK_START, flush=True)
     if wait and sys.stdin.isatty() and sys.stdout.isatty():
         # No expiring challenge is created before this pause. Only a fresh,
         # empty Enter confirms launching, never policy trust or Full Access.
         while True:
-            print("[Enterで起動]  Ctrl+Cで中止 / 手順全文: gate.sh readme", flush=True)
+            print("[Enterで起動]  Ctrl+Cで中止 / 手順全文: " + readme_command, flush=True)
             try:
                 line = sys.stdin.readline(256)
                 if not line:

@@ -64,7 +64,8 @@ def assemble(source, output, templates, *, revision=BASELINE, extra_files=None, 
         raise ValueError("invalid additional kit member")
     kit_root = KIT_ROOT if revision == BASELINE and not extra_files else "unreal-agent-asp-oauth-" + revision[:7]
     if kit_name is not None:
-        if not re.fullmatch(r"unreal-agent-[a-z0-9-]{1,80}", kit_name) or sandbox not in ("asp", "devlore") or kind != "permission-acceptance-kit":
+        if (not re.fullmatch(r"unreal-agent-[a-z0-9-]{1,80}", kit_name) or sandbox not in ("asp", "devlore")
+                or kind not in ("permission-acceptance-kit", "daily-development-kit")):
             raise ValueError("invalid acceptance kit identity")
         kit_root = kit_name
     archive_name = kit_root + ".tar.gz"
