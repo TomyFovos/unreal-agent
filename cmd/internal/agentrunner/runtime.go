@@ -319,6 +319,32 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 			closeRuntime = func() error { return errors.Join(oldClose(), cache.Close()) }
 		}
 		registry := &selectedTools{Registry: configured.Registry}
+		refreshPermission := func(context.Context) error {
+			updated := constraints
+			prompt := ""
+			if controller := permission.ControllerFromContext(ctx); controller != nil {
+				snapshot := controller.Snapshot()
+				mode := snapshot.Mode
+				prompt = "Unreal permission mode: " + mode.Label() + ". Tool availability is not authorization. Unreal owns human approval per Operation; never claim to approve or change permissions. Denials are observations. Full Access Bash is ambient access, not an OS sandbox."
+				updated.ToolPolicy = "human-controlled-by-Unreal: " + string(mode)
+				updated.Process = "denied until human authorization; ambient access, no OS sandbox"
+				if mode == permission.FullAccess {
+					updated.Process = "human-approved ambient access; operator maximum applies"
+				}
+				updated.AllowedTools = nil
+				for _, d := range registry.StaticDefinitions() {
+					if policy.CheckTool(d.Tool.Name) == nil {
+						updated.AllowedTools = append(updated.AllowedTools, d.Tool.Name)
+					}
+				}
+				slices.Sort(updated.AllowedTools)
+			}
+			builder.(interface{ SetPermissionPrompt(string) }).SetPermissionPrompt(prompt)
+			builder.(interface {
+				SetContextConstraints(contextengine.Constraints)
+			}).SetContextConstraints(updated)
+			return nil
+		}
 		configure := func(choice sessionstore.RuntimeSelection) error {
 			backend, e := c.ProviderRuntime(choice.Provider)
 			if e != nil {
@@ -343,19 +369,6 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 				}
 			}
 			prompt, definitions := composed.Compose(c.Identity.SystemPrompt, definitions)
-			if controller := permission.ControllerFromContext(ctx); controller != nil {
-				mode := controller.Snapshot().Mode
-				prompt += "\nUnreal permission mode: " + mode.Label() + ". Tool availability is not authorization. Unreal owns human approval per Operation; never claim to approve or change permissions. Denials are observations. Full Access Bash is ambient access, not an OS sandbox."
-				updated := constraints
-				updated.ToolPolicy = "human-controlled-by-Unreal: " + string(mode)
-				updated.Process = "denied until human authorization; ambient access, no OS sandbox"
-				if mode == permission.FullAccess {
-					updated.Process = "human-approved ambient access; operator maximum applies"
-				}
-				builder.(interface {
-					SetContextConstraints(contextengine.Constraints)
-				}).SetContextConstraints(updated)
-			}
 			builder.(interface{ SetRuntimeProvider(string) }).SetRuntimeProvider(choice.Provider)
 			b := builder.(interface {
 				ConfigureRuntime(llm.Model, string, []llm.Tool, []tool.Skill, bool, bool)
@@ -364,7 +377,7 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 			builder.(interface {
 				SetContextRuntime(sessionstore.RuntimeSelection, bool)
 			}).SetContextRuntime(choice, enabled)
-			return nil
+			return refreshPermission(ctx)
 		}
 		if err = configure(active); err != nil {
 			closeRuntime()
@@ -407,7 +420,7 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 			builder.SetModel(llm.Model{ID: choice.Model, ReasoningEffort: choice.Effort})
 			return nil
 		}
-		return host.Runtime{ContextEngine: engine, ContextCache: cache, Selection: &base, ValidateSelection: validate, ApplySelection: apply, Builder: builder, LLM: client, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, configured.RemoteJobs...), Close: closeRuntime}, nil
+		return host.Runtime{ContextEngine: engine, ContextCache: cache, Selection: &base, ValidateSelection: validate, ApplySelection: apply, BeforeGeneration: refreshPermission, Builder: builder, LLM: client, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, configured.RemoteJobs...), Close: closeRuntime}, nil
 
 	}
 	return factory, identity, nil

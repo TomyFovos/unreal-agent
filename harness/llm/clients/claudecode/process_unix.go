@@ -40,6 +40,15 @@ func killProcessGroup(cmd *exec.Cmd) error {
 	return err
 }
 
+func terminatedByOwner(err error) bool {
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return false
+	}
+	status, ok := exit.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() && status.Signal() == syscall.SIGTERM
+}
+
 // Policy sources are checked by metadata only. --safe-mode deliberately leaves
 // managed hooks active, so reject mode refuses such a source before executing Claude.
 // Trust mode skips this check and accepts the external administrative boundary.

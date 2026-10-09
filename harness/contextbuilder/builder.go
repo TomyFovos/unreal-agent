@@ -34,6 +34,7 @@ type builder struct {
 	request                   llm.Request
 	preamble                  string
 	systemPrompt              string
+	permissionPrompt          string
 	instructions              string
 	skills                    string
 	committedPrefix           []llm.Item
@@ -168,6 +169,14 @@ func (current *builder) SetSystemPrompt(prompt string) {
 	current.renderSystem()
 }
 
+// SetPermissionPrompt replaces only the ephemeral permission layer. The owner
+// invokes it on the Coordinator goroutine at each generation boundary, without
+// applying pending runtime/model/schema changes or modifying canonical history.
+func (current *builder) SetPermissionPrompt(prompt string) {
+	current.permissionPrompt = prompt
+	current.renderSystem()
+}
+
 // SetProjectInstructions binds the session's persisted snapshot. It is model
 // guidance only and changes no tool, permission, or lifecycle state.
 func (current *builder) SetProjectInstructions(snapshot projectinstructions.Snapshot) error {
@@ -181,7 +190,7 @@ func (current *builder) SetProjectInstructions(snapshot projectinstructions.Snap
 
 func (current *builder) renderSystem() {
 	var layers []string
-	for _, layer := range []string{current.preamble, current.systemPrompt, current.instructions, current.skills} {
+	for _, layer := range []string{current.preamble, current.systemPrompt, current.permissionPrompt, current.instructions, current.skills} {
 		if layer = strings.TrimSpace(layer); layer != "" {
 			layers = append(layers, layer)
 		}

@@ -43,6 +43,8 @@ type Client struct {
 	cached   modelcatalog.Catalog
 	cacheKey string
 	expires  time.Time
+	// Bounded post-candidate shutdown grace; injectable only by package fixtures.
+	terminationGrace time.Duration
 }
 
 func NewClient(c Config) (*Client, error) {

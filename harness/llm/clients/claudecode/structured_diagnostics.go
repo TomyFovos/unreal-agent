@@ -41,6 +41,9 @@ const (
 	structuredPermissionDenied
 	structuredUsageInvalid
 	structuredSerializerRoundLimit
+	structuredGenerationDeadline
+	structuredTerminationDeadline
+	structuredReapDeadline
 )
 
 func (e *Error) StructuredStage() string {
@@ -95,6 +98,12 @@ func (e *Error) StructuredStage() string {
 		return "structured_usage_invalid"
 	case structuredSerializerRoundLimit:
 		return "structured_serializer_round_limit"
+	case structuredGenerationDeadline:
+		return "structured_generation_timeout"
+	case structuredTerminationDeadline:
+		return "structured_termination_timeout"
+	case structuredReapDeadline:
+		return "structured_process_reap_timeout"
 	default:
 		return ""
 	}

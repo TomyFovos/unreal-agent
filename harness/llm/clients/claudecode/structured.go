@@ -200,6 +200,7 @@ func runStructuredRounds(ctx context.Context, req llm.Request, opt llm.RequestOp
 			return llm.Response{}, &Error{Code: "bridge_context_budget"}
 		}
 		generationCtx, cancel := context.WithTimeout(ctx, time.Duration(limits.TimeoutMillis)*time.Millisecond)
+		generationCtx = context.WithValue(generationCtx, generationOwnerKey{}, ctx)
 		if opt.Progress != nil {
 			opt.Progress(llm.Progress{Attempt: uint64(generation), Reset: true})
 		}
@@ -321,7 +322,11 @@ func (c *Client) structuredGeneration(ctx context.Context, path string, env []st
 	if err != nil {
 		return actionProposal{}, llm.Response{}, err
 	}
-	processCtx, cancel := context.WithCancel(ctx)
+	owner := ctx
+	if parent, ok := ctx.Value(generationOwnerKey{}).(context.Context); ok {
+		owner = parent
+	}
+	processCtx, cancel := context.WithCancel(owner)
 	defer cancel()
 	cmd := exec.CommandContext(processCtx, path, request.Arguments...)
 	cmd.Dir, cmd.Env, cmd.Stderr = dir, request.Environment, io.Discard
@@ -346,44 +351,5 @@ func (c *Client) structuredGeneration(ctx context.Context, path string, env []st
 	}
 	stdin.Close()
 	output.Close()
-	done, parsed := make(chan error, 1), make(chan struct{})
-	go func() {
-		err := cmd.Wait()
-		_ = killProcessGroup(cmd)
-		select {
-		case <-parsed:
-		case <-processCtx.Done():
-			reader.Close()
-		case <-time.After(2 * time.Second):
-			reader.Close()
-		}
-		done <- err
-	}()
-	proposal, response, streamErr := runStructuredProtocol(reader, writer, schema, input, probe, progress...)
-	close(parsed)
-	writer.Close()
-	var waitErr error
-	natural := false
-	select {
-	case waitErr = <-done:
-		natural = true
-	case <-ctx.Done():
-		cancel()
-		waitErr = <-done
-	case <-time.After(100 * time.Millisecond):
-		cancel()
-		waitErr = <-done
-	}
-	cancel()
-	reader.Close()
-	if ctx.Err() != nil {
-		return actionProposal{}, llm.Response{}, ctx.Err()
-	}
-	if streamErr != nil {
-		return actionProposal{}, llm.Response{}, streamErr
-	}
-	if natural && waitErr != nil {
-		return actionProposal{}, llm.Response{}, &Error{Code: "subprocess_failure"}
-	}
-	return proposal, response, nil
+	return collectStructuredGeneration(ctx, owner, cmd, reader, writer, schema, model, input, probe, c.terminationGrace, cancel, progress...)
 }

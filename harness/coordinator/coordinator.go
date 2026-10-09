@@ -22,6 +22,9 @@ type Dependencies struct {
 	// BeforeTurn is owner composition, called only on the coordinator goroutine.
 	// boundary excludes an in-flight request and unfinished tool/operation loops.
 	BeforeTurn func(context.Context, bool) (uint64, error)
+	// BeforeGeneration refreshes only ephemeral owner-controlled guidance on the
+	// Coordinator goroutine. It must not apply a pending runtime selection.
+	BeforeGeneration func(context.Context) error
 	// InitialInputs is one startup batch processed before any execution or model decision.
 	InitialInputs []inbox.Input
 	// Finished is a pure read of an already committed canonical Finish record.

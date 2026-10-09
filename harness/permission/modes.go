@@ -64,10 +64,14 @@ type Pending struct {
 	Deadline        time.Time
 }
 type ModeSnapshot struct {
-	Enabled  bool
-	Mode     Mode
-	Revision uint64
-	Pending  []Pending
+	Enabled bool
+	Mode    Mode
+	// Stopped distinguishes selected historical mode from effective authority.
+	// Omitted false preserves compatibility with live old-client snapshots.
+	Stopped      bool
+	SelectedMode Mode
+	Revision     uint64
+	Pending      []Pending
 }
 type Permit struct {
 	Context  context.Context
@@ -99,6 +103,7 @@ type Controller struct {
 	lease             string
 	challenge         string
 	challengeRevision uint64
+	stopped           bool
 }
 type controllerKey struct{}
 
@@ -115,10 +120,24 @@ func NewController(ctx context.Context, baseline, maximum *Policy, timeout time.
 		timeout = 2 * time.Minute
 	}
 	c := &Controller{ctx: ctx, cancel: cancel, baseline: baseline, maximum: maximum, mode: ReadOnly, revision: 1, timeout: timeout, pending: map[string]*pendingApproval{}, active: map[string]context.CancelFunc{}, changed: make(chan struct{})}
-	context.AfterFunc(ctx, func() { c.mu.Lock(); defer c.mu.Unlock(); c.revokeLocked("canceled"); c.lease = ""; c.notifyLocked() })
+	context.AfterFunc(ctx, func() { c.mu.Lock(); defer c.mu.Unlock(); c.stopLocked() })
 	return c
 }
-func (c *Controller) Close() { c.cancel() }
+func (c *Controller) Close() {
+	c.cancel()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stopLocked()
+}
+func (c *Controller) stopLocked() {
+	if c.stopped {
+		return
+	}
+	c.stopped = true
+	c.revokeLocked("canceled")
+	c.lease, c.challenge = "", ""
+	c.notifyLocked()
+}
 func WithController(ctx context.Context, c *Controller) context.Context {
 	ctx = WithPolicy(ctx, &Policy{controller: c})
 	return context.WithValue(ctx, controllerKey{}, c)
@@ -168,7 +187,10 @@ func (c *Controller) Snapshot() ModeSnapshot { s, _ := c.Watch(); return s }
 func (c *Controller) Watch() (ModeSnapshot, <-chan struct{}) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	s := ModeSnapshot{Enabled: true, Mode: c.mode, Revision: c.revision}
+	s := ModeSnapshot{Enabled: true, Mode: c.mode, SelectedMode: c.mode, Stopped: c.ctx.Err() != nil, Revision: c.revision}
+	if s.Stopped {
+		s.Mode = ReadOnly
+	}
 	for _, p := range c.pending {
 		s.Pending = append(s.Pending, Pending{ID: p.request.ID, Tool: p.request.Tool, Scope: p.request.Scope, Deadline: p.deadline})
 	}

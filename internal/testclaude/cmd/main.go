@@ -41,6 +41,9 @@ type configuration struct {
 	StructuredInitializeError                                           bool
 	StructuredSerializerFailures                                        int
 	StructuredEnforcementReminder                                       bool
+	StructuredAfterResultMillis                                         int
+	StructuredTrailing                                                  string
+	StructuredHoldAfterResult                                           bool
 }
 type bridgeStep struct {
 	Name, Arguments, Contains           string

@@ -19,6 +19,9 @@ import (
 // Offline structured-output fixture. Every generation is a separate process.
 // It inspects only supplied context/receipts, never the workspace or commands.
 func structured(dir, path string, args []string, c configuration) {
+	if c.IgnoreTermination {
+		signal.Ignore(syscall.SIGTERM)
+	}
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 8192), 16<<20)
 	read := func() map[string]any {
@@ -220,6 +223,17 @@ func structured(dir, path string, args []string, c configuration) {
 	}
 	emit(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": "serializer-only", "content": "Structured output provided successfully"}}}, "tool_use_result": map[string]any{"structured_output": output}})
 	emit(map[string]any{"type": "result", "subtype": "success", "is_error": false, "structured_output": output, "result": "private-helper-result", "usage": map[string]any{"input_tokens": 10, "output_tokens": 2, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}, "session_id": "private-session-sensitive"})
+	if c.StructuredAfterResultMillis > 0 {
+		time.Sleep(time.Duration(c.StructuredAfterResultMillis) * time.Millisecond)
+	}
+	if c.StructuredTrailing != "" {
+		fmt.Print(c.StructuredTrailing)
+	}
+	if c.StructuredHoldAfterResult {
+		for {
+			time.Sleep(time.Second)
+		}
+	}
 	fmt.Fprintln(os.Stderr, "private-token-sensitive")
 	os.Exit(c.Exit)
 }

@@ -55,6 +55,12 @@ func readStructuredStream(scanner *bufio.Scanner, schema *actionSchema, prefix [
 			continue
 		}
 		if finished {
+			var trailing struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(line, &trailing) == nil && (trailing.Type == "tool_progress" || trailing.Type == "tool_use_summary") && isSerializerMetadata(line, trailing.Type, serializerIDs) {
+				continue // verified serializer-only metadata, with no execution
+			}
 			return fail(structuredError("structured_protocol_invalid", structuredTrailingFrame), structuredTrailingFrame, line)
 		}
 		if structuredReminder(line) {
@@ -447,6 +453,10 @@ func structuredDenial(err error) error {
 // The SDK initialize.jsonSchema field is the official equivalent of
 // --json-schema/outputFormat. Send it over stdin; no schema or prompt in argv.
 func runStructuredProtocol(r io.Reader, w io.Writer, schema *actionSchema, input string, probe bool, progress ...func(llm.Progress)) (actionProposal, llm.Response, error) {
+	return runStructuredProtocolFinished(r, w, schema, input, probe, nil, progress...)
+}
+
+func runStructuredProtocolFinished(r io.Reader, w io.Writer, schema *actionSchema, input string, probe bool, candidate func(), progress ...func(llm.Progress)) (actionProposal, llm.Response, error) {
 	initialize, user, err := structuredProtocolFrames(schema, input, probe)
 	if err != nil {
 		return actionProposal{}, llm.Response{}, err
@@ -520,6 +530,9 @@ func runStructuredProtocol(r io.Reader, w io.Writer, schema *actionSchema, input
 		return readStructuredStream(scanner, schema, prefix.Bytes(), func() {
 			if closer, ok := w.(io.Closer); ok {
 				_ = closer.Close()
+			}
+			if candidate != nil {
+				candidate()
 			}
 		}, progress...)
 	}

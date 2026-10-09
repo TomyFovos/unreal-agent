@@ -33,6 +33,11 @@ never persisted/replayed. Completed receipts remain durable. Incomplete restored
 Operations are canceled with an expired permission decision, not re-executed.
 Inspect history and submit a new request to retry interrupted work.
 
+Stopped Session snapshots expose effective Read Only with an expired status;
+the previously selected mode is historical metadata, not active authority.
+The native picker shows Session stopped / permissions expired. A resumed
+generation requires fresh approval, while past Operations keep their decisions.
+
 ## Configuration and compatibility
 
 New launcher bootstrap creates a read-only baseline plus a capability ceiling;
@@ -66,7 +71,8 @@ The ceiling is **not a permission grant from a file**. Modes cannot be set in
 configuration; enabled configurations require an explicit maximum. Restart the
 specific Host to load configuration changes. Tool schemas reflect the ceiling,
 so providers can request work, see denials and continue. Context constraints
-refresh at turn boundaries, without switching runtime or granting authority.
+refresh at turn and structured-generation boundaries, without switching the
+turn-pinned runtime or granting authority.
 No authentication is copied/imported and no provider fallback is added.
 
 ## Control boundary and children

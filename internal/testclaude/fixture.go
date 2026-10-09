@@ -37,6 +37,9 @@ type Config struct {
 	StructuredInitializeError                                           bool
 	StructuredSerializerFailures                                        int
 	StructuredEnforcementReminder                                       bool
+	StructuredAfterResultMillis                                         int
+	StructuredTrailing                                                  string
+	StructuredHoldAfterResult                                           bool
 }
 type BridgeStep struct {
 	Name, Arguments, Contains           string

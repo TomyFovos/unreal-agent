@@ -182,6 +182,10 @@ func (e *Error) message() string {
 		return "Claude structured response exceeded the size limit"
 	case "structured_generation_timeout":
 		return "Claude structured generation timed out"
+	case "structured_termination_timeout":
+		return "Claude structured result termination/drain timed out; no Action or Final accepted"
+	case "structured_process_reap_timeout":
+		return "Claude structured process could not be reaped; no Action or Final accepted"
 	case "structured_serializer_round_limit":
 		return "Claude StructuredOutput reached its bounded serializer turn limit; no Action or Final was accepted"
 	case "structured_runtime_changed":

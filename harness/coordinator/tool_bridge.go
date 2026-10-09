@@ -140,6 +140,12 @@ func (current *coordinator) acceptBridgeRequest(ctx context.Context, request bri
 		return nil
 	}
 	if request.refresh {
+		if current.dependencies.BeforeGeneration != nil {
+			if err := current.dependencies.BeforeGeneration(request.ctx); err != nil {
+				request.reply <- bridgeReply{err: err}
+				return nil
+			}
+		}
 		var built contextbuilder.Result
 		var err error
 		if b, ok := current.dependencies.ContextBuilder.(interface {

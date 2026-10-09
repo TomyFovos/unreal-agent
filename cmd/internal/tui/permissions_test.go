@@ -9,6 +9,19 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 )
 
+func TestStoppedPermissionDisplayCannotGrant(t *testing.T) {
+	s := Snapshot{Permissions: permission.ModeSnapshot{Enabled: true, Mode: permission.ReadOnly, SelectedMode: permission.FullAccess, Stopped: true}}
+	if p := permissionPicker(s); len(p.Options) != 0 || !strings.Contains(p.Title, "expired") {
+		t.Fatal("stopped picker permits privilege selection")
+	}
+	if !strings.Contains(permissionStatus(s), "Session stopped") || permissionBadge(s) == "FULL " {
+		t.Fatal("stopped status claims active Full Access")
+	}
+	if !strings.Contains(strings.Join(fullPermissionConfirmation(s, 1, "fixture").Instructions, " "), "Session stop/resume") {
+		t.Fatal("confirmation omits Session-lifetime expiry")
+	}
+}
+
 func humanUI(t *testing.T) (*permission.Controller, chan Key, *screenObserver, *fakeClient, <-chan error) {
 	t.Helper()
 	c := permission.NewController(t.Context(), permission.Unrestricted(), permission.Unrestricted(), time.Second)

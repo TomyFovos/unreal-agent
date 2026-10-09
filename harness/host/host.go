@@ -41,6 +41,7 @@ type Runtime struct {
 	Selection         *sessionstore.RuntimeSelection
 	ApplySelection    func(sessionstore.RuntimeSelection) error
 	ValidateSelection func(sessionstore.RuntimeSelection) error
+	BeforeGeneration  func(context.Context) error
 	Builder           contextbuilder.Builder
 	LLM               llm.Adapter
 	Tools             tool.Registry
@@ -366,9 +367,10 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	}
 	pending := s.pendingStop()
 	dependencies := coordinator.Dependencies{SessionID: o.ID, Inbox: s.inbox, Restored: restored,
-		ContextBuilt: s.contextBuilt,
-		BeforeTurn:   s.beginTurn,
-		Sessions:     &serializedStore{s}, ContextBuilder: s.runtime.Builder, LLM: s.runtime.LLM, Tools: s.runtime.Tools,
+		ContextBuilt:     s.contextBuilt,
+		BeforeTurn:       s.beginTurn,
+		BeforeGeneration: s.runtime.BeforeGeneration,
+		Sessions:         &serializedStore{s}, ContextBuilder: s.runtime.Builder, LLM: s.runtime.LLM, Tools: s.runtime.Tools,
 		Finished: func() bool { return s.Finish() != nil }, Operations: s.runtime.Operations, ToolHeartbeatInterval: o.Heartbeat, RestoredStop: pending, InitialInputs: initial}
 	if o.TextOnlyChild {
 		if o.Lifecycle != "child" {

@@ -16,6 +16,12 @@ func (m *Model) setPermissions(generation string, snapshot permission.ModeSnapsh
 }
 func permissionPicker(s Snapshot) *Picker {
 	p := &Picker{Kind: "permissions", Title: "Permissions · " + s.Permissions.Mode.Label(), Hint: "Schemas are capabilities, not permission grants", PermissionRevision: s.Permissions.Revision, Options: []string{"Read Only", "Ask for Approval", "Full Access"}}
+	if s.Permissions.Stopped {
+		p.Title = "Permissions expired · Session stopped"
+		p.Options = nil
+		p.Hint = "Resume starts Read Only; privileged operations require reapproval"
+		return p
+	}
 	if !s.Permissions.Enabled {
 		p.Options = nil
 		p.Hint = "Legacy configured policy; opt in with PermissionModes.Enabled and a reviewed Maximum"
@@ -36,7 +42,7 @@ func fullPermissionConfirmation(s Snapshot, revision uint64, challenge string) *
 	return &Picker{Kind: "permission-full", Title: "Confirm Full Access · Session " + SafeText(string(s.ID)), Options: []string{"Deny / keep current mode", "Confirm Full Access for this Session"}, PermissionRevision: revision, PermissionChallenge: challenge, Instructions: []string{
 		"NO OS SANDBOX. Bash can execute arbitrary commands.",
 		"Filesystem, network, credentials, environment and shared mounts may be accessed.",
-		"Continues after detach; Host restart requires reapproval. /permissions can revoke. Operator maximum and explicit denies still apply.",
+		"Continues after detach; Session stop/resume and Host restart require reapproval. /permissions can revoke. Operator maximum and explicit denies still apply.",
 	}}
 }
 func operationPermissionConfirmation(s Snapshot, op permission.Pending) *Picker {
@@ -68,6 +74,9 @@ func permissionStatus(s Snapshot) string {
 	if !s.Permissions.Enabled {
 		return ""
 	}
+	if s.Permissions.Stopped {
+		return "Permissions: expired · Session stopped (selected " + s.Permissions.SelectedMode.Label() + ")"
+	}
 	return fmt.Sprintf("Permissions: %s", s.Permissions.Mode.Label())
 }
 
@@ -80,6 +89,9 @@ func permissionSeparator(label string) string {
 func permissionBadge(s Snapshot) string {
 	if !s.Permissions.Enabled {
 		return ""
+	}
+	if s.Permissions.Stopped {
+		return "EXPIRED "
 	}
 	switch s.Permissions.Mode {
 	case permission.ReadOnly:

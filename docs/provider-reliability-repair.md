@@ -45,6 +45,36 @@ windows; canonical resume selections retain their identity.
 - Existing permission/workspace/revision-conflict and both-provider tool tests
   remain required. No live Sessions, credentials, Sandbox or inference are used.
 
-The later permission/lifecycle and common-package sections are completed with
-their independently verified checkpoints; the continuation checkpoint adds no
-authentication, permission or provider fallback.
+## Permission generations and Claude termination
+
+The Host supplies a separate `BeforeGeneration` owner callback. Structured
+RefreshContext invokes it on the Coordinator goroutine to replace only the
+permission prompt layer and current constraints from the live Controller.
+It does not rerun BeforeTurn or apply pending provider/model/effort/tool schemas.
+Operation admission remains authoritative; a change after prompt construction
+can still deny or cancel an Operation. Action/replay identity excludes permission
+revision; old successes, denials and cancellations retain their canonical outcome.
+
+A stopped Controller reports `Stopped=true`, effective Read Only and the
+historical `SelectedMode`. It grants nothing. Gateway/TUI show expired/Session
+stopped; resume creates a fresh Read Only Controller. A live detach preserves
+the grant. Historical Operation permission evidence is not changed.
+
+Each independent Claude generation has a generation deadline through validated
+candidate result. Post-candidate termination has a separate **2 second** finite
+grace: close stdin, allow cleanup, request SIGTERM at halfway if still alive,
+validate every remaining stdout frame through physical EOF, then reap the parent
+and kill its process group. Only validated heartbeat/correlated serializer
+metadata can follow a result. Invalid trailing tools, drain timeout or inability
+to reap accept no Action/Final. On failure only, a pipe may be closed to unblock
+cleanup; this is never manufactured success EOF. Owner cancellation applies at
+every stage. Fixed stages distinguish generation, termination and reap timeout.
+Cleanup time is excluded from client-clock generation speed statistics.
+
+Fixtures inject short finite grace/timeout values, test slow valid cleanup,
+metadata, serializer retries, invalid/Bash tails, held pipes, no response and
+cancel. No tool callback runs before EOF/reap. The existing prepare/version/help/
+auth checks remain outside the Action round loop, not cached for Host lifetime.
+The fake Host changes Read Only → Full Access → Read Only during inner rounds,
+replays a denied ID after promotion, executes a new ID, and leaves a pending
+model/effort switch unapplied. The common-package checkpoint follows separately.

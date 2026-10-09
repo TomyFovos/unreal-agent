@@ -95,13 +95,17 @@ func TestHumanHostFullAccessDetachAttachAndRestartExpires(t *testing.T) {
 	if err = h.Close(); err != nil {
 		t.Fatal(err)
 	}
+	stopped, _ := s.Inspect(0, 4096)
+	if !stopped.Permissions.Stopped || stopped.Permissions.Mode != permission.ReadOnly || stopped.Permissions.SelectedMode != permission.FullAccess {
+		t.Fatal("stopped Host reports effective historical grant")
+	}
 	next := modeHost(t, dir)
 	r, err := next.Resume(t.Context(), Options{ID: s.ID, Policy: permission.Unrestricted()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	view, _ := r.Inspect(0, 4096)
-	if !view.Permissions.Enabled || view.Permissions.Mode != permission.ReadOnly || len(view.History.Items) < len(before.History.Items) {
+	if !view.Permissions.Enabled || view.Permissions.Stopped || view.Permissions.Mode != permission.ReadOnly || len(view.History.Items) < len(before.History.Items) {
 		t.Fatal("restart retained elevation or lost history")
 	}
 	if _, err = r.PermissionControl(s.Generation); err == nil {
