@@ -6,6 +6,12 @@ Linux amd64 / GOAMD64=v1 / CGO / tree-sitter の新snapshotです。OS sandbox�
 変更しません。新しいprivate配置へ導入し、同じキットの再実行は検証後に再利用します。
 過去の6284e49 binaryにはPermission Modeがないため、この新snapshotを使用します。
 
+入力欄の直下にprovider/model・effort・TPS・Input/Output usageを常時表示します。
+`(api)`はClaude CLIのAPI時間と報告token数からの速度、`~...(est)`は報告token数と
+Unrealのgeneration時計による推定です。tool/承認待ちを計測へ混ぜません。
+token数を本文から推定せず、不明は`—`（ASCII表示では`-`）。完了値は保持し、
+新generationの統計が未報告なら不明表示へ戻ります。狭い画面では項目を省略します。
+
 ## 転送と一括導入
 
 Windowsでarchiveと`.sha256`のあるフォルダから実行してください。
@@ -36,6 +42,8 @@ restricted preflightで確認し、Structured Bridge/managedPolicyMode=trustを�
 MCPや他providerへfallbackしません。未認証・未監査はfail-closedです。
 
 setupは実推論を送りません。表示された`LAUNCH:`の専用`unreal`のパスを使用します。
+起動直前にこのREADMEを表示し、対話端末では**Enterまで待機**します。Ctrl+C/EOFは
+TUIを起動せず終了します。非対話環境の自動試験は待機しません。
 `~/.local/bin/unreal`やshell設定は置換しません。configは0600、各専用directoryは0700。
 state/workspaceは専用の新しい一時Git repoであり、既存`~/workspace`は使用しません。
 証拠保持のためworkspace/stateは永続で、削除しません。
@@ -45,6 +53,8 @@ state/workspaceは専用の新しい一時Git repoであり、既存`~/workspace
 ```sh
 permission_gate="$HOME/.local/state/unreal-agent-pilot/@SANDBOX@/permissions-@REVISION_SHORT@"
 permission_package="$HOME/.local/opt/unreal-agent-pilot/@SANDBOX@/@REVISION_SHORT@-$(sha256sum "$permission_unpack/@KIT_ROOT@/SHA256SUMS" | cut -c1-16)"
+# 後から手順だけ再表示（Host起動・認証probe・推論なし）
+bash "$permission_package/gate.sh" readme
 ```
 
 ## Gate D — 履歴とHost lifetime
@@ -82,6 +92,7 @@ PASSはcanonical履歴prefix/terminal receipts不変、Operation重複0、Read O
 | read | read/grep/globの実receiptと結果。 |
 | deny | Read OnlyのwriteとBashを実際に要求。Unreal typed denial、出力ファイル0。モデルの文章だけではFAIL。 |
 | ask | 先に`/permissions`→Ask for Approval。最初のwriteをAllow Once、次のwriteをDeny。once.txtだけ生成。 |
+| work | `/permissions`→Full Accessを明示Confirm。sample.txtをnative write→read→edit→read→Bashによる内容検証。 |
 | full | 先に`/permissions`→Full Access→別画面の警告を読み明示Confirm。Bash failing test→edit/write→passing testのcanonical receiptsと成果物。 |
 
 Full Access/Bashは**OS sandboxではありません**。認証情報・filesystem・network・
@@ -90,11 +101,24 @@ environment・shared mountsへambient accessでき、任意command/Git pushも�
 このアクセスを受け入れる場合だけ確認してください。80x24未満では承認不可です。
 初期baselineはread/grep/globのみで、設定のMaximumは承認ではありません。
 
+**native write/editはSessionのworkspaceに限定**されます。`sample.txt`など相対pathを
+使い、別の`/tmp` repoを作らないでください。Bashで外のdirectoryを作れてもnative toolの
+workspaceにはなりません。新規writeの`expected:{exists:false}`は正規形式で、digestは不要。
+親directoryは存在する必要があります。editではreadが返したwhole-file revisionを使用。
+失敗receiptの`reason=workspace_boundary`、`parent_missing`、`invalid_revision`、
+`revision_conflict`等で原因を確認できます。`code=invalid`だけでPermission拒否とは扱いません。
+
+長い応答は会話領域上のマウスホイール、PgUp/PgDnで読めます。Ctrl+Home/Endで先頭/末尾、
+入力が空ならHome/Endと上下キーも履歴操作です。入力中のHome/Endはcomposer操作を維持。
+Splitの右ペイン上のホイールはOrchestrationをスクロールします。コピー機能は不要です。
+端末のテキスト選択が必要ならShiftを押してドラッグしてください（端末のmouse override）。
+
 ```sh
 # STAGEごとのFinal後、detachして実行
 bash "$permission_package/gate.sh" verify read
 bash "$permission_package/gate.sh" verify deny
 bash "$permission_package/gate.sh" verify ask
+bash "$permission_package/gate.sh" verify work
 bash "$permission_package/gate.sh" verify full
 # Full Access中にdetach/reattachしてmodeが保持されることも確認
 bash "$permission_package/gate.sh" checkpoint gate-e

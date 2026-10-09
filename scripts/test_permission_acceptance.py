@@ -88,6 +88,63 @@ class PermissionAcceptanceTests(unittest.TestCase):
         with patch.object(pilot,"claude_preflight",side_effect=AssertionError("must not run")),self.assertRaises(pilot.PilotError):
             gate.setup(self.package,self.meta,self.p,self.args)
 
+    def test_instructions_wait_only_for_interactive_enter(self):
+        (self.package / "README.md").write_text("日本語の受入手順\n", encoding="utf-8")
+        class TTY(io.StringIO):
+            def isatty(self): return True
+        stdin, stdout = TTY("\n"), TTY()
+        with patch.object(sys,"stdin",stdin), patch.object(sys,"stdout",stdout):
+            gate.instructions(self.package,wait=True)
+        self.assertIn("日本語の受入手順",stdout.getvalue())
+        self.assertIn("EnterでTUI",stdout.getvalue())
+        self.assertEqual(stdin.tell(),1)
+        for contents in ("", "typed input\n"):
+            with patch.object(sys,"stdin",TTY(contents)), patch.object(sys,"stdout",TTY()), self.assertRaises(pilot.PilotError):
+                gate.instructions(self.package,wait=True)
+        with patch.object(sys,"stdin",io.StringIO("do not consume")), patch.object(sys,"stdout",TTY()):
+            gate.instructions(self.package,wait=True)
+            self.assertEqual(sys.stdin.tell(),0)
+        with patch.object(sys,"stdin",TTY("do not consume")), patch.object(sys,"stdout",io.StringIO()):
+            gate.instructions(self.package,wait=True)
+            self.assertEqual(sys.stdin.tell(),0)
+
+    def test_open_displays_and_confirms_instructions_before_exec(self):
+        self.setup_gate()
+        order=[]
+        with patch.dict(os.environ,self.env,clear=True), patch.object(gate,"kit",return_value=(self.installed,self.meta)), \
+                patch.object(gate,"preflight",side_effect=lambda *a:order.append("preflight")), \
+                patch.object(gate,"instructions",side_effect=lambda *a,**k:order.append(("readme",k))), \
+                patch.object(os,"chdir"),patch.object(os,"execve",side_effect=lambda *a:order.append("exec")):
+            self.assertEqual(gate.main(["open","gate-e","--instance",self.args.instance]),0)
+        self.assertEqual(order,["preflight",("readme",{"wait":True}),"exec"])
+        with patch.dict(os.environ,self.env,clear=True), patch.object(gate,"kit",return_value=(self.installed,self.meta)), \
+                patch.object(gate,"preflight"),patch.object(gate,"instructions",side_effect=pilot.PilotError("gate_instructions_canceled","No TUI started.")), \
+                patch.object(os,"execve") as execute, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(gate.main(["open","gate-e","--instance",self.args.instance]),1)
+            execute.assert_not_called()
+        # Readme replay does not require a Session, authentication or any Host.
+        with patch.object(gate,"kit",return_value=(self.package,self.meta)), patch.object(gate,"instructions") as show, patch.object(gate,"binding",side_effect=AssertionError("not needed")):
+            self.assertEqual(gate.main(["readme"]),0)
+            show.assert_called_once_with(self.package)
+
+    def test_work_requires_exact_native_receipts_and_real_content_assertion(self):
+        self.setup_gate(); root=self.p["workspace"]
+        (root/"sample.txt").write_bytes(b"after\n")
+        ops=[{"ID":tool,"ToolName":tool,"Status":"completed","Permission":{"State":"full_access"},"State":{"Plan":{"Data":{"path":"sample.txt"}}}} for tool in ("write","edit","read")]
+        ops.append({"ID":"bash","ToolName":"Bash","Status":"completed","Permission":{"State":"full_access"},"State":{"Input":{"Command":gate.WORK_COMMAND},"Result":{"ExitCode":0}}})
+        with contextlib.redirect_stdout(io.StringIO()):gate.verify_stage(self.p,{"Operations":ops},"work")
+        for altered in (ops[1:],ops[:-1]):
+            with self.assertRaises(pilot.PilotError):gate.verify_stage(self.p,{"Operations":altered},"work")
+        wrong=copy.deepcopy(ops);wrong[0]["State"]["Plan"]["Data"]["path"]="/tmp/elsewhere/sample.txt"
+        with self.assertRaises(pilot.PilotError):gate.verify_stage(self.p,{"Operations":wrong},"work")
+        wrong=copy.deepcopy(ops);wrong[-1]["State"]["Result"]["ExitCode"]=1
+        with self.assertRaises(pilot.PilotError):gate.verify_stage(self.p,{"Operations":wrong},"work")
+        (root/"sample.txt").write_bytes(b"wrong\n")
+        with self.assertRaises(pilot.PilotError):gate.verify_stage(self.p,{"Operations":ops},"work")
+        self.assertIn("expected={exists:false}",gate.PROMPTS["work"])
+        self.assertIn(gate.WORK_COMMAND,gate.PROMPTS["work"])
+        self.assertIn("immutable workspace boundary",gate.configuration("asp",root,"m","high")["Runtime"]["SystemPrompt"])
+
     def test_private_config_paths_and_session_names(self):
         with self.assertRaises(pilot.PilotError): gate.paths(self.home,self.meta,"../default")
         with self.assertRaises(pilot.PilotError): gate.session_id("existing-session")
