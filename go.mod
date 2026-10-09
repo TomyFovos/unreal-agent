@@ -4,6 +4,7 @@ go 1.27.0
 
 require (
 	github.com/oapi-codegen/runtime v1.6.0
+	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/rivo/uniseg v0.4.7
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/tree-sitter/go-tree-sitter v0.25.0

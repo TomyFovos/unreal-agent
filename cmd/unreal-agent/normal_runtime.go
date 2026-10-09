@@ -33,6 +33,8 @@ type normalLauncherConfig struct {
 	Version           int
 	DiscoverProviders *bool              `json:",omitzero"`
 	ClaudeCode        *claudecode.Config `json:",omitzero"`
+	// Explicit discovery opt-in; never inferred from proxy-managed auth.json.
+	CodexDockerSandboxOAuth bool `json:",omitzero"`
 }
 
 type normalRuntimeError struct{ Code string }
@@ -75,18 +77,28 @@ func claudeTransportConfig(c claudecode.Config, getenv func(string) string) clau
 }
 
 func discoverCodex(ctx context.Context, option string, getenv func(string) string) (agentrunner.ProviderRuntime, error) {
+	return discoverCodexSource(ctx, option, getenv, false)
+}
+
+func discoverCodexSource(ctx context.Context, option string, getenv func(string) string, sandbox bool) (agentrunner.ProviderRuntime, error) {
 	path, err := externalCodexAuthFile(option, getenv)
 	if err != nil {
 		return agentrunner.ProviderRuntime{}, err
 	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
-		return agentrunner.ProviderRuntime{}, &credential.Error{Code: "external_reauth_required"}
-	}
 	ref := credential.Reference{Provider: "openai-codex", Method: credential.OAuth, ID: "external-codex"}
+	var resolver credential.Resolver = provider.ExternalCodex(openaicodex.Config{AuthFile: path})
+	if sandbox {
+		ref = credential.Reference{Provider: "openai-codex", Method: credential.DockerSandboxOAuth, ID: "docker-sandbox-oauth"}
+		resolver = provider.DockerSandboxCodex(openaicodex.DockerSandboxSource{AuthFile: path, Getenv: getenv})
+	} else {
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+			return agentrunner.ProviderRuntime{}, &credential.Error{Code: "external_reauth_required"}
+		}
+	}
 	// Resolve with the existing external owner, then discard the material. It is
 	// never imported, copied to config, logged or retained by discovery.
-	if _, err = provider.ExternalCodex(openaicodex.Config{AuthFile: path}).Resolve(ctx, ref); err != nil {
+	if _, err = resolver.Resolve(ctx, ref); err != nil {
 		return agentrunner.ProviderRuntime{}, err
 	}
 	catalog := modelcatalog.ReadCodexCache(codexModelCache(path))
@@ -161,7 +173,7 @@ func registerNormalProviders(ctx context.Context, config serveConfiguration, cod
 		var p agentrunner.ProviderRuntime
 		var err error
 		if id == "openai-codex" {
-			p, err = discoverCodex(ctx, codexFile, getenv)
+			p, err = discoverCodexSource(ctx, codexFile, getenv, config.Launcher != nil && config.Launcher.CodexDockerSandboxOAuth)
 		} else {
 			p, err = discoverClaude(ctx, normalClaudeConfig(config), getenv)
 		}

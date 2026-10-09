@@ -44,6 +44,9 @@ func NewManager(store Store, refreshers map[string]RefreshFunc) *Manager {
 	return &Manager{store: store, refreshers: copied, now: time.Now, skew: 30 * time.Second}
 }
 func (m *Manager) Login(ctx context.Context, ref Reference, material Material) error {
+	if ref.Method == DockerSandboxOAuth {
+		return &Error{Code: "unsupported_managed_source"}
+	}
 	if err := ref.Validate(); err != nil {
 		return err
 	}
@@ -59,6 +62,9 @@ func (m *Manager) Logout(ctx context.Context, ref Reference) error {
 }
 func (m *Manager) List(ctx context.Context) ([]Metadata, error) { return m.store.List(ctx) }
 func (m *Manager) Resolve(ctx context.Context, ref Reference) (Material, error) {
+	if ref.Method == DockerSandboxOAuth {
+		return Material{}, &Error{Code: "unsupported_managed_source"}
+	}
 	if err := ref.Validate(); err != nil {
 		return Material{}, err
 	}

@@ -32,7 +32,16 @@ func Defaults(catalog map[string][]Model) []Descriptor {
 		{ID: "ollama", Endpoint: ollama.BaseURL, AuthMethods: []credential.Method{credential.None}, Capabilities: caps, Models: catalog["ollama"], New: func(c BuildConfig, _ credential.Material) (Client, error) {
 			return ollama.NewClient(ollama.Config{BaseURL: c.Selection.Endpoint, MaxAttempts: &c.Selection.MaxAttempts, HTTPClient: c.HTTPClient})
 		}},
-		{ID: "openai-codex", Endpoint: openaicodex.BaseURL, AuthMethods: []credential.Method{credential.OAuth}, Capabilities: caps, Models: catalog["openai-codex"], New: func(c BuildConfig, m credential.Material) (Client, error) {
+		{ID: "openai-codex", Endpoint: openaicodex.BaseURL, AuthMethods: []credential.Method{credential.OAuth, credential.DockerSandboxOAuth}, Capabilities: caps, Models: catalog["openai-codex"], New: func(c BuildConfig, m credential.Material) (Client, error) {
+			if c.Selection.Auth.Method == credential.DockerSandboxOAuth {
+				if m.Owner != credential.DockerSandboxProxy || m.Token.Reveal() != "" || m.AccountID != "" || m.RefreshToken.Reveal() != "" || !m.ExpiresAt.IsZero() || c.Selection.Endpoint != openaicodex.BaseURL {
+					return nil, &credential.Error{Code: "invalid_docker_sandbox_material"}
+				}
+				return openaicodex.NewClient(openaicodex.Config{DockerSandboxOAuth: true, BaseURL: c.Selection.Endpoint, MaxAttempts: &c.Selection.MaxAttempts, HTTPClient: c.HTTPClient})
+			}
+			if m.Owner == credential.DockerSandboxProxy {
+				return nil, &credential.Error{Code: "invalid_material"}
+			}
 			return openaicodex.NewClient(openaicodex.Config{AccessToken: m.Token.Reveal(), AccountID: m.AccountID, BaseURL: c.Selection.Endpoint, MaxAttempts: &c.Selection.MaxAttempts, HTTPClient: c.HTTPClient})
 		}},
 	}

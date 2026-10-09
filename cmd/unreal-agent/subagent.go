@@ -360,6 +360,11 @@ func (f closeFunc) Close() error { return f() }
 // API keys, OAuth tokens, proxy credentials and parent OTEL settings do not.
 func childEnvironment(c agentrunner.RuntimeConfig) []string {
 	env := []string{"PATH=/usr/bin:/bin", "LANG=C.UTF-8"}
+	// Only the closed, nonsecret kit mode crosses to a child. The child still
+	// independently validates the explicitly selected source before each turn.
+	if (isDockerSandboxCodex(c.Identity.Provider.Auth) || isDockerSandboxCodex(c.Backends["openai-codex"].Provider.Auth)) && os.Getenv("SBX_CRED_OPENAI_MODE") == "oauth" {
+		env = append(env, "SBX_CRED_OPENAI_MODE=oauth")
+	}
 	if c.Identity.Provider.Provider != "claude-code" && c.Backends["claude-code"].Provider.Provider == "" {
 		return env
 	}

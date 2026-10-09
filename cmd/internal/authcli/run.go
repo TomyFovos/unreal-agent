@@ -28,6 +28,9 @@ func Run(ctx context.Context, args []string, input io.Reader, output io.Writer) 
 		}
 		return json.MarshalWrite(output, authflow.Matrix())
 	}
+	if args[0] == "check-docker-sandbox-oauth" {
+		return checkDockerSandboxOAuth(ctx, args[1:], output)
+	}
 	flags := flag.NewFlagSet("unreal-agent-auth", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	directory := flags.String("store", "", "private credential directory")

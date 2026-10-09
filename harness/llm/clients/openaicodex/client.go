@@ -25,6 +25,9 @@ type Config struct {
 	BaseURL     string
 	MaxAttempts *int
 	Trace       func(responsesapi.Exchange)
+	// Requires the separately validated host-owned Sandbox OAuth route. Never
+	// combine with token, account ID or AuthFile, and never infer from a token.
+	DockerSandboxOAuth bool
 }
 
 type Client struct {
@@ -42,9 +45,16 @@ func NewClient(config Config) (*Client, error) {
 	if config.MaxAttempts != nil && *config.MaxAttempts <= 0 {
 		return nil, errors.New("max attempts must be positive")
 	}
-	credentials, err := config.credentials()
-	if err != nil {
-		return nil, err
+	var credentials credentials
+	if config.DockerSandboxOAuth {
+		if config.BaseURL != "" && config.BaseURL != BaseURL || config.AccessToken != "" || config.AccountID != "" || config.AuthFile != "" {
+			return nil, errors.New("invalid codex Docker Sandbox OAuth configuration")
+		}
+	} else {
+		credentials, err = config.credentials()
+		if err != nil {
+			return nil, err
+		}
 	}
 	// Never forward subscription credentials through redirects.
 	httpClient := http.Client{
@@ -55,16 +65,31 @@ func NewClient(config Config) (*Client, error) {
 		httpClient = *config.HTTPClient
 		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	}
+	headers := map[string][]string{
+		"Authorization":      {"Bearer " + credentials.accessToken},
+		"ChatGPT-Account-ID": {credentials.accountID},
+		"Content-Type":       {"application/json"}, "originator": {"unreal-agent"}, "User-Agent": {"unreal-agent"},
+	}
+	if config.DockerSandboxOAuth {
+		delete(headers, "ChatGPT-Account-ID")
+		headers["Authorization"] = []string{"Bearer " + SandboxAccessSentinel}
+		base := httpClient.Transport
+		if config.HTTPClient == nil || base == nil {
+			transport := http.DefaultTransport.(*http.Transport).Clone()
+			transport.Proxy = nil
+			base = transport
+		} else if transport, ok := base.(*http.Transport); ok {
+			clone := transport.Clone()
+			clone.Proxy = nil
+			base = clone
+		}
+		httpClient.Transport = sandboxTransport{base: base}
+		httpClient.Jar = nil
+	}
 	remote := primitives.NewRemoteClientWithHTTPClient(&httpClient)
 	adapter, err := responsesapi.NewAdapter(remote, responsesapi.Config{
-		Endpoint: baseURL + "/responses",
-		Headers: map[string][]string{
-			"Authorization":      {"Bearer " + credentials.accessToken},
-			"ChatGPT-Account-ID": {credentials.accountID},
-			"Content-Type":       {"application/json"},
-			"originator":         {"unreal-agent"},
-			"User-Agent":         {"unreal-agent"},
-		},
+		Endpoint:          baseURL + "/responses",
+		Headers:           headers,
 		CacheKeyPlacement: responsesapi.CacheKeyPlacement{UsePromptCacheKeyField: true, Header: "session-id"},
 		MaxAttempts:       config.MaxAttempts,
 		Trace:             config.Trace,

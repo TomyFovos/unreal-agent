@@ -13,8 +13,14 @@ func isExternalCodex(ref credential.Reference) bool {
 	return ref == (credential.Reference{Provider: "openai-codex", Method: credential.OAuth, ID: "external-codex"})
 }
 
+func isDockerSandboxCodex(ref credential.Reference) bool {
+	return ref == (credential.Reference{Provider: "openai-codex", Method: credential.DockerSandboxOAuth, ID: "docker-sandbox-oauth"})
+}
+
 func needsExternalCodex(c serveConfiguration) bool {
-	uses := func(s provider.Selection) bool { return s.Provider == "openai-codex" && isExternalCodex(s.Auth) }
+	uses := func(s provider.Selection) bool {
+		return s.Provider == "openai-codex" && (isExternalCodex(s.Auth) || isDockerSandboxCodex(s.Auth))
+	}
 	if uses(c.Runtime.Provider) {
 		return true
 	}
@@ -65,9 +71,13 @@ func withExternalCodexCredentials(managed credential.Resolver, path string) cred
 		return managed
 	}
 	external := provider.ExternalCodex(openaicodex.Config{AuthFile: path})
+	sandbox := provider.DockerSandboxCodex(openaicodex.DockerSandboxSource{AuthFile: path})
 	return credential.ResolverFunc(func(ctx context.Context, ref credential.Reference) (credential.Material, error) {
 		if isExternalCodex(ref) {
 			return external.Resolve(ctx, ref)
+		}
+		if isDockerSandboxCodex(ref) {
+			return sandbox.Resolve(ctx, ref)
 		}
 		if managed == nil {
 			return credential.Material{}, &credential.Error{Code: "store_required"}

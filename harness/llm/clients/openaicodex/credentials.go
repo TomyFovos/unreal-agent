@@ -61,7 +61,7 @@ func (config Config) credentials() (credentials, error) {
 	if token == "" {
 		return credentials{}, errors.New("codex access token must be set; use OPENAI_CODEX_ACCESS_TOKEN or a ChatGPT-authenticated Codex auth file")
 	}
-	if strings.HasPrefix(token, "sk-") || !headerValue(token) {
+	if strings.HasPrefix(token, "sk-") || reservedProxyToken(token) || !headerValue(token) {
 		return credentials{}, errors.New("codex requires a subscription access token, not an API key or invalid header value")
 	}
 	claimAccount, expires, err := tokenClaims(token)
