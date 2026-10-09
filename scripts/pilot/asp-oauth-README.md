@@ -17,7 +17,7 @@
 
    ```sh
    cd /tmp
-   sha256sum -c @ARCHIVE@.sha256 && work=$(mktemp -d /tmp/unreal-asp-oauth.XXXXXXXX) && tar -xzf @ARCHIVE@ -C "$work" && source "$work/@KIT_ROOT@/activate.sh" --model gpt-6.1-sol --effort medium && unreal asp-oauth
+   sha256sum -c @ARCHIVE@.sha256 && asp_catalog_work=$(mktemp -d /tmp/unreal-asp-oauth.XXXXXXXX) && tar -xzf @ARCHIVE@ -C "$asp_catalog_work" && source "$asp_catalog_work/@KIT_ROOT@/activate.sh" --model gpt-6.1-sol --effort medium --instance oauth-catalog-v1 && unreal asp-catalog
    ```
 
 `SBX_CRED_OPENAI_MODE=oauth`、既存`~/workspace`、kitの`auth.json`と`config.toml`が
@@ -34,14 +34,22 @@ Python3、bash、標準coreutils/tar/lddが必要で、ビルド環境は不要�
 shell設定ファイル・PATHを変更せず、内部では同梱native `unreal`を起動します。
 既存の同名shell functionは上書きせず停止します。
 
-config=`~/.config/unreal-agent-pilot/asp/oauth-v1/runtime.json`（0600）、
-state=`~/.local/state/unreal-agent-pilot/asp/oauth-v1/`、socket=`state/run/host.sock`。
+この更新では旧binaryのHostを再利用しないよう、明示的な新instance
+`oauth-catalog-v1`を使用します。旧`oauth-v1`のHost・config・Session Storeは停止・変更せず
+保持します。新instanceには旧Session履歴を移行しません。
+config=`~/.config/unreal-agent-pilot/asp/oauth-catalog-v1/runtime.json`（0600）、
+state=`~/.local/state/unreal-agent-pilot/asp/oauth-catalog-v1/`、socket=`state/run/host.sock`。
 初期権限はworkspace内read/grep/globのみ。edit/write/Bash/childは許可しません。
 `--instance <別名>`は新しい設定用で、旧設定やSessionを移行・上書きしません。
 
-`unreal asp-oauth`はcreate/attach/resumeを行い、起動だけでは推論を送りません。
+`unreal asp-catalog`はcreate/attach/resumeを行い、起動だけでは推論を送りません。
 TUIで`/model`、`/view orchestration`を確認できます。Ctrl-Dでdetachした後は
-同じshellで`unreal asp-oauth`により再接続します。
+同じshellで`unreal asp-catalog`により再接続します。
+`/model`は既存models_cache.jsonを優先し、欠落・形式不一致ならCodex CLIの
+metadata-only `model/list`を利用します。既存Codex CLIがPATHに必要です。
+推論・thread作成・tool実行は行わず、API keyやproviderへfallbackしません。
+一覧はCLIのbundled/cache metadataの場合があり、各modelの契約上の利用権を保証しません。
+取得失敗時はsafe reasonを表示し現在選択を維持します。`/model refresh`で再取得できます。
 短い実推論を1件だけ試す場合は、ユーザー自身が`unreal --smoke-only`を実行します。
 既知Finalのcanonical保存とOperations=0を検査し、再送・自動fallbackしません。
 Sandbox接続・実推論の実機確認は未実施です。

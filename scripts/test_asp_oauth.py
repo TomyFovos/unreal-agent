@@ -198,6 +198,57 @@ class AspOAuthNativeKitTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0)
         self.assertTrue(paths["sessions"].is_dir())
 
+    def test_update_instance_missing_cache_model_list_and_old_history_preserved(self):
+        old = self.home / ".local/state/unreal-agent-pilot/asp/oauth-v1/sessions"
+        old.mkdir(parents=True)
+        marker = old / "existing-history"; marker.write_bytes(b"immutable synthetic history")
+        old_before = (marker.read_bytes(), marker.stat().st_mtime_ns)
+        (self.home / ".codex/models_cache.json").unlink()  # custom providers need not write this cache
+        binary_dir = self.home / "fake-cli"; binary_dir.mkdir()
+        codex = binary_dir / "codex"
+        codex.write_text('''#!/usr/bin/env python3
+import json, pathlib, sys
+requests = []
+for line in sys.stdin:
+    frame = json.loads(line); requests.append(frame['method'])
+    if frame['method'] == 'initialize': print(json.dumps({'id':frame['id'],'result':{'userAgent':'fixture'}}), flush=True)
+    elif frame['method'] == 'initialized': continue
+    elif frame['method'] == 'model/list':
+        data=[{'id':m,'model':m,'displayName':m,'hidden':False,'defaultReasoningEffort':'high','supportedReasoningEfforts':[{'reasoningEffort':'high'},{'reasoningEffort':'xhigh'}]} for m in ['fixture-a','fixture-b']]
+        print(json.dumps({'id':frame['id'],'result':{'data':data,'nextCursor':None}}), flush=True)
+    else: sys.exit(9)
+''')
+        codex.chmod(0o700)
+        env = dict(self.env, PATH=str(binary_dir)+os.pathsep+self.env['PATH'])
+        result = self.run_driver('--setup-only', '--model', 'gpt-6.1-sol', '--instance', 'oauth-catalog-v1', env=env)
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+        state = self.home / '.local/state/unreal-agent-pilot/asp/oauth-catalog-v1'
+        paths = {'home':self.home,'config':self.home/'.config/unreal-agent-pilot/asp/oauth-catalog-v1/runtime.json','state':state,'sessions':state/'sessions','socket':state/'run/host.sock'}
+        process = subprocess.Popen(pilot.host_arguments(self.kit, paths, str(self.home/'.codex/auth.json')), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        gateway = pilot.Gateway(paths['socket'])
+        try:
+            import time
+            deadline = time.monotonic()+20
+            while time.monotonic()<deadline:
+                self.assertIsNone(process.poll(), 'updated native Host exited')
+                try: gateway.call('auth/methods', {}); break
+                except (OSError, http.client.HTTPException): time.sleep(0.1)
+            else: self.fail('updated native Host not ready')
+            gateway.call('open', {'ID':'catalog-no-inference','Mode':'create'})
+            reply=gateway.call('extension', {'Action':'model.catalog','ID':'catalog-no-inference'})
+            self.assertTrue(reply['Catalog']['Available'])
+            self.assertEqual([m['ID'] for m in reply['Catalog']['Models']], ['fixture-a','fixture-b'])
+            self.assertEqual(reply['Catalog']['Models'][1]['Efforts'], ['high','xhigh'])
+            view=gateway.call('inspect', {'ID':'catalog-no-inference','Limit':256})['View']
+            self.assertFalse(view.get('Operations', []))
+            self.assertTrue(all(item.get('Kind') not in ('model_response','tool_call_status') for item in view.get('History',{}).get('Items',[])))
+        finally:
+            process.terminate(); process.wait(timeout=10)
+        self.assertEqual(process.returncode, 0)
+        self.assertEqual((marker.read_bytes(), marker.stat().st_mtime_ns), old_before)
+        for path, before in self.before.items():
+            if path.name!='models_cache.json': self.assertEqual((path.read_bytes(),path.stat().st_mtime_ns),before)
+
 
 if __name__ == "__main__":
     unittest.main()
