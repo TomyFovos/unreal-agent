@@ -111,7 +111,7 @@ func (adapter *adapter) Respond(ctx context.Context, request llm.Request, option
 	}
 	body, err := requestBody(request, promptCacheKey, adapter.extensions)
 	if err != nil {
-		return llm.Response{}, err
+		return llm.Response{}, diagnosed(err, FailureDiagnostic{Stage: "request_build"})
 	}
 	ctx = context.WithValue(ctx, progressKey{}, options.Progress)
 	statusCode, responseBody, err := adapter.exchange(ctx, body, key)
@@ -122,9 +122,11 @@ func (adapter *adapter) Respond(ctx context.Context, request llm.Request, option
 		adapter.trace(Exchange{RequestBody: body, StatusCode: statusCode, ResponseBody: responseBody})
 	}
 	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
-		return llm.Response{}, fmt.Errorf("create response: %w", providerError(statusCode, responseBody))
+		failure := providerError(statusCode, responseBody)
+		return llm.Response{}, diagnosed(fmt.Errorf("create response: %w", failure), FailureDiagnostic{Stage: "http_status", Status: statusCode, Retryable: retryableResponseError(failure, primitives.DefaultRemoteRequest("", "", "").RetryPolicy.RetryableStatusCodes)})
 	}
-	return decodeResponse(responseBody)
+	response, err := decodeResponse(responseBody)
+	return response, diagnosed(err, FailureDiagnostic{Stage: "response_decode", Status: statusCode, Reason: "invalid_response"})
 }
 
 const modelResponseIdleTimeout = 30 * time.Minute
@@ -193,7 +195,12 @@ func remoteFailureError(ctx context.Context, event primitives.PrimitiveEvent) er
 	if failure.Denial != nil {
 		return failure.Denial
 	}
-	return errors.New(failure.Error)
+	reason := "unknown"
+	switch failure.RemoteKind {
+	case primitives.RemoteFailureTimeout, primitives.RemoteFailureConnection, primitives.RemoteFailureTLS:
+		reason = string(failure.RemoteKind)
+	}
+	return diagnosed(errors.New(failure.Error), FailureDiagnostic{Stage: "transport", Reason: reason, Retryable: true})
 }
 
 func canceledError(ctx context.Context) error {

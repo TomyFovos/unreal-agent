@@ -138,7 +138,7 @@ func TestDockerSandboxProxyHTTPDenials(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer client.Close()
-			_, err = client.Respond(t.Context(), llm.Request{}, llm.RequestOptions{})
+			_, err = client.Respond(t.Context(), llm.Request{Model: llm.Model{ID: "gpt-6.1-sol", ReasoningEffort: llm.ReasoningEffortMedium}}, llm.RequestOptions{})
 			var failure *responsesapi.APIError
 			if !errors.As(err, &failure) || failure.StatusCode != status || proxy.Requests.Load() != 1 || proxy.DirectRequests.Load() != 0 {
 				t.Fatal("HTTP denial retried, fell back, or lost its status")

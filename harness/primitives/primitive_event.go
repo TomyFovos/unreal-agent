@@ -23,6 +23,9 @@ type PrimitiveEvent struct {
 type PrimitiveFailureResult struct {
 	Denial *permission.Error
 	Error  string
+	// RemoteKind preserves a closed transport category before Error loses the
+	// underlying Go error type. It carries no URL, header or error message.
+	RemoteKind RemoteFailureKind `json:",omitzero"`
 }
 
 func primitiveFailure(

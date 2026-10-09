@@ -29,7 +29,17 @@ func (adapter *adapter) exchange(ctx context.Context, body []byte, cacheKey stri
 		request := adapter.remoteRequest(body, cacheKey)
 		result := adapter.exchangeAttempt(ctx, request, events)
 		if !result.retry || attempt >= adapter.maxAttempts {
-			return result.status, result.body, result.err
+			stage := "stream_error"
+			reason := "unknown"
+			switch {
+			case result.status != 0 && (result.status < http.StatusOK || result.status >= http.StatusMultipleChoices):
+				stage = "http_status"
+			case errors.Is(result.err, io.ErrUnexpectedEOF):
+				stage, reason = "stream_incomplete", "incomplete_stream"
+			case result.apiError == nil:
+				stage, reason = "stream_decode", "invalid_response"
+			}
+			return result.status, result.body, diagnosed(result.err, FailureDiagnostic{Stage: stage, Status: result.status, Reason: reason, Retryable: result.retry})
 		}
 		if err := ctx.Err(); err != nil {
 			return result.status, nil, err

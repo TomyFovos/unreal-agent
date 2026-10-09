@@ -92,6 +92,24 @@ provider failure, without exposing response bodies or retrying authorization.
 
 ## Verification
 
+Model continuation failures retain safe `stage`, numeric HTTP `status`, a closed
+`reason` and `retryable` in the public typed provider error. HTTP rejection and
+an API error delivered inside a successful SSE response have distinct stages
+(`http_status` and `stream_error`). Transport categories are captured before
+primitive error strings erase Go types; arbitrary upstream error codes, bodies,
+URLs, headers and request IDs are discarded at the provider boundary. No request
+body is logged or persisted by this diagnostic. The existing retry policy and
+attempt limit remain unchanged. Retry eligibility never authorizes replay of a
+completed Operation, an authentication switch or a provider fallback.
+
+`remote_failure` alone from older binaries does not establish a malformed tool
+result or a transient upstream incident. The loopback forward-proxy Host fixture
+checks Bash/create/read/edit/read/Bash continuation, the actual file bytes,
+canonical receipts, injected HTTP 502/SSE errors and explicit resume. Completed
+Operations and history remain unchanged on resume; human Full Access expires.
+Sandbox incident classification still needs the safe fields from the failing
+request; a local fixture is not evidence of a real Sandbox's HTTP response.
+
 Unit/Host fixtures cover a real loopback CONNECT/TLS proxy exchange, exact endpoint/headers,
 API-key-mode refusal, duplicate/malformed configuration, reread between
 generations, mixed native/proxy material, 401/403 responses, cancellation,

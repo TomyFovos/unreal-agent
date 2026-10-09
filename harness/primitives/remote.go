@@ -3,6 +3,8 @@ package primitives
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
@@ -626,7 +628,41 @@ func remoteAttemptFailure(request RemoteRequest, attempt int, err error) error {
 }
 
 func remoteFailure(request RemoteRequest, err error) PrimitiveEvent {
-	return primitiveFailure(request.Source, request.CorrelationID, err)
+	event := primitiveFailure(request.Source, request.CorrelationID, err)
+	failure := event.Result.(PrimitiveFailureResult)
+	if failure.Denial == nil {
+		failure.RemoteKind = remoteFailureKind(err)
+	}
+	event.Result = failure
+	return event
+}
+
+type RemoteFailureKind string
+
+const (
+	RemoteFailureUnknown    RemoteFailureKind = "unknown"
+	RemoteFailureTimeout    RemoteFailureKind = "timeout"
+	RemoteFailureConnection RemoteFailureKind = "connection_error"
+	RemoteFailureTLS        RemoteFailureKind = "tls_error"
+)
+
+func remoteFailureKind(err error) RemoteFailureKind {
+	var timed net.Error
+	if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &timed) && timed.Timeout() {
+		return RemoteFailureTimeout
+	}
+	var certificate *tls.CertificateVerificationError
+	var authority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var record tls.RecordHeaderError
+	if errors.As(err, &certificate) || errors.As(err, &authority) || errors.As(err, &hostname) || errors.As(err, &record) {
+		return RemoteFailureTLS
+	}
+	var connection *net.OpError
+	if errors.As(err, &connection) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return RemoteFailureConnection
+	}
+	return RemoteFailureUnknown
 }
 
 func remoteCanceled(request RemoteRequest) PrimitiveEvent {

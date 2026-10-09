@@ -4,6 +4,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -284,11 +285,19 @@ func (a *adapter) Respond(ctx context.Context, req llm.Request, opt llm.RequestO
 }
 
 type Error struct {
-	Code   string
-	Status int
+	Code       string
+	Status     int
+	Diagnostic *responsesapi.FailureDiagnostic `json:",omitzero"`
 }
 
-func (e *Error) Error() string { return "provider: " + e.Code }
+func (e *Error) Error() string {
+	message := "provider: " + e.Code
+	if e.Diagnostic != nil {
+		d := e.Diagnostic.Safe()
+		message += fmt.Sprintf(" stage=%s status=%d reason=%s retryable=%t", d.Stage, d.Status, d.Reason, d.Retryable)
+	}
+	return message
+}
 func normalize(err error) error {
 	if denied := permission.Failure(err); denied != nil {
 		return denied
@@ -316,6 +325,11 @@ func normalize(err error) error {
 		return pe
 	}
 	var api *responsesapi.APIError
+	diagnostic, known := responsesapi.Diagnose(err)
+	var safe *responsesapi.FailureDiagnostic
+	if known {
+		safe = &diagnostic
+	}
 	if errors.As(err, &api) {
 		code := "remote_failure"
 		switch api.StatusCode {
@@ -328,7 +342,7 @@ func normalize(err error) error {
 		case 429:
 			code = "rate_limited"
 		}
-		return &Error{Code: code, Status: api.StatusCode}
+		return &Error{Code: code, Status: diagnostic.Status, Diagnostic: safe}
 	}
-	return &Error{Code: "request_failed"}
+	return &Error{Code: "request_failed", Status: diagnostic.Status, Diagnostic: safe}
 }

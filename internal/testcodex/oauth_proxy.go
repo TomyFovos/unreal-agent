@@ -1,6 +1,7 @@
 package testcodex
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -35,6 +36,17 @@ type OAuthProxy struct {
 const DockerProxyURL = "http://host.docker.internal:3128"
 
 func NewOAuthProxy(t *testing.T, publicSentinel string) *OAuthProxy {
+	return newOAuthProxy(t, publicSentinel, nil)
+}
+
+// NewOAuthProxyWithHandler supplies only the synthetic model backend. The
+// same CONNECT, authority, TLS, sentinel and no-account checks still apply.
+func NewOAuthProxyWithHandler(t *testing.T, publicSentinel string, handler http.Handler) *OAuthProxy {
+	t.Helper()
+	return newOAuthProxy(t, publicSentinel, handler)
+}
+
+func newOAuthProxy(t *testing.T, publicSentinel string, handler http.Handler) *OAuthProxy {
 	t.Helper()
 	fixture := &OAuthProxy{}
 	fixture.Status.Store(http.StatusOK)
@@ -75,12 +87,23 @@ func NewOAuthProxy(t *testing.T, publicSentinel string) *OAuthProxy {
 				Effort string `json:"effort"`
 			} `json:"reasoning"`
 		}
-		ok := json.UnmarshalRead(io.LimitReader(r.Body, 1<<20), &body) == nil && r.Method == http.MethodPost && r.Host == "chatgpt.com" && r.URL.Path == "/backend-api/codex/responses" && r.Header.Get("Authorization") == "Bearer "+publicSentinel && len(r.Header.Values("ChatGPT-Account-ID")) == 0 && r.Header.Get("Originator") == "unreal-agent" && r.Header.Get("Proxy-Authorization") == "" && r.Header.Get("Cookie") == "" && body.Model == "gpt-6.1-sol" && body.Reasoning.Effort == "medium" && body.Stream && !body.Store
+		data, readErr := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
+		ok := readErr == nil && len(data) <= 1<<20 && json.Unmarshal(data, &body) == nil && r.Method == http.MethodPost && r.Host == "chatgpt.com" && r.URL.Path == "/backend-api/codex/responses" && r.Header.Get("Authorization") == "Bearer "+publicSentinel && len(r.Header.Values("ChatGPT-Account-ID")) == 0 && r.Header.Get("Originator") == "unreal-agent" && r.Header.Get("Proxy-Authorization") == "" && r.Header.Get("Cookie") == "" && body.Model == "gpt-6.1-sol" && body.Reasoning.Effort == "medium" && body.Stream && !body.Store
 		fixture.RequestOK.Store(ok)
+		if !ok {
+			t.Error("mock proxy request violated the fixed routing/auth/wire contract")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		status := int(fixture.Status.Load())
 		if status != http.StatusOK {
 			w.WriteHeader(status)
 			io.WriteString(w, `{"error":{"message":"private-fixture-response","code":"private-fixture-code"}}`)
+			return
+		}
+		if handler != nil {
+			r.Body = io.NopCloser(bytes.NewReader(data))
+			handler.ServeHTTP(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")

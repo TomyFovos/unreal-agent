@@ -294,7 +294,7 @@ func TestServeExternalCodexTUIAndRotation(t *testing.T) {
 	view = inspectInteractive(t, client, "codex-tui", func(v host.View) bool { return responseCount(v) == 2 })
 	submitInteractive(t, client, view, "third", "Exercise a rejected credential response.")
 	view = inspectInteractive(t, client, "codex-tui", func(v host.View) bool { return v.Failure != "" })
-	if !strings.HasPrefix(view.Failure, "call model for turn \"") || !strings.HasSuffix(view.Failure, ": provider: unauthenticated") || calls.Load() != 3 {
+	if !strings.HasPrefix(view.Failure, "call model for turn \"") || !strings.HasSuffix(view.Failure, ": provider: unauthenticated stage=http_status status=401 reason=unknown retryable=false") || calls.Load() != 3 {
 		t.Fatalf("unexpected normalized failure or request count: %s, %d", view.Failure, calls.Load())
 	}
 	secrets := append(append(tokens, accounts...), "unused-external-refresh-secret", "sk-unused-api-key-sensitive", "unused-inline-token-sensitive", "unused-inline-account-sensitive")
