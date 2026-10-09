@@ -37,6 +37,7 @@ type Spec struct {
 }
 
 type Operation struct {
+	Permission *permission.Decision `json:",omitzero"`
 	// ToolName records origin for current-policy checks on resume; it is not a grant.
 	ToolName        string            `json:",omitzero"`
 	Denial          *permission.Error `json:",omitzero"`

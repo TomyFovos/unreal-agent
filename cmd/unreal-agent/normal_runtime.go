@@ -23,6 +23,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/profile"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
+	"github.com/unreallabsai/unreal-agent/harness/tool"
 	"github.com/unreallabsai/unreal-agent/internal/privateexport"
 	"golang.org/x/term"
 )
@@ -274,7 +275,7 @@ func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProvid
 	if err != nil {
 		return config, err
 	}
-	config.Runtime = agentrunner.RuntimeIdentity{Version: 1, Provider: p.Provider, Profile: profile.Default(), Workspace: workspace, SystemPrompt: "Help with this workspace. Use observed evidence, respect the configured permissions, and report uncertainty explicitly.", ReasoningEffort: p.ReasoningEffort, DisallowedTools: []string{"Bash"}, ClaudeCode: p.ClaudeCode}
+	config.Runtime = agentrunner.RuntimeIdentity{Version: 1, Provider: p.Provider, Profile: profile.Default(), Workspace: workspace, SystemPrompt: "Help with this workspace. Use observed evidence, respect the configured permissions, and report uncertainty explicitly.", ReasoningEffort: p.ReasoningEffort, ClaudeCode: p.ClaudeCode}
 	delete(config.Providers, id)
 	// The conservative normal profile permits only native workspace inspection.
 	// No shell sandbox is supplied by the existing permission engine.
@@ -286,6 +287,8 @@ func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProvid
 	if u, e := url.Parse(openaicodex.BaseURL); e == nil {
 		config.Permissions.NetworkOrigins = []string{u.Scheme + "://" + u.Host}
 	}
+	maximum := permission.Config{Tools: tool.StaticNames(), FilesystemUnrestricted: true, NetworkUnrestricted: true, ProcessMode: permission.ProcessUnrestricted}
+	config.PermissionModes = &permission.ModesConfig{Enabled: true, Maximum: &maximum}
 	return config, nil
 }
 

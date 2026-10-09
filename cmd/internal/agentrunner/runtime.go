@@ -335,6 +335,19 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 				}
 			}
 			prompt, definitions := composed.Compose(c.Identity.SystemPrompt, definitions)
+			if controller := permission.ControllerFromContext(ctx); controller != nil {
+				mode := controller.Snapshot().Mode
+				prompt += "\nUnreal permission mode: " + mode.Label() + ". Tool availability is not authorization. Unreal owns human approval per Operation; never claim to approve or change permissions. Denials are observations. Full Access Bash is ambient access, not an OS sandbox."
+				updated := constraints
+				updated.ToolPolicy = "human-controlled-by-Unreal: " + string(mode)
+				updated.Process = "denied until human authorization; ambient access, no OS sandbox"
+				if mode == permission.FullAccess {
+					updated.Process = "human-approved ambient access; operator maximum applies"
+				}
+				builder.(interface {
+					SetContextConstraints(contextengine.Constraints)
+				}).SetContextConstraints(updated)
+			}
 			builder.(interface{ SetRuntimeProvider(string) }).SetRuntimeProvider(choice.Provider)
 			b := builder.(interface {
 				ConfigureRuntime(llm.Model, string, []llm.Tool, []tool.Skill, bool, bool)
@@ -359,6 +372,11 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 		apply := func(choice sessionstore.RuntimeSelection) error {
 			if err := validate(choice); err != nil {
 				return err
+			}
+			if permission.ControllerFromContext(ctx) != nil && choice == active {
+				if err := configure(choice); err != nil {
+					return err
+				}
 			}
 			if choice != active {
 				next, e := selectionClient(c, choice)

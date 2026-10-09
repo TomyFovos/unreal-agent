@@ -25,6 +25,9 @@ func readServeConfiguration(path string) (serveConfiguration, error) {
 	if err = json.Unmarshal(data, &config, json.RejectUnknownMembers(true)); err != nil {
 		return config, &configurationError{Code: "invalid_runtime_configuration"}
 	}
+	if config.PermissionModes != nil && config.PermissionModes.Validate() != nil {
+		return config, &configurationError{Code: "invalid_runtime_configuration"}
+	}
 	return config, nil
 }
 

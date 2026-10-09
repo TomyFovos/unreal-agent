@@ -20,6 +20,11 @@ ASCII letters, digits and dashes, are at most 128 bytes, and cannot begin with
 a dash. `unreal -test` is an unknown option. `unreal --help` lists the supported
 options; options can appear before or after the positional name.
 
+New configurations start in **Read Only**. `/permissions` selects Read Only,
+Ask for Approval or explicitly confirmed Full Access; the header shows the
+effective mode. See [Session permission modes](permissions.md) for per-Operation
+approval, ambient Bash access, legacy configuration and restart behavior.
+
 The launcher probes the configured gateway using its existing read-only
 authentication-methods request. A healthy Host is reused. Otherwise it starts
 the same executable's `serve` subprocess in a separate OS session, with stdin

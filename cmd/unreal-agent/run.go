@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/harness/authflow"
@@ -30,6 +31,7 @@ type serveConfiguration struct {
 	Context         contextengine.Config  `json:",omitzero"`
 	Runtime         agentrunner.RuntimeIdentity
 	Permissions     permission.Config
+	PermissionModes *permission.ModesConfig `json:",omitzero"`
 	LanguageServers []lsp.ServerConfig
 	DebugAdapters   []dap.AdapterConfig
 	Subagents       map[string]childTemplate
@@ -74,6 +76,23 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			return err
 		}
 		defer policy.Close()
+		capabilityPolicy := policy
+		var modeMaximum *permission.Policy
+		var approvalTimeout time.Duration
+		if config.PermissionModes != nil {
+			if err = config.PermissionModes.Validate(); err != nil {
+				return err
+			}
+			if config.PermissionModes.Enabled {
+				modeMaximum, err = permission.New(*config.PermissionModes.Maximum)
+				if err != nil {
+					return err
+				}
+				defer modeMaximum.Close()
+				capabilityPolicy = modeMaximum
+				approvalTimeout = time.Duration(config.PermissionModes.ApprovalTimeoutMillis) * time.Millisecond
+			}
+		}
 		var resolver credential.Resolver
 		var auth *authflow.Service
 		if *credentials != "" {
@@ -110,7 +129,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 				return errors.New("claude-code requires Runtime.ClaudeCode executable/catalog configuration")
 			}
 			transportConfig := *claudeConfig
-			if normalMode {
+			if normalMode || modeMaximum != nil {
 				transportConfig = claudeTransportConfig(transportConfig, os.Getenv)
 			}
 			cli, e := claudecode.NewClient(transportConfig)
@@ -124,7 +143,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			claudeClient = cli
 			defer cli.Close()
 			health["claude-code"] = func(checkCtx context.Context) error {
-				if normalMode {
+				if normalMode || modeMaximum != nil {
 					return probeErr // registration result; not a heavy probe per picker/turn
 				}
 				checkCtx, cancelCheck := context.WithCancel(checkCtx)
@@ -148,14 +167,17 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		defer languageTools.Close()
 		runtimeConfig, templates, err := withParentSubagents(agentrunner.RuntimeConfig{Context: config.Context, Identity: config.Runtime, SessionDirectory: *directory, Providers: registry, Credentials: resolver, LanguageTools: languageTools, DebugAdapters: config.DebugAdapters, Backends: config.Providers, Health: health, Catalogs: map[string]func(context.Context) (modelcatalog.Catalog, error){"claude-code": readClaudeCatalog, "openai-codex": func(readCtx context.Context) (modelcatalog.Catalog, error) {
 			return codexRead(readCtx, false)
-		}}}, config.Subagents, policy, *credentials, codexPath)
+		}}}, config.Subagents, capabilityPolicy, *credentials, codexPath)
 		if err != nil {
 			return err
 		}
 		if normalMode {
 			runtimeConfig.ProviderProcess = true
 			runtimeConfig.ToolFilter = func(id, name string) bool {
-				return id != "claude-code" || policy.CheckTool(name) == nil
+				if modeMaximum != nil {
+					return capabilityPolicy.CheckTool(name) == nil
+				}
+				return id != "claude-code" || capabilityPolicy.CheckTool(name) == nil
 			}
 			available := runtimeConfig.CheckProvider(ctx, config.Runtime.Provider.Provider) == nil
 			for id := range runtimeConfig.Backends {
@@ -175,6 +197,10 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 				runtimeConfig.Capabilities = map[string]modelcatalog.Capabilities{"claude-code": capability}
 			}
 		}
+		if modeMaximum != nil {
+			runtimeConfig.ProviderProcess = true
+			runtimeConfig.ToolFilter = func(_, name string) bool { return capabilityPolicy.CheckTool(name) == nil }
+		}
 		factory, identity, err := agentrunner.NewRuntimeFactory(runtimeConfig)
 		if err != nil {
 			return err
@@ -186,7 +212,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		if err != nil {
 			return err
 		}
-		owner, err := host.New(ctx, host.Config{Directory: *directory, Build: factory})
+		owner, err := host.New(ctx, host.Config{Directory: *directory, Build: factory, PermissionMaximum: modeMaximum, ApprovalTimeout: approvalTimeout})
 		if err != nil {
 			return err
 		}

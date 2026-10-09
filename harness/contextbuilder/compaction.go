@@ -55,6 +55,16 @@ func (b *builder) SetContextRuntime(s sessionstore.RuntimeSelection, tools bool)
 	}
 }
 
+// Coordinator-owned projection only. Human controls never mutate the Builder;
+// the next turn boundary supplies fresh, safe permission constraints.
+func (b *builder) SetContextConstraints(c contextengine.Constraints) {
+	c.AllowedTools = slices.Clone(c.AllowedTools)
+	b.constraints = c
+	if b.engine != nil {
+		b.engine.Configure(b.contextRuntime, c, b.instructions != "")
+	}
+}
+
 // SetTaskInput retains the child's explicit initial task across long tool loops.
 // This is a rebuildable binding to an existing canonical input, not task memory.
 func (b *builder) SetTaskInput(id inbox.ID) {

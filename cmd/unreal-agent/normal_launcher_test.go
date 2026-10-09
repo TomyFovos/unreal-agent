@@ -108,6 +108,9 @@ func TestNormalLauncherFirstRunTwoProvidersDefaultPathsReuseAndResume(t *testing
 	if config.Permissions.ProcessMode != permission.ProcessDenied || config.Permissions.FilesystemUnrestricted || config.Permissions.NetworkUnrestricted || len(config.Permissions.WriteRoots) != 0 || slices.Contains(config.Permissions.Tools, "Bash") {
 		t.Fatal("smoke permission profile became the default")
 	}
+	if config.PermissionModes == nil || !config.PermissionModes.Enabled || config.PermissionModes.Maximum == nil || !slices.Contains(config.PermissionModes.Maximum.Tools, "Bash") {
+		t.Fatal("bootstrap lost human-controlled capability ceiling")
+	}
 	for path, want := range map[string]fs.FileMode{f.o.config: 0600, filepath.Dir(f.o.config): 0700, f.o.state: 0700, f.o.sessions: 0700, filepath.Dir(f.o.socket): 0700} {
 		info, err := os.Lstat(path)
 		if err != nil || info.Mode().Perm() != want {

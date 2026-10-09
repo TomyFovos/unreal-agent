@@ -679,6 +679,17 @@ func (current *coordinator) restore(ctx context.Context) error {
 		return err
 	}
 	for _, value := range current.dependencies.Restored.Operations {
+		if permission.ControllerFromContext(ctx) != nil && !operationIsTerminal(value.Status) {
+			// A durable pending/granted annotation is evidence, never authority.
+			// Also covers the crash gap before the first admission checkpoint.
+			// Do not execute uncertain effects even if a fresh UI grants Full Access.
+			value = operation.PermissionFailure(value, &permission.Error{Code: permission.Denied, Capability: "approval", Reason: "previous Host authorization expired; explicit retry required"})
+			value.Permission = &permission.Decision{Mode: permission.ReadOnly, State: "expired"}
+			value.Status = operation.StatusCanceled
+			if err := current.storeOperationInSessionStore(ctx, value); err != nil {
+				return err
+			}
+		}
 		current.addOperationToLocalState(value)
 		if b, ok := current.dependencies.ContextBuilder.(interface{ ObserveOperation(operation.Operation) }); ok {
 			b.ObserveOperation(value)

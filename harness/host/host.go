@@ -53,6 +53,10 @@ type Factory func(context.Context, session.ID) (Runtime, error)
 type Config struct {
 	Directory string
 	Build     Factory
+	// PermissionMaximum opts in to ephemeral human-controlled modes. Options.Policy
+	// remains the read-only baseline; this reviewed upper bound is never a grant.
+	PermissionMaximum *permission.Policy
+	ApprovalTimeout   time.Duration
 }
 type Mode string
 
@@ -130,15 +134,16 @@ type Event struct {
 	Operation  *operation.Operation `json:",omitzero"`
 }
 type View struct {
-	Context    *contextengine.Diagnostics `json:",omitzero"`
-	Progress   *Progress                  `json:",omitzero"`
-	Session    sessionstore.Snapshot
-	Generation string
-	Revision   uint64
-	History    HistoryPage
-	Operations []operation.Operation
-	Running    bool
-	Failure    string `json:",omitzero"`
+	Permissions permission.ModeSnapshot
+	Context     *contextengine.Diagnostics `json:",omitzero"`
+	Progress    *Progress                  `json:",omitzero"`
+	Session     sessionstore.Snapshot
+	Generation  string
+	Revision    uint64
+	History     HistoryPage
+	Operations  []operation.Operation
+	Running     bool
+	Failure     string `json:",omitzero"`
 
 	// ProjectInstructions identifies the bound snapshot without its content.
 	ProjectInstructions *projectinstructions.Metadata `json:",omitzero"`
@@ -149,6 +154,7 @@ type Subscription struct {
 	Cancel  func()
 }
 type Session struct {
+	permissions       *permission.Controller
 	ID                session.ID
 	Generation        string
 	StartAfter        sessionstore.Sequence
@@ -256,10 +262,21 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 			return nil, err
 		}
 	}
-	cctx, cancel := context.WithCancel(permission.WithPolicy(h.ctx, o.Policy))
+	base := permission.WithPolicy(h.ctx, o.Policy)
+	var controller *permission.Controller
+	if h.config.PermissionMaximum != nil {
+		controller = permission.NewController(h.ctx, o.Policy, h.config.PermissionMaximum, h.config.ApprovalTimeout)
+		base = permission.WithController(permission.WithPolicy(h.ctx, h.config.PermissionMaximum), controller)
+	}
+	cctx, cancel := context.WithCancel(base)
+	if controller != nil {
+		stop := cancel
+		cancel = func() { stop(); controller.Close() }
+	}
 	s := &Session{ID: o.ID, Generation: uuid.New().String(), ctx: cctx, cancel: cancel, lock: lock, store: raw,
 		snapshot: restored.Snapshot, operations: map[operation.ID]operation.Operation{}, submissions: map[inbox.ID]*submission{},
 		subscribers: map[uint64]chan Event{}, done: make(chan struct{}), running: true}
+	s.permissions = controller
 	defer func() {
 		if err != nil {
 			cancel()
@@ -554,6 +571,9 @@ func (s *Session) view(after sessionstore.Sequence, limit int) (View, error) {
 	end := min(int(after)+limit, len(s.items))
 	v := View{Context: s.contextReport, Progress: s.progress, ProjectInstructions: s.instructions, Session: s.snapshot, Generation: s.Generation, Revision: s.revision, Running: s.running,
 		History: ProjectHistoryPage(sessionstore.Page{Items: s.items[int(after):end], NextAfter: sessionstore.Sequence(end), More: end < len(s.items)})}
+	if s.permissions != nil {
+		v.Permissions = s.permissions.Snapshot()
+	}
 	if s.err != nil {
 		v.Failure = s.err.Error()
 	}

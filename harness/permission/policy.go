@@ -1,5 +1,5 @@
 // Package permission enforces concrete capabilities at execution boundaries.
-// It does not implement human approval or semantic workflow governance.
+// Human approval is owned by a Session controller, never by a provider.
 package permission
 
 import (
@@ -72,11 +72,14 @@ type root struct {
 // execution ownership lifetime, and Close it after all executors have stopped.
 // Its root handles pin authorized directories against path replacement.
 type Policy struct {
-	all     bool
-	config  Config
-	reads   []root
-	writes  []root
-	parents []*Policy
+	all        bool
+	config     Config
+	reads      []root
+	writes     []root
+	parents    []*Policy
+	controller *Controller
+	guard      func() error
+	readOnly   bool
 }
 
 func Unrestricted() *Policy { return &Policy{all: true} }
@@ -172,6 +175,14 @@ func (p *Policy) each(check func(*Policy) error) error {
 	if p == nil {
 		return check(DenyAll())
 	}
+	if p.guard != nil {
+		if err := p.guard(); err != nil {
+			return err
+		}
+	}
+	if p.controller != nil {
+		return p.controller.currentPolicy().each(check)
+	}
 	if len(p.parents) == 0 {
 		return check(p)
 	}
@@ -183,15 +194,38 @@ func (p *Policy) each(check func(*Policy) error) error {
 	return nil
 }
 func (p *Policy) CheckTool(name string) error {
-	return p.each(func(p *Policy) error {
+	// Tool availability is not execution authority. Human-controlled Sessions
+	// expose the reviewed ceiling so denied proposals receive canonical receipts.
+	return p.toolPolicy().each(func(p *Policy) error {
 		if p.all || slices.Contains(p.config.Tools, name) {
 			return nil
 		}
 		return deny("tool", "tool is not allowed")
 	})
 }
+
+func (p *Policy) toolPolicy() *Policy {
+	if p == nil {
+		return DenyAll()
+	}
+	if p.controller != nil {
+		return p.controller.maximum
+	}
+	if len(p.parents) == 0 {
+		return p
+	}
+	copy := *p
+	copy.parents = make([]*Policy, len(p.parents))
+	for i, parent := range p.parents {
+		copy.parents[i] = parent.toolPolicy()
+	}
+	return &copy
+}
 func (p *Policy) CheckProcess() error {
 	return p.each(func(p *Policy) error {
+		if p.readOnly {
+			return deny("process", "read-only mode")
+		}
 		if p.all {
 			return nil
 		}
@@ -278,6 +312,9 @@ func (p *Policy) CheckPath(path string, write bool) error {
 }
 func (p *Policy) unrestrictedFilesystem() bool {
 	return p.each(func(p *Policy) error {
+		if p.readOnly {
+			return deny("filesystem", "read-only mode")
+		}
 		if p.all || p.config.FilesystemUnrestricted {
 			return nil
 		}
@@ -302,6 +339,9 @@ func (p *Policy) selectRoot(path string, write bool) (*root, string, error) {
 	}
 	var selected *root
 	err = p.each(func(p *Policy) error {
+		if write && p.readOnly {
+			return deny("filesystem", "read-only mode")
+		}
 		if p.all || p.config.FilesystemUnrestricted {
 			return nil
 		}

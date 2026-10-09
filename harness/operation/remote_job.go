@@ -1,6 +1,7 @@
 package operation
 
 import (
+	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -29,6 +30,13 @@ type RemoteJobHandler interface {
 	AddRemoteJob(Operation) error
 	CancelRemoteJob(ID, string) error
 	RemoteJobUpdates() <-chan Operation
+}
+
+// ScopedRemoteJobHandler uses the manager's per-operation authorization and
+// cancellation lifetime, instead of the handler's Session policy. Human modes
+// fail closed for handlers that cannot enforce this execution scope.
+type ScopedRemoteJobHandler interface {
+	AddRemoteJobWithContext(context.Context, Operation) error
 }
 
 type RemoteJobState struct {

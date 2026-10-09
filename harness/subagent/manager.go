@@ -31,6 +31,7 @@ type Config struct {
 	ResolveRuntime   RuntimeResolver
 }
 type job struct {
+	ctx        context.Context
 	operation  operation.Operation
 	done       chan struct{}
 	cancel     chan struct{}
@@ -80,6 +81,9 @@ func (m *Manager) RemoteJobPlanType() operation.RemoteJobPlanType       { return
 func (m *Manager) RemoteJobPlanVersion() operation.RemoteJobPlanVersion { return PlanVersion }
 func (m *Manager) RemoteJobUpdates() <-chan operation.Operation         { return m.updates }
 func (m *Manager) AddRemoteJob(op operation.Operation) error {
+	return m.AddRemoteJobWithContext(m.ctx, op)
+}
+func (m *Manager) AddRemoteJobWithContext(ctx context.Context, op operation.Operation) error {
 	plan, err := DecodePlan(op)
 	if err != nil {
 		return err
@@ -95,7 +99,7 @@ func (m *Manager) AddRemoteJob(op operation.Operation) error {
 	if _, ok := m.jobs[op.ID]; ok {
 		return nil
 	}
-	j := &job{operation: op, cancel: make(chan struct{}), done: make(chan struct{})}
+	j := &job{ctx: ctx, operation: op, cancel: make(chan struct{}), done: make(chan struct{})}
 	if m.canceled[op.ID] || op.Status == operation.StatusCanceling {
 		j.once.Do(func() { close(j.cancel) })
 	}
@@ -138,7 +142,9 @@ func (m *Manager) emit(op operation.Operation) {
 }
 func (m *Manager) run(j *job, p Plan) {
 	defer func() { close(j.done); m.mu.Lock(); m.notify(); m.mu.Unlock() }()
-	ctx, cancel := context.WithCancel(m.ctx)
+	ctx, cancel := context.WithCancel(j.ctx)
+	stop := context.AfterFunc(m.ctx, cancel)
+	defer stop()
 	defer cancel()
 	go func() {
 		select {
@@ -157,7 +163,7 @@ func (m *Manager) run(j *job, p Plan) {
 	default:
 		switch p.Action {
 		case "start":
-			status, err = m.spawn(j, p, &state)
+			status, err = m.spawn(ctx, j, p, &state)
 		case "send":
 			var connection *processChannel
 			connection, err = m.connection(ctx, p.Handle)
@@ -187,6 +193,9 @@ func (m *Manager) run(j *job, p Plan) {
 	case <-j.cancel:
 		status = operation.StatusCanceled
 	default:
+	}
+	if ctx.Err() != nil {
+		status = operation.StatusCanceled
 	}
 	if err != nil && status != operation.StatusCanceled {
 		status = operation.StatusFailed
@@ -264,7 +273,7 @@ func (m *Manager) connection(ctx context.Context, id operation.ID) (*processChan
 		}
 	}
 }
-func (m *Manager) spawn(j *job, p Plan, state *operation.RemoteJobState) (operation.Status, error) {
+func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.RemoteJobState) (operation.Status, error) {
 	allowed, ok := m.config.Templates[p.Template]
 	actual, _ := json.Marshal(p.Configuration)
 	expected, _ := json.Marshal(allowed)
@@ -288,7 +297,19 @@ func (m *Manager) spawn(j *job, p Plan, state *operation.RemoteJobState) (operat
 	if err := child.Validate(); err != nil {
 		return operation.StatusFailed, err
 	}
-	policy := permission.FromContext(m.ctx)
+	if control := permission.ControllerFromContext(ctx); control != nil && control.Snapshot().Mode != permission.FullAccess {
+		// Allow Once authorizes this child start, not subsequent privileged
+		// child Operations. Children do not receive the parent's approval lease.
+		if len(child.Policy.WriteRoots) != 0 {
+			return operation.StatusFailed, &permission.Error{Code: permission.Denied, Capability: "child", Reason: "individual approval cannot delegate child write access"}
+		}
+		for _, name := range child.Policy.Tools {
+			if !permission.ReadOnlyTool(name) && name != "Finish" && name != "SendParent" {
+				return operation.StatusFailed, &permission.Error{Code: permission.Denied, Capability: "child", Reason: "individual approval requires a read-only child template"}
+			}
+		}
+	}
+	policy := permission.FromContext(ctx)
 	if err := policy.CheckProcess(); err != nil {
 		return operation.StatusFailed, err
 	}
@@ -299,7 +320,7 @@ func (m *Manager) spawn(j *job, p Plan, state *operation.RemoteJobState) (operat
 	}
 	handle := Handle{Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: j.operation.ID}
 	collect := func() (bool, error) {
-		view, err := ReadChild(m.ctx, m.config.Directory, p.ChildID, 0, 1)
+		view, err := ReadChild(ctx, m.config.Directory, p.ChildID, 0, 1)
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
 		}
@@ -349,11 +370,11 @@ func (m *Manager) spawn(j *job, p Plan, state *operation.RemoteJobState) (operat
 	select {
 	case <-j.cancel:
 		return operation.StatusCanceled, nil
-	case <-m.ctx.Done():
-		return operation.StatusCanceled, context.Cause(m.ctx)
+	case <-ctx.Done():
+		return operation.StatusCanceled, context.Cause(ctx)
 	default:
 	}
-	channel := startProcess(m.ctx, m.config, child)
+	channel := startProcess(ctx, m.config, child)
 	m.mu.Lock()
 	j.connection = channel
 	m.notify()
@@ -364,9 +385,9 @@ func (m *Manager) spawn(j *job, p Plan, state *operation.RemoteJobState) (operat
 	cancellation := j.cancel
 	for {
 		select {
-		case <-m.ctx.Done():
+		case <-ctx.Done():
 			channel.cancel()
-			return operation.StatusCanceled, context.Cause(m.ctx)
+			return operation.StatusCanceled, context.Cause(ctx)
 		case <-cancellation:
 			canceled = true
 			cancellation = nil

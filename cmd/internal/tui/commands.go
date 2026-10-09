@@ -42,6 +42,7 @@ var commandCatalog = []commandCandidate{
 	{"/children start", "/children start TEMPLATE", "start child: [PROVIDER MODEL EFFORT] -- TASK", requiredArguments},
 	{"/children retry-start", "/children retry-start", "retry an uncertain child start with the same input ID", noArguments},
 	{"/model", "/model [refresh]", "choose provider, model and effort; refresh reloads catalog", noArguments},
+	{"/permissions", "/permissions", "choose human-approved Session permissions; review pending operations", noArguments},
 	{"/analyze", "/analyze", "read-only session analysis", noArguments},
 	{"/view", "/view [MODE]", "choose Chat / Orchestration / Split (120+ columns)", noArguments},
 	{"/view chat", "/view chat", "show Live Dock conversation", noArguments},

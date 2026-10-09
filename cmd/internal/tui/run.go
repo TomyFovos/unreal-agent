@@ -17,6 +17,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
@@ -31,13 +32,21 @@ type Client interface {
 	Logout(context.Context, credential.Reference) error
 	ListCredentials(context.Context) ([]credential.Metadata, error)
 }
+type permissionWatchResult struct {
+	generation   string
+	connection   permission.ControlConnection
+	snapshot     *permission.ModeSnapshot
+	disconnected bool
+}
+
 type Config struct {
-	Client Client
-	ID     session.ID
-	Keys   <-chan Key
-	Output io.Writer
-	Size   func() (int, int)
-	Theme  *Theme
+	WatchPermissions func(context.Context, string) (permission.ControlConnection, error)
+	Client           Client
+	ID               session.ID
+	Keys             <-chan Key
+	Output           io.Writer
+	Size             func() (int, int)
+	Theme            *Theme
 	// Legacy Panel remains available to embedders. Live Dock uses structured
 	// Viewer data; both hooks are read-only projections, never Session access.
 	Panel               func(width, height int) string
@@ -57,13 +66,15 @@ type Config struct {
 	ExportDirectory string
 }
 type commandResult struct {
-	text, kind    string
-	err           error
-	input         *inbox.Input
-	sheet         *Sheet
-	picker        *Picker
-	transcript    *transcriptPage
-	transcriptTop bool
+	text, kind           string
+	permissionSnapshot   *permission.ModeSnapshot
+	permissionGeneration string
+	err                  error
+	input                *inbox.Input
+	sheet                *Sheet
+	picker               *Picker
+	transcript           *transcriptPage
+	transcriptTop        bool
 }
 
 func Run(ctx context.Context, c Config) error {
@@ -168,6 +179,18 @@ func Run(ctx context.Context, c Config) error {
 	previousStreaming := false
 	previousView := ViewChat
 	var frame Frame
+	var permissionConnection permission.ControlConnection
+	var permissionGeneration string
+	var cancelPermission context.CancelFunc
+	permissionEvents := make(chan permissionWatchResult, 2)
+	defer func() {
+		if cancelPermission != nil {
+			cancelPermission()
+		}
+		if permissionConnection.Cancel != nil {
+			permissionConnection.Cancel()
+		}
+	}()
 	for {
 		if c.Size != nil {
 			w, h := c.Size()
@@ -198,6 +221,56 @@ func Run(ctx context.Context, c Config) error {
 				u.LegacyPanel = c.Panel(width, height)
 			}
 			s := m.Snapshot()
+			if c.WatchPermissions != nil && s.Connected && s.Generation != "" && permissionGeneration != s.Generation {
+				if cancelPermission != nil {
+					cancelPermission()
+				}
+				if permissionConnection.Cancel != nil {
+					permissionConnection.Cancel()
+				}
+				permissionConnection = permission.ControlConnection{}
+				permissionGeneration = s.Generation
+				watchCtx, stop := context.WithCancel(ctx)
+				cancelPermission = stop
+				generation := s.Generation
+				go func() {
+					conn, err := c.WatchPermissions(watchCtx, generation)
+					if err != nil {
+						return
+					}
+					select {
+					case permissionEvents <- permissionWatchResult{generation: generation, connection: conn}:
+					case <-watchCtx.Done():
+						conn.Cancel()
+						return
+					}
+					defer conn.Cancel()
+					for {
+						select {
+						case snapshot, ok := <-conn.Updates:
+							if !ok {
+								if watchCtx.Err() == nil {
+									select {
+									case permissionEvents <- permissionWatchResult{generation: generation, disconnected: true}:
+									case <-watchCtx.Done():
+									}
+								}
+								return
+							}
+							select {
+							case permissionEvents <- permissionWatchResult{generation: generation, snapshot: &snapshot}:
+							case <-watchCtx.Done():
+								return
+							}
+						case <-watchCtx.Done():
+							return
+						}
+					}
+				}()
+			}
+			if s.Permissions.Enabled && len(s.Permissions.Pending) > 0 && s.Permissions.Pending[0].ID != u.PermissionDismissed && u.Picker == nil && u.Sheet == nil && u.Private == nil && !u.Busy && strings.TrimSpace(editor.Text()) == "" {
+				u.Picker = operationPermissionConfirmation(s, s.Permissions.Pending[0])
+			}
 			files.sync(s, &u, &editor)
 			streaming := s.Progress != nil && s.Progress.Mode == "streaming" && !s.Progress.Done
 			frame = RenderFrame(s, u, width, height)
@@ -246,6 +319,26 @@ func Run(ctx context.Context, c Config) error {
 			}
 		case <-changes:
 			dirty = true
+		case result := <-permissionEvents:
+			if result.generation != m.Snapshot().Generation {
+				if result.connection.Cancel != nil {
+					result.connection.Cancel()
+				}
+				continue
+			}
+			if result.disconnected {
+				permissionGeneration = ""
+				permissionConnection = permission.ControlConnection{}
+				dirty = true
+				continue
+			}
+			if result.snapshot != nil {
+				m.setPermissions(result.generation, *result.snapshot)
+			} else {
+				permissionConnection = result.connection
+				m.setPermissions(result.generation, result.connection.Initial)
+			}
+			dirty = true
 		case result := <-files.events:
 			// Revalidate scope/cursor before accepting asynchronous candidates.
 			files.sync(m.Snapshot(), &u, &editor)
@@ -260,6 +353,13 @@ func Run(ctx context.Context, c Config) error {
 			u.Busy = false
 			u.Outbox = ""
 			cancelJob = nil
+			if result.permissionGeneration != "" && result.permissionGeneration != m.Snapshot().Generation {
+				dirty = true
+				continue
+			}
+			if result.permissionSnapshot != nil {
+				m.setPermissions(result.permissionGeneration, *result.permissionSnapshot)
+			}
 			if result.input != nil {
 				if result.err != nil {
 					retry = result.input
@@ -350,6 +450,9 @@ func Run(ctx context.Context, c Config) error {
 				p := u.Picker
 				switch key.Name {
 				case "escape":
+					if p.Kind == "permission-once" {
+						u.PermissionDismissed = p.PermissionOperation
+					}
 					if p.Kind == "effort" {
 						var current *sessionstore.RuntimeSelection
 						if s.Selection != nil && s.Selection.Provider == p.Provider {
@@ -385,6 +488,65 @@ func Run(ctx context.Context, c Config) error {
 					continue
 				case "enter":
 					if len(p.Options) == 0 {
+						continue
+					}
+					if p.Kind == "permissions" {
+						if permissionConnection.Request == nil {
+							notice("permission control disconnected; reconnect the TUI", "warning")
+							continue
+						}
+						if p.Selection >= 3 {
+							index := p.Selection - 3
+							if index >= len(s.Permissions.Pending) {
+								notice("approval changed; reopen /permissions", "warning")
+								continue
+							}
+							u.Picker = operationPermissionConfirmation(s, s.Permissions.Pending[index])
+							continue
+						}
+						mode := []permission.Mode{permission.ReadOnly, permission.Ask, permission.FullAccess}[p.Selection]
+						request := permissionConnection.Request
+						if mode == permission.FullAccess {
+							if !permissionReviewFits(width, height) {
+								notice("Resize to at least 80x24 to review Full Access", "warning")
+								continue
+							}
+							start("preparing Full Access confirmation", func(ctx context.Context) commandResult {
+								out, err := request(ctx, permission.ControlRequest{Action: "prepare_full", Expected: p.PermissionRevision})
+								if err != nil {
+									return commandResult{err: err}
+								}
+								return commandResult{permissionGeneration: s.Generation, picker: fullPermissionConfirmation(s, out.Snapshot.Revision, out.Challenge)}
+							})
+						} else {
+							u.Picker = nil
+							start("changing Session permissions", func(ctx context.Context) commandResult {
+								out, err := request(ctx, permission.ControlRequest{Action: "set_mode", Expected: p.PermissionRevision, Mode: mode})
+								return commandResult{permissionGeneration: s.Generation, text: mode.Label() + " active", err: err, permissionSnapshot: &out.Snapshot}
+							})
+						}
+						continue
+					}
+					if p.Kind == "permission-full" || p.Kind == "permission-once" {
+						if p.Kind == "permission-full" && p.Selection == 0 {
+							u.Picker = nil
+							continue
+						}
+						if !permissionReviewFits(width, height) && p.Selection == 1 {
+							notice("Resize to at least 80x24 to review permission scope", "warning")
+							continue
+						}
+						if permissionConnection.Request == nil {
+							notice("permission control disconnected; reconnect the TUI", "warning")
+							continue
+						}
+						request := permissionConnection.Request
+						action := permissionControlAction(p)
+						u.Picker = nil
+						start("recording human permission decision", func(ctx context.Context) commandResult {
+							out, err := request(ctx, action)
+							return commandResult{permissionGeneration: s.Generation, text: "Permission decision recorded", err: err, permissionSnapshot: &out.Snapshot}
+						})
 						continue
 					}
 					if p.Kind == "view" {
@@ -620,6 +782,12 @@ func Run(ctx context.Context, c Config) error {
 			line = command
 			parts := strings.Fields(line)
 			switch parts[0] {
+			case "/permissions":
+				if len(parts) != 1 {
+					notice("usage: /permissions (choose and confirm interactively)", "warning")
+					continue
+				}
+				u.Picker, u.Sheet = permissionPicker(s), nil
 			case "/view":
 				if len(parts) == 1 {
 					u.Picker, u.Sheet = viewPicker(u.View, width), nil

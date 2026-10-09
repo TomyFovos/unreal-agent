@@ -41,6 +41,7 @@ type Config struct {
 	Workspace string
 }
 type request struct {
+	Permission      *permission.ControlRequest `json:",omitzero"`
 	ID              session.ID
 	Mode            host.Mode
 	Generation      string
@@ -51,13 +52,14 @@ type request struct {
 	Secret          string `json:",omitzero"`
 }
 type frame struct {
-	View     *host.View            `json:",omitzero"`
-	Event    *host.Event           `json:",omitzero"`
-	Receipt  *host.Receipt         `json:",omitzero"`
-	Metadata *credential.Metadata  `json:",omitzero"`
-	Entries  []credential.Metadata `json:",omitzero"`
-	Methods  []authflow.Support    `json:",omitzero"`
-	Error    string                `json:",omitzero"`
+	Permission *permission.ControlReply `json:",omitzero"`
+	View       *host.View               `json:",omitzero"`
+	Event      *host.Event              `json:",omitzero"`
+	Receipt    *host.Receipt            `json:",omitzero"`
+	Metadata   *credential.Metadata     `json:",omitzero"`
+	Entries    []credential.Metadata    `json:",omitzero"`
+	Methods    []authflow.Support       `json:",omitzero"`
+	Error      string                   `json:",omitzero"`
 }
 type Error struct{ Code string }
 
@@ -107,7 +109,7 @@ func ListenAndServe(ctx context.Context, path string, c Config) error {
 		return err
 	}
 	defer cleanup()
-	server := &http.Server{Handler: Handler(c), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, ReadTimeout: 10 * time.Second, MaxHeaderBytes: 8192, BaseContext: func(net.Listener) context.Context { return ctx }}
+	server := &http.Server{ConnContext: authenticatePeer, Handler: Handler(c), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, ReadTimeout: 10 * time.Second, MaxHeaderBytes: 8192, BaseContext: func(net.Listener) context.Context { return ctx }}
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -127,6 +129,10 @@ func Handler(c Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.Host != "localhost" || r.Header.Get("Origin") != "" {
 			http.Error(w, "invalid local request", http.StatusBadRequest)
+			return
+		}
+		if r.URL.Path == "/v1/permissions" {
+			servePermissions(w, r, c)
 			return
 		}
 		if r.URL.Path == "/v1/extension" && c.Extension != nil {

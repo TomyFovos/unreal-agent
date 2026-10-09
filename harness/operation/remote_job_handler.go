@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"sync"
 )
 
@@ -34,7 +35,7 @@ func newRemoteJobHandlers(ctx context.Context, handlers []RemoteJobHandler) *rem
 	return router
 }
 
-func (router *remoteJobHandlers) add(current Operation) (int, error) {
+func (router *remoteJobHandlers) add(ctx context.Context, current Operation) (int, error) {
 	state, err := DecodeRemoteJobState(current)
 	if err != nil {
 		return -1, err
@@ -65,8 +66,16 @@ func (router *remoteJobHandlers) add(current Operation) (int, error) {
 	if router.closed[matched] {
 		return -1, fmt.Errorf("remote job handler %d stopped", matched)
 	}
-	if err := router.handlers[matched].AddRemoteJob(current); err != nil {
-		return -1, err
+	var addErr error
+	if scoped, ok := router.handlers[matched].(ScopedRemoteJobHandler); ok {
+		addErr = scoped.AddRemoteJobWithContext(ctx, current)
+	} else if permission.ControllerFromContext(ctx) != nil {
+		addErr = &permission.Error{Code: permission.Unsupported, Capability: "approval", Reason: "handler does not support operation-scoped authorization"}
+	} else {
+		addErr = router.handlers[matched].AddRemoteJob(current)
+	}
+	if addErr != nil {
+		return -1, addErr
 	}
 	return matched, nil
 }

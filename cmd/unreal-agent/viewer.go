@@ -6,6 +6,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/analysis"
 	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
@@ -23,6 +24,9 @@ func attachViewer(ctx context.Context, client *gateway.Client, id session.ID) er
 	panel := viewer.NewPanel(ctx, id, observation)
 	defer panel.Close()
 	return tui.Terminal(ctx, tui.Config{Client: client, ID: id, Viewer: panel.Snapshot, Command: childStartCommand(client, id, panel.Command), Updates: panel.Updates(),
+		WatchPermissions: func(ctx context.Context, generation string) (permission.ControlConnection, error) {
+			return client.WatchPermissions(ctx, id, generation)
+		},
 		ViewChanged: func(mode tui.ViewMode) { panel.SetTopologyVisible(mode != tui.ViewChat) },
 		RuntimeCapabilities: func(ctx context.Context) (map[string]modelcatalog.Capabilities, error) {
 			out, err := modelExchange(ctx, client.Extension, modelRequest{Action: "runtime.health", ID: id})

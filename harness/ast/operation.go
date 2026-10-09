@@ -53,6 +53,9 @@ func (h *Handler) CancelRemoteJob(id operation.ID, _ string) error {
 	return nil
 }
 func (h *Handler) AddRemoteJob(current operation.Operation) error {
+	return h.AddRemoteJobWithContext(h.ctx, current)
+}
+func (h *Handler) AddRemoteJobWithContext(parent context.Context, current operation.Operation) error {
 	state, err := operation.DecodeRemoteJobState(current)
 	if err != nil {
 		return err
@@ -73,11 +76,13 @@ func (h *Handler) AddRemoteJob(current operation.Operation) error {
 		h.mu.Unlock()
 		return nil
 	}
-	ctx, cancel := context.WithCancel(h.ctx)
+	ctx, cancel := context.WithCancel(parent)
+	stop := context.AfterFunc(h.ctx, cancel)
 	h.jobs[current.ID] = cancel
 	h.workers.Add(1)
 	h.mu.Unlock()
 	go func() {
+		defer stop()
 		defer h.workers.Done()
 		defer func() { h.mu.Lock(); delete(h.jobs, current.ID); h.mu.Unlock() }()
 		defer cancel()

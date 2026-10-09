@@ -28,6 +28,7 @@ type Sheet struct {
 
 // UIState is disposable presentation state, owned by the terminal event loop.
 type UIState struct {
+	PermissionDismissed   string
 	Theme                 Theme
 	Now                   time.Time
 	Input                 string
@@ -207,6 +208,7 @@ func usage(u viewer.Usage) string {
 }
 func header(s Snapshot, u UIState, l layout) line {
 	conn, run := connection(s, u.Now), runtime(s)
+	permissions := permissionStatus(s)
 	cs, rs := meta, meta
 	if conn == "disconnected" {
 		cs = failureStyle
@@ -272,6 +274,7 @@ func header(s Snapshot, u UIState, l layout) line {
 	}
 	build := func() line {
 		metric := ""
+
 		if model != "" {
 			metric += "  " + model
 		}
@@ -281,7 +284,7 @@ func header(s Snapshot, u UIState, l layout) line {
 		if tokens != "" {
 			metric += "  " + tokens
 		}
-		return joined(textLine(brand, agentStyle), textLine(id, strong), textLine("  "+u.View.effective(l.width+1).title(), meta), textLine("  "+connText, cs), textLine("  "+runText, rs), textLine(metric, meta))
+		return joined(textLine(permissions+permissionSeparator(permissions), warningStyle), textLine(brand, agentStyle), textLine(id, strong), textLine("  "+u.View.effective(l.width+1).title(), meta), textLine("  "+connText, cs), textLine("  "+runText, rs), textLine(metric, meta))
 	}
 	if build().width() > l.width {
 		model = ""
@@ -660,7 +663,7 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 		if runtime(s) == "unknown" {
 			run = "?"
 		}
-		f.Lines = append(f.Lines, textLine(mark+" "+run, meta).clip(l.width).paint(u.Theme))
+		f.Lines = append(f.Lines, textLine(permissionBadge(s)+mark+" "+run, meta).clip(l.width).paint(u.Theme))
 		if l.height > 1 {
 			for len(f.Lines) < l.height-1 {
 				f.Lines = append(f.Lines, "")
@@ -733,6 +736,12 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 	minimum := 3
 	if l.height >= 20 {
 		minimum = l.height * 2 / 5
+	}
+	if u.Picker != nil && (u.Picker.Kind == "permission-full" || u.Picker.Kind == "permission-once") {
+		// Permission scopes take priority over old conversation and dock rows.
+		minimum = 1
+		states = nil
+		notifications = nil
 	}
 	maxDock := max(0, l.height-1-blank-footer-minimum)
 	// Sheets and child detail yield room to state/errors above the Rule. Keeping

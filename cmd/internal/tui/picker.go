@@ -11,17 +11,21 @@ import (
 
 // Picker is UI-local, using the slash menu's selection window and styles.
 type Picker struct {
-	Kind, Title, Hint string
-	Options           []string
-	Selection, Offset int
-	Catalog           modelcatalog.Catalog
-	Model             modelcatalog.Model
-	Revision          uint64
-	Provider          string
-	Providers         []modelcatalog.Provider
-	Responses         []ResponseChoice
-	Views             []ViewMode
-	ToolBridge        bool
+	PermissionRevision  uint64
+	PermissionOperation string
+	PermissionChallenge string // UI attachment memory only; never public history
+	Instructions        []string
+	Kind, Title, Hint   string
+	Options             []string
+	Selection, Offset   int
+	Catalog             modelcatalog.Catalog
+	Model               modelcatalog.Model
+	Revision            uint64
+	Provider            string
+	Providers           []modelcatalog.Provider
+	Responses           []ResponseChoice
+	Views               []ViewMode
+	ToolBridge          bool
 }
 
 func responseExportPicker(choices []ResponseChoice) *Picker {
@@ -187,6 +191,13 @@ func pickerRows(p *Picker, u UIState, l layout, budget int) ([]line, int) {
 		title = strings.ReplaceAll(title, " · ", " / ")
 	}
 	rows := []line{l.gutter("", "", textLine(title, strong).clip(l.text))}
+	for _, instruction := range p.Instructions {
+		for _, wrapped := range wrapLine(textLine(instruction, warningStyle), l.text, true, 0) {
+			if len(rows) < budget-2 {
+				rows = append(rows, l.gutter("", "", wrapped))
+			}
+		}
+	}
 	if p.Hint != "" && budget >= 3 {
 		rows = append(rows, l.gutter("", "", textLine(p.Hint, warningStyle).clip(l.text)))
 	}

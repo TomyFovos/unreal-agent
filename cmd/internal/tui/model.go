@@ -19,6 +19,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
@@ -29,6 +30,7 @@ type Reader interface {
 	Subscribe(context.Context, session.ID, sessionstore.Sequence, int, int) (host.Subscription, error)
 }
 type Snapshot struct {
+	Permissions        permission.ModeSnapshot
 	ID                 session.ID
 	Generation         string
 	Revision           uint64
@@ -108,6 +110,7 @@ func (m *Model) Snapshot() Snapshot {
 	s.Lines = append([]string(nil), s.Lines...)
 	s.Entries = cloneEntries(s.Entries)
 	s.Operations = append([]operation.Operation(nil), s.Operations...)
+	s.Permissions.Pending = append([]permission.Pending(nil), s.Permissions.Pending...)
 	if s.Progress != nil {
 		p := *s.Progress
 		s.Progress = &p
@@ -145,6 +148,7 @@ func (m *Model) apply(v host.View) error {
 		m.hasCompletedEpoch = false
 		m.seenEpoch = 0
 		s.Progress = nil
+		s.Permissions = permission.ModeSnapshot{}
 	}
 	for _, item := range v.History.Items {
 		if item.Sequence <= s.After {
@@ -224,6 +228,9 @@ func (m *Model) apply(v host.View) error {
 		s.Revision = v.Revision
 		s.Running = v.Running
 		s.Operations = v.Operations
+		if v.Permissions.Revision >= s.Permissions.Revision || v.Generation != s.Generation {
+			s.Permissions = v.Permissions
+		}
 		if v.Context != nil {
 			d := *v.Context
 			s.ContextPackage = &d

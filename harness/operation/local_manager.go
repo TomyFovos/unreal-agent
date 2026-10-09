@@ -18,6 +18,16 @@ type LocalOperationManager struct {
 	primitiveEvents chan primitives.PrimitiveEvent
 	updates         chan Operation
 	pendingUpdates  []Operation
+	approvals       chan admissionResult
+}
+
+type admissionResult struct {
+	operation Operation
+	permit    permission.Permit
+}
+
+type waitingAdmission struct {
+	cancel context.CancelFunc
 }
 
 type localAddRequest struct {
@@ -72,6 +82,7 @@ func NewLocalOperationManager(ctx context.Context, remoteJobHandlers ...RemoteJo
 		cancellations:   make(chan localCancelRequest),
 		primitiveEvents: make(chan primitives.PrimitiveEvent),
 		updates:         make(chan Operation),
+		approvals:       make(chan admissionResult),
 	}
 	go manager.run()
 	return manager
@@ -125,6 +136,7 @@ func (manager *LocalOperationManager) run() {
 	defer manager.remoteJobs.workers.Wait()
 	operations := make(map[ID]*localRunningOperation)
 	accepted := make(map[ID]struct{})
+	waiting := make(map[ID]waitingAdmission)
 	activePrimitives := 0
 
 	for {
@@ -145,9 +157,17 @@ func (manager *LocalOperationManager) run() {
 				request.result <- nil
 				continue
 			}
-			if err := Authorize(permission.FromContext(manager.ctx), request.operation); err != nil {
+			controller := permission.ControllerFromContext(manager.ctx)
+			policy := permission.FromContext(manager.ctx)
+			if controller != nil {
+				policy = permission.FromContext(controller.MaximumContext(manager.ctx))
+			}
+			if err := Authorize(policy, request.operation); err != nil {
 				if denial := permission.Failure(err); denial != nil {
 					failed := PermissionFailure(request.operation, denial)
+					if controller != nil {
+						failed.Permission = &permission.Decision{Mode: controller.Snapshot().Mode, State: "denied"}
+					}
 					accepted[request.operation.ID] = struct{}{}
 					manager.appendLocalUpdate(failed)
 					request.result <- nil
@@ -156,49 +176,73 @@ func (manager *LocalOperationManager) run() {
 				}
 				continue
 			}
-			ctx, cancel := context.WithCancel(manager.ctx)
-			current := &localRunningOperation{
-				ctx:                   ctx,
-				cancel:                cancel,
-				operation:             request.operation,
-				remoteJobHandlerIndex: -1,
-			}
-			if request.operation.Type == TypeRemoteJob {
-				handlerIndex, err := manager.remoteJobs.add(request.operation)
-				if err != nil {
-					cancel()
-					if denial := permission.Failure(err); denial != nil {
-						accepted[request.operation.ID] = struct{}{}
-						manager.appendLocalUpdate(PermissionFailure(request.operation, denial))
-						request.result <- nil
-					} else {
-						request.result <- err
-					}
-					continue
+			if controller == nil {
+				ctx, cancel := context.WithCancel(manager.ctx)
+				count, err := manager.startOperation(operations, request.operation, ctx, cancel)
+				activePrimitives += count
+				if err == nil {
+					accepted[request.operation.ID] = struct{}{}
 				}
-				current.remoteJobHandlerIndex = handlerIndex
-				accepted[request.operation.ID] = struct{}{}
-				operations[request.operation.ID] = current
+				request.result <- err
+				continue
+			}
+			// Discard persisted permission evidence as authority. Only a fresh
+			// in-memory admission can grant execution in this Host lifetime.
+			op := request.operation
+			ctx, cancel := context.WithCancel(manager.ctx)
+			r := humanPermissionRequest(op)
+			results := controller.Request(ctx, r)
+			op.Permission = &permission.Decision{Mode: controller.Snapshot().Mode, State: "pending"}
+			accepted[op.ID] = struct{}{}
+			waiting[op.ID] = waitingAdmission{cancel: cancel}
+			manager.appendLocalUpdate(op)
+			go func() {
+				select {
+				case permit := <-results:
+					select {
+					case manager.approvals <- admissionResult{operation: op, permit: permit}:
+					case <-manager.ctx.Done():
+						permit.Release()
+						cancel()
+					}
+				case <-manager.ctx.Done():
+					cancel()
+				}
+			}()
+			request.result <- nil
+
+		case result := <-manager.approvals:
+			pending, ok := waiting[result.operation.ID]
+			if !ok {
+				result.permit.Release()
+				continue
+			}
+			delete(waiting, result.operation.ID)
+			op := result.operation
+			op.Permission = &result.permit.Decision
+			if result.permit.Denial != nil {
+				failed := PermissionFailure(op, result.permit.Denial)
+				if result.permit.Decision.State == "canceled" || result.permit.Decision.State == "revoked" {
+					failed.Status = StatusCanceled
+				}
+				manager.appendLocalUpdate(failed)
+				pending.cancel()
+				result.permit.Release()
+				continue
+			}
+			manager.appendLocalUpdate(op)
+			count, err := manager.startOperation(operations, op, result.permit.Context, func() { pending.cancel(); result.permit.Release() })
+			activePrimitives += count
+			if err != nil {
+				manager.appendLocalUpdate(failLocalOperation(op, err))
+			}
+
+		case request := <-manager.cancellations:
+			if pending, ok := waiting[request.id]; ok {
+				pending.cancel()
 				request.result <- nil
 				continue
 			}
-			if err := current.initialize(); err != nil {
-				cancel()
-				request.result <- err
-				continue
-			}
-			step, err := current.handle(nil)
-			if err != nil {
-				cancel()
-				request.result <- err
-				continue
-			}
-			accepted[request.operation.ID] = struct{}{}
-			operations[request.operation.ID] = current
-			activePrimitives += manager.acceptLocalStep(operations, current, step)
-			request.result <- nil
-
-		case request := <-manager.cancellations:
 			current, exists := operations[request.id]
 			if !exists {
 				request.result <- nil
@@ -245,6 +289,13 @@ func (manager *LocalOperationManager) run() {
 				manager.failRemoteJobOperation(operations, current, err)
 				continue
 			}
+			update.operation.Permission = current.operation.Permission
+			if current.ctx.Err() != nil {
+				step, err := CancelRemoteJob(update.operation)
+				if err == nil {
+					update.operation = *step.Operation
+				}
+			}
 			current.operation = update.operation
 			manager.appendLocalUpdate(update.operation)
 			if localOperationFinished(update.operation.Status) {
@@ -279,6 +330,9 @@ func (manager *LocalOperationManager) run() {
 			activePrimitives += manager.acceptLocalStep(operations, current, step)
 
 		case <-manager.ctx.Done():
+			for _, pending := range waiting {
+				pending.cancel()
+			}
 			for _, current := range operations {
 				current.cancel()
 			}
@@ -286,6 +340,50 @@ func (manager *LocalOperationManager) run() {
 			return
 		}
 	}
+}
+
+// startOperation receives an immutable, revocable execution lease. No executor
+// is called while admission is pending.
+func (manager *LocalOperationManager) startOperation(operations map[ID]*localRunningOperation, op Operation, ctx context.Context, cancel context.CancelFunc) (int, error) {
+	if ctx.Err() != nil {
+		cancel()
+		manager.appendLocalUpdate(PermissionFailure(op, &permission.Error{Code: permission.Denied, Capability: "approval", Reason: "operation authorization canceled"}))
+		return 0, nil
+	}
+	if err := Authorize(permission.FromContext(ctx), op); err != nil {
+		cancel()
+		if denial := permission.Failure(err); denial != nil {
+			manager.appendLocalUpdate(PermissionFailure(op, denial))
+			return 0, nil
+		}
+		return 0, err
+	}
+	current := &localRunningOperation{ctx: ctx, cancel: cancel, operation: op, remoteJobHandlerIndex: -1}
+	if op.Type == TypeRemoteJob {
+		index, err := manager.remoteJobs.add(ctx, op)
+		if err != nil {
+			cancel()
+			if denial := permission.Failure(err); denial != nil {
+				manager.appendLocalUpdate(PermissionFailure(op, denial))
+				return 0, nil
+			}
+			return 0, err
+		}
+		current.remoteJobHandlerIndex = index
+		operations[op.ID] = current
+		return 0, nil
+	}
+	if err := current.initialize(); err != nil {
+		cancel()
+		return 0, err
+	}
+	step, err := current.handle(nil)
+	if err != nil {
+		cancel()
+		return 0, err
+	}
+	operations[op.ID] = current
+	return manager.acceptLocalStep(operations, current, step), nil
 }
 
 func (manager *LocalOperationManager) acceptLocalStep(
