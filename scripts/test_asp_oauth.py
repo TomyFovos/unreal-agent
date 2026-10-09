@@ -55,20 +55,25 @@ class AspOAuthTests(unittest.TestCase):
     def test_native_preflight_argv_and_environment(self):
         calls = []
         def probe(args, env, **kwargs):
-            calls.append((args, env))
+            calls.append((args, env, kwargs))
             return b"safe dummy", 0
         with patch.object(pilot, "bounded_probe", side_effect=probe), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(asp.preflight(self.root, self.home, dict(self.env, OPENAI_API_KEY="PRIVATE_DUMMY", GITHUB_TOKEN="PRIVATE_DUMMY")), str(self.auth))
-        args, env = calls[0]
+        args, env, kwargs = calls[0]
         self.assertEqual(args, [str(self.root / "unreal-agent-auth"), "check-docker-sandbox-oauth", "--codex-auth-file", str(self.auth), "--check-forward-proxy"])
+        self.assertEqual(kwargs, {"capture_stderr": True})
         self.assertEqual(set(env), {"HOME", "PATH", "SBX_CRED_OPENAI_MODE", "HTTPS_PROXY"})
         self.assertNotIn("PRIVATE_DUMMY", json.dumps(env))
         with patch.object(pilot, "bounded_probe", return_value=(b"PRIVATE_DUMMY", 1)), self.assertRaises(pilot.PilotError) as error:
             asp.preflight(self.root, self.home, self.env)
         self.assertNotIn("PRIVATE_DUMMY", str(error.exception))
-        with patch.object(pilot, "bounded_probe", return_value=(b"credential: docker_sandbox_proxy_unavailable PRIVATE_DUMMY", 1)), self.assertRaises(pilot.PilotError) as error:
+        with patch.object(pilot, "bounded_probe", return_value=(b"credential: docker_sandbox_proxy_unavailable\n", 1)), self.assertRaises(pilot.PilotError) as error:
             asp.preflight(self.root, self.home, self.env)
         self.assertEqual(error.exception.code, "docker_sandbox_proxy_unavailable")
+        self.assertNotIn("PRIVATE_DUMMY", str(error.exception))
+        with patch.object(pilot, "bounded_probe", return_value=(b"credential: docker_sandbox_proxy_unavailable PRIVATE_DUMMY", 1)), self.assertRaises(pilot.PilotError) as error:
+            asp.preflight(self.root, self.home, self.env)
+        self.assertEqual(error.exception.code, "docker_sandbox_oauth_unavailable")
         self.assertNotIn("PRIVATE_DUMMY", str(error.exception))
 
     def test_config_creation_rerun_and_existing_config_preserved(self):

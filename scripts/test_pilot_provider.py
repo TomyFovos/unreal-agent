@@ -251,6 +251,26 @@ class ProviderPilotTests(unittest.TestCase):
             pilot.bounded_probe([sys.executable, "-c", "import time; time.sleep(5)"], env, timeout=0.1)
         self.assertEqual(error.exception.code, "preflight_timeout")
 
+    def test_stderr_capture_requires_optin_and_remains_private_and_bounded(self):
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(self.home)}
+        args = [sys.executable, "-c", "import sys; print('safe-status'); print('PRIVATE_DUMMY', file=sys.stderr); sys.exit(1)"]
+        with contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
+            status, code = pilot.bounded_probe(args, env)
+            self.assertEqual((status, code), (b"safe-status\n", 1))
+            private, code = pilot.bounded_probe(args, env, capture_stderr=True)
+            self.assertEqual(code, 1)
+            self.assertIn(b"safe-status\n", private)
+            self.assertIn(b"PRIVATE_DUMMY\n", private)
+            for script, options, expected in (
+                    ("import sys; print('PRIVATE_DUMMY'*4096, file=sys.stderr)", {"limit": 32}, "preflight_output_limit"),
+                    ("import sys,time; print('PRIVATE_DUMMY', file=sys.stderr); time.sleep(5)", {"timeout": 0.1}, "preflight_timeout")):
+                with self.assertRaises(pilot.PilotError) as failure:
+                    pilot.bounded_probe([sys.executable, "-c", script], env, capture_stderr=True, **options)
+                self.assertEqual(failure.exception.code, expected)
+                self.assertNotIn("PRIVATE_DUMMY", str(failure.exception))
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(errors.getvalue(), "")
+
     def test_provider_bundle_no_binaries_credentials_and_checksum(self):
         for sandbox in pilot.PROVIDERS:
             archive = bundle.build(self.root, sandbox)

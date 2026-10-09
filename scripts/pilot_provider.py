@@ -147,11 +147,13 @@ def configuration(sandbox, workspace, model, effort, claude_binary="", audited=F
             "Runtime": runtime, "Permissions": permissions}
 
 
-def bounded_probe(argv, env, timeout=15, limit=1 << 20):
+def bounded_probe(argv, env, timeout=15, limit=1 << 20, *, capture_stderr=False):
     """No raw stdout/stderr escapes on errors; never use the project as cwd."""
     with tempfile.TemporaryDirectory(prefix="unreal-pilot-preflight-") as directory:
         process = subprocess.Popen(argv, env=env, cwd=directory, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT if capture_stderr else subprocess.DEVNULL,
+                                   start_new_session=True)
         output = bytearray()
         try:
             with selectors.DefaultSelector() as selector:
