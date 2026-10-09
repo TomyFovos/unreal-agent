@@ -27,6 +27,22 @@ func decodeResponse(body []byte) (llm.Response, error) {
 		return llm.Response{}, err
 	}
 	converted.Usage.Raw = envelope.Usage
+	// Preserve absence/null independently of the generated required numeric
+	// fields. An omitted counter is not a measured zero in the status bar.
+	var counters struct {
+		Input  *int64 `json:"input_tokens"`
+		Output *int64 `json:"output_tokens"`
+	}
+	if len(envelope.Usage) == 0 || json.Unmarshal(envelope.Usage, &counters) != nil {
+		converted.Usage.Unknown = append(converted.Usage.Unknown, llm.UsageInput, llm.UsageOutput)
+	} else {
+		if counters.Input == nil {
+			converted.Usage.Unknown = append(converted.Usage.Unknown, llm.UsageInput)
+		}
+		if counters.Output == nil {
+			converted.Usage.Unknown = append(converted.Usage.Unknown, llm.UsageOutput)
+		}
+	}
 	return converted, nil
 }
 

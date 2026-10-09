@@ -185,7 +185,7 @@ func TestOrchestrationClaudePermissionDenialShowsOnlySafeStatus(t *testing.T) {
 				u.Theme = theme
 				frame := RenderFrame(s, u, size[0], size[1])
 				text := frameText(frame)
-				if len(frame.Lines) != size[1] || frame.CursorY != size[1]-1 || strings.Contains(text, "decision_reason_type") || strings.Contains(text, "turn-id") {
+				if len(frame.Lines) != size[1] || frame.CursorY != size[1]-2 || strings.Contains(text, "decision_reason_type") || strings.Contains(text, "turn-id") {
 					t.Fatal("Orchestration leaked error details or displaced composer", size)
 				}
 			}
@@ -234,7 +234,7 @@ func TestOrchestrationResponsiveViewsRailComposerAndThemes(t *testing.T) {
 				u.View, u.Theme = view, theme
 				f := RenderFrame(s, u, size[0], size[1])
 				exportFrameBounds(t, f, size[0], size[1])
-				if f.View != view.effective(size[0]) || f.CursorY != size[1]-1 || len(f.Lines) != size[1] {
+				if f.View != view.effective(size[0]) || f.CursorY != size[1]-2 || len(f.Lines) != size[1] {
 					t.Fatal("view/composer misplaced", f.View, size)
 				}
 				text := sgrRE.ReplaceAllString(frameText(f), "")

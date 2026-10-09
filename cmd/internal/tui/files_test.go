@@ -399,11 +399,11 @@ func TestFileComposerSlashCommandPasteEscapeAndResizeSplit(t *testing.T) {
 	r.size.Store(44<<32 | 14)
 	waitFor(t, func() bool {
 		rows := strings.Split(r.visible(), "\n")
-		return strings.Contains(rows[13], "@src/ma") && strings.Contains(r.visible(), "src/main.go")
+		return strings.Contains(rows[12], "@src/ma") && strings.Contains(r.visible(), "src/main.go")
 	})
 	r.keys <- Key{Name: "tab"}
 	waitFor(t, func() bool {
-		return strings.Contains(strings.Split(r.visible(), "\n")[13], "src/main.go") && !strings.Contains(r.visible(), "Enter/Tab insert path")
+		return strings.Contains(strings.Split(r.visible(), "\n")[12], "src/main.go") && !strings.Contains(r.visible(), "Enter/Tab insert path")
 	})
 	if r.commands.Load() != 0 {
 		t.Fatal("confirm invoked /children")
@@ -421,7 +421,7 @@ func TestFileComposerSlashCommandPasteEscapeAndResizeSplit(t *testing.T) {
 	waitFor(t, func() bool { return !strings.Contains(r.visible(), "Enter/Tab insert path") })
 	// Escape is stable until the mention/cursor changes, including on resize.
 	r.size.Store(160<<32 | 36)
-	waitFor(t, func() bool { return strings.HasPrefix(strings.Split(r.visible(), "\n")[34], "─") })
+	waitFor(t, func() bool { return strings.HasPrefix(strings.Split(r.visible(), "\n")[33], "─") })
 	if strings.Contains(r.visible(), "Enter/Tab insert path") {
 		t.Fatal("resize reopened dismissed mention")
 	}
@@ -441,7 +441,7 @@ func TestFilePickerResponsivePlainASCIIAndRightEdge(t *testing.T) {
 					plain.Lines[i] = sgrRE.ReplaceAllString(line, "")
 				}
 				bounds(t, plain, size[0], size[1])
-				if f.CursorY != size[1]-1 {
+				if f.CursorY != size[1]-2 {
 					t.Fatal("file picker moved composer")
 				}
 				if theme.ASCII && strings.ContainsAny(frameText(f), "↑↓›─") {

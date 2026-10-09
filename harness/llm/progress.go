@@ -7,4 +7,5 @@ type Progress struct {
 	Attempt uint64
 	Reset   bool
 	Delta   string
+	Tokens  *TokenCounts
 }

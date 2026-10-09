@@ -17,6 +17,7 @@ type Progress struct {
 	Epoch, Attempt  uint64
 	Mode, Text      string
 	Done, Truncated bool
+	Statistics      *llm.GenerationStatistics `json:",omitzero"`
 }
 
 const maxProgressBytes = 64 << 10
@@ -24,9 +25,12 @@ const maxProgressBytes = 64 << 10
 type progressAdapter struct {
 	session *Session
 	next    llm.Adapter
+	now     func() time.Time
 }
 
-func (s *Session) withProgress(next llm.Adapter) llm.Adapter { return &progressAdapter{s, next} }
+func (s *Session) withProgress(next llm.Adapter) llm.Adapter {
+	return &progressAdapter{session: s, next: next}
+}
 func (s *Session) currentTurn() session.TurnID {
 	for i := len(s.items) - 1; i >= 0; i-- {
 		if s.items[i].Kind == sessionstore.ItemTurn {
@@ -54,11 +58,42 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 	s.broadcast(Event{Kind: "progress", Progress: s.progress})
 	s.mu.Unlock()
 	lastBroadcast := time.Time{}
-	done := false // accessed only with s.mu
+	now := a.now
+	if now == nil {
+		now = time.Now
+	}
+	started := now()
+	statistics := func(response llm.Response) *llm.GenerationStatistics {
+		if response.Generation != nil && response.Generation.Valid() {
+			copy := *response.Generation
+			copy.Model = r.Model.ID
+			return &copy
+		}
+		stats := &llm.GenerationStatistics{Model: r.Model.ID, Tokens: llm.ReportedTokens(response.Usage), DurationMicros: now().Sub(started).Microseconds(), Source: "client_clock"}
+		if !stats.Valid() {
+			return nil // zero/unmeasurable duration is unknown, not invented timing
+		}
+		return stats
+	}
+	done := false            // accessed only with s.mu
+	waitingForTools := false // freeze statistics throughout approval/execution waits
 	prior := o.Progress
 	if tools := o.Tools; tools != nil {
 		o.Tools = func(callCtx context.Context, public llm.Response) ([]llm.ToolOutcome, error) {
+			s.mu.Lock()
+			waitingForTools = true
+			public.Generation = statistics(public)
+			if !done && s.progress != nil && s.progress.Epoch == epoch {
+				s.progress.Statistics = public.Generation
+				s.progress.Done = true
+				s.broadcast(Event{Kind: "progress", Progress: s.progress})
+			}
+			s.mu.Unlock()
 			outcomes, err := tools(callCtx, public)
+			s.mu.Lock()
+			waitingForTools = false
+			started = now() // approval/Operation/receipt wait is never TPS time
+			s.mu.Unlock()
 			if err != nil {
 				return outcomes, err
 			}
@@ -85,15 +120,30 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 	}
 	o.Progress = func(p llm.Progress) {
 		s.mu.Lock()
-		if !done && ctx.Err() == nil && s.running && s.currentTurn() == turn && s.progress != nil && s.progress.Epoch == epoch {
+		if !done && !waitingForTools && ctx.Err() == nil && s.running && s.currentTurn() == turn && s.progress != nil && s.progress.Epoch == epoch {
 			current := s.progress
 			if p.Attempt >= current.Attempt {
 				if p.Reset || p.Attempt > current.Attempt {
 					current.Text = ""
 					current.Truncated = false
+					current.Statistics = nil
+					started = now()
 				}
 				current.Mode = "streaming"
 				current.Attempt = p.Attempt
+				if p.Tokens != nil {
+					tokens := p.Tokens.Safe()
+					if current.Statistics != nil {
+						old := current.Statistics.Tokens
+						if !tokens.InputKnown {
+							tokens.Input, tokens.InputKnown = old.Input, old.InputKnown
+						}
+						if !tokens.OutputKnown {
+							tokens.Output, tokens.OutputKnown = old.Output, old.OutputKnown
+						}
+					}
+					current.Statistics = &llm.GenerationStatistics{Model: r.Model.ID, Tokens: tokens, DurationMicros: now().Sub(started).Microseconds(), Source: "client_clock"}
+				}
 				remaining := maxProgressBytes - len(current.Text)
 				delta := p.Delta
 				if len(delta) > remaining {
@@ -101,9 +151,9 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 					current.Truncated = true
 				}
 				current.Text = strings.ToValidUTF8(current.Text+delta, "")
-				if p.Reset || lastBroadcast.IsZero() || time.Since(lastBroadcast) >= 30*time.Millisecond {
+				if p.Reset || lastBroadcast.IsZero() || now().Sub(lastBroadcast) >= 30*time.Millisecond {
 					s.broadcast(Event{Kind: "progress", Progress: current})
-					lastBroadcast = time.Now()
+					lastBroadcast = now()
 				}
 			}
 		}
@@ -115,8 +165,14 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 	response, err := a.next.Respond(ctx, r, o)
 	s.mu.Lock()
 	done = true
+	if err == nil && response.Failure == nil {
+		response.Generation = statistics(response)
+	}
 	if s.progress != nil && s.progress.Epoch == epoch {
 		s.progress.Done = true
+		if response.Generation != nil {
+			s.progress.Statistics = response.Generation
+		}
 		s.broadcast(Event{Kind: "progress", Progress: s.progress})
 	}
 	s.mu.Unlock()

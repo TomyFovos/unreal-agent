@@ -118,7 +118,7 @@ func TestMultiProviderPickerResponsiveBottomAndHeader(t *testing.T) {
 	for _, size := range [][2]int{{44, 14}, {60, 20}, {80, 24}, {130, 30}} {
 		for _, theme := range []Theme{{}, {Plain: true}, {NoColor: true}, {ASCII: true}} {
 			frame := RenderFrame(Snapshot{ID: "test", Connected: true, Running: true, Selection: current}, UIState{Theme: theme, Picker: p}, size[0], size[1])
-			if len(frame.Lines) != size[1] || frame.CursorY != size[1]-1 {
+			if len(frame.Lines) != size[1] || frame.CursorY != size[1]-2 {
 				t.Fatal("provider picker displaced composer")
 			}
 			if size[0] >= 80 && !strings.Contains(strings.Join(frame.Lines, "\n"), "Claude Code") {

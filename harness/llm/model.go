@@ -116,12 +116,13 @@ const (
 )
 
 type Response struct {
-	ID      string
-	Model   string `json:",omitzero"`
-	Stop    StopReason
-	Output  []Item `json:",omitzero"`
-	Usage   Usage
-	Failure *Failure
+	ID         string
+	Model      string `json:",omitzero"`
+	Stop       StopReason
+	Output     []Item `json:",omitzero"`
+	Usage      Usage
+	Failure    *Failure
+	Generation *GenerationStatistics `json:",omitzero"`
 }
 
 // InputTokens includes CachedInputTokens and CacheWriteInputTokens.

@@ -667,7 +667,7 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 		}
 		f.Lines = append(f.Lines, textLine(permissionBadge(s)+mark+" "+run, meta).clip(l.width).paint(u.Theme))
 		if l.height > 1 {
-			for len(f.Lines) < l.height-1 {
+			for len(f.Lines) < l.height-2 {
 				f.Lines = append(f.Lines, "")
 			}
 			text := u.Input
@@ -676,7 +676,13 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 			}
 			f.Lines = append(f.Lines, textLine(text, normal).clip(l.width).paint(u.Theme))
 			f.CursorX = min(max(0, l.width-1), uniseg.StringWidth(text))
-			f.CursorY = l.height - 1
+			f.CursorY = len(f.Lines) - 1
+		}
+		f.Lines = append(f.Lines, statisticsBar(s, u, l).paint(u.Theme))
+		if len(f.Lines) > l.height {
+			drop := len(f.Lines) - l.height
+			f.Lines = f.Lines[drop:]
+			f.CursorY = max(0, f.CursorY-drop)
 		}
 		return f
 	}
@@ -716,7 +722,7 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 		u.cache.begin(l.text, u.Theme.ASCII)
 		defer u.cache.end()
 	}
-	footer := 1 + len(input)
+	footer := 2 + len(input) // rule, composer, permanent statistics row
 	if l.height >= 16 {
 		footer++
 	}
@@ -930,6 +936,7 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 	f.CursorY = len(rows) + cy
 	f.CursorX = max(0, cx)
 	rows = append(rows, input...)
+	rows = append(rows, statisticsBar(s, u, full))
 	for _, r := range rows[:min(len(rows), l.height)] {
 		f.Lines = append(f.Lines, r.clip(l.width).paint(u.Theme))
 	}

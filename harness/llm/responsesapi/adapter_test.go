@@ -225,8 +225,9 @@ func TestResponseKeepsOutputWhenTruncated(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	want := llm.Response{
-		ID:   "resp-1",
-		Stop: llm.StopMaxOutputTokens,
+		ID:    "resp-1",
+		Stop:  llm.StopMaxOutputTokens,
+		Usage: llm.Usage{Unknown: []llm.UsageField{llm.UsageInput, llm.UsageOutput}},
 		Output: []llm.Item{{
 			ProviderID: "message-1",
 			Type:       llm.ItemMessage,

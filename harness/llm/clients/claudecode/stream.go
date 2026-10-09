@@ -39,6 +39,7 @@ type wireEvent struct {
 	Type         string      `json:"type"`
 	Message      wireMessage `json:"message"`
 	ContentBlock block       `json:"content_block"`
+	Usage        *wireUsage  `json:"usage,omitempty"`
 	Delta        struct {
 		Type       string `json:"type"`
 		Text       string `json:"text"`
@@ -49,6 +50,7 @@ type wireEvent struct {
 type streamRecord struct {
 	Type            string           `json:"type"`
 	Subtype         string           `json:"subtype"`
+	DurationAPI     *float64         `json:"duration_api_ms,omitempty"`
 	Model           string           `json:"model"`
 	PermissionMode  jsontext.Value   `json:"permissionMode"`
 	Status          jsontext.Value   `json:"status"`
@@ -172,6 +174,7 @@ func parseStream(input io.Reader, opt llm.RequestOptions) (llm.Response, error) 
 			if err := textOnlyEvent(v.Event); err != nil {
 				return llm.Response{}, err
 			}
+			emitTokenProgress(v.Event, opt.Progress)
 			if v.Event.Type == "content_block_delta" && v.Event.Delta.Type == "text_delta" && opt.Progress != nil {
 				opt.Progress(llm.Progress{Attempt: 1, Delta: v.Event.Delta.Text})
 			}
@@ -229,6 +232,9 @@ func parseStream(input io.Reader, opt llm.RequestOptions) (llm.Response, error) 
 			r.Usage, err = normalizeUsage(v.Usage)
 			if err != nil {
 				return llm.Response{}, err
+			}
+			if v.DurationAPI != nil && *v.DurationAPI >= 0.001 && *v.DurationAPI <= 24*60*60*1000 {
+				r.Generation = &llm.GenerationStatistics{Model: r.Model, Tokens: llm.ReportedTokens(r.Usage), DurationMicros: int64(*v.DurationAPI * 1000), Source: "provider_api"}
 			}
 		case "error":
 			return llm.Response{}, streamFailure(v)

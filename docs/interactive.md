@@ -261,6 +261,18 @@ The existing bounded child policy still applies.
 
 - Resize is detected without changing session state. Output is bounded to terminal rows/cells, and provider/tool text cannot inject terminal escapes. Native terminal writes observe cancellation and a two-second deadline. Rendering is independent of the subscription receiver.
 
+The compact row immediately below the composer shows provider/model, reasoning
+effort, output tokens/sec and input/output token usage. Tokens are provider
+counters, never estimates from text. Claude `duration_api_ms` yields `(api)`;
+Codex or missing API duration uses `~...(est)` from the generation's client clock.
+Both are generation throughput, not pure decoding speed; output includes reported
+reasoning/serializer tokens. Approval and Unreal tool/receipt waits are excluded.
+Missing counters or timing show `—` (`-` in ASCII). Stream counters update via the
+existing throttled progress events, with no new repaint/rate timer. Completion is
+retained in canonical response metadata for reattach; older responses without
+timing show usage only. New generations reset their unknown statistics and
+runtime/model changes do not relabel an old rate. Narrow terminals omit fields.
+
 ## Workspace file selection
 
 Type `@` at the start of a composer token (or after whitespace) to open **Files**.

@@ -47,7 +47,7 @@ func TestCommandMenuArrowsReachEveryCandidateAndScrollBothWays(t *testing.T) {
 				if f.ConversationHeight < 3 || e.Text() != "/" || e.cursor != 1 {
 					t.Fatal("menu navigation altered input or consumed the conversation")
 				}
-				if size[1] >= 16 && (!strings.Contains(f.Lines[size[1]-3], "^C stop") || !strings.Contains(f.Lines[size[1]-3], "^D detach")) {
+				if size[1] >= 16 && (!strings.Contains(f.Lines[size[1]-4], "^C stop") || !strings.Contains(f.Lines[size[1]-4], "^D detach")) {
 					t.Fatal("command navigation hints hid stop/detach")
 				}
 				u.MenuOffset = f.MenuOffset
@@ -195,7 +195,7 @@ func TestComposerAtBottomWithMultilineAndResponsiveFooter(t *testing.T) {
 		for _, size := range [][2]int{{80, 24}, {60, 20}, {44, 14}, {120, 30}} {
 			f := RenderFrame(s, u, size[0], size[1])
 			bounds(t, f, size[0], size[1])
-			if len(f.Lines) != size[1] || f.CursorY != size[1]-1 {
+			if len(f.Lines) != size[1] || f.CursorY != size[1]-2 {
 				t.Fatalf("composer/caret not at bottom for %v: %+v", size, f)
 			}
 			l := makeLayout(size[0], size[1])
@@ -203,7 +203,7 @@ func TestComposerAtBottomWithMultilineAndResponsiveFooter(t *testing.T) {
 				l.text -= len("^C stop") + 2
 			}
 			input, _, _, _, _ := composer(s, u, l)
-			ruleRow := size[1] - len(input) - 1
+			ruleRow := size[1] - len(input) - 2
 			if !strings.HasPrefix(f.Lines[ruleRow], "─") {
 				t.Fatal("separator did not precede composer")
 			}
@@ -323,7 +323,7 @@ func TestRunCommandMenuEnterInsertsRequiredArgumentPrefix(t *testing.T) {
 			r.selectCommand(t, name)
 			r.keys <- Key{Name: "enter"}
 			waitFor(t, func() bool {
-				return strings.Contains(strings.Split(r.out.text(), "\n")[23], "cmd › "+name) && r.out.cursorX() == 9+len(name)+1
+				return strings.Contains(strings.Split(r.out.text(), "\n")[22], "cmd › "+name) && r.out.cursorX() == 9+len(name)+1
 			})
 			usage := map[string]string{"/login": "/login PROVIDER ID", "/logout": "/logout PROVIDER ID", "/child": "(this session)", "/child-send": "/child-send TEXT"}[name]
 			if !strings.Contains(r.out.text(), usage) {
@@ -362,7 +362,7 @@ func TestRunCommandMenuFilteredNavigationResetAndSelectedTab(t *testing.T) {
 	r.keys <- Key{Name: "down"}
 	r.keys <- Key{Name: "tab"}
 	waitFor(t, func() bool {
-		return strings.Contains(strings.Split(r.out.text(), "\n")[13], "/child-retry") && r.out.cursorX() == 2+len("/child-retry")
+		return strings.Contains(strings.Split(r.out.text(), "\n")[12], "/child-retry") && r.out.cursorX() == 2+len("/child-retry")
 	})
 }
 
@@ -377,7 +377,7 @@ func TestRunCommandMenuTabCompletesArrowSelectedCandidate(t *testing.T) {
 				value += " "
 			}
 			waitFor(t, func() bool {
-				return strings.Contains(strings.Split(r.out.text(), "\n")[23], "cmd › "+name) && r.out.cursorX() == 9+len(value)
+				return strings.Contains(strings.Split(r.out.text(), "\n")[22], "cmd › "+name) && r.out.cursorX() == 9+len(value)
 			})
 			r.fake.mu.Lock()
 			defer r.fake.mu.Unlock()

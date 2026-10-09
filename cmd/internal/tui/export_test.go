@@ -80,7 +80,7 @@ func TestExportLastExactCanonicalBodyIndependentOfViewport(t *testing.T) {
 				for _, scroll := range []int{0, 5000} {
 					frame := RenderFrame(m.Snapshot(), UIState{Theme: theme, Scroll: scroll}, 44, 14)
 					exportFrameBounds(t, frame, 44, 14)
-					if frame.CursorY != 13 {
+					if frame.CursorY != 12 {
 						t.Fatal("composer no longer bottom")
 					}
 				}
@@ -411,7 +411,7 @@ func TestExportPickerNavigationResponsiveAndCommandDiscovery(t *testing.T) {
 				for range len(p.Options) {
 					frame := RenderFrame(idleSnapshot(), UIState{Theme: theme, Picker: p}, size[0], size[1])
 					exportFrameBounds(t, frame, size[0], size[1])
-					if !strings.Contains(frameText(frame), fmt.Sprintf("Turn %d ", p.Responses[p.Selection].TurnNumber)) || frame.CursorY != size[1]-1 {
+					if !strings.Contains(frameText(frame), fmt.Sprintf("Turn %d ", p.Responses[p.Selection].TurnNumber)) || frame.CursorY != size[1]-2 {
 						t.Fatal("picker selection hidden or composer moved", size)
 					}
 					p.Offset = frame.PickerOffset

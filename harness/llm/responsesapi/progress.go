@@ -20,10 +20,32 @@ func emitTextProgress(ctx context.Context, payload []byte) {
 		return
 	}
 	var e struct {
-		Type  string `json:"type"`
-		Delta string `json:"delta"`
+		Type     string `json:"type"`
+		Delta    string `json:"delta"`
+		Response struct {
+			Usage *struct {
+				Input  *int64 `json:"input_tokens"`
+				Output *int64 `json:"output_tokens"`
+			} `json:"usage"`
+		} `json:"response"`
 	}
-	if json.Unmarshal(payload, &e) == nil && e.Type == "response.output_text.delta" {
+	if json.Unmarshal(payload, &e) != nil {
+		return
+	}
+	if e.Type == "response.created" || e.Type == "response.in_progress" || e.Type == "response.completed" || e.Type == "response.incomplete" {
+		if usage := e.Response.Usage; usage != nil {
+			tokens := llm.TokenCounts{}
+			if usage.Input != nil && *usage.Input >= 0 {
+				tokens.Input, tokens.InputKnown = *usage.Input, true
+			}
+			if usage.Output != nil && *usage.Output >= 0 {
+				tokens.Output, tokens.OutputKnown = *usage.Output, true
+			}
+			attempt, _ := ctx.Value(attemptKey{}).(uint64)
+			emitProgress(ctx, llm.Progress{Attempt: attempt, Tokens: &tokens})
+		}
+	}
+	if e.Type == "response.output_text.delta" {
 		attempt, _ := ctx.Value(attemptKey{}).(uint64)
 		// Bound the callback even if a provider emits an enormous SSE frame.
 		if len(e.Delta) > 64<<10 {

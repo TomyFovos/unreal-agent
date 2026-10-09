@@ -118,8 +118,15 @@ func (c *Client) respondStructured(ctx context.Context, req llm.Request, opt llm
 			return llm.Response{}, safeBridgeCallbackError(err)
 		}
 	}
+	var generation uint64
 	return runStructuredRounds(ctx, req, opt, schema, c.config.ToolBridge.limits(), func(ctx context.Context, model llm.Model, schema *actionSchema, system, input string) (actionProposal, llm.Response, error) {
-		return c.structuredGeneration(ctx, path, env, model, schema, system, input, false)
+		generation++
+		attempt := generation
+		progress := opt.Progress
+		if prior := progress; prior != nil {
+			progress = func(p llm.Progress) { p.Attempt = attempt; prior(p) }
+		}
+		return c.structuredGeneration(ctx, path, env, model, schema, system, input, false, progress)
 	})
 }
 
@@ -193,6 +200,10 @@ func runStructuredRounds(ctx context.Context, req llm.Request, opt llm.RequestOp
 			return llm.Response{}, &Error{Code: "bridge_context_budget"}
 		}
 		generationCtx, cancel := context.WithTimeout(ctx, time.Duration(limits.TimeoutMillis)*time.Millisecond)
+		if opt.Progress != nil {
+			opt.Progress(llm.Progress{Attempt: uint64(generation), Reset: true})
+		}
+		generationStart := time.Now()
 		proposal, response, err := generate(generationCtx, model, schema, system, input)
 		cancel()
 		if err != nil {
@@ -203,6 +214,11 @@ func runStructuredRounds(ctx context.Context, req llm.Request, opt llm.RequestOp
 				return llm.Response{}, &Error{Code: "structured_generation_timeout"}
 			}
 			return llm.Response{}, err
+		}
+		// Record this generation before replay usage is combined for canonical
+		// accounting. Neither prior proposals nor Unreal tool waits affect TPS.
+		if response.Generation == nil || !response.Generation.Valid() {
+			response.Generation = &llm.GenerationStatistics{Model: model.ID, Tokens: llm.ReportedTokens(response.Usage), DurationMicros: time.Since(generationStart).Microseconds(), Source: "client_clock"}
 		}
 		response.ID = uuid.New().String()
 		if proposal.Type == "final" {
@@ -291,7 +307,7 @@ func sensitiveReceipt(text string) bool { return secretguard.Sensitive(text) }
 // One generation = one independent isolated process. SDK controls and stdout
 // live only in this stack frame. No session/replay/private continuation state
 // is reused, and cleanup reaps the entire process group on every exit path.
-func (c *Client) structuredGeneration(ctx context.Context, path string, env []string, model llm.Model, schema *actionSchema, system, input string, probe bool) (actionProposal, llm.Response, error) {
+func (c *Client) structuredGeneration(ctx context.Context, path string, env []string, model llm.Model, schema *actionSchema, system, input string, probe bool, progress ...func(llm.Progress)) (actionProposal, llm.Response, error) {
 	dir, err := os.MkdirTemp("", "unreal-claude-structured-")
 	if err != nil {
 		return actionProposal{}, llm.Response{}, &Error{Code: "subprocess_failure"}
@@ -343,7 +359,7 @@ func (c *Client) structuredGeneration(ctx context.Context, path string, env []st
 		}
 		done <- err
 	}()
-	proposal, response, streamErr := runStructuredProtocol(reader, writer, schema, input, probe)
+	proposal, response, streamErr := runStructuredProtocol(reader, writer, schema, input, probe, progress...)
 	close(parsed)
 	writer.Close()
 	var waitErr error

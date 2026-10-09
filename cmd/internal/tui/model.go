@@ -46,6 +46,7 @@ type Snapshot struct {
 	Lines              []string
 	Operations         []operation.Operation
 	Progress           *host.Progress
+	LastGeneration     *llm.GenerationStatistics
 	WaitingForModel    bool
 	Selection          *sessionstore.RuntimeSelection
 	PendingSelection   *sessionstore.RuntimeSelection
@@ -113,7 +114,15 @@ func (m *Model) Snapshot() Snapshot {
 	s.Permissions.Pending = append([]permission.Pending(nil), s.Permissions.Pending...)
 	if s.Progress != nil {
 		p := *s.Progress
+		if p.Statistics != nil {
+			copy := *p.Statistics
+			p.Statistics = &copy
+		}
 		s.Progress = &p
+	}
+	if s.LastGeneration != nil {
+		copy := *s.LastGeneration
+		s.LastGeneration = &copy
 	}
 	if s.ContextPackage != nil {
 		d := *s.ContextPackage
@@ -186,6 +195,12 @@ func (m *Model) apply(v host.View) error {
 				}
 			}
 		case sessionstore.ModelResponse:
+			if data.Response.Generation != nil && data.Response.Generation.Valid() {
+				copy := *data.Response.Generation
+				s.LastGeneration = &copy
+			} else if data.Response.Failure == nil {
+				s.LastGeneration = &llm.GenerationStatistics{Model: data.Response.Model, Tokens: llm.ReportedTokens(data.Response.Usage)}
+			}
 			responseTurn = data.TurnID
 			responseSeen = true
 			s.WaitingForModel = false
@@ -281,6 +296,10 @@ func (m *Model) setProgress(p *host.Progress) {
 		return
 	}
 	copy := *p
+	if p.Statistics != nil {
+		stats := *p.Statistics
+		copy.Statistics = &stats
+	}
 	copy.Text = clipBytes(copy.Text, 64<<10)
 	m.state.Progress = &copy
 	m.seenEpoch = p.Epoch

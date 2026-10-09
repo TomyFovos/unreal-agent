@@ -55,7 +55,7 @@ func TestClaudeTrustedPolicyAnalysisKeepsLiveDockResponsive(t *testing.T) {
 		for _, theme := range []Theme{{}, {NoColor: true}, {Plain: true}, {ASCII: true}} {
 			u := UIState{Theme: theme, Sheet: &Sheet{Title: "Analysis · Overview", Analysis: "Overview", Lines: analysis.Lines(r, "Overview", theme.ASCII)}}
 			f := RenderFrame(m.Snapshot(), u, size[0], size[1])
-			if len(f.Lines) != size[1] || f.CursorY != size[1]-1 || !strings.Contains(f.Lines[len(f.Lines)-1], "Ask") {
+			if len(f.Lines) != size[1] || f.CursorY != size[1]-2 || !strings.Contains(f.Lines[len(f.Lines)-2], "Ask") {
 				t.Fatal("trust metadata displaced bottom composer", size)
 			}
 			for _, line := range f.Lines {
@@ -64,7 +64,7 @@ func TestClaudeTrustedPolicyAnalysisKeepsLiveDockResponsive(t *testing.T) {
 				}
 			}
 			u.Sheet.Offset = 1_000_000
-			if end := RenderFrame(m.Snapshot(), u, size[0], size[1]); end.CursorY != size[1]-1 {
+			if end := RenderFrame(m.Snapshot(), u, size[0], size[1]); end.CursorY != size[1]-2 {
 				t.Fatal("scrolling overview moved composer")
 			}
 		}
@@ -81,7 +81,7 @@ func TestClaudeClosedInitReasonVisibleInBoundedFailure(t *testing.T) {
 		for _, theme := range []Theme{{}, {NoColor: true}, {Plain: true}, {ASCII: true}} {
 			f := RenderFrame(m.Snapshot(), UIState{Theme: theme}, size[0], size[1])
 			text := sgrRE.ReplaceAllString(strings.Join(f.Lines, ""), "")
-			if !strings.Contains(text, "init_plugins_loaded") || len(f.Lines) != size[1] || f.CursorY != size[1]-1 {
+			if !strings.Contains(text, "init_plugins_loaded") || len(f.Lines) != size[1] || f.CursorY != size[1]-2 {
 				t.Fatal("bounded failure hid the closed reason or moved composer", size)
 			}
 		}

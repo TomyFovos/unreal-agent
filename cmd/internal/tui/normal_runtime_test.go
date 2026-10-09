@@ -37,7 +37,7 @@ func TestNormalRuntimeCapabilityProjectionDoesNotRewriteDesiredConfiguration(t *
 			for _, theme := range []Theme{{}, {NoColor: true}, {Plain: true}, {ASCII: true}} {
 				u := UIState{Theme: theme, Sheet: &Sheet{Title: "Analysis · Overview", Analysis: "Overview", Lines: analysis.Lines(r, "Overview", theme.ASCII)}}
 				frame := RenderFrame(m.Snapshot(), u, size[0], size[1])
-				if frame.CursorY != size[1]-1 {
+				if frame.CursorY != size[1]-2 {
 					t.Fatal("health moved composer")
 				}
 				for _, line := range frame.Lines {

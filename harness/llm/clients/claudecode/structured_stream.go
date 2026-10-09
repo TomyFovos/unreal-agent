@@ -15,7 +15,7 @@ import (
 // host ToolCall: only result.structured_output, independently schema-validated,
 // becomes an Action/Final. All other execution is rejected by the same isolated
 // stream validator as text-only mode. No raw JSON/prose reaches progress/UI.
-func readStructuredStream(scanner *bufio.Scanner, schema *actionSchema, prefix []byte, finish func()) (actionProposal, llm.Response, error) {
+func readStructuredStream(scanner *bufio.Scanner, schema *actionSchema, prefix []byte, finish func(), progress ...func(llm.Progress)) (actionProposal, llm.Response, error) {
 	var clean bytes.Buffer
 	clean.Write(prefix)
 	serializerIDs := map[string]bool{}
@@ -221,6 +221,9 @@ func readStructuredStream(scanner *bufio.Scanner, schema *actionSchema, prefix [
 			record.Event.Delta.Text = ""
 			if err := textOnlyEvent(record.Event); err != nil {
 				return fail(err, structuredSerializerPartialInvalid, line)
+			}
+			if len(progress) > 0 {
+				emitTokenProgress(record.Event, progress[0])
 			}
 		case "user":
 			if len(record.Message.Content) == 0 {
@@ -443,7 +446,7 @@ func structuredDenial(err error) error {
 
 // The SDK initialize.jsonSchema field is the official equivalent of
 // --json-schema/outputFormat. Send it over stdin; no schema or prompt in argv.
-func runStructuredProtocol(r io.Reader, w io.Writer, schema *actionSchema, input string, probe bool) (actionProposal, llm.Response, error) {
+func runStructuredProtocol(r io.Reader, w io.Writer, schema *actionSchema, input string, probe bool, progress ...func(llm.Progress)) (actionProposal, llm.Response, error) {
 	initialize, user, err := structuredProtocolFrames(schema, input, probe)
 	if err != nil {
 		return actionProposal{}, llm.Response{}, err
@@ -518,7 +521,7 @@ func runStructuredProtocol(r io.Reader, w io.Writer, schema *actionSchema, input
 			if closer, ok := w.(io.Closer); ok {
 				_ = closer.Close()
 			}
-		})
+		}, progress...)
 	}
 	stage, code := structuredInitIncomplete, "structured_unavailable"
 	if scanner.Err() == bufio.ErrTooLong {

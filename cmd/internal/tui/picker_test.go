@@ -34,7 +34,7 @@ func TestModelPickerEffortsScrollingFallbackAndBottom(t *testing.T) {
 			u := UIState{Picker: p, Theme: theme}
 			f := RenderFrame(Snapshot{ID: "test", Connected: true, Running: true, Selection: current}, u, size[0], size[1])
 			text := strings.Join(f.Lines, "\n")
-			if !strings.Contains(text, "Model 11") || f.CursorY != size[1]-1 || !strings.Contains(f.Lines[len(f.Lines)-1], "Ask") {
+			if !strings.Contains(text, "Model 11") || f.CursorY != size[1]-2 || !strings.Contains(f.Lines[len(f.Lines)-2], "Ask") {
 				t.Fatal(size, text)
 			}
 			for _, line := range f.Lines {
@@ -72,7 +72,7 @@ func TestAnalysisViewsResponsiveSanitizedScrolledAndCurrentHeader(t *testing.T) 
 			for _, view := range analysis.Views[:len(analysis.Views)-1] {
 				u := UIState{Theme: theme, Sheet: &Sheet{Title: "Analysis · " + view, Analysis: view, Lines: analysis.Lines(r, view, theme.ASCII)}}
 				f := RenderFrame(s, u, size[0], size[1])
-				if len(f.Lines) != size[1] || f.CursorY != size[1]-1 || !strings.Contains(f.Lines[len(f.Lines)-1], "Ask") {
+				if len(f.Lines) != size[1] || f.CursorY != size[1]-2 || !strings.Contains(f.Lines[len(f.Lines)-2], "Ask") {
 					t.Fatal("analysis displaced bottom composer", size, view)
 				}
 				for _, line := range f.Lines {

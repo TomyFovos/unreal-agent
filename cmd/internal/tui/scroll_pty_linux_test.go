@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/host"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"golang.org/x/sys/unix"
 )
 
@@ -24,6 +27,13 @@ func TestScrollRealPTYWheelKeyboardResizeAndDetach(t *testing.T) {
 		}
 		text.WriteString("LAST_SCROLL_LINE")
 		f := conversationFixture(text.String())
+		response := f.view.History.Items[len(f.view.History.Items)-1].Data.(sessionstore.ModelResponse)
+		response.Response.Generation = &llm.GenerationStatistics{Model: "pty-model", Source: "provider_api", DurationMicros: 2_000_000, Tokens: llm.TokenCounts{Input: 100, Output: 20, InputKnown: true, OutputKnown: true}}
+		f.view.History.Items[len(f.view.History.Items)-1].Data = response
+		f.view.History.Items = append([]host.HistoryItem{{Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{Kind: sessionstore.HostRuntimeApplied, Selection: &sessionstore.RuntimeSelection{Provider: "claude-code", Model: "pty-model", Effort: "high", Revision: 1}}}}, f.view.History.Items...)
+		for i := range f.view.History.Items {
+			f.view.History.Items[i].Sequence = sessionstore.Sequence(i + 1)
+		}
 		theme := Theme{Plain: true}
 		if err := Terminal(t.Context(), Config{Client: f, ID: "s", Theme: &theme}); err != nil {
 			t.Fatal(err)
@@ -108,7 +118,9 @@ func TestScrollRealPTYWheelKeyboardResizeAndDetach(t *testing.T) {
 		}
 	}
 	readUntil(func(s string) bool { return strings.Contains(s, "LAST_SCROLL_LINE") })
-
+	if !strings.Contains(out.text(), "Claude/pty-model | high | TPS 10.0(api)") || !strings.Contains(out.text(), "In:100 Out:20") {
+		t.Fatal("PTY statistics not below composer", out.text())
+	}
 	if !strings.Contains(out.rawText(), "\x1b[?1006h") || !strings.Contains(out.rawText(), "\x1b[?1000h") {
 		t.Fatal("mouse reporting not enabled")
 	}

@@ -35,7 +35,7 @@ func TestClaudeDiscoveredPickerAliasRestrictionsEffortsAndResponsiveScroll(t *te
 	for _, size := range [][2]int{{44, 14}, {60, 20}, {80, 24}, {130, 30}} {
 		for _, theme := range []Theme{{}, {NoColor: true}, {Plain: true}, {ASCII: true}} {
 			frame := RenderFrame(Snapshot{ID: "team", Connected: true, Running: true, Selection: current}, UIState{Picker: p, Theme: theme}, size[0], size[1])
-			if !strings.Contains(strings.Join(frame.Lines, "\n"), "Discovered 11") || frame.CursorY != size[1]-1 {
+			if !strings.Contains(strings.Join(frame.Lines, "\n"), "Discovered 11") || frame.CursorY != size[1]-2 {
 				t.Fatal("discovered model scrolled outside viewport or displaced composer", size)
 			}
 			for _, line := range frame.Lines {

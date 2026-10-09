@@ -132,7 +132,7 @@ func TestLivePhase4MultilineComposerCursorMaskedAndScroll(t *testing.T) {
 	}
 	s.Progress = &host.Progress{Mode: "streaming", Text: "draft"}
 	f = RenderFrame(s, u, 80, 24)
-	if !strings.Contains(f.Lines[20], "generating") {
+	if !strings.Contains(f.Lines[19], "generating") {
 		t.Fatal("scroll pushed pulse out")
 	}
 }
@@ -475,7 +475,7 @@ func TestLivePhase2PulsePrioritiesAndStates(t *testing.T) {
 		s := idleSnapshot()
 		s.Progress = c.p
 		f := RenderFrame(s, plainUI(), 80, 24)
-		if strings.Count(frameText(f), c.want) != 1 || !strings.Contains(f.Lines[20], c.want) {
+		if strings.Count(frameText(f), c.want) != 1 || !strings.Contains(f.Lines[19], c.want) {
 			t.Fatalf("pulse misplaced: %s", frameText(f))
 		}
 	}
@@ -591,7 +591,7 @@ func TestLivePhase1IdleResponsiveAndResize(t *testing.T) {
 		}
 	}
 	f := RenderFrame(s, u, 80, 24)
-	if len(f.Lines) != 24 || f.ConversationHeight < 15 || f.Lines[1] != "" || f.Lines[22] != strings.Repeat("─", 79) || !strings.Contains(f.Lines[21], "^D detach") || !strings.Contains(f.Lines[23], "you ›") {
+	if len(f.Lines) != 24 || f.ConversationHeight < 15 || f.Lines[1] != "" || f.Lines[21] != strings.Repeat("─", 79) || !strings.Contains(f.Lines[20], "^D detach") || !strings.Contains(f.Lines[22], "you ›") {
 		t.Fatalf("idle layout: %#v", f)
 	}
 	for _, word := range []string{"child", "/login", "help", "thinking", "generating"} {

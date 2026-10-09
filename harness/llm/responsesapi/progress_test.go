@@ -34,8 +34,11 @@ func TestProgressFromSSEDoesNotChangeCanonicalResponse(t *testing.T) {
 	if !reflect.DeepEqual(response, want) {
 		t.Fatal("partial output entered canonical response")
 	}
-	if len(progress) != 4 || !progress[0].Reset || progress[1].Delta != "partial-1" || !progress[2].Reset || progress[2].Attempt != 2 || progress[3].Delta != "partial-2" {
+	if len(progress) != 5 || !progress[0].Reset || progress[1].Delta != "partial-1" || !progress[2].Reset || progress[2].Attempt != 2 || progress[3].Delta != "partial-2" {
 		t.Fatalf("progress: %+v", progress)
+	}
+	if progress[4].Tokens == nil || *progress[4].Tokens != (llm.TokenCounts{Input: 12, Output: 8, InputKnown: true, OutputKnown: true}) || progress[4].Delta != "" || progress[4].Attempt != 2 {
+		t.Fatalf("reported token progress: %+v", progress[4])
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()

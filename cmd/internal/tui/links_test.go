@@ -146,7 +146,7 @@ func TestHyperlinkResponsiveSplitResizeCacheAndExport(t *testing.T) {
 					}
 				}
 				bounds(t, plain, size[0], size[1])
-				if strings.Contains(f.Lines[len(f.Lines)-1], "\x1b]8;") {
+				if strings.Contains(f.Lines[len(f.Lines)-1], "\x1b]8;") || len(f.Lines) > 1 && strings.Contains(f.Lines[len(f.Lines)-2], "\x1b]8;") {
 					t.Fatal("composer acquired clickable links")
 				}
 			}
