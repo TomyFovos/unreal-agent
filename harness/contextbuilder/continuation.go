@@ -2,6 +2,8 @@ package contextbuilder
 
 import (
 	"encoding/json/v2"
+	"slices"
+
 	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -76,9 +78,11 @@ func (b *builder) requiredContinuations() (map[string]bool, error) {
 func (b *builder) redactedReceipt(running bool) ([]llm.ToolResultOutput, bool) {
 	status, present := b.source.Data.(sessionstore.ToolCallStatus)
 	state := "completed"
-	if !present {
-		state = "unavailable"
-	}
+	// WaitingFor records dependencies even in terminal canonical receipts. It
+	// says nothing about liveness. Aggregate actual states with fixed precedence,
+	// independent of Operation enumeration: active, rejected, unknown, failed,
+	// canceled, completed. An absent receipt always remains unavailable.
+	active, rejected, unknown, failed, canceled := running, status.Status.Denial != nil, false, status.Status.Error != "", false
 	var operations []string
 	for _, op := range status.Operations {
 		value := "unknown"
@@ -93,18 +97,28 @@ func (b *builder) redactedReceipt(running bool) ([]llm.ToolResultOutput, bool) {
 			value = "canceled"
 		}
 		operations = append(operations, value)
-		if value != "completed" {
-			state = value
-		}
+		active = active || value == "running"
+		rejected = rejected || op.Denial != nil
+		unknown = unknown || value == "unknown"
+		failed = failed || value == "failed"
+		canceled = canceled || value == "canceled"
 	}
-	if status.Status.Error != "" {
-		state = "failed"
-	}
-	if status.Status.Denial != nil {
-		state = "rejected"
-	}
-	if running || len(status.Status.WaitingFor) > 0 {
+	// Without IDs these are a sorted multiset of actual states, retaining one
+	// entry per Operation; they do not claim correspondence to an execution ID.
+	slices.Sort(operations)
+	switch {
+	case !present:
+		state = "unavailable"
+	case active:
 		state = "running"
+	case rejected:
+		state = "rejected"
+	case unknown:
+		state = "unknown"
+	case failed:
+		state = "failed"
+	case canceled:
+		state = "canceled"
 	}
 	data, _ := json.Marshal(struct {
 		Redacted        bool     `json:"redacted"`

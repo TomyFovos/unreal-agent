@@ -26,6 +26,14 @@ and actual canonical states (including unavailable, running, failed and canceled
 Secret arguments make the whole group portable; original private replay IDs are
 never retained with redacted arguments. Stubs are not canonical receipts.
 
+Terminal receipts retain `WaitingFor` as dependency evidence, not liveness.
+Redaction uses the Coordinator's running flag and actual Operation states. The
+aggregate precedence is running, rejected, unknown, failed, canceled, completed;
+an absent canonical receipt is always unavailable. `operation_states` is a sorted
+multiset of the actual per-Operation states (including duplicate counts), with no
+IDs. An Operation denial makes the aggregate rejected without rewriting that
+Operation's terminal status. Neither projection nor replay erases dependencies.
+
 Estimates remain conservative JSON/UTF-8 byte-based estimates, not measured
 tokens. Explicit budgets, unknown-window fallback, schema and private framing
 reserves remain. New initial selections use matching available CLI catalog
