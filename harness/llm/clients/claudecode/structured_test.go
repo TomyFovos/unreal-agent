@@ -272,7 +272,7 @@ func TestStructuredResultBoundAndSecretExclusion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, input, err := structuredPrompt(built.Request.Input, &receipt, 1024)
+	_, input, err := structuredPrompt(built.Request, &receipt, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +287,7 @@ func TestStructuredResultBoundAndSecretExclusion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, input, err = structuredPrompt(built.Request.Input, &receipt, 1024)
+	_, input, err = structuredPrompt(built.Request, &receipt, 1024)
 	if err != nil || strings.Contains(input, "sk-ant-test-secret-sensitive") {
 		t.Fatal("secret receipt leaked", err)
 	}

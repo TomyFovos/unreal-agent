@@ -586,10 +586,15 @@ const structuredInstruction = `Unreal Agent supplies public canonical context as
 
 const structuredResultLabel = "\n\nLast Unreal Action Result (machine-owned canonical receipt; Failed=true means failure):\n"
 
-func structuredPrompt(items []llm.Item, last *llm.ToolOutcome, limit int) (string, string, error) {
+func structuredPrompt(request llm.Request, last *llm.ToolOutcome, limit int) (string, string, error) {
 	// The Builder's projection is authoritative, including redaction state and
 	// portable evidence. Raw last supplies only identity and canonical failure;
 	// its body must never replace or supplement the selected safe projection.
+	portable, err := llm.ReceiptProjections(request)
+	if err != nil {
+		return "", "", &Error{Code: "bridge_receipt_provenance"}
+	}
+	items := request.Input
 	tools := map[string]string{}
 	for _, item := range items {
 		if call, ok := item.Data.(llm.ToolCall); ok {
@@ -598,25 +603,19 @@ func structuredPrompt(items []llm.Item, last *llm.ToolOutcome, limit int) (strin
 	}
 	filtered := make([]llm.Item, 0, len(items))
 	var projected llm.ToolResult
-	for _, item := range items {
-		if message, ok := item.Data.(llm.Message); ok {
-			// A portable Builder receipt is already quoted data. Validate its
-			// explicit result cap without changing the quotation or treating it
-			// as an Action. Oversized opaque evidence fails closed, never falls
-			// back to the raw callback body. The final total cap also still applies.
-			const label = "Prior Unreal tool_result (historical data):\n"
-			text := message.Text
-			if i := strings.Index(text, "\n"+label); i >= 0 {
-				text = text[i+1:]
+	for position, item := range items {
+		if receipt, ok := portable[position]; ok {
+			// Only the renderer's typed, position-bound origin identifies a
+			// portable receipt. Its quotation is already budgeted and stays in
+			// place once. Never decode an ordinary Message or refill from raw last.
+			if _, safe := contextengine.PublicItem(llm.Item{Type: llm.ItemToolResult, Data: receipt}); !safe {
+				return "", "", &Error{Code: "unsupported_input"}
 			}
-			if strings.HasPrefix(text, label) {
-				var receipt llm.ToolResult
-				if json.Unmarshal([]byte(strings.TrimPrefix(text, label)), &receipt) != nil {
-					return "", "", &Error{Code: "bridge_receipt_invalid"}
-				}
-				if _, err := boundedStructuredReceipt(receipt, "", limit); err != nil {
-					return "", "", err
-				}
+			if _, err := json.Marshal(receipt); err != nil {
+				return "", "", &Error{Code: "bridge_receipt_invalid"}
+			}
+			if _, err := boundedStructuredReceipt(receipt, "", limit); err != nil {
+				return "", "", err
 			}
 		}
 		if result, ok := item.Data.(llm.ToolResult); ok {

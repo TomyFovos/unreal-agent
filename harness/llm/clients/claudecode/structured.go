@@ -190,7 +190,7 @@ func runStructuredRounds(ctx context.Context, req llm.Request, opt llm.RequestOp
 		if budget > 0 {
 			opt.InputBudget = budget
 		}
-		system, input, err := structuredPrompt(req.Input, last, limits.ResultBytes)
+		system, input, err := structuredPrompt(req, last, limits.ResultBytes)
 		if err != nil {
 			return llm.Response{}, err
 		}

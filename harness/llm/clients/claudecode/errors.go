@@ -229,6 +229,8 @@ func (e *Error) message() string {
 		return "Claude tool bridge tool request was canceled"
 	case "bridge_receipt_invalid":
 		return "Claude tool bridge received an invalid Unreal tool receipt"
+	case "bridge_receipt_provenance":
+		return "Claude tool bridge received inconsistent receipt provenance"
 	case "bridge_unavailable":
 		return "Claude tool bridge SDK transport is unavailable"
 	case "bridge_host_failure":

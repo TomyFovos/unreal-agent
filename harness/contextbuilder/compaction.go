@@ -468,6 +468,10 @@ func (b *builder) buildCompactedReserve(reserve int64) (Result, error) {
 	if err := llm.ValidateContinuation(request.Input); err != nil {
 		return Result{}, err
 	}
+	request, err = llm.BindReceiptProjections(request)
+	if err != nil {
+		return Result{}, err
+	}
 	return Result{Request: request, Report: Report{Changes: changes, Context: &d}, Package: &p}, nil
 }
 

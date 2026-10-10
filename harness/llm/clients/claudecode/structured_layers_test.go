@@ -272,7 +272,7 @@ func TestStructuredLayerPromptFramingAndPrivateExclusion(t *testing.T) {
 	}
 	last := llm.ToolOutcome{Failed: true, Result: llm.ToolResult{CallID: "receipt", Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: "canonical failure feedback"}}}}
 	items = append(items, llm.Item{Type: llm.ItemToolResult, Data: last.Result})
-	system, input, err := structuredPrompt(items, &last, 1024)
+	system, input, err := structuredPrompt(llm.Request{Input: items}, &last, 1024)
 	if err != nil || !strings.Contains(system, "PROJECT_SNAPSHOT") || !strings.Contains(system, structuredInstruction) || strings.Count(input, "canonical failure feedback") != 1 || !strings.Contains(input, `"Failed":true`) {
 		t.Fatal("system/prompt/receipt framing", err)
 	}
@@ -284,11 +284,11 @@ func TestStructuredLayerPromptFramingAndPrivateExclusion(t *testing.T) {
 		{Result: llm.ToolResult{CallID: "receipt", Output: slices.Repeat([]llm.ToolResultOutput{{Kind: llm.ToolResultText}}, 129)}},
 	} {
 		projected := append(slices.Clone(items[:3]), llm.Item{Type: llm.ItemToolResult, Data: receipt.Result})
-		_, _, err := structuredPrompt(projected, &receipt, 1024)
+		_, _, err := structuredPrompt(llm.Request{Input: projected}, &receipt, 1024)
 		requireCode(t, err, "bridge_receipt_invalid")
 	}
 	last.Result.Output[0].Value = strings.Repeat("large receipt\n", 1000)
 	projected := append(slices.Clone(items[:2]), llm.Item{Type: llm.ItemToolResult, Data: last.Result})
-	_, _, err = structuredPrompt(projected, &last, 1024)
+	_, _, err = structuredPrompt(llm.Request{Input: projected}, &last, 1024)
 	requireCode(t, err, "bridge_context_budget") // opaque oversized JSON/text is never split
 }

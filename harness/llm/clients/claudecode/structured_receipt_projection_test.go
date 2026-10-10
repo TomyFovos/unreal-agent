@@ -148,7 +148,7 @@ func TestStructuredReceiptProjectionRepairSecretState(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, input, err := structuredPrompt(built.Request.Input, &outcome, 65536)
+			_, input, err := structuredPrompt(built.Request, &outcome, 65536)
 			if err != nil || strings.Contains(input, "SYNTHETIC_PRIVATE_MARKER") {
 				t.Fatal("protected body leaked", err)
 			}
@@ -204,7 +204,7 @@ func TestStructuredReceiptProjectionRepairMultipleReadsAndReserve(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	system, input, err := structuredPrompt(built.Request.Input, &last, 65536)
+	system, input, err := structuredPrompt(built.Request, &last, 65536)
 	if err != nil || contextengine.Estimate(system)+contextengine.Estimate(input) > 24576 || built.Report.Context.TransportReserve != reserve {
 		t.Fatal("private reserve/final transport budget mismatch", err)
 	}
@@ -232,7 +232,7 @@ func TestStructuredReceiptProjectionRepairPortableNeverUsesRaw(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, input, err := structuredPrompt(built.Request.Input, &last, 65536)
+	_, input, err := structuredPrompt(built.Request, &last, 65536)
 	if err != nil || strings.Contains(input, "SYNTHETIC_PRIVATE_MARKER") {
 		t.Fatal("portable projection fell back to raw canonical body", err)
 	}
@@ -310,6 +310,10 @@ func TestStructuredReceiptProjectionRepairTrueOverflowAndOpaqueCap(t *testing.T)
 	}
 	// The explicit cap also applies after a whole-group portable projection.
 	portable := contextengine.Portable(contextengine.Unit{Kind: contextengine.ToolResult, Item: llm.Item{Type: llm.ItemToolResult, Data: llm.ToolResult{CallID: "cap", Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: strings.Repeat("opaque", 1000)}}}}}, false)
-	_, _, err = structuredPrompt([]llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: "task"}}, portable}, nil, 1024)
+	portableRequest, err := llm.BindReceiptProjections(llm.Request{Input: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: "task"}}, portable}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = structuredPrompt(portableRequest, nil, 1024)
 	requireCode(t, err, "bridge_context_budget")
 }

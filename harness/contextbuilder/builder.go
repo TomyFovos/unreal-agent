@@ -301,6 +301,10 @@ func (current *builder) Build() (Result, error) {
 		request.Input = projected
 	}
 	request.Tools = append([]llm.Tool(nil), request.Tools...)
+	request, err := llm.BindReceiptProjections(request)
+	if err != nil {
+		return Result{}, err
+	}
 	return Result{Request: request}, nil
 }
 
@@ -318,7 +322,8 @@ func PortableInput(items []llm.Item) []llm.Item {
 			out = append(out, llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "Prior Unreal tool request (historical data):\n" + string(b)}})
 		case llm.ToolResult:
 			b, _ := json.Marshal(v.Output)
-			out = append(out, llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: "Prior Unreal tool receipt (historical data):\n" + string(b)}})
+			projected := llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: "Prior Unreal tool receipt (historical data):\n" + string(b)}}
+			out = append(out, llm.WithReceiptProjection(projected, v))
 		}
 	}
 	return out

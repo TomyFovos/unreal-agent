@@ -51,6 +51,30 @@ oversized opaque/portable receipts fail with the existing typed budget error,
 rather than splitting serialized JSON or automatically repeating an Action.
 Existing range-limited reads retain their exact range and truncation metadata.
 
+Portable receipt identity is derived from the trusted renderer, never from a
+heading in a Message. Both bounded and legacy Builders attach a private typed
+origin containing only the adopted receipt, then seal it to the final request's
+item position. Distinct renderings have distinct identity even when text or
+CallID is equal. The Claude adapter validates those bindings and checks source
+eligibility and `ResultBytes` on the typed value, without decoding Message text.
+Missing, moved, duplicate or changed origins fail before generation with
+`bridge_receipt_provenance`; ordinary prose containing historical-receipt labels
+is not an internal mismatch. Native ToolResults keep their existing typed path.
+Origins/bindings are immutable, request-local, unexported and excluded from JSON.
+Canonical Item decoding and public/index projection do not preserve them; they
+are rebuilt only by Builder rendering, never by parsing exported text.
+
+The R3 regression first reproduces `bridge_receipt_invalid` on the original
+20a8e12 source with Go 1.27/JSON v2, through bounded and legacy Builder paths.
+Its ordinary-user/system/assistant/quoted-JSON matrix preserves the exact text;
+an isolated fake Host reaches one canonical Final with zero Operations. Typed
+native/portable receipts remain capped, while equal ordinary prose is subject
+only to the ordinary total input limit. Internal missing/position/duplicate and
+running/final mismatch cases fail closed with no generation, tool callback or
+public response. Prior terminal-state, middle-edit/range, secret, reserve and
+duplicate-proposal tests remain required. This fix establishes no direct cause
+for the separate real Sandbox SSE/timeout failures.
+
 The e52a4dc review regression uses the actual native translator's terminal
 `WaitingFor` and parses both stub state fields. It also tests real Builder → final
 Claude input → native fake CLI → fake Host: small/4KiB/8KiB/12KiB middle edits,
