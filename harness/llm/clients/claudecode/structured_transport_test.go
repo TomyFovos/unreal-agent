@@ -166,7 +166,7 @@ func TestStructuredLayerTransportContractReserve(t *testing.T) {
 	if _, err := r.run(t.Context()); err != nil || len(reserves) != 2 {
 		t.Fatal("bounded transport contract round failed", err)
 	}
-	framing, err := structuredTransportReserve(nil, 3000)
+	framing, err := structuredTransportReserve(nil)
 	if err != nil || reserves[0] != framing+contextengine.Estimate(r.schema.contract) || reserves[1] <= reserves[0] {
 		t.Fatal("private Registry contract/receipt budget was not reserved")
 	}

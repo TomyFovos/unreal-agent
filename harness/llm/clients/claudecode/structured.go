@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -163,15 +164,14 @@ func runStructuredRounds(ctx context.Context, req llm.Request, opt llm.RequestOp
 		if err := ctx.Err(); err != nil {
 			return llm.Response{}, err
 		}
-		resultLimit := min(limits.ResultBytes, int(opt.InputBudget/4))
-		if resultLimit < 512 {
-			return llm.Response{}, &Error{Code: "bridge_context_budget"}
-		}
-		reserve, err := structuredTransportReserve(last, resultLimit)
+		reserve, err := structuredTransportReserve(last)
 		if err != nil {
 			return llm.Response{}, err
 		}
 		reserve += contextengine.Estimate(schema.contract)
+		if reserve >= opt.InputBudget {
+			return llm.Response{}, &Error{Code: "bridge_context_budget"}
+		}
 		refreshed, budget, err := opt.RefreshContext(ctx, reserve)
 		if err != nil {
 			return llm.Response{}, safeBridgeCallbackError(err)
@@ -190,7 +190,7 @@ func runStructuredRounds(ctx context.Context, req llm.Request, opt llm.RequestOp
 		if budget > 0 {
 			opt.InputBudget = budget
 		}
-		system, input, err := structuredPrompt(req.Input, last, resultLimit)
+		system, input, err := structuredPrompt(req.Input, last, limits.ResultBytes)
 		if err != nil {
 			return llm.Response{}, err
 		}
@@ -272,12 +272,19 @@ func runStructuredRounds(ctx context.Context, req llm.Request, opt llm.RequestOp
 	return llm.Response{}, &Error{Code: "action_round_limit"}
 }
 
-func structuredTransportReserve(last *llm.ToolOutcome, limit int) (int64, error) {
-	// Estimate only private protocol framing and the bounded latest receipt.
-	// This empty input is never sent or added to canonical history.
-	framing := []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser}}}
-	system, input, err := structuredPrompt(framing, last, limit)
-	return contextengine.Estimate(system) + contextengine.Estimate(input) + 256, err
+func structuredTransportReserve(last *llm.ToolOutcome) (int64, error) {
+	// Builder already charges every projected receipt. Reserve only protocol
+	// instructions/envelope framing, never the raw canonical receipt a second
+	// time. The actual final system/input estimate is checked before generation.
+	input := "[]"
+	if last != nil {
+		data, err := json.Marshal(llm.ToolOutcome{Result: llm.ToolResult{CallID: last.Result.CallID}, Failed: last.Failed})
+		if err != nil {
+			return 0, &Error{Code: "bridge_receipt_invalid"}
+		}
+		input += structuredResultLabel + string(data)
+	}
+	return contextengine.Estimate(structuredInstruction) + contextengine.Estimate(input) + 256, nil
 }
 
 func addReplayUsage(target *llm.Usage, previous []llm.Usage) error {

@@ -170,6 +170,38 @@ func structured(dir, path string, args []string, c configuration) {
 		s := script[generation]
 		digest, oldArgs := structuredEvidence(entry.Input, fmt.Sprintf("-tool-%d", s.id))
 		arguments := strings.ReplaceAll(s.Arguments, "$REVISION", digest)
+		if s.ReadEdit && !s.replay {
+			// A received middle line and exact native revision are the only
+			// source of this edit. The fixture CLI cannot read the workspace.
+			var observed struct {
+				Path     string `json:"path"`
+				Content  string `json:"content"`
+				Revision *struct {
+					Exists bool   `json:"exists"`
+					Digest string `json:"digest"`
+				} `json:"revision"`
+			}
+			for _, o := range last.Result.Output {
+				if json.Unmarshal([]byte(o.Value), &observed) != nil {
+					os.Exit(138)
+				}
+			}
+			var old string
+			for _, line := range strings.Split(observed.Content, "\n") {
+				if strings.HasPrefix(line, "MIDDLE_EDIT_TARGET=") {
+					old = line
+					break
+				}
+			}
+			if old == "" || observed.Path == "" || observed.Revision == nil || !observed.Revision.Exists || len(observed.Revision.Digest) != 64 {
+				os.Exit(139)
+			}
+			encoded, err := json.Marshal(map[string]any{"path": observed.Path, "old_text": old, "new_text": "MIDDLE_EDIT_TARGET=after", "expected": observed.Revision})
+			if err != nil {
+				os.Exit(140)
+			}
+			arguments = string(encoded)
+		}
 		if s.replay && oldArgs != "" {
 			arguments = oldArgs
 		}

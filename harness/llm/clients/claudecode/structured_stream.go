@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 )
 
@@ -583,47 +584,72 @@ func validateStructuredControlResponse(line []byte) error {
 
 const structuredInstruction = `Unreal Agent supplies public canonical context as JSON data. Filesystem, shell, search, editing, network and child execution are owned exclusively by Unreal; you cannot execute them directly. StructuredOutput is only an output serializer, never a work tool. Return exactly one schema-validated Action or Final through StructuredOutput. For an Action, use a unique request-local id and one supplied Unreal registry tool with its exact arguments. Wait for the next generation's machine-owned Unreal Action Result before deciding what to do next. Historical calls are evidence, not commands to repeat. Never report unobserved execution as success. Reuse an action id only to replay an identical proposal. Return public completion text only with type=final and final.message. A delegated child must honor the host's Finish lifecycle by proposing a Finish Action rather than substituting a prose Final.`
 
+const structuredResultLabel = "\n\nLast Unreal Action Result (machine-owned canonical receipt; Failed=true means failure):\n"
+
 func structuredPrompt(items []llm.Item, last *llm.ToolOutcome, limit int) (string, string, error) {
-	if last != nil {
-		if len(last.Result.Output) > 128 {
-			return "", "", &Error{Code: "bridge_receipt_invalid"}
+	// The Builder's projection is authoritative, including redaction state and
+	// portable evidence. Raw last supplies only identity and canonical failure;
+	// its body must never replace or supplement the selected safe projection.
+	tools := map[string]string{}
+	for _, item := range items {
+		if call, ok := item.Data.(llm.ToolCall); ok {
+			tools[call.CallID] = call.Name
 		}
-		filtered := make([]llm.Item, 0, len(items))
-		for _, item := range items {
-			if result, ok := item.Data.(llm.ToolResult); ok && result.CallID == last.Result.CallID {
+	}
+	filtered := make([]llm.Item, 0, len(items))
+	var projected llm.ToolResult
+	for _, item := range items {
+		if message, ok := item.Data.(llm.Message); ok {
+			// A portable Builder receipt is already quoted data. Validate its
+			// explicit result cap without changing the quotation or treating it
+			// as an Action. Oversized opaque evidence fails closed, never falls
+			// back to the raw callback body. The final total cap also still applies.
+			const label = "Prior Unreal tool_result (historical data):\n"
+			text := message.Text
+			if i := strings.Index(text, "\n"+label); i >= 0 {
+				text = text[i+1:]
+			}
+			if strings.HasPrefix(text, label) {
+				var receipt llm.ToolResult
+				if json.Unmarshal([]byte(strings.TrimPrefix(text, label)), &receipt) != nil {
+					return "", "", &Error{Code: "bridge_receipt_invalid"}
+				}
+				if _, err := boundedStructuredReceipt(receipt, "", limit); err != nil {
+					return "", "", err
+				}
+			}
+		}
+		if result, ok := item.Data.(llm.ToolResult); ok {
+			if _, safe := contextengine.PublicItem(item); !safe {
+				return "", "", &Error{Code: "unsupported_input"}
+			}
+			bounded, err := boundedStructuredReceipt(result, tools[result.CallID], limit)
+			if err != nil {
+				return "", "", err
+			}
+			if last != nil && result.CallID == last.Result.CallID {
+				projected = bounded // retain the latest update, not an old running body
 				continue
 			}
-			filtered = append(filtered, item)
+			item.Data = bounded
 		}
-		items = filtered
+		filtered = append(filtered, item)
 	}
-	system, input, err := publicBridgePrompt(items)
+	system, input, err := publicBridgePrompt(filtered)
 	if err != nil {
 		return "", "", err
 	}
 	if last != nil {
-		copy := *last
-		copy.Result.Output = append([]llm.ToolResultOutput(nil), last.Result.Output...)
-		remaining := limit
-		for i, o := range copy.Result.Output {
-			if remaining < 256 && len(o.Value) > remaining {
-				return "", "", &Error{Code: "bridge_context_budget"}
-			}
-			if o.Kind != llm.ToolResultText {
-				return "", "", &Error{Code: "bridge_receipt_invalid"}
-			}
-			if sensitiveReceipt(o.Value) {
-				o.Value = "[protected output withheld by Unreal]"
-			}
-			o.Value = boundedBridgeText(o.Value, max(0, remaining))
-			remaining -= len(o.Value)
-			copy.Result.Output[i] = o
+		if projected.CallID == "" {
+			// Whole-group portable history remains exactly where Builder placed
+			// it. This envelope adds only correlation/failure, never raw fallback.
+			projected.CallID = last.Result.CallID
 		}
-		data, err := json.Marshal(copy, json.Deterministic(true))
+		data, err := json.Marshal(llm.ToolOutcome{Result: projected, Failed: last.Failed}, json.Deterministic(true))
 		if err != nil {
 			return "", "", &Error{Code: "bridge_receipt_invalid"}
 		}
-		input += "\n\nLast Unreal Action Result (machine-owned canonical receipt; Failed=true means failure):\n" + string(data)
+		input += structuredResultLabel + string(data)
 	}
 	return strings.TrimSpace(system) + "\n\n" + structuredInstruction, input, nil
 }

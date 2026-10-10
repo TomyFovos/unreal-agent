@@ -48,6 +48,7 @@ type configuration struct {
 type bridgeStep struct {
 	Name, Arguments, Contains           string
 	Error, Duplicate, DuplicateEnvelope bool
+	ReadEdit                            bool
 }
 type call struct {
 	Arguments, Environment   []string

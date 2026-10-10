@@ -44,6 +44,9 @@ type Config struct {
 type BridgeStep struct {
 	Name, Arguments, Contains           string
 	Error, Duplicate, DuplicateEnvelope bool
+	// ReadEdit derives path, old text and expected revision solely from the
+	// previous received native read; no fixture revision/body shortcut exists.
+	ReadEdit bool
 }
 type Call struct {
 	Arguments, Environment   []string

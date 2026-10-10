@@ -204,6 +204,7 @@ func TestStructuredProviderUsesPublicActionNotHelperInput(t *testing.T) {
 		StructuredHelperInputs: []string{`{"serializer_internal":{"path":"private-sensitive"}}`, `{}`, `{"type":"final","final":{"message":"sensitive-prose"}}`},
 	})
 	var calls atomic.Int32
+	opt.RefreshContext = func(context.Context, int64) (llm.Request, int64, error) { return req, 24576, nil }
 	opt.Tools = func(ctx context.Context, r llm.Response) ([]llm.ToolOutcome, error) {
 		calls.Add(1)
 		if len(r.Output) != 1 {
@@ -213,7 +214,7 @@ func TestStructuredProviderUsesPublicActionNotHelperInput(t *testing.T) {
 		if call.Name != "read" || string(call.Arguments) != `{"path":"fixture.go"}` {
 			t.Fatal("Host executed helper input")
 		}
-		return bridgeReply(ctx, r)
+		return projectedBridgeReply(ctx, r, &req)
 	}
 	r, err := c.Respond(t.Context(), req, opt)
 	if err != nil || calls.Load() != 1 || len(f.Calls(t)) != 3 || r.Output[0].Data.(llm.Message).Text != "Bridge fixture completed" {

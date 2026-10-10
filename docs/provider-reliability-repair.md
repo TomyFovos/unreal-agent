@@ -34,6 +34,31 @@ multiset of the actual per-Operation states (including duplicate counts), with n
 IDs. An Operation denial makes the aggregate rejected without rewriting that
 Operation's terminal status. Neither projection nor replay erases dependencies.
 
+Claude's final structured input uses that same Builder projection. The latest
+native receipt is moved once into the machine-owned `Last Unreal Action Result`
+envelope, with `Failed` taken from the canonical Host outcome. Portable receipts
+stay quoted in the public context; their envelope adds correlation/failure only.
+Raw callback bodies never refill a redaction or a missing/portable projection.
+Private transport reserve charges instructions and envelope framing only: Builder
+has already charged the bodies. The final combined system/input estimate remains
+mandatory before generation, and no `InputBudget/4` result cap is applied.
+
+The explicit `ResultBytes` cap is retained. A known native read that exceeds it
+can be projected as a UTF-8 prefix inside a complete typed JSON result, preserving
+the full-file revision and starting line and setting `truncated=true`. JSON
+escaping is included in the cap. Its canonical result is unchanged. Other
+oversized opaque/portable receipts fail with the existing typed budget error,
+rather than splitting serialized JSON or automatically repeating an Action.
+Existing range-limited reads retain their exact range and truncation metadata.
+
+The e52a4dc review regression uses the actual native translator's terminal
+`WaitingFor` and parses both stub state fields. It also tests real Builder → final
+Claude input → native fake CLI → fake Host: small/4KiB/8KiB/12KiB middle edits,
+partial reads, duplicate proposals, protected output, multiple current reads,
+private reserve accounting and true overflow. The fake CLI derives path, old
+middle text and revision only from its received read. No real inference, Session,
+credential, Sandbox connection or existing Host shutdown is part of these tests.
+
 Estimates remain conservative JSON/UTF-8 byte-based estimates, not measured
 tokens. Explicit budgets, unknown-window fallback, schema and private framing
 reserves remain. New initial selections use matching available CLI catalog

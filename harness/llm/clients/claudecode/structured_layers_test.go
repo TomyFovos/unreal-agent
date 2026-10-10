@@ -280,15 +280,15 @@ func TestStructuredLayerPromptFramingAndPrivateExclusion(t *testing.T) {
 		t.Fatal("private state/instruction became public conversation")
 	}
 	for _, receipt := range []llm.ToolOutcome{
-		{Result: llm.ToolResult{Output: []llm.ToolResultOutput{{Kind: llm.ToolResultImage, Value: "dummy"}}}},
-		{Result: llm.ToolResult{Output: make([]llm.ToolResultOutput, 129)}},
+		{Result: llm.ToolResult{CallID: "receipt", Output: []llm.ToolResultOutput{{Kind: llm.ToolResultImage, Value: "dummy"}}}},
+		{Result: llm.ToolResult{CallID: "receipt", Output: slices.Repeat([]llm.ToolResultOutput{{Kind: llm.ToolResultText}}, 129)}},
 	} {
-		_, _, err := structuredPrompt(items, &receipt, 1024)
+		projected := append(slices.Clone(items[:3]), llm.Item{Type: llm.ItemToolResult, Data: receipt.Result})
+		_, _, err := structuredPrompt(projected, &receipt, 1024)
 		requireCode(t, err, "bridge_receipt_invalid")
 	}
 	last.Result.Output[0].Value = strings.Repeat("large receipt\n", 1000)
-	_, input, err = structuredPrompt(items[:2], &last, 1024)
-	if err != nil || !strings.Contains(input, "truncated") || len(input) > 4096 {
-		t.Fatal("unbounded/silent result truncation", err)
-	}
+	projected := append(slices.Clone(items[:2]), llm.Item{Type: llm.ItemToolResult, Data: last.Result})
+	_, _, err = structuredPrompt(projected, &last, 1024)
+	requireCode(t, err, "bridge_context_budget") // opaque oversized JSON/text is never split
 }

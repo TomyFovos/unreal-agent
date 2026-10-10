@@ -47,9 +47,10 @@ func TestStructuredOfficialControlSerializerCorrection(t *testing.T) {
 	c, f, req, opt := structuredClient(t)
 	f.Set(t, testclaude.Config{Subscription: "team", StructuredSerializerFailures: 1, BridgeSteps: []testclaude.BridgeStep{{Name: "read", Arguments: `{"path":"fixture.go"}`, Contains: "canonical file receipt"}}})
 	var actions atomic.Int32
+	opt.RefreshContext = func(context.Context, int64) (llm.Request, int64, error) { return req, 24576, nil }
 	opt.Tools = func(ctx context.Context, response llm.Response) ([]llm.ToolOutcome, error) {
 		actions.Add(1)
-		return bridgeReply(ctx, response)
+		return projectedBridgeReply(ctx, response, &req)
 	}
 	response, err := c.Respond(t.Context(), req, opt)
 	if err != nil || actions.Load() != 1 || len(f.Calls(t)) != 2 || len(response.Output) != 1 || response.Output[0].Type != llm.ItemMessage {

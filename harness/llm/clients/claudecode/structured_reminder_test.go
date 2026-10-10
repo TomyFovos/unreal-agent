@@ -87,9 +87,10 @@ func TestStructuredOfficialControlEnforcementReminder(t *testing.T) {
 	c, f, req, opt := structuredClient(t)
 	f.Set(t, testclaude.Config{Subscription: "team", StructuredEnforcementReminder: true, BridgeSteps: []testclaude.BridgeStep{{Name: "read", Arguments: `{"path":"fixture.go"}`, Contains: "canonical file receipt"}}})
 	var calls atomic.Int32
+	opt.RefreshContext = func(context.Context, int64) (llm.Request, int64, error) { return req, 24576, nil }
 	opt.Tools = func(ctx context.Context, response llm.Response) ([]llm.ToolOutcome, error) {
 		calls.Add(1)
-		return bridgeReply(ctx, response)
+		return projectedBridgeReply(ctx, response, &req)
 	}
 	response, err := c.Respond(t.Context(), req, opt)
 	if err != nil || calls.Load() != 1 || len(response.Output) != 1 || len(f.Calls(t)) != 2 {

@@ -16,14 +16,33 @@ import (
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/mutation"
+	files "github.com/unreallabsai/unreal-agent/harness/native"
+	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/internal/testclaude"
 )
 
 func structuredClient(t *testing.T) (*Client, *testclaude.Fixture, llm.Request, llm.RequestOptions) {
 	c, f, req := bridgeClient(t)
 	c.config.ToolBridge.Mode = BridgeModeStructured
-	opt := llm.RequestOptions{Tools: bridgeReply, ActionScope: "canonical-fixture-input", RefreshContext: func(context.Context, int64) (llm.Request, int64, error) { return req, 24576, nil }}
+	opt := llm.RequestOptions{ActionScope: "canonical-fixture-input", RefreshContext: func(context.Context, int64) (llm.Request, int64, error) { return req, 24576, nil }}
+	opt.Tools = func(ctx context.Context, r llm.Response) ([]llm.ToolOutcome, error) {
+		return projectedBridgeReply(ctx, r, &req)
+	}
 	return c, f, req, opt
+}
+
+// Fake the Host's persisted call/receipt projection, rather than relying on
+// adapter reinjection of raw callback bodies that production must never use.
+func projectedBridgeReply(ctx context.Context, r llm.Response, req *llm.Request) ([]llm.ToolOutcome, error) {
+	outcomes, err := bridgeReply(ctx, r)
+	if err == nil {
+		req.Input = append(req.Input, r.Output...)
+		for _, outcome := range outcomes {
+			req.Input = append(req.Input, llm.Item{Type: llm.ItemToolResult, Data: outcome.Result})
+		}
+	}
+	return outcomes, err
 }
 
 func TestStructuredOfficialControlSchemaAndHostReceipt(t *testing.T) {
@@ -35,7 +54,7 @@ func TestStructuredOfficialControlSchemaAndHostReceipt(t *testing.T) {
 		if len(response.Output) != 1 || response.Output[0].Type != llm.ItemToolCall {
 			t.Fatal("protocol JSON leaked to public response")
 		}
-		return bridgeReply(ctx, response)
+		return projectedBridgeReply(ctx, response, &req)
 	}
 	opt.RefreshContext = func(context.Context, int64) (llm.Request, int64, error) { refresh.Add(1); return req, 24576, nil }
 	if err := c.ProbeToolBridge(t.Context(), req.Tools); err != nil {
@@ -245,13 +264,30 @@ func waitForProcessGone(t *testing.T, pid int) {
 }
 
 func TestStructuredResultBoundAndSecretExclusion(t *testing.T) {
-	receipt := llm.ToolOutcome{Result: llm.ToolResult{CallID: "receipt", Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: strings.Repeat("日本語", 20000)}}}}
-	_, input, err := structuredPrompt(textRequest().Input, &receipt, 1024)
-	if err != nil || !strings.Contains(input, "truncated") || len(input) > 4096 {
-		t.Fatal("receipt unbounded or silently truncated", err, len(input))
+	h := newStructuredProjectionHistory(t, 500000)
+	body := strings.Repeat("日本語", 20000)
+	read := files.Result{Version: files.Version, Code: "ok", Path: "fixture.txt", Content: body, Revision: new(mutation.RevisionOf([]byte(body))), StartLine: 1}
+	receipt := h.receipt(llm.Response{Output: []llm.Item{{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "receipt", Name: "read", Arguments: `{"path":"fixture.txt"}`}}}}, string(files.EncodeResult(read)), operation.StatusCompleted)
+	built, err := h.b.Build()
+	if err != nil {
+		t.Fatal(err)
 	}
-	receipt.Result.Output[0].Value = "ANTHROPIC_API_KEY=sk-ant-test-secret-sensitive"
-	_, input, err = structuredPrompt(textRequest().Input, &receipt, 1024)
+	_, input, err := structuredPrompt(built.Request.Input, &receipt, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, projected := structuredProjectionResult(t, input)
+	var partial files.Result
+	if len(projected.Output) != 1 || len(projected.Output[0].Value) > 1024 || json.Unmarshal([]byte(projected.Output[0].Value), &partial) != nil || !partial.Truncated || partial.Revision == nil || *partial.Revision != *read.Revision || !strings.HasPrefix(body, partial.Content) || partial.StartLine != 1 {
+		t.Fatal("explicit cap produced invalid JSON or lost partial-read provenance")
+	}
+	h = newStructuredProjectionHistory(t, 24576)
+	receipt = h.receipt(llm.Response{Output: []llm.Item{{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "receipt", Name: "read", Arguments: `{"path":"fixture.txt"}`}}}}, "ANTHROPIC_API_KEY=sk-ant-test-secret-sensitive", operation.StatusCompleted)
+	built, err = h.b.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, input, err = structuredPrompt(built.Request.Input, &receipt, 1024)
 	if err != nil || strings.Contains(input, "sk-ant-test-secret-sensitive") {
 		t.Fatal("secret receipt leaked", err)
 	}
