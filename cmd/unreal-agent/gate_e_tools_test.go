@@ -15,7 +15,6 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
-	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
 	"github.com/unreallabsai/unreal-agent/harness/mutation"
 	files "github.com/unreallabsai/unreal-agent/harness/native"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -32,7 +31,7 @@ func TestGateECreateEditReadProcessAndWorkspaceBoundaryBothProviders(t *testing.
 
 func checkWorkspaceToolReceipts(t *testing.T, configure func(*testing.T, serveConfiguration) serveConfiguration) {
 	t.Helper()
-	for _, provider := range []string{"claude", "codex"} {
+	for _, provider := range []string{"codex"} {
 		t.Run(provider, func(t *testing.T) {
 			outside := filepath.Join(t.TempDir(), "sample.txt")
 			args := func(value any) string {
@@ -51,50 +50,43 @@ func checkWorkspaceToolReceipts(t *testing.T, configure func(*testing.T, serveCo
 				{Name: "write", Arguments: args(map[string]any{"path": outside, "content": "forbidden", "expected": mutation.Revision{}}), Contains: "workspace_boundary", Error: true},
 			}
 			var cfg serveConfiguration
-			var f *testclaude.Fixture
 			var auth string
 			var calls atomic.Int32
-			if provider == "claude" {
-				f = testclaude.New(t)
-				cfg = bridgeServeConfiguration(t, f)
-				cfg.Runtime.ClaudeCode.ToolBridge.Mode = claudecode.BridgeModeStructured
-				f.Set(t, testclaude.Config{Subscription: "team", BridgeManagedPermissionsOnly: true, BridgeSteps: steps})
-			} else {
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var req multiWire
-					if err := json.UnmarshalRead(r.Body, &req); err != nil {
-						t.Error(err)
-						w.WriteHeader(400)
-						return
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req multiWire
+				if err := json.UnmarshalRead(r.Body, &req); err != nil {
+					t.Error(err)
+					w.WriteHeader(400)
+					return
+				}
+				n := int(calls.Add(1)) - 1
+				if n > len(steps) {
+					t.Error("unexpected generation/replay")
+					w.WriteHeader(500)
+					return
+				}
+				if n > 0 {
+					input, _ := json.Marshal(req.Input)
+					if !strings.Contains(string(input), steps[n-1].Contains) {
+						t.Error("canonical result did not reach next generation")
 					}
-					n := int(calls.Add(1)) - 1
-					if n > len(steps) {
-						t.Error("unexpected generation/replay")
-						w.WriteHeader(500)
-						return
-					}
-					if n > 0 {
-						input, _ := json.Marshal(req.Input)
-						if !strings.Contains(string(input), steps[n-1].Contains) {
-							t.Error("canonical result did not reach next generation")
-						}
-					}
-					var outputs []any
-					if n < len(steps) {
-						id := fmt.Sprint("gate-e-", n)
-						outputs = []any{map[string]any{"type": "function_call", "id": id, "call_id": id, "name": steps[n].Name, "arguments": steps[n].Arguments}}
-					} else {
-						outputs = []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "Bridge fixture completed"}}}}
-					}
-					data, _ := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]any{"id": fmt.Sprint("response-", n), "status": "completed", "output": outputs}})
-					w.Header().Set("Content-Type", "text/event-stream")
-					fmt.Fprintf(w, "data: %s\n\n", data)
-				}))
-				t.Cleanup(server.Close)
-				cfg = codexServeConfiguration(t.TempDir(), server.URL)
-				auth = filepath.Join(t.TempDir(), "auth.json")
-				writeCodexAuth(t, auth, "gate-e-fake-secret", "gate-e-fake-account")
-			}
+				}
+				var outputs []any
+				if n < len(steps) {
+					id := fmt.Sprint("gate-e-", n)
+					outputs = []any{map[string]any{"type": "function_call", "id": id, "call_id": id, "name": steps[n].Name, "arguments": steps[n].Arguments}}
+				} else {
+					outputs = []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "Bridge fixture completed"}}}}
+				}
+				data, _ := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]any{"id": fmt.Sprint("response-", n), "status": "completed", "output": outputs}})
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintf(w, "data: %s\n\n", data)
+			}))
+			t.Cleanup(server.Close)
+			cfg = codexServeConfiguration(t.TempDir(), server.URL)
+			auth = filepath.Join(t.TempDir(), "auth.json")
+			writeCodexAuth(t, auth, "gate-e-fake-secret", "gate-e-fake-account")
+
 			cfg = configure(t, cfg)
 			var c *gateway.Client
 			if auth != "" {
@@ -170,13 +162,6 @@ func checkWorkspaceToolReceipts(t *testing.T, configure func(*testing.T, serveCo
 			}
 			if _, err := os.Stat(outside); !os.IsNotExist(err) {
 				t.Fatal("outside write side effect")
-			}
-			if f != nil {
-				for _, call := range f.Calls(t) {
-					cliArgument(t, call, "--tools", "")
-					cliArgument(t, call, "--allowedTools", "StructuredOutput")
-					cliArgument(t, call, "--mcp-config", `{"mcpServers":{}}`)
-				}
 			}
 		})
 	}

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -461,14 +462,29 @@ func assertChildCodexSource(t *testing.T, binary string, parentPID int, authPath
 				t.Error("could not inspect child environment")
 				return
 			}
-			entries := strings.Split(strings.TrimRight(string(environment), "\x00"), "\x00")
-			if len(entries) != 2 {
-				t.Error("child environment inherited ambient entries")
+			// The child has the Host's environment (D1) without the Codex
+			// token variables: the auth file stays its only Codex source.
+			hostEnvironment, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", parentPID))
+			if err != nil {
+				t.Error("could not inspect Host environment")
+				return
 			}
-			for _, entry := range entries {
-				if entry != "PATH=/usr/bin:/bin" && entry != "LANG=C.UTF-8" {
-					t.Error("child environment contains an unauthorized entry")
+			host, hostPath := map[string]bool{}, ""
+			for _, entry := range strings.Split(strings.TrimRight(string(hostEnvironment), "\x00"), "\x00") {
+				host[entry] = true
+				if strings.HasPrefix(entry, "PATH=") {
+					hostPath = entry
 				}
+			}
+			entries := strings.Split(strings.TrimRight(string(environment), "\x00"), "\x00")
+			for _, entry := range entries {
+				key, _, _ := strings.Cut(entry, "=")
+				if !host[entry] || key == "OPENAI_CODEX_ACCESS_TOKEN" || key == "OPENAI_CODEX_ACCOUNT_ID" {
+					t.Error("child environment has an entry the Host's lacks, or a Codex token variable")
+				}
+			}
+			if hostPath != "" && !slices.Contains(entries, hostPath) {
+				t.Error("child lost the Host's PATH")
 			}
 			return
 		}

@@ -26,7 +26,8 @@ func TestDescendantChildHelper(t *testing.T) {
 		return
 	}
 	var directory string
-	err := sub.Serve(context.Background(), os.Stdin, os.Stdout, func(ctx context.Context, c sub.ChildConfig, send sub.Sender) (*host.Session, io.Closer, error) {
+	err := sub.Serve(context.Background(), os.Stdin, os.Stdout, func(ctx context.Context, c sub.ChildConfig, link sub.ChildLink) (*host.Session, io.Closer, error) {
+		send := link.Send
 		directory = c.SessionDirectory
 		model := adapter(func(context.Context, llm.Request, llm.RequestOptions) (llm.Response, error) {
 			return llm.Response{}, nil

@@ -109,7 +109,7 @@ func TestCoordinatorAppliesTurnTypes(t *testing.T) {
 func TestCoordinatorRestoresOrdinaryResponseDuringCompaction(t *testing.T) {
 	run := newStopTestRun(t, 0)
 	response := textResponse("Ordinary response")
-	response.Output = append(response.Output, llm.Item{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "old-call", Name: "unknown"}})
+	response.Output = append(response.Output, llm.Item{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "old-call", Name: "unknown", Arguments: `{}`}})
 	run.store.items = []sessionstore.Item{
 		storedItem(1, sessionstore.ItemInput, externalEvent(t, 0, "input", "hello")),
 		storedItem(2, sessionstore.ItemTurn, session.Turn{ID: "ordinary", Type: session.TurnRegular}),
@@ -1953,11 +1953,7 @@ func TestCoordinatorRunReturnsReconciliationError(t *testing.T) {
 			}}},
 		}),
 		storedItem(2, sessionstore.ItemToolCallStatus, status),
-		storedItem(3, sessionstore.ItemToolCallStatus, sessionstore.ToolCallStatus{
-			TurnID: "another-turn",
-			CallID: "another-call",
-		}),
-		storedItem(4, sessionstore.ItemTurn, session.Turn{ID: "turn-2", Type: session.TurnRegular}),
+		storedItem(3, sessionstore.ItemTurn, session.Turn{ID: "turn-2", Type: session.TurnRegular}),
 	}
 	completed := value
 	completed.Status = operation.StatusCompleted
@@ -2168,7 +2164,7 @@ func TestCoordinatorClonesOperationDataBeforeDispatch(t *testing.T) {
 		Version:     1,
 		Status:      operation.StatusReady,
 		State:       jsontext.Value(`{"state":"original"}`),
-		Idempotency: jsontext.Value(`{"key":"original"}`),
+		Idempotence: &operation.IdempotencyMetadata{Idempotency: jsontext.Value(`{"key":"original"}`)},
 	})
 
 	if err := current.dispatchOperationsToManager(t.Context()); err != nil {
@@ -2176,7 +2172,7 @@ func TestCoordinatorClonesOperationDataBeforeDispatch(t *testing.T) {
 	}
 	stored := current.state.operations[value.ID]
 	if string(stored.State) != `{"state":"original"}` ||
-		string(stored.Idempotency) != `{"key":"original"}` {
+		string(stored.Idempotency()) != `{"key":"original"}` {
 		t.Fatalf("stored operation was mutated: %#v", stored)
 	}
 }
@@ -2727,7 +2723,7 @@ func (manager *fakeOperationManager) Add(value operation.Operation) error {
 	manager.adds = append(manager.adds, value)
 	if manager.mutateAdds {
 		value.State[0] = '!'
-		value.Idempotency[0] = '!'
+		value.Idempotency()[0] = '!'
 	}
 	if manager.addError != nil {
 		return manager.addError(value)

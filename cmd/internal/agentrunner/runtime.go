@@ -12,7 +12,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
-	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
@@ -22,6 +22,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 	"github.com/unreallabsai/unreal-agent/harness/tool/bash"
+	"github.com/unreallabsai/unreal-agent/harness/tool/observed"
 	"github.com/unreallabsai/unreal-agent/harness/tool/viewimage"
 	"net/http"
 	"os"
@@ -38,14 +39,17 @@ type RuntimeIdentity struct {
 	Workspace, SystemPrompt string
 	ReasoningEffort         llm.ReasoningEffort
 	DisallowedTools         []string
-	LanguageServers         string             `json:",omitempty"`
-	DebugAdapters           string             `json:",omitempty"`
-	ClaudeCode              *claudecode.Config `json:",omitzero"`
+	LanguageServers         string              `json:",omitempty"`
+	DebugAdapters           string              `json:",omitempty"`
+	Claude                  *claudeagent.Config `json:",omitzero"`
 }
 type RuntimeConfig struct {
 	// Context is a versioned, disposable projection strategy. It is deliberately
 	// outside immutable runtime/auth identity, so old histories need no migration.
-	Context          contextengine.Config
+	Context contextengine.Config
+	// ClaudeSubagents lets the Claude route drive this Host's child templates
+	// through Bash (U21); zero when there are none.
+	ClaudeSubagents  claudeagent.SubagentCLI
 	TaskInput        inbox.ID
 	Identity         RuntimeIdentity
 	SessionDirectory string
@@ -123,30 +127,11 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 	if c.Providers.RequiresResolver(c.Identity.Provider) && c.Credentials == nil {
 		return nil, nil, errors.New("runtime: credential resolver required")
 	}
-	if !c.Identity.ReasoningEffort.Valid() && !(c.Identity.Provider.Provider == "claude-code" && c.Identity.ReasoningEffort == "") {
+	if !c.Identity.ReasoningEffort.Valid() && !(c.Identity.Provider.Provider == claudeagent.ProviderID && c.Identity.ReasoningEffort == "") {
 		return nil, nil, errors.New("runtime: invalid reasoning effort")
 	}
-	if c.Identity.Provider.Provider == "claude-code" {
-		if c.Identity.ClaudeCode == nil {
-			return nil, nil, errors.New("runtime: claude-code requires executable configuration")
-		}
-		if e := c.Identity.ClaudeCode.ManagedPolicyMode.Validate(); e != nil {
-			return nil, nil, e
-		}
-		if e := c.Identity.ClaudeCode.ToolBridge.Validate(); e != nil {
-			return nil, nil, e
-		}
-		catalog, e := modelcatalog.Configured(c.Identity.ClaudeCode.Models)
-		if e != nil {
-			return nil, nil, e
-		}
-		copy := *c.Identity.ClaudeCode
-		copy.Models = catalog.Models
-		copy.Getenv = nil
-		copy.CatalogSource = nil
-		copy.CurrentModel = llm.Model{}
-		copy.AuthorizeProcess = nil
-		c.Identity.ClaudeCode = &copy
+	if c.Identity.Provider.Provider == claudeagent.ProviderID && (c.Identity.Claude == nil || !filepath.IsAbs(c.Identity.Claude.Binary)) {
+		return nil, nil, errors.New("runtime: Claude executable configuration required")
 	}
 	toolResources := supportsTools
 	for id, p := range c.Backends {
@@ -160,29 +145,10 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 		if _, err = profile.Resolve(c.Identity.Profile, p.Provider); err != nil {
 			return nil, nil, err
 		}
-		if p.ClaudeCode != nil {
-			if e := p.ClaudeCode.ToolBridge.Validate(); e != nil {
-				return nil, nil, e
-			}
-			if e := p.ClaudeCode.ManagedPolicyMode.Validate(); e != nil {
-				return nil, nil, e
-			}
-			catalog, e := modelcatalog.Configured(p.ClaudeCode.Models)
-			if e != nil {
-				return nil, nil, e
-			}
-			copy := *p.ClaudeCode
-			copy.Models = catalog.Models
-			copy.Getenv = nil
-			copy.CatalogSource = nil
-			copy.CurrentModel = llm.Model{}
-			copy.AuthorizeProcess = nil
-			p.ClaudeCode = &copy
-		}
-		if p.Provider.Provider == "claude-code" && p.ClaudeCode == nil {
+		if p.Provider.Provider == claudeagent.ProviderID && (p.Claude == nil || !filepath.IsAbs(p.Claude.Binary)) {
 			return nil, nil, errors.New("runtime: Claude executable configuration required")
 		}
-		if !p.ReasoningEffort.Valid() && !(p.Provider.Provider == "claude-code" && p.ReasoningEffort == "") {
+		if !p.ReasoningEffort.Valid() && !(p.Provider.Provider == claudeagent.ProviderID && p.ReasoningEffort == "") {
 			return nil, nil, errors.New("runtime: invalid backend effort")
 		}
 		c.Backends[id] = p
@@ -240,7 +206,10 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 				}
 			}
 		}
-		initialClient, err := selectionClient(c, active)
+		// Results carries what Claude Code reported for its own tool calls to the
+		// claude_code receipts of this Session.
+		results := observed.NewResults()
+		initialClient, err := selectionClient(c, active, workspace, results)
 		if err != nil {
 			return host.Runtime{}, err
 		}
@@ -261,11 +230,11 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 		}
 		tools := ToolConfig{SessionID: id, Directory: workspace, Getenv: os.Getenv, CatalogOnly: c.ToolCatalogOnly}
 		if toolResources {
-			tools.Names = []string{tool.BashName, tool.ViewImageName}
+			tools.Names = []string{tool.BashName, tool.ViewImageName, tool.ClaudeCodeName}
 			if len(skills) > 0 {
 				tools.Names = append(tools.Names, tool.SkillUseName)
 			}
-			tools.Translators = tool.StaticTranslators{Bash: bash.New(bash.Config{Shell: "/bin/sh", Directory: workspace, BaseDirectory: operationDirectory}), ViewImage: viewimage.New(viewimage.Config{Directory: workspace})}
+			tools.Translators = tool.StaticTranslators{Bash: bash.New(bash.Config{Shell: "/bin/sh", Directory: workspace, BaseDirectory: operationDirectory}), ViewImage: viewimage.New(viewimage.Config{Directory: workspace}), ClaudeCode: observed.New(results)}
 		}
 		configured, err := c.NewTools(ctx, tools)
 		if err != nil {
@@ -360,9 +329,21 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 				return e
 			}
 			enabled := c.ProviderSupportsTools(choice.Provider)
-			var allowed func(string) bool
-			if c.ToolFilter != nil {
-				allowed = func(name string) bool { return c.ToolFilter(choice.Provider, name) }
+			allowed := func(name string) bool {
+				// Claude Code runs its own tools: the Claude route only records
+				// them and hands refused commands to Bash (U21, U22). No other
+				// route sees the claude_code record tool.
+				if choice.Provider == claudeagent.ProviderID {
+					if name == tool.ClaudeCodeName {
+						return true
+					}
+					if name != tool.BashName {
+						return false
+					}
+				} else if name == tool.ClaudeCodeName {
+					return false
+				}
+				return c.ToolFilter == nil || c.ToolFilter(choice.Provider, name)
 			}
 			registry.set(enabled, allowed)
 			var definitions []llm.Tool
@@ -403,7 +384,7 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 				}
 			}
 			if choice != active {
-				next, e := selectionClient(c, choice)
+				next, e := selectionClient(c, choice, workspace, results)
 				if e != nil {
 					return e
 				}

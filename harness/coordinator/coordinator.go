@@ -19,6 +19,9 @@ type Dependencies struct {
 	// ContextBuilt publishes derived, body-free request diagnostics. It does
 	// not append a canonical record or change scheduling/lifecycle decisions.
 	ContextBuilt func(contextengine.Diagnostics)
+	// ModelReplayHeld publishes a closed, ephemeral input-wait notice after an
+	// unanswered canonical Native attempt. It never fabricates a response.
+	ModelReplayHeld func(session.TurnID)
 	// BeforeTurn is owner composition, called only on the coordinator goroutine.
 	// boundary excludes an in-flight request and unfinished tool/operation loops.
 	BeforeTurn func(context.Context, bool) (uint64, error)

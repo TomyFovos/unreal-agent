@@ -54,7 +54,19 @@ type ToolResultOutput struct {
 type ToolResult struct {
 	CallID string
 	Output []ToolResultOutput
+	// State is Host-derived request projection data, never accepted from JSON
+	// or persisted as a second receipt. Resume derives it from canonical facts.
+	State ToolResultState `json:"-"`
 }
+
+type ToolResultState uint8
+
+const (
+	ToolResultUnknown ToolResultState = iota
+	ToolResultPending
+	ToolResultSucceeded
+	ToolResultFailed
+)
 
 // Raw is the provider's verbatim reasoning item. A provider may attach state to
 // it that the harness cannot reconstruct, such as encrypted reasoning content, so
@@ -92,11 +104,13 @@ const (
 	ReasoningEffortHigh   ReasoningEffort = "high"
 	ReasoningEffortXHigh  ReasoningEffort = "xhigh"
 	ReasoningEffortMax    ReasoningEffort = "max"
+	// Ultra is the Codex catalog's top level for models such as GPT-6.1-Sol.
+	ReasoningEffortUltra ReasoningEffort = "ultra"
 )
 
 func (effort ReasoningEffort) Valid() bool {
 	switch effort {
-	case ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh, ReasoningEffortXHigh, ReasoningEffortMax:
+	case ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh, ReasoningEffortXHigh, ReasoningEffortMax, ReasoningEffortUltra:
 		return true
 	default:
 		return false

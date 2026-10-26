@@ -6,7 +6,7 @@ import (
 	"errors"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
-	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
@@ -18,7 +18,8 @@ import (
 type ProviderRuntime struct {
 	Provider        provider.Selection
 	ReasoningEffort llm.ReasoningEffort
-	ClaudeCode      *claudecode.Config `json:",omitzero"`
+	// Claude names the CLI the Claude route runs (U21).
+	Claude *claudeagent.Config `json:",omitzero"`
 }
 
 func (c RuntimeConfig) ProviderSupportsTools(id string) bool {
@@ -30,8 +31,8 @@ func (c RuntimeConfig) ProviderSupportsTools(id string) bool {
 		return false
 	}
 	build := provider.BuildConfig{Selection: p.Provider}
-	if p.ClaudeCode != nil {
-		build.ClaudeCode = *p.ClaudeCode
+	if p.Claude != nil {
+		build.ClaudeAgent = *p.Claude
 	}
 	return c.Providers.SupportsRuntimeTools(build)
 }
@@ -55,7 +56,7 @@ func (c RuntimeConfig) CheckProvider(ctx context.Context, id string) error {
 
 func (c RuntimeConfig) ProviderRuntime(id string) (ProviderRuntime, error) {
 	if id == c.Identity.Provider.Provider {
-		return ProviderRuntime{c.Identity.Provider, c.Identity.ReasoningEffort, c.Identity.ClaudeCode}, nil
+		return ProviderRuntime{Provider: c.Identity.Provider, ReasoningEffort: c.Identity.ReasoningEffort, Claude: c.Identity.Claude}, nil
 	}
 	p, ok := c.Backends[id]
 	if !ok {
@@ -89,12 +90,8 @@ func (c RuntimeConfig) Catalog(ctx context.Context, id string) (modelcatalog.Cat
 	if id == c.Identity.Provider.Provider && c.ModelCatalog != nil {
 		return c.ModelCatalog(ctx)
 	}
-	p, e := c.ProviderRuntime(id)
-	if e != nil {
+	if _, e := c.ProviderRuntime(id); e != nil {
 		return modelcatalog.Catalog{}, e
-	}
-	if p.ClaudeCode != nil {
-		return modelcatalog.Configured(p.ClaudeCode.Models)
 	}
 	return modelcatalog.Catalog{Problem: "catalog unavailable"}, nil
 }

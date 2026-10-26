@@ -16,8 +16,7 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
-	"github.com/unreallabsai/unreal-agent/harness/llm"
-	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openaicodex"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
@@ -25,27 +24,38 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/provider"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 	"github.com/unreallabsai/unreal-agent/internal/privateexport"
-	"golang.org/x/term"
 )
 
 // Normal discovery adds registrations, never replaces Runtime or permissions.
-// Team/Enterprise trust must be explicitly configured, even on first run.
 type normalLauncherConfig struct {
 	Version           int
-	DiscoverProviders *bool              `json:",omitzero"`
-	ClaudeCode        *claudecode.Config `json:",omitzero"`
-	// Explicit discovery opt-in; never inferred from proxy-managed auth.json.
+	DiscoverProviders *bool `json:",omitzero"`
+	// ClaudeBinary is an explicit Claude Code executable (--bootstrap-claude-binary).
+	ClaudeBinary string `json:",omitzero"`
+	// Native auto detection validates routing and the source; environment labels
+	// or proxy strings alone cannot authorize Docker or credential fallback.
+	CodexDisabled           bool `json:",omitzero"`
+	ClaudeDisabled          bool `json:",omitzero"`
 	CodexDockerSandboxOAuth bool `json:",omitzero"`
+	CodexAuto               bool `json:",omitzero"`
 }
 
-type normalRuntimeError struct{ Code string }
+type normalRuntimeError struct {
+	Code      string
+	Providers []modelcatalog.Provider
+}
 
 func (e *normalRuntimeError) Error() string {
+	if len(e.Providers) > 0 {
+		text := "no external provider is available"
+		for _, p := range e.Providers {
+			text += "; " + p.ID + ": " + string(p.Reason) + " (" + p.Reason.Hint() + ")"
+		}
+		return text
+	}
 	switch e.Code {
 	case "providers_unavailable":
-		return "no external provider is available; sign in with codex login or claude auth login; Team/Enterprise also requires explicit managedPolicyMode=trust in runtime.json"
-	case "initial_provider_required":
-		return "first run needs an initial provider selection; run unreal in a terminal or set the existing UNREAL_HARNESS_LLM_PROVIDER override"
+		return "no external provider is available; sign in with codex login, or run claude and /login"
 	case "initial_provider_unavailable":
 		return "configured initial provider is unavailable; no automatic provider fallback"
 	case "catalog_unavailable":
@@ -53,28 +63,6 @@ func (e *normalRuntimeError) Error() string {
 	default:
 		return "normal runtime: " + e.Code
 	}
-}
-
-func normalClaudeConfig(config serveConfiguration) claudecode.Config {
-	if config.Runtime.Provider.Provider == "claude-code" && config.Runtime.ClaudeCode != nil {
-		return *config.Runtime.ClaudeCode
-	}
-	if p, ok := config.Providers["claude-code"]; ok && p.ClaudeCode != nil {
-		return *p.ClaudeCode
-	}
-	if config.Launcher != nil && config.Launcher.ClaudeCode != nil {
-		return *config.Launcher.ClaudeCode
-	}
-	// Opt in to checking Unreal-owned tools, not permissions or managed trust.
-	return claudecode.Config{ManagedPolicyMode: claudecode.ManagedPolicyReject, ToolBridge: claudecode.ToolBridgeConfig{Enabled: true, Mode: claudecode.BridgeModeStructured}}
-}
-
-func claudeTransportConfig(c claudecode.Config, getenv func(string) string) claudecode.Config {
-	c.Getenv = getenv
-	// This authorizes only the isolated provider protocol. Tool subprocesses
-	// still go through the unmodified execution permission policy.
-	c.AuthorizeProcess = func(context.Context) error { return nil }
-	return c
 }
 
 func discoverCodex(ctx context.Context, option string, getenv func(string) string) (agentrunner.ProviderRuntime, error) {
@@ -115,24 +103,16 @@ func discoverCodexSource(ctx context.Context, option string, getenv func(string)
 	return agentrunner.ProviderRuntime{Provider: provider.Selection{Version: 1, Provider: "openai-codex", Model: provider.Model{ID: model.ID}, Endpoint: openaicodex.BaseURL, Auth: ref, MaxAttempts: 2, Source: "external CLI catalog / local bootstrap"}, ReasoningEffort: model.DefaultEffort}, nil
 }
 
-func discoverClaude(ctx context.Context, c claudecode.Config, getenv func(string) string) (agentrunner.ProviderRuntime, error) {
-	cli, err := claudecode.NewClient(claudeTransportConfig(c, getenv))
+func discoverCodexAuto(ctx context.Context, option string, getenv func(string) string) (agentrunner.ProviderRuntime, error) {
+	path, err := externalCodexAuthFile(option, getenv)
 	if err != nil {
 		return agentrunner.ProviderRuntime{}, err
 	}
-	defer cli.Close()
-	if err = cli.Probe(ctx); err != nil {
-		return agentrunner.ProviderRuntime{}, err
-	}
-	catalog, err := cli.Catalog(ctx)
+	sandbox, err := (openaicodex.DockerSandboxSource{AuthFile: path, Getenv: getenv}).DetectRoute()
 	if err != nil {
 		return agentrunner.ProviderRuntime{}, err
 	}
-	model, err := initialCatalogModel(catalog, "")
-	if err != nil {
-		return agentrunner.ProviderRuntime{}, err
-	}
-	return agentrunner.ProviderRuntime{Provider: provider.Selection{Version: 1, Provider: "claude-code", Model: provider.Model{ID: model.ID}, Auth: credential.Reference{Provider: "claude-code", Method: credential.OAuth, ID: "external-claude-code"}, MaxAttempts: 2, Source: "external CLI catalog / local bootstrap"}, ReasoningEffort: model.DefaultEffort, ClaudeCode: &c}, nil
+	return discoverCodexSource(ctx, option, getenv, sandbox)
 }
 
 func initialCatalogModel(c modelcatalog.Catalog, id string) (modelcatalog.Model, error) {
@@ -156,45 +136,56 @@ func initialCatalogModel(c modelcatalog.Catalog, id string) (modelcatalog.Model,
 }
 
 func registerNormalProviders(ctx context.Context, config serveConfiguration, codexFile string, getenv func(string) string) (serveConfiguration, error) {
+	discover := true
 	if config.Launcher != nil {
 		if config.Launcher.Version != 1 {
 			return config, &normalRuntimeError{Code: "unsupported_launcher_version"}
 		}
-		if config.Launcher.ClaudeCode != nil {
-			if _, err := claudecode.NewClient(*config.Launcher.ClaudeCode); err != nil {
-				return config, err
-			}
+		if config.Launcher.CodexAuto && (config.Launcher.CodexDockerSandboxOAuth || config.Launcher.CodexDisabled) {
+			return config, &normalRuntimeError{Code: "conflicting_codex_route"}
 		}
 		if config.Launcher.DiscoverProviders != nil && !*config.Launcher.DiscoverProviders {
-			return config, nil
+			discover = false
 		}
 	}
 	config.Providers = cloneBackends(config.Providers)
-	catalogUnavailable := false
+	config.providerStatuses = nil
+
+	if !discover {
+		return config, nil
+	}
 	// Fixed traversal only controls registration order, never initial selection.
-	for _, id := range []string{"openai-codex", "claude-code"} {
+	// Claude is the Claude Code route (U21); the older claude-code route is
+	// no longer discovered.
+	for _, id := range []string{"openai-codex", claudeagent.ProviderID} {
 		if config.Runtime.Provider.Provider == id || config.Providers[id].Provider.Provider != "" {
+			config.providerStatuses = append(config.providerStatuses, modelcatalog.Provider{ID: id, Name: modelcatalog.ProviderName(id), Availability: "available"})
+			continue
+		}
+		if config.Launcher != nil && (id == "openai-codex" && config.Launcher.CodexDisabled || id == claudeagent.ProviderID && config.Launcher.ClaudeDisabled) {
+			config.providerStatuses = append(config.providerStatuses, unavailableProvider(id, modelcatalog.ProviderDisabled))
 			continue
 		}
 		var p agentrunner.ProviderRuntime
 		var err error
 		if id == "openai-codex" {
-			p, err = discoverCodexSource(ctx, codexFile, getenv, config.Launcher != nil && config.Launcher.CodexDockerSandboxOAuth)
+			if config.Launcher != nil && config.Launcher.CodexAuto {
+				p, err = discoverCodexAuto(ctx, codexFile, getenv)
+			} else {
+				p, err = discoverCodexSource(ctx, codexFile, getenv, config.Launcher != nil && config.Launcher.CodexDockerSandboxOAuth)
+			}
 		} else {
-			p, err = discoverClaude(ctx, normalClaudeConfig(config), getenv)
+			p, err = discoverClaudeAgent(ctx, config, getenv)
 		}
 		if ctx.Err() != nil {
 			return config, ctx.Err()
 		}
 		if err == nil {
 			config.Providers[id] = p
+			config.providerStatuses = append(config.providerStatuses, modelcatalog.Provider{ID: id, Name: modelcatalog.ProviderName(id), Availability: "available"})
 		} else {
-			var failure *normalRuntimeError
-			catalogUnavailable = catalogUnavailable || errors.As(err, &failure) && failure.Code == "catalog_unavailable"
+			config.providerStatuses = append(config.providerStatuses, unavailableProvider(id, providerFailureReason(err, id == "openai-codex" && config.Launcher != nil && config.Launcher.CodexDockerSandboxOAuth)))
 		}
-	}
-	if config.Runtime.Provider.Provider == "" && len(config.Providers) == 0 && catalogUnavailable {
-		return config, &normalRuntimeError{Code: "catalog_unavailable"}
 	}
 	return config, nil
 }
@@ -209,36 +200,21 @@ func cloneBackends(in map[string]agentrunner.ProviderRuntime) map[string]agentru
 
 type initialProviderChooser func([]string) (string, error)
 
+// chooseInitialProvider starts a new instance with Claude, the designer (U25),
+// when it is available. /model switches at any time, so nothing is asked (U8).
 func chooseInitialProvider(out io.Writer) initialProviderChooser {
 	return func(ids []string) (string, error) {
-		if !term.IsTerminal(int(os.Stdin.Fd())) {
-			return "", &normalRuntimeError{Code: "initial_provider_required"}
+		id := ids[0]
+		if slices.Contains(ids, claudeagent.ProviderID) {
+			id = claudeagent.ProviderID
 		}
-		fmt.Fprintln(out, "First run: choose the initial provider (saved in runtime.json).")
-		for i, id := range ids {
-			fmt.Fprintf(out, "%d. %s\n", i+1, modelcatalog.ProviderName(id))
-		}
-		fmt.Fprint(out, "Provider number: ")
-		var number int
-		if _, err := fmt.Fscanln(os.Stdin, &number); err != nil || number < 1 || number > len(ids) {
-			return "", &normalRuntimeError{Code: "initial_provider_required"}
-		}
-		return ids[number-1], nil
+		fmt.Fprintf(out, "Starting with %s; /model switches provider, model and effort.\n", modelcatalog.ProviderName(id))
+		return id, nil
 	}
 }
 
 func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProviderChooser, getenv func(string) string) (serveConfiguration, error) {
-	var config serveConfiguration
-	config.Launcher = &normalLauncherConfig{Version: 1}
-	config.Launcher.CodexDockerSandboxOAuth = o.bootstrapDocker
-	if o.bootstrapTrust || o.bootstrapClaude != "" {
-		c := normalClaudeConfig(config)
-		c.Binary = o.bootstrapClaude
-		if o.bootstrapTrust && o.bootstrapAudited {
-			c.ManagedPolicyMode = claudecode.ManagedPolicyTrust
-		}
-		config.Launcher.ClaudeCode = &c
-	}
+	config := bootstrapDiscovery(o)
 	config, err := registerNormalProviders(ctx, config, o.codexFile, getenv)
 	if err != nil {
 		return config, err
@@ -249,7 +225,12 @@ func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProvid
 	}
 	slices.Sort(ids)
 	if len(ids) == 0 {
-		return config, &normalRuntimeError{Code: "providers_unavailable"}
+		for _, status := range config.providerStatuses {
+			if status.Reason == modelcatalog.CatalogUnavailable {
+				return config, &normalRuntimeError{Code: "catalog_unavailable", Providers: config.providerStatuses}
+			}
+		}
+		return config, &normalRuntimeError{Code: "providers_unavailable", Providers: config.providerStatuses}
 	}
 	id := getenv("UNREAL_HARNESS_LLM_PROVIDER")
 	if id == "" {
@@ -268,16 +249,11 @@ func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProvid
 	}
 	if requested := getenv("UNREAL_HARNESS_LLM_MODEL"); requested != "" {
 		var catalog modelcatalog.Catalog
-		if id == "openai-codex" {
+		if id == claudeagent.ProviderID {
+			catalog, _, err = claudeagent.Discover(ctx, p.Claude.Binary, nil)
+		} else if id == "openai-codex" {
 			path, _ := externalCodexAuthFile(o.codexFile, getenv)
 			catalog, err = codexCatalogReader(path, isDockerSandboxCodex(p.Provider.Auth), getenv)(ctx, false)
-		} else {
-			cli, e := claudecode.NewClient(claudeTransportConfig(*p.ClaudeCode, getenv))
-			if e != nil {
-				return config, e
-			}
-			catalog, err = cli.Catalog(ctx)
-			cli.Close()
 		}
 		m, e := initialCatalogModel(catalog, requested)
 		if err != nil || e != nil {
@@ -289,17 +265,18 @@ func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProvid
 	if err != nil {
 		return config, err
 	}
-	config.Runtime = agentrunner.RuntimeIdentity{Version: 1, Provider: p.Provider, Profile: profile.Default(), Workspace: workspace, SystemPrompt: "Help with this workspace. Use observed evidence, respect the configured permissions, and report uncertainty explicitly.", ReasoningEffort: p.ReasoningEffort, ClaudeCode: p.ClaudeCode}
+	config.Runtime = agentrunner.RuntimeIdentity{Version: 1, Provider: p.Provider, Profile: profile.Default(), Workspace: workspace, SystemPrompt: "Help with this workspace. Use observed evidence, respect the configured permissions, and report uncertainty explicitly.", ReasoningEffort: p.ReasoningEffort, Claude: p.Claude}
 	delete(config.Providers, id)
 	// The conservative normal profile permits only native workspace inspection.
 	// No shell sandbox is supplied by the existing permission engine.
-	config.Permissions = permission.Config{}
+	nativeOrigins := append([]string(nil), config.Permissions.NetworkOrigins...)
+	config.Permissions = permission.Config{NetworkOrigins: nativeOrigins}
 	if bootstrapWorkspaceReadable(workspace, o, getenv) {
 		config.Permissions.Tools = []string{"read", "grep", "glob"}
 		config.Permissions.ReadRoots = []string{workspace}
 	}
 	if u, e := url.Parse(openaicodex.BaseURL); e == nil {
-		config.Permissions.NetworkOrigins = []string{u.Scheme + "://" + u.Host}
+		config.Permissions.NetworkOrigins = append(config.Permissions.NetworkOrigins, u.Scheme+"://"+u.Host)
 	}
 	maximum := permission.Config{Tools: tool.StaticNames(), FilesystemUnrestricted: true, NetworkUnrestricted: true, ProcessMode: permission.ProcessUnrestricted}
 	config.PermissionModes = &permission.ModesConfig{Enabled: true, Maximum: &maximum}
@@ -367,61 +344,4 @@ func resolveLauncherConfig(ctx context.Context, o launchOptions, choose initialP
 		return readServeConfiguration(o.config)
 	}
 	return config, err
-}
-
-// Evaluate the exact generated registry at registration without a Session,
-// model request, user frame, tool call or canonical Operation.
-func probeNormalBridge(ctx context.Context, c agentrunner.RuntimeConfig, cli *claudecode.Client) modelcatalog.Capabilities {
-	capability := modelcatalog.Capabilities{ToolBridge: "unknown"}
-	dir, err := os.MkdirTemp("", "unreal-provider-registration-")
-	if err != nil {
-		return capability
-	}
-	defer os.RemoveAll(dir)
-	c.SessionDirectory, c.Backends = dir, cloneBackends(c.Backends)
-	c.ToolCatalogOnly = true
-	// Build in the Claude namespace even if Codex is the initial provider.
-	p, err := c.ProviderRuntime("claude-code")
-	if err != nil {
-		return capability
-	}
-	if c.Identity.Provider.Provider != "claude-code" {
-		c.Backends[c.Identity.Provider.Provider] = agentrunner.ProviderRuntime{Provider: c.Identity.Provider, ReasoningEffort: c.Identity.ReasoningEffort, ClaudeCode: c.Identity.ClaudeCode}
-		delete(c.Backends, "claude-code")
-	}
-	c.Identity.Provider, c.Identity.ReasoningEffort, c.Identity.ClaudeCode = p.Provider, p.ReasoningEffort, p.ClaudeCode
-	build, _, err := agentrunner.NewRuntimeFactory(c)
-	if err != nil {
-		return capability
-	}
-	probeCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	runtime, err := build(probeCtx, "provider-registration")
-	if err != nil {
-		return capability
-	}
-	defer func() {
-		cancel()
-		if runtime.Close != nil {
-			runtime.Close()
-		}
-		if m, ok := runtime.Operations.(interface{ Done() <-chan struct{} }); ok {
-			<-m.Done()
-		}
-	}()
-	var definitions []llm.Tool
-	for _, d := range runtime.Tools.StaticDefinitions() {
-		definitions = append(definitions, d.Tool)
-	}
-	if len(definitions) == 0 {
-		return modelcatalog.Capabilities{ToolBridge: "disabled"}
-	}
-	if err = cli.ProbeToolBridge(ctx, definitions); err == nil {
-		return modelcatalog.Capabilities{Tools: true, ToolBridge: "available"}
-	}
-	var failure *claudecode.Error
-	if errors.As(err, &failure) && (failure.Code == "bridge_allowlist_inactive" || failure.Code == "bridge_permission_denied" || failure.Code == "permission_denied" || failure.Code == "structured_unavailable") {
-		capability.ToolBridge = "blocked_by_policy"
-	}
-	return capability
 }

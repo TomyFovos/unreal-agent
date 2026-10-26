@@ -185,3 +185,40 @@ func TestClientConfigurationValidation(t *testing.T) {
 		}
 	}
 }
+
+// The backend rejects ultra; the client sends the resolved effort instead.
+func TestClientNeverSendsUltra(t *testing.T) {
+	var sent []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Reasoning struct {
+				Effort string `json:"effort"`
+			} `json:"reasoning"`
+		}
+		_ = json.UnmarshalRead(r.Body, &body)
+		sent = append(sent, body.Reasoning.Effort)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n")
+	}))
+	defer server.Close()
+	resolve := func(_ context.Context, model string, selected llm.ReasoningEffort) llm.ReasoningEffort {
+		if model != "gpt-6.1-sol" || selected != llm.ReasoningEffortUltra {
+			t.Errorf("resolver got %s %s", model, selected)
+		}
+		return llm.ReasoningEffortXHigh
+	}
+	request := llm.Request{Model: llm.Model{ID: "gpt-6.1-sol", ReasoningEffort: llm.ReasoningEffortUltra}, Input: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: "hi"}}}}
+	for _, config := range []Config{{AccessToken: "t", AccountID: "a", BaseURL: server.URL, RequestEffort: resolve}, {AccessToken: "t", AccountID: "a", BaseURL: server.URL}} {
+		client, err := NewClient(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = client.Respond(context.Background(), request, llm.RequestOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		client.Close()
+	}
+	if len(sent) != 2 || sent[0] != "xhigh" || sent[1] != "max" {
+		t.Fatal("sent efforts", sent)
+	}
+}

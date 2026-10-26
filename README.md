@@ -2,6 +2,9 @@
 
 An async-first agent harness from Unreal Labs.
 
+**Install:** see [docs/install.md](docs/install.md) (Japanese) and the
+[Releases](https://github.com/TomyFovos/unreal-agent/releases) page.
+
 Start the interactive terminal with:
 
 ```sh
@@ -12,13 +15,12 @@ unreal my-project
 In a source checkout, run `make build` and use `bin/unreal`. The launcher creates,
 attaches to, or resumes the named Session and starts a background Host when needed.
 On first run it discovers signed-in external providers, creates a private,
-conservative configuration, and asks once for the initial provider if both are
-available. Existing configurations and Session history are preserved.
+conservative configuration, and starts with Claude when it is available.
+Existing configurations and Session history are preserved.
 
 Use `/model` to select Provider → Model → Effort, `/view` for Chat/Orchestration,
-and `/analyze Overview` for runtime and capability status. Claude Team/Enterprise
-requires an explicit `managedPolicyMode=trust` opt-in. Without an organization
-tool grant, Claude remains text-capable and its Tool Bridge is marked unavailable.
+and `/analyze Overview` for runtime and capability status. Claude runs through
+the signed-in Claude Code CLI ([Claude route](docs/claude-route.md)).
 See [normal startup and configuration](docs/normal-launcher.md).
 
 - [harness/](harness/) — the library.

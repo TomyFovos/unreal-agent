@@ -5,25 +5,39 @@ import (
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/primitives"
+	"strings"
 	"sync"
 	"uuid"
 )
 
 type processChannel struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	endpoint  *endpoint
-	process   *primitives.ProcessInvocation
-	connected chan struct{}
+	ctx        context.Context
+	cancel     context.CancelFunc
+	endpoint   *endpoint
+	process    *primitives.ProcessInvocation
+	connected  chan struct{}
+	finishHint chan struct{}
+	// approvals carries the child's requests and their ends to the
+	// manager, in order.
+	approvals chan approvalEvent
+	stderr    []byte // the end of the child's diagnostics, for failures
 	done      chan struct{}
 	err       error // written before done closes
 	writeMu   sync.Mutex
 }
 
-func startProcess(ctx context.Context, c Config, child ChildConfig) *processChannel {
+type approvalEvent struct {
+	approval Approval
+	done     bool
+}
+
+// startProcess starts the child agent process under ctx's policy and tells
+// it the parent's mode.
+func startProcess(ctx context.Context, c Config, child ChildConfig, mode permission.Mode) *processChannel {
 	ctx, cancel := context.WithCancel(ctx)
-	p := &processChannel{ctx: ctx, cancel: cancel, connected: make(chan struct{}), done: make(chan struct{})}
+	p := &processChannel{ctx: ctx, cancel: cancel, connected: make(chan struct{}), finishHint: make(chan struct{}, 1), done: make(chan struct{}), approvals: make(chan approvalEvent, 64)}
 	events := make(chan primitives.PrimitiveEvent, 16)
 	p.process = primitives.StartProcess(ctx, primitives.ProcessStartRequest{Source: "subagent", CorrelationID: primitives.CorrelationID(uuid.New().String()), Path: c.Binary, Arguments: append([]string(nil), c.Arguments...), Directory: child.Workspace, Environment: append([]string(nil), c.Environment...), Pipes: primitives.ProcessPipeAll}, events)
 	ep := &endpoint{ctx: ctx, connection: uuid.New().String(), local: string(child.ParentID), remote: string(child.ChildID)}
@@ -38,10 +52,18 @@ func startProcess(ctx context.Context, c Config, child ChildConfig) *processChan
 		decoder := frameDecoder{}
 		welcomed := false
 		draining := false
+		finishNotified := false
 		for event := range events {
 			switch event.Type {
 			case primitives.PrimitiveEventProcessOutput:
 				result := event.Result.(primitives.ProcessOutputResult)
+				if result.Stream == primitives.ProcessStderr {
+					p.stderr = append(p.stderr, result.Data...)
+					if len(p.stderr) > 8<<10 {
+						p.stderr = append([]byte(nil), p.stderr[len(p.stderr)-4<<10:]...)
+					}
+					continue
+				}
 				if result.Stream != primitives.ProcessStdout || draining {
 					continue
 				}
@@ -60,13 +82,31 @@ func startProcess(ctx context.Context, c Config, child ChildConfig) *processChan
 								welcomed = true
 								close(p.connected)
 							}
+						case "approval", "approval_done":
+							if f.Approval == nil || f.Approval.ID == "" || len(f.Approval.ID) > 256 || len(f.Approval.Tool) > 128 || len(f.Approval.Scope) > 512 {
+								err = fmt.Errorf("invalid child approval frame")
+								break
+							}
+							select {
+							case p.approvals <- approvalEvent{approval: *f.Approval, done: f.Kind == "approval_done"}:
+							case <-ctx.Done():
+							}
 						case "finish":
 							if f.Finish == nil {
 								err = fmt.Errorf("missing finish record")
 							} else {
 								err = f.Finish.Validate()
 							}
-							// Canonical disk state, never this notification, determines completion.
+							// This is only a wakeup. The manager must verify durable
+							// canonical Finish and terminal child Operations before
+							// it starts owned-channel teardown and process reap.
+							if err == nil && !finishNotified {
+								finishNotified = true // At most one disk reconciliation per exact channel.
+								select {
+								case p.finishHint <- struct{}{}:
+								default:
+								}
+							}
 						default:
 							err = ep.accept(f)
 						}
@@ -85,7 +125,7 @@ func startProcess(ctx context.Context, c Config, child ChildConfig) *processChan
 				draining = true
 				cancel()
 			case primitives.PrimitiveEventFailed:
-				p.err = fmt.Errorf("child process failed")
+				p.err = fmt.Errorf("child process failed%s", p.diagnostics())
 				return
 			case primitives.PrimitiveEventCanceled:
 				if p.err == nil {
@@ -98,7 +138,7 @@ func startProcess(ctx context.Context, c Config, child ChildConfig) *processChan
 				}
 				result := event.Result.(primitives.ProcessExitResult)
 				if result.ExitCode != 0 && p.err == nil {
-					p.err = fmt.Errorf("child process exited without success")
+					p.err = fmt.Errorf("child process exited with code %d%s", result.ExitCode, p.diagnostics())
 				}
 				return
 			}
@@ -107,12 +147,27 @@ func startProcess(ctx context.Context, c Config, child ChildConfig) *processChan
 	go func() {
 		hello := ep.envelope("hello")
 		hello.Config = &child
+		hello.Mode = mode
 		if err := p.write(ctx, hello); err != nil {
 			cancel()
 		}
 	}()
 	return p
 }
+
+// diagnostics is the last lines the child wrote to stderr. The process
+// goroutine owns p.stderr.
+func (p *processChannel) diagnostics() string {
+	text := strings.TrimSpace(strings.ToValidUTF8(string(p.stderr), "\uFFFD"))
+	if text == "" {
+		return ""
+	}
+	if lines := strings.Split(text, "\n"); len(lines) > 8 {
+		text = strings.Join(lines[len(lines)-8:], "\n")
+	}
+	return ": " + text
+}
+
 func (p *processChannel) write(ctx context.Context, f frame) error {
 	// Cancellation of a pipe write after it started requires closing the channel.
 	// Tear down that child rather than leave an unbounded writer behind.

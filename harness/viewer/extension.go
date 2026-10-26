@@ -103,12 +103,14 @@ func (h ExtensionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			} else {
 				out.View = &v
 			}
-		case "steer", "cancel", "resume":
+		case "steer", "cancel", "resume", "approve":
 			controls := HostControls{Host: h.Host}
 			var receipt host.Receipt
 			switch q.Action {
 			case "steer":
 				receipt, err = controls.SteerChild(r.Context(), q.Control)
+			case "approve":
+				receipt, err = controls.ApproveChild(r.Context(), q.Control)
 			case "cancel":
 				receipt, err = controls.CancelChild(r.Context(), q.Control)
 			case "resume":
@@ -217,6 +219,9 @@ func (r Remote) SteerChild(ctx context.Context, q ControlRequest) (host.Receipt,
 }
 func (r Remote) CancelChild(ctx context.Context, q ControlRequest) (host.Receipt, error) {
 	return r.receipt(ctx, "cancel", q)
+}
+func (r Remote) ApproveChild(ctx context.Context, q ControlRequest) (host.Receipt, error) {
+	return r.receipt(ctx, "approve", q)
 }
 func (r Remote) ResumeChild(ctx context.Context, q ControlRequest) error {
 	if q.ParentID != r.ParentID {

@@ -138,25 +138,23 @@ func TestDockerSandboxForwardProxyHostCanonicalResults(t *testing.T) {
 	}
 }
 
-func TestDockerSandboxForwardProxyChildEnvironmentIsClosed(t *testing.T) {
+// A child gets the Host's environment, so its commands find the same tools
+// and proxy as the parent's (D1). Codex token variables stay behind: the
+// explicit auth file is a child's only Codex source, as for the Host.
+func TestChildEnvironmentIsTheHostEnvironment(t *testing.T) {
 	t.Setenv("SBX_CRED_OPENAI_MODE", "oauth")
 	t.Setenv("HTTPS_PROXY", testcodex.DockerProxyURL)
-	t.Setenv("https_proxy", "")
-	t.Setenv("HTTP_PROXY", "http://private-fixture:secret@untrusted.invalid:3128")
 	t.Setenv("NO_PROXY", "*")
-	cfg := agentrunner.RuntimeConfig{}
-	cfg.Identity.Provider.Auth = credential.Reference{Provider: "openai-codex", ID: "docker-sandbox-oauth", Method: credential.DockerSandboxOAuth}
-	env := childEnvironment(cfg)
-	if !slices.Contains(env, "HTTPS_PROXY="+testcodex.DockerProxyURL) || strings.Contains(strings.Join(env, "\n"), "private-fixture") || strings.Contains(strings.Join(env, "\n"), "NO_PROXY") {
-		t.Fatal("child relay missing or parent secrets crossed")
+	t.Setenv("GOPATH", "/fixture/go")
+	t.Setenv("OPENAI_CODEX_ACCESS_TOKEN", "ambient-inline-token-sensitive")
+	t.Setenv("OPENAI_CODEX_ACCOUNT_ID", "ambient-inline-account-sensitive")
+	env := childEnvironment(agentrunner.RuntimeConfig{})
+	for _, want := range []string{"SBX_CRED_OPENAI_MODE=oauth", "HTTPS_PROXY=" + testcodex.DockerProxyURL, "NO_PROXY=*", "GOPATH=/fixture/go", "PATH=" + os.Getenv("PATH")} {
+		if !slices.Contains(env, want) {
+			t.Fatal("child environment lost", want)
+		}
 	}
-	t.Setenv("HTTPS_PROXY", "http://private-fixture:secret@untrusted.invalid:3128")
-	if strings.Contains(strings.Join(childEnvironment(cfg), "\n"), "PROXY=") {
-		t.Fatal("invalid relay crossed to child")
-	}
-	t.Setenv("HTTPS_PROXY", testcodex.DockerProxyURL)
-	cfg.Identity.Provider.Auth = codexReference()
-	if strings.Contains(strings.Join(childEnvironment(cfg), "\n"), "PROXY=") {
-		t.Fatal("native child proxy contract changed")
+	if joined := strings.Join(env, "\n"); strings.Contains(joined, "ambient-inline") {
+		t.Fatal("Codex token variables crossed to a child")
 	}
 }

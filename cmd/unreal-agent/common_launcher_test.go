@@ -14,7 +14,6 @@ import (
 	"testing"
 
 	"github.com/unreallabsai/unreal-agent/harness/credential"
-	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
 	"github.com/unreallabsai/unreal-agent/internal/testclaude"
 )
 
@@ -25,15 +24,14 @@ func TestCommonBootstrapUsesNormalDiscoveryAndExplicitTrust(t *testing.T) {
 		want                 int
 	}{
 		{"codex", true, false, false, 1}, {"claude", false, true, true, 1}, {"both", true, true, true, 2},
-		{"no-auth", false, false, false, 0}, {"team-no-trust", false, true, false, 0},
+		// The Claude Code route (U21) runs under the organization's own managed
+		// settings; the old route's managed-trust flags are not needed for it.
+		{"no-auth", false, false, false, 0}, {"team-without-trust-flags", false, true, false, 1},
 	} {
 		t.Run(providers.name, func(t *testing.T) {
 			_, cli := normalFixture(t, providers.codex, providers.claude)
 			cli.Set(t, testclaude.Config{Subscription: "team", SignedOut: !providers.claude, Catalog: hostClaudeCatalog})
 			args := []string{"--bootstrap-claude-binary", cli.Binary, "dev"}
-			if providers.trust {
-				args = append(args, "--bootstrap-claude-policy-audited", "--bootstrap-claude-managed-trust")
-			}
 			o, err := parseLaunchOptions(args, io.Discard, os.Getenv)
 			if err != nil {
 				t.Fatal(err)
@@ -50,9 +48,6 @@ func TestCommonBootstrapUsesNormalDiscoveryAndExplicitTrust(t *testing.T) {
 			}
 			if len(cfg.Providers)+1 != providers.want || cfg.Launcher.DiscoverProviders != nil && !*cfg.Launcher.DiscoverProviders {
 				t.Fatal("common startup retained single-provider Pilot")
-			}
-			if cfg.Runtime.Provider.Provider == "claude-code" && (cfg.Runtime.ClaudeCode.ManagedPolicyMode != claudecode.ManagedPolicyTrust || cfg.Runtime.ClaudeCode.ToolBridge.Mode != claudecode.BridgeModeStructured) {
-				t.Fatal("Claude boundary changed")
 			}
 			if !reflect.DeepEqual(cfg.Permissions.Tools, []string{"read", "grep", "glob"}) || cfg.Permissions.FilesystemUnrestricted || cfg.Permissions.NetworkUnrestricted {
 				t.Fatal("common package changed baseline grants")
@@ -104,7 +99,7 @@ func TestCommonBootstrapFlagsDoNotApproveOrOverwriteExistingConfig(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	o, err := parseLaunchOptions([]string{"--config", f.o.config, "--bootstrap-codex-docker-oauth", "dev", "--bootstrap-claude-policy-audited", "--bootstrap-claude-managed-trust"}, io.Discard, os.Getenv)
+	o, err := parseLaunchOptions([]string{"--config", f.o.config, "--bootstrap-codex-docker-oauth", "dev"}, io.Discard, os.Getenv)
 	if err != nil || string(o.id) != "dev" {
 		t.Fatal("bool bootstrap flags consumed session argument", err)
 	}

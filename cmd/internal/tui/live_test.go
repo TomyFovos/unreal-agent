@@ -28,26 +28,26 @@ func idleSnapshot() Snapshot {
 
 func TestLivePhase4CommandsCompletionAndPasteIsolation(t *testing.T) {
 	s, u := idleSnapshot(), childUI(2)
-	u.Input = "/ch"
+	u.Input = "/"
 	menu := commandSheet(s, u, makeLayout(80, 24))
 	if len(menu) < 2 || !strings.Contains(menu[0].plain(), "›") {
 		t.Fatal("menu absent")
 	}
 	var e Editor
-	e.Apply(Key{Text: "/logi"})
+	e.Apply(Key{Text: "/mo"})
 	var complete completion
 	complete.reset()
 	u.Input = e.Text()
 	complete.apply(&e, s, &u)
-	if e.Text() != "/login " {
+	if e.Text() != "/model" {
 		t.Fatalf("single completion: %q", e.Text())
 	}
-	e.replace("/ch")
+	e.replace("/")
 	complete.reset()
 	u.MenuOptions = nil
 	u.Input = e.Text()
 	complete.apply(&e, s, &u)
-	if e.Text() != "/child" {
+	if e.Text() != "/" {
 		t.Fatal("common prefix: " + e.Text())
 	}
 	complete.apply(&e, s, &u)

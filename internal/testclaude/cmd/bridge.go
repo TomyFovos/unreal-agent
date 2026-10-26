@@ -176,7 +176,9 @@ func bridge(dir, path string, args []string, c configuration) {
 	digest := ""
 	for n, step := range c.BridgeSteps {
 		arguments := strings.ReplaceAll(step.Arguments, "$REVISION", digest)
-		id := fmt.Sprintf("tool-%d", n)
+		// Independent fake model conversations must not reuse a previous Tool
+		// Call ID. Explicit retries below still resend this exact identity.
+		id := fmt.Sprintf("tool-%d-%d", os.Getpid(), n)
 		name := "mcp__unreal__unreal_" + step.Name
 		emit(map[string]any{"type": "assistant", "message": map[string]any{"id": fmt.Sprintf("msg-%d", n), "model": model, "content": []any{map[string]any{"type": "thinking", "thinking": "private-reasoning-sensitive"}, map[string]any{"type": "tool_use", "id": id, "name": name, "input": jsontext.Value(arguments)}}, "stop_reason": "tool_use", "usage": map[string]any{"input_tokens": 10, "output_tokens": 2, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}})
 		result := mcp(id, "tools/call", map[string]any{"name": "unreal_" + step.Name, "arguments": jsontext.Value(arguments)})

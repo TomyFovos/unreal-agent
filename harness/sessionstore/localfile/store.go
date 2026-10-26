@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"uuid"
 
@@ -27,6 +28,7 @@ type cachedWriteState struct {
 }
 
 type Store struct {
+	restoreView          atomic.Pointer[RestoreView]
 	directory            string
 	writeStateCacheMutex sync.Mutex
 	writeStateCache      map[session.ID]cachedWriteState
@@ -321,6 +323,9 @@ func (store *Store) loadWriteState(
 }
 
 func (store *Store) publishInitialState(state storedState) error {
+	if err := store.invalidateRestoreView(state.Snapshot.Session.ID); err != nil {
+		return err
+	}
 	encoded, err := encodeInitialLog(state.Snapshot.Session, state.Items)
 	if err != nil {
 		return err
@@ -340,6 +345,10 @@ func (store *Store) append(
 	kind recordType,
 	value any,
 ) error {
+	if err := store.invalidateRestoreView(id); err != nil {
+		store.evictCachedWriteState(id)
+		return err
+	}
 	encoded, err := encodeRecord(kind, value)
 	if err != nil {
 		store.evictCachedWriteState(id)

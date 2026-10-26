@@ -252,7 +252,7 @@ func (b *builder) contextResponse(response llm.Response) {
 	}
 }
 
-func (b *builder) contextReceipt(callID string, output []llm.ToolResultOutput, running bool) {
+func (b *builder) contextReceipt(callID string, output []llm.ToolResultOutput, running bool, state llm.ToolResultState) {
 	if b.engine == nil {
 		return
 	}
@@ -260,12 +260,12 @@ func (b *builder) contextReceipt(callID string, output []llm.ToolResultOutput, r
 		b.engine.RemoveStaged(id)
 	}
 	delete(b.runningUnits, callID)
-	item := llm.Item{Type: llm.ItemToolResult, Data: llm.ToolResult{CallID: callID, Output: output}}
+	item := llm.Item{Type: llm.ItemToolResult, Data: llm.ToolResult{CallID: callID, Output: output, State: state}}
 	if _, safe := contextengine.PublicItem(item); !safe || b.blockedCalls[callID] {
 		b.addUnit(item, contextengine.ToolResult, contextengine.Omit, false, false, "", nil)
 		if stub, present := b.redactedReceipt(running); present {
 			output = stub
-			item.Data = llm.ToolResult{CallID: callID, Output: output}
+			item.Data = llm.ToolResult{CallID: callID, Output: output, State: state}
 		} else {
 			// No canonical receipt means no claim of execution/completion.
 			output = stub
@@ -363,7 +363,7 @@ func (b *builder) renderContinuation(s contextengine.Selected, quoted map[string
 		text := contextengine.ReferenceText(u)
 		if !portable {
 			if receipt, ok := u.Item.Data.(llm.ToolResult); ok {
-				return []llm.Item{{Type: llm.ItemToolResult, Data: llm.ToolResult{CallID: receipt.CallID, Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: text}}}}}
+				return []llm.Item{{Type: llm.ItemToolResult, Data: llm.ToolResult{CallID: receipt.CallID, Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: text}}, State: receipt.State}}}
 			}
 		}
 		return []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: text}}}
@@ -390,6 +390,23 @@ func (b *builder) BuildWithReserve(reserve int64) (Result, error) {
 	if reserve < 0 {
 		return Result{}, &contextengine.Error{Code: "required_context_exceeds_budget"}
 	}
+	if b.conversation != nil && b.provider == "claude-native" {
+		result, err := b.Build()
+		if err != nil {
+			return Result{}, err
+		}
+		budget, err := b.conversationBudget(result.Request.Tools)
+		if err != nil {
+			return Result{}, err
+		}
+		for _, item := range result.Request.Input {
+			reserve += contextengine.Estimate(item)
+			if reserve > budget {
+				return Result{}, &llm.ContinuationError{Code: "epoch_context_limit"}
+			}
+		}
+		return result, nil
+	}
 	if b.engine == nil {
 		return b.Build()
 	}
@@ -397,6 +414,40 @@ func (b *builder) BuildWithReserve(reserve int64) (Result, error) {
 }
 
 func (b *builder) buildCompactedReserve(reserve int64) (Result, error) {
+	return b.buildProjected(reserve, nil)
+}
+
+// BuildWithProjection uses the pinned adapter's actual final serializer, never
+// its live client. The Coordinator owns this call just like BuildWithReserve.
+func (b *builder) BuildWithProjection(projection llm.ContextProjection) (Result, error) {
+	if projection.Measure == nil || projection.Reserve < 0 || projection.SchemaReserve < 0 {
+		return Result{}, &contextengine.Error{Code: "invalid_projection_cost"}
+	}
+	if b.conversation != nil && b.provider == "claude-native" {
+		result, err := b.Build()
+		if err != nil {
+			return Result{}, err
+		}
+		budget, err := b.conversationBudget(result.Request.Tools, projection.SchemaReserve)
+		if err != nil {
+			return Result{}, err
+		}
+		measured, err := projection.Measure(result.Request)
+		if err != nil {
+			return Result{}, err
+		}
+		if measured < 0 || projection.Reserve > budget || measured > budget-projection.Reserve {
+			return Result{}, &llm.ContinuationError{Code: "epoch_context_limit"}
+		}
+		return result, nil
+	}
+	if b.engine == nil {
+		return b.Build()
+	}
+	return b.buildProjected(projection.Reserve, &projection)
+}
+
+func (b *builder) buildProjected(reserve int64, projection *llm.ContextProjection) (Result, error) {
 	runtime := b.contextRuntime
 	runtime.Model = b.request.Model.ID
 	runtime.Effort = string(b.request.Model.ReasoningEffort)
@@ -406,8 +457,53 @@ func (b *builder) buildCompactedReserve(reserve int64) (Result, error) {
 	if len(b.request.Tools) > 0 {
 		schema = contextengine.Estimate(b.request.Tools) + 512
 	}
+	if projection != nil {
+		schema = max(schema, projection.SchemaReserve)
+	}
 	quoted := map[string]bool{}
+	var projectionError error
+	measure := func(items []llm.Item) (int64, error) {
+		request := llm.Request{Model: b.request.Model, Tools: b.request.Tools, Input: items}
+		request, err := llm.BindReceiptProjections(request)
+		if err != nil {
+			return 0, err
+		}
+		return projection.Measure(request)
+	}
+	// Same canonical call provides the result codec/name during marginal sizing.
+	// Only eligible public partners are used; no private/unadopted body is copied.
+	partners := map[string]llm.Item{}
+	if projection != nil {
+		for _, item := range append(slices.Clone(b.committedPrefix), b.stagedSuffix...) {
+			if call, ok := item.Data.(llm.ToolCall); ok {
+				if safe, eligible := contextengine.PublicItem(item); eligible {
+					partners[call.CallID] = safe
+				}
+			}
+		}
+	}
+	// Discarded at the end of this Build; portable retry gets a distinct key.
+	var memo *projectionMemo
+	if projection != nil {
+		memo = newProjectionMemo(measure, len(partners))
+	}
 	cost := func(u contextengine.Unit, reason string, ref bool) int64 {
+		if projection != nil {
+			key := projectionKey(u, reason, ref, quoted[u.Group])
+			if result, ok := u.Item.Data.(llm.ToolResult); ok {
+				if call, exists := partners[result.CallID]; exists {
+					key.partner = projectionPartnerKey{present: true, call: call.Data.(llm.ToolCall)}
+				}
+			}
+			value, e := memo.cost(key, func() []llm.Item {
+				return b.renderContinuation(contextengine.Selected{Unit: u, Reason: reason, ReferenceOnly: ref}, quoted)
+			})
+			if e == nil {
+				return value
+			}
+			projectionError = e
+			return 1 << 60
+		}
 		// Use a worst-case charge so changing an incomplete group to quoted
 		// historical evidence cannot exceed the selector's budget.
 		if ref {
@@ -431,7 +527,32 @@ func (b *builder) buildCompactedReserve(reserve int64) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	p, d, err := b.engine.Build(contextengine.BuildInput{Runtime: runtime, Instructions: b.committedPrefix[0], SchemaTokens: schema, Cost: cost, TransportReserve: reserve, RequiredGroups: required})
+	var baseCost func(llm.Item, contextengine.State) (int64, error)
+	if projection != nil {
+		baseCost = func(instructions llm.Item, state contextengine.State) (int64, error) {
+			message := instructions.Data.(llm.Message)
+			message.Text += "\n\n" + contextengine.StateItem(state).Data.(llm.Message).Text
+			value, e := measure([]llm.Item{{Type: llm.ItemMessage, Data: message}})
+			return value - reserve, e
+		}
+	}
+	var measureSelected func(llm.Item, contextengine.State, []contextengine.Selected) (int64, error)
+	if projection != nil {
+		measureSelected = func(instructions llm.Item, state contextengine.State, selected []contextengine.Selected) (int64, error) {
+			message := instructions.Data.(llm.Message)
+			message.Text += "\n\n" + contextengine.StateItem(state).Data.(llm.Message).Text
+			items := []llm.Item{{Type: llm.ItemMessage, Data: message}}
+			for _, unit := range selected {
+				items = append(items, b.renderContinuation(unit, quoted)...)
+			}
+			return measure(items)
+		}
+	}
+	buildInput := contextengine.BuildInput{Runtime: runtime, Instructions: b.committedPrefix[0], SchemaTokens: schema, Cost: cost, BaseCost: baseCost, MeasureSelected: measureSelected, TransportReserve: reserve, RequiredGroups: required}
+	p, d, err := b.engine.Build(buildInput)
+	if projectionError != nil {
+		return Result{}, projectionError
+	}
 	if contextengine.IsBudgetError(err) {
 		// Private provider replay may exhaust the budget even when every public
 		// receipt body fits. Retry a request-local, whole-group portable projection
@@ -440,7 +561,10 @@ func (b *builder) buildCompactedReserve(reserve int64) (Result, error) {
 		for group := range required {
 			quoted[group] = true
 		}
-		p, d, err = b.engine.Build(contextengine.BuildInput{Runtime: runtime, Instructions: b.committedPrefix[0], SchemaTokens: schema, Cost: cost, TransportReserve: reserve, RequiredGroups: required})
+		p, d, err = b.engine.Build(buildInput)
+		if projectionError != nil {
+			return Result{}, projectionError
+		}
 	}
 	if err != nil {
 		return Result{}, err
@@ -459,8 +583,18 @@ func (b *builder) buildCompactedReserve(reserve int64) (Result, error) {
 	}
 	// A final renderer check covers the actual JSON/framing estimate as well.
 	actualEstimate := int64(0)
-	for _, item := range request.Input {
-		actualEstimate += contextengine.Estimate(item)
+	if projection != nil {
+		actualEstimate, err = measure(request.Input)
+		if err != nil {
+			return Result{}, err
+		}
+		d.EstimatedInputTokens = actualEstimate
+		d.Utilization = 100 * float64(actualEstimate) / float64(p.Budget.Input)
+		p.EstimatedTokens = actualEstimate - reserve
+	} else {
+		for _, item := range request.Input {
+			actualEstimate += contextengine.Estimate(item)
+		}
 	}
 	if actualEstimate > p.Budget.Input {
 		return Result{}, &contextengine.Error{Code: "required_context_exceeds_budget"}

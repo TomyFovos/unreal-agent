@@ -16,7 +16,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/internal/testcodex"
 )
 
-const codexModelPage = `{"data":[{"id":"picker-id","model":"wire-model","displayName":"Synthetic Model","description":"provider-prose-not-public","hidden":false,"isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"low","description":"private-effort-detail"},{"reasoningEffort":"high"},{"reasoningEffort":"ultra"}],"account_id":"account-private"}],"nextCursor":null}`
+const codexModelPage = `{"data":[{"id":"picker-id","model":"wire-model","displayName":"Synthetic Model","description":"provider-prose-not-public","hidden":false,"isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"low","description":"private-effort-detail"},{"reasoningEffort":"high"},{"reasoningEffort":"hyper"}],"account_id":"account-private"}],"nextCursor":null}`
 
 func codexFrames(page string) []any {
 	var value any
@@ -225,7 +225,7 @@ func TestCodexCacheProblemCodesAndReadOnlySource(t *testing.T) {
 	for _, tc := range []struct{ data, code string }{
 		{`{invalid`, "codex_cache_invalid"},
 		{`{"models":[]}`, "codex_cache_no_selectable_models"},
-		{`{"models":[{"slug":"bad","visibility":"list","supported_reasoning_levels":[{"effort":"ultra"}]}]}`, "codex_cache_no_selectable_models"},
+		{`{"models":[{"slug":"bad","visibility":"list","supported_reasoning_levels":[{"effort":"hyper"}]}]}`, "codex_cache_no_selectable_models"},
 	} {
 		if err := os.WriteFile(path, []byte(tc.data), 0600); err != nil {
 			t.Fatal(err)

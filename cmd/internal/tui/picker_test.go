@@ -12,6 +12,22 @@ import (
 	"testing"
 )
 
+func TestProviderPickerSupportedButUnavailableUsesClosedHints(t *testing.T) {
+	providers := []modelcatalog.Provider{
+		{ID: "openai-codex", Name: "OpenAI Codex", Availability: "available"},
+		{ID: "claude-code", Name: "Claude Code", Availability: "unavailable", Reason: modelcatalog.ManagedTrustRequired},
+	}
+	p := providerPicker(providers, &sessionstore.RuntimeSelection{Provider: "openai-codex"})
+	if len(p.Options) != 2 || p.Selection != 0 || !strings.Contains(p.Options[1], "audit policy") {
+		t.Fatal("provider availability hidden")
+	}
+	providers[1].Reason = "PRIVATE_PROVIDER_PAYLOAD"
+	p = providerPicker(providers, nil)
+	if strings.Contains(strings.Join(p.Options, "\n"), "PRIVATE_PROVIDER_PAYLOAD") {
+		t.Fatal("non-enum reason exposed")
+	}
+}
+
 func TestModelPickerEffortsScrollingFallbackAndBottom(t *testing.T) {
 	current := &sessionstore.RuntimeSelection{Version: 1, Model: "m0", Name: "current", Provider: "openai-codex", Effort: llm.ReasoningEffortMedium}
 	c := modelcatalog.Catalog{Available: true}

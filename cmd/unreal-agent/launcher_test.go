@@ -526,7 +526,7 @@ func TestLauncherCanceledStartupLeavesBackgroundHostAlive(t *testing.T) {
 	}
 	client := gateway.NewClient(f.o.socket)
 	defer client.Close()
-	waitInteractive(t, func() bool { return probeHost(t.Context(), client) == nil })
+	waitInteractiveContext(t, func(ctx context.Context) bool { return probeHost(ctx, client) == nil })
 	if err = f.run(t.Context(), []string{"test"}, func(context.Context, *gateway.Client, session.ID) error { return nil }); err != nil {
 		t.Fatal(err)
 	}

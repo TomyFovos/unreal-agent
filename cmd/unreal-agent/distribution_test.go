@@ -72,7 +72,7 @@ func TestSnapshotPackagedHostNoInference(t *testing.T) {
 	})
 	client := gateway.NewClient(f.o.socket)
 	defer client.Close()
-	waitInteractive(t, func() bool { return probeHost(t.Context(), client) == nil })
+	waitInteractiveContext(t, func(ctx context.Context) bool { return probeHost(ctx, client) == nil })
 	view, err := client.Open(t.Context(), host.Create, "snapshot-smoke")
 	if err != nil || !view.Running {
 		t.Fatal("snapshot Host could not create an idle Session", err)

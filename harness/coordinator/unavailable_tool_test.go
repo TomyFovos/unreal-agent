@@ -66,7 +66,7 @@ func TestCoordinatorSchedulesAvailableCallAlongsideUnavailableCall(t *testing.T)
 	statuses, err := current.handleModelResponse(t.Context(), sessionstore.ModelResponse{
 		TurnID: "turn-1",
 		Response: llm.Response{Output: []llm.Item{
-			{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "unknown", Name: "unknown-tool"}},
+			{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "unknown", Name: "unknown-tool", Arguments: `{}`}},
 			{Type: llm.ItemToolCall, Data: valid},
 		}},
 	})

@@ -2,6 +2,9 @@ package credential
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"slices"
 	"time"
 )
 
@@ -15,6 +18,27 @@ type Metadata struct {
 type Record struct {
 	Metadata Metadata
 	Material Material
+	// NativeGrant is an opt-in v2 extension owned by the dedicated Native
+	// lifecycle. It is committed in the same atomic replacement as Material.
+	// Ordinary providers retain the v1 encoding and Manager behavior.
+	NativeGrant *NativeGrantEvidence
+}
+
+// NativeGrantEvidence records verified grant provenance, not permission to
+// infer or a billing assertion. MaterialHash binds it to this exact rotation.
+type NativeGrantEvidence struct {
+	RouteDigest  string   `json:"route_digest"`
+	AccountID    string   `json:"account_id"`
+	TeamID       string   `json:"team_id"`
+	TokenKind    string   `json:"token_kind"`
+	ScopeSource  string   `json:"scope_source"`
+	Scopes       []string `json:"scopes"`
+	Generation   uint64   `json:"generation"`
+	Revision     uint64   `json:"revision"`
+	MaterialHash string   `json:"material_hash"`
+	// Revoked retains the account/route binding after logout while all token
+	// material is erased. It can never be used for refresh or dispatch.
+	Revoked bool `json:"revoked,omitzero"`
 }
 
 // Transaction is valid only during WithCredential. Backends must serialize it
@@ -60,6 +84,49 @@ func (m *Manager) Login(ctx context.Context, ref Reference, material Material) e
 func (m *Manager) Logout(ctx context.Context, ref Reference) error {
 	return m.store.WithCredential(ctx, ref, func(tx Transaction) error { return tx.Remove() })
 }
+
+// NativeLogout erases material while retaining the verified ordinary account
+// binding. A later login cannot silently switch accounts under existing saved
+// Session references. Legacy providers retain the existing Remove semantics.
+func (m *Manager) NativeLogout(ctx context.Context, ref Reference) error {
+	if ref.Provider != "claude-native" || ref.Method != OAuth {
+		return &Error{Code: "invalid_reference"}
+	}
+	return m.store.WithCredential(ctx, ref, func(tx Transaction) error {
+		r, err := tx.Read()
+		if IsCode(err, "not_found") {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if r.NativeGrant == nil {
+			return &Error{Code: "native_verified_grant_required"}
+		}
+		g := *r.NativeGrant
+		g.Scopes = slices.Clone(g.Scopes)
+		g.Revoked = true
+		r.NativeGrant = &g
+		r.Material.Token = Secret{}
+		r.Material.RefreshToken = Secret{}
+		r.Material.ExpiresAt = time.Time{}
+		r.Metadata.RefreshPending = false
+		g.MaterialHash = NativeMaterialBindingHash(ref, r)
+		return tx.Write(r)
+	})
+}
+
+// NativeMaterialBindingHash is a private-record digest, never a public grant.
+// It binds the opt-in evidence to exactly the material atomically stored beside
+// it; no secret is returned, logged, or added to canonical history.
+func NativeMaterialBindingHash(ref Reference, r Record) string {
+	h := sha256.New()
+	for _, v := range []string{ref.Provider, ref.ID, string(ref.Method), r.Material.AccountID, r.Material.Token.Reveal(), r.Material.RefreshToken.Reveal(), r.Material.ExpiresAt.Format(time.RFC3339Nano)} {
+		h.Write([]byte(v))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 func (m *Manager) List(ctx context.Context) ([]Metadata, error) { return m.store.List(ctx) }
 func (m *Manager) Resolve(ctx context.Context, ref Reference) (Material, error) {
 	if ref.Method == DockerSandboxOAuth {
@@ -75,6 +142,9 @@ func (m *Manager) Resolve(ctx context.Context, ref Reference) (Material, error) 
 			return err
 		}
 		current := record.Material
+		if record.NativeGrant != nil {
+			return &Error{Code: "native_owner_required"}
+		}
 		if record.Metadata.RefreshPending {
 			return &Error{Code: "reauth_required"}
 		}

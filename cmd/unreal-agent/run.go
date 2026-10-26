@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
@@ -18,14 +19,16 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/dap"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
-	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/lsp"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
+	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
 
 type serveConfiguration struct {
+	providerStatuses []modelcatalog.Provider
 	// Launcher is nonsecret local discovery policy, outside Session identity.
 	Launcher        *normalLauncherConfig `json:",omitzero"`
 	Context         contextengine.Config  `json:",omitzero"`
@@ -48,6 +51,8 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	flags.SetOutput(output)
 	socket := flags.String("socket", "", "absolute private Unix socket path")
 	switch args[0] {
+	case "providers":
+		return runProviderPreflight(ctx, args[1:], output)
 	case "serve":
 		normal := flags.Bool("normal-runtime", false, "enable normal launcher provider discovery (internal launcher option)")
 		path := flags.String("config", "", "nonsecret runtime/policy JSON configuration")
@@ -71,7 +76,17 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 				return err
 			}
 		}
-		policy, err := permission.New(config.Permissions)
+		// Built-in subagents are derived per Host, not part of a Session's
+		// recorded identity, so Sessions from before them still resume.
+		builtinSubagents := false
+		if len(config.Subagents) == 0 {
+			if defaults := defaultSubagents(config); defaults != nil {
+				maximum := withChildTools(*config.PermissionModes.Maximum)
+				config.PermissionModes.Maximum = &maximum
+				config.Subagents, builtinSubagents = defaults, true
+			}
+		}
+		policy, err := permission.New(withClaudeCodeRecord(config.Permissions))
 		if err != nil {
 			return err
 		}
@@ -84,7 +99,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 				return err
 			}
 			if config.PermissionModes.Enabled {
-				modeMaximum, err = permission.New(*config.PermissionModes.Maximum)
+				modeMaximum, err = permission.New(withClaudeCodeRecord(*config.PermissionModes.Maximum))
 				if err != nil {
 					return err
 				}
@@ -116,59 +131,29 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		if err != nil {
 			return err
 		}
-		var claudeClient *claudecode.Client
 		codexRead := codexCatalogReader(codexPath, isDockerSandboxCodex(config.Runtime.Provider.Auth) || isDockerSandboxCodex(config.Providers["openai-codex"].Provider.Auth), os.Getenv)
-		var readClaudeCatalog func(context.Context) (modelcatalog.Catalog, error)
 		health := map[string]func(context.Context) error{}
-		claudeConfig := config.Runtime.ClaudeCode
-		if p, ok := config.Providers["claude-code"]; ok {
-			claudeConfig = p.ClaudeCode
-		}
-		if config.Runtime.Provider.Provider == "claude-code" || config.Providers["claude-code"].Provider.Provider != "" {
-			if claudeConfig == nil {
-				return errors.New("claude-code requires Runtime.ClaudeCode executable/catalog configuration")
-			}
-			transportConfig := *claudeConfig
-			if normalMode || modeMaximum != nil {
-				transportConfig = claudeTransportConfig(transportConfig, os.Getenv)
-			}
-			cli, e := claudecode.NewClient(transportConfig)
-			if e != nil {
-				return e
-			}
-			probeErr := cli.Probe(permission.WithPolicy(ctx, policy))
-			if probeErr != nil && len(config.Providers) == 0 && !normalMode {
-				return probeErr
-			}
-			claudeClient = cli
-			defer cli.Close()
-			health["claude-code"] = func(checkCtx context.Context) error {
-				if normalMode || modeMaximum != nil {
-					return probeErr // registration result; not a heavy probe per picker/turn
-				}
-				checkCtx, cancelCheck := context.WithCancel(checkCtx)
-				stop := context.AfterFunc(ctx, cancelCheck)
-				defer stop()
-				defer cancelCheck()
-				return cli.Probe(permission.WithPolicy(checkCtx, policy))
-			}
-			readClaudeCatalog = func(readCtx context.Context) (modelcatalog.Catalog, error) {
-				readCtx, cancelRead := context.WithCancel(readCtx)
-				stop := context.AfterFunc(ctx, cancelRead)
-				defer stop()
-				defer cancelRead()
-				return cli.Catalog(permission.WithPolicy(readCtx, policy))
-			}
+		var claudeAgent *claudeCatalog
+		if binary, e := claudeBinary(config, os.Getenv); e == nil && (config.Runtime.Provider.Provider == claudeagent.ProviderID || config.Providers[claudeagent.ProviderID].Provider.Provider != "") {
+			claudeAgent = &claudeCatalog{binary: binary}
+			health[claudeagent.ProviderID] = claudeAgent.check
 		}
 		languageTools, err := agentrunner.NewLanguageTools(permission.WithPolicy(ctx, policy), config.Runtime.Workspace, config.LanguageServers)
 		if err != nil {
 			return err
 		}
 		defer languageTools.Close()
-		runtimeConfig, templates, err := withParentSubagents(agentrunner.RuntimeConfig{Context: config.Context, Identity: config.Runtime, SessionDirectory: *directory, Providers: registry, Credentials: resolver, LanguageTools: languageTools, DebugAdapters: config.DebugAdapters, Backends: config.Providers, Health: health, Catalogs: map[string]func(context.Context) (modelcatalog.Catalog, error){"claude-code": readClaudeCatalog, "openai-codex": func(readCtx context.Context) (modelcatalog.Catalog, error) {
+		catalogs := map[string]func(context.Context) (modelcatalog.Catalog, error){"openai-codex": func(readCtx context.Context) (modelcatalog.Catalog, error) {
 			return codexRead(readCtx, false)
-		}}}, config.Subagents, capabilityPolicy, *credentials, codexPath)
+		}}
+		if claudeAgent != nil {
+			catalogs[claudeagent.ProviderID] = func(readCtx context.Context) (modelcatalog.Catalog, error) { return claudeAgent.read(readCtx, false) }
+		}
+		runtimeConfig, templates, err := withParentSubagents(agentrunner.RuntimeConfig{Context: config.Context, Identity: config.Runtime, SessionDirectory: *directory, Providers: registry, Credentials: resolver, LanguageTools: languageTools, DebugAdapters: config.DebugAdapters, Backends: config.Providers, Health: health, Catalogs: catalogs}, config.Subagents, capabilityPolicy, *credentials, codexPath)
 		if err != nil {
+			return err
+		}
+		if runtimeConfig.ClaudeSubagents, err = claudeSubagents(templates, *socket); err != nil {
 			return err
 		}
 		if normalMode {
@@ -177,7 +162,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 				if modeMaximum != nil {
 					return capabilityPolicy.CheckTool(name) == nil
 				}
-				return id != "claude-code" || capabilityPolicy.CheckTool(name) == nil
+				return true
 			}
 			available := runtimeConfig.CheckProvider(ctx, config.Runtime.Provider.Provider) == nil
 			for id := range runtimeConfig.Backends {
@@ -185,16 +170,6 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			}
 			if !available {
 				return &normalRuntimeError{Code: "providers_unavailable"}
-			}
-			if claudeConfig != nil {
-				capability := modelcatalog.Capabilities{ToolBridge: "disabled"}
-				if claudeConfig.ToolBridge.Enabled {
-					capability.ToolBridge = "unknown"
-					if runtimeConfig.CheckProvider(ctx, "claude-code") == nil {
-						capability = probeNormalBridge(permission.WithPolicy(ctx, policy), runtimeConfig, claudeClient)
-					}
-				}
-				runtimeConfig.Capabilities = map[string]modelcatalog.Capabilities{"claude-code": capability}
 			}
 		}
 		if modeMaximum != nil {
@@ -208,9 +183,11 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		if err = json.Unmarshal(identity, &runtimeConfig.Identity); err != nil {
 			return err
 		}
-		identity, err = withSubagentIdentity(identity, templates)
-		if err != nil {
-			return err
+		if !builtinSubagents {
+			identity, err = withSubagentIdentity(identity, templates)
+			if err != nil {
+				return err
+			}
 		}
 		owner, err := host.New(ctx, host.Config{Directory: *directory, Build: factory, PermissionMaximum: modeMaximum, ApprovalTimeout: approvalTimeout})
 		if err != nil {
@@ -223,23 +200,8 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			return err
 		}
 		gatewayConfig := withViewer(gateway.Config{Host: owner, Policy: policy, Configuration: identity, Auth: auth, Workspace: workspace}, *directory)
-		var claudeCatalog modelcatalog.Catalog
-		if claudeConfig != nil {
-			claudeCatalog, err = modelcatalog.Configured(claudeConfig.Models)
-			if err != nil {
-				return err
-			}
-		}
 		binding := launcherHostBinding{Configuration: absolutePath(*path), Sessions: absolutePath(*directory), Credentials: absolutePath(*credentials), CodexFile: absolutePath(*codexFile), Normal: *normal, Identity: ownLauncherIdentity()}
-		models := modelUI{binding: &binding, owner: owner, runtime: runtimeConfig, templates: templates, policy: policy, cache: codexModelCache(codexPath), codexRead: codexRead, claude: claudeCatalog, next: gatewayConfig.Extension}
-		if claudeClient != nil {
-			models.claudeRead = func(readCtx context.Context, refresh bool) (modelcatalog.Catalog, error) {
-				if refresh {
-					claudeClient.InvalidateCatalog()
-				}
-				return readClaudeCatalog(readCtx)
-			}
-		}
+		models := modelUI{supported: config.providerStatuses, binding: &binding, owner: owner, runtime: runtimeConfig, templates: templates, policy: policy, cache: codexModelCache(codexPath), codexRead: codexRead, claudeAgent: claudeAgent, next: gatewayConfig.Extension}
 		gatewayConfig.Extension = models
 		return gateway.ListenAndServe(ctx, *socket, gatewayConfig)
 	case "attach":
@@ -278,4 +240,15 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	default:
 		return errors.New("unsupported command: expected serve or attach")
 	}
+}
+
+// withClaudeCodeRecord lets every policy, the Read Only baseline included, keep
+// claude_code receipts. They only record calls Claude Code already ran after
+// Unreal's mode approved them (U21) and grant nothing, so a policy saved
+// before the route existed covers them too.
+func withClaudeCodeRecord(c permission.Config) permission.Config {
+	if !slices.Contains(c.Tools, tool.ClaudeCodeName) {
+		c.Tools = append(slices.Clone(c.Tools), tool.ClaudeCodeName)
+	}
+	return c
 }

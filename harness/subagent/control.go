@@ -18,6 +18,9 @@ type ControlRequest struct {
 	ChildID          session.ID
 	InputID          inbox.ID
 	Text             string
+	// Request and Allow answer a child's approval request (ApproveChild).
+	Request string `json:",omitzero"`
+	Allow   bool   `json:",omitzero"`
 }
 
 func validateControl(owner *host.Session, r ControlRequest) (operation.Operation, error) {
@@ -53,6 +56,20 @@ func SteerChild(ctx context.Context, owner *host.Session, r ControlRequest) (hos
 	digest := sha256.Sum256([]byte(string(owner.ID) + "\x00" + string(r.InputID)))
 	id := operation.ID("control-" + hex.EncodeToString(digest[:16]))
 	return owner.SubmitOperation(ctx, r.ParentGeneration, r.InputID, id, "SubagentSend", spec)
+}
+
+// ApproveChild answers a request the child waits on, as its parent (U17).
+func ApproveChild(ctx context.Context, owner *host.Session, r ControlRequest) (host.Receipt, error) {
+	if _, err := validateControl(owner, r); err != nil {
+		return host.Receipt{}, err
+	}
+	spec, err := NewSpec(Plan{Version: 1, Action: "approve", ParentID: owner.ID, Handle: r.OperationID, Request: r.Request, Allow: r.Allow})
+	if err != nil {
+		return host.Receipt{}, err
+	}
+	digest := sha256.Sum256([]byte(string(owner.ID) + "\x00" + string(r.InputID)))
+	id := operation.ID("control-" + hex.EncodeToString(digest[:16]))
+	return owner.SubmitOperation(ctx, r.ParentGeneration, r.InputID, id, "SubagentApprove", spec)
 }
 func CancelChild(ctx context.Context, owner *host.Session, r ControlRequest) (host.Receipt, error) {
 	if _, err := validateControl(owner, r); err != nil {

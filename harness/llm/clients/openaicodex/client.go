@@ -28,11 +28,15 @@ type Config struct {
 	// Requires the separately validated host-owned Sandbox OAuth route. Never
 	// combine with token, account ID or AuthFile, and never infer from a token.
 	DockerSandboxOAuth bool
+	// RequestEffort turns a selected effort into the one sent, from the
+	// model catalog; nil sends max for ultra (see modelcatalog.RequestEffort).
+	RequestEffort func(ctx context.Context, model string, selected llm.ReasoningEffort) llm.ReasoningEffort
 }
 
 type Client struct {
-	adapter llm.Adapter
-	remote  *primitives.RemoteClient
+	adapter       llm.Adapter
+	remote        *primitives.RemoteClient
+	requestEffort func(context.Context, string, llm.ReasoningEffort) llm.ReasoningEffort
 }
 
 var _ llm.Adapter = (*Client)(nil)
@@ -105,7 +109,7 @@ func NewClient(config Config) (*Client, error) {
 		_ = remote.Close()
 		return nil, err
 	}
-	return &Client{adapter: adapter, remote: remote}, nil
+	return &Client{adapter: adapter, remote: remote, requestEffort: config.RequestEffort}, nil
 }
 
 func (client *Client) Respond(ctx context.Context, request llm.Request, options llm.RequestOptions) (llm.Response, error) {
@@ -114,6 +118,13 @@ func (client *Client) Respond(ctx context.Context, request llm.Request, options 
 	}
 	if request.Model.MaxOutputTokens != nil {
 		return llm.Response{}, errors.New("codex does not support max_output_tokens")
+	}
+	// The backend rejects ultra; Codex sends the model's multi-agent effort.
+	if request.Model.ReasoningEffort == llm.ReasoningEffortUltra {
+		request.Model.ReasoningEffort = llm.ReasoningEffortMax
+		if client.requestEffort != nil {
+			request.Model.ReasoningEffort = client.requestEffort(ctx, request.Model.ID, llm.ReasoningEffortUltra)
+		}
 	}
 	response, err := client.adapter.Respond(ctx, request, options)
 	var apiErr *responsesapi.APIError

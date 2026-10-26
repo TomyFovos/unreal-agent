@@ -41,8 +41,9 @@ func BindRuntime(extensions []tool.Extension, ctx context.Context, owner *host.S
 	}
 }
 
-// Extensions returns codecs for all five tools; child mode advertises only
-// SendParent and Finish, and parent mode only start/send/cancel.
+// Extensions returns codecs for all six tools. A child advertises SendParent
+// and Finish, and a parent start/send/cancel/approve; a child with worker
+// templates is both.
 func Extensions(owner session.ID, templates map[string]runtime.Template, child bool) ([]tool.Extension, error) {
 	data, err := json.Marshal(templates)
 	if err != nil {
@@ -61,12 +62,14 @@ func Extensions(owner session.ID, templates map[string]runtime.Template, child b
 		{"SubagentStart", "start", "Start an independent child agent. The operation remains running; ready messages expose its handle. End your turn to wait for events.", map[string]any{"template": map[string]any{"type": "string"}, "task": map[string]any{"type": "string"}}, []string{"template", "task"}, false},
 		{"SubagentSend", "send", "Send a message to an owned child using its operation handle. Acknowledgement means durable receipt, not task completion.", map[string]any{"handle": map[string]any{"type": "string"}, "text": map[string]any{"type": "string"}}, []string{"handle", "text"}, false},
 		{"SubagentCancel", "cancel", "Cancel an owned child by operation handle.", map[string]any{"handle": map[string]any{"type": "string"}}, []string{"handle"}, false},
+		{"SubagentApprove", "approve", "Allow or deny a request an owned child is waiting on. Children ask their parent, not the user; ask the user yourself when unsure.", map[string]any{"handle": map[string]any{"type": "string"}, "request": map[string]any{"type": "string"}, "allow": map[string]any{"type": "boolean"}}, []string{"handle", "request", "allow"}, false},
 		{"SendParent", "parent", "Send a progress update or question to the parent; end the turn to wait for its reply.", map[string]any{"text": map[string]any{"type": "string"}}, []string{"text"}, true},
 		{"Finish", "finish", "Finish delegated work with a canonical report, only after every other operation has completed. Call Finish alone; it stops this child.", map[string]any{"status": map[string]any{"type": "string", "enum": []string{"completed", "failed"}}, "summary": map[string]any{"type": "string"}, "changedFiles": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "tests": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "blockers": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, []string{"status", "summary", "changedFiles", "tests", "blockers"}, true},
 	}
 	var result []tool.Extension
 	for _, d := range definitions {
-		result = append(result, tool.Extension{Definition: tool.Definition{Tool: llm.Tool{Type: llm.ToolFunction, Name: d.name, Description: d.description, Parameters: map[string]any{"type": "object", "properties": d.properties, "required": d.required, "additionalProperties": false}}}, Translator: &translator{action: d.action, owner: owner, templates: copied}, Enabled: d.isChild == child})
+		enabled := d.isChild == child || !d.isChild && len(copied) > 0
+		result = append(result, tool.Extension{Definition: tool.Definition{Tool: llm.Tool{Type: llm.ToolFunction, Name: d.name, Description: d.description, Parameters: map[string]any{"type": "object", "properties": d.properties, "required": d.required, "additionalProperties": false}}}, Translator: &translator{action: d.action, owner: owner, templates: copied}, Enabled: enabled})
 	}
 	return result, nil
 }
@@ -82,11 +85,16 @@ func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallSta
 		Tests        []string                `json:"tests"`
 		Blockers     []string                `json:"blockers"`
 		Runtime      *runtime.RuntimeRequest `json:"runtime"`
+		Request      string                  `json:"request"`
+		Allow        bool                    `json:"allow"`
 	}
 	if err := json.Unmarshal([]byte(call.Arguments), &args, json.RejectUnknownMembers(true)); err != nil {
 		return tool.ErrorStatus("Invalid subagent arguments", 0)
 	}
 	p := runtime.Plan{Version: 1, Action: t.action, ParentID: t.owner, Handle: args.Handle, Text: args.Text}
+	if t.action == "approve" {
+		p.Request, p.Allow = args.Request, args.Allow
+	}
 	if t.action == "start" {
 		config, ok := t.templates[args.Template]
 		if !ok {

@@ -86,7 +86,7 @@ func TestStorePersistsTypedHistoryAndPagination(t *testing.T) {
 		Version:     1,
 		Status:      operation.StatusAwaiting,
 		State:       jsontext.Value(`{"step":1}`),
-		Idempotency: jsontext.Value(`{"key":"one"}`),
+		Idempotence: &operation.IdempotencyMetadata{Idempotency: jsontext.Value(`{"key":"one"}`)},
 	}
 	status := sessionstore.ToolCallStatus{
 		TurnID:     turn.ID,

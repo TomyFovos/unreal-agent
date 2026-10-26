@@ -18,6 +18,32 @@ import (
 
 const testShellPath = "/bin/sh"
 
+func TestShellPOSIXSuccessAndNonzeroExitAreActualObservations(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		exit    int
+		stderr  string
+	}{
+		{"[ x = x ]", 0, ""},
+		{"printf '%s\\n' 'synthetic expected failure' >&2\nexit 127", 127, "synthetic expected failure\n"},
+	} {
+		current := newShellOperation(t, "syntax-observation", operation.ShellInput{Shell: testShellPath, Command: test.command, Directory: t.TempDir()}, t.TempDir(), 1024)
+		starts := 0
+		completed := runShellActorObserved(t, t.Context(), current, func(_ operation.Operation, event primitives.PrimitiveEvent) {
+			if event.Type == primitives.PrimitiveEventProcessStarted {
+				starts++
+			}
+		})
+		state := shellState(t, completed)
+		if completed.Status != operation.StatusCompleted || state.Result == nil || state.Result.ExitCode != test.exit || state.Input.Shell != testShellPath || state.Input.Command != test.command || starts != 1 {
+			t.Fatal("command exit, operation completion, or actual interpreter was misrepresented")
+		}
+		if state.Result.Err != test.stderr {
+			t.Fatal("actual stderr was lost")
+		}
+	}
+}
+
 func TestShellActorCapturesArtifactsAndCompletes(t *testing.T) {
 	baseDirectory := t.TempDir()
 	workingDirectory := t.TempDir()
@@ -678,14 +704,13 @@ func newShellOperation(
 	if err != nil {
 		t.Fatal(err)
 	}
-	return operation.Operation{
+	return operation.WithIdempotency(operation.Operation{
 		ID:              id,
 		Type:            spec.Type,
 		Version:         spec.Version,
 		Status:          operation.StatusReady,
 		MaxOutputLength: spec.MaxOutputLength, State: spec.State,
-		Idempotency: spec.Idempotency,
-	}
+	}, spec.Idempotency)
 }
 
 func shellOperationWithState(t *testing.T, id operation.ID, state operation.ShellState) operation.Operation {

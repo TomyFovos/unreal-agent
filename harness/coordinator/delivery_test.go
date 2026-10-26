@@ -107,7 +107,7 @@ func TestCoordinatorCompactionPreservesPendingInputsOnReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := sessionstore.ModelResponse{TurnID: "compact", Response: textResponse("Summary")}
-	response.Response.Output = append(response.Response.Output, llm.Item{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "summary-call", Name: "unknown"}})
+	response.Response.Output = append(response.Response.Output, llm.Item{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "summary-call", Name: "unknown", Arguments: `{}`}})
 	current.state.callModel = true
 	statuses, err := current.handleModelResponse(t.Context(), response)
 	if err != nil {

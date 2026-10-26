@@ -200,7 +200,7 @@ func (store *faultMemoryStore) check(ctx context.Context, id session.ID) error {
 
 func cloneFaultOperation(value operation.Operation) operation.Operation {
 	value.State = value.State.Clone()
-	value.Idempotency = value.Idempotency.Clone()
+	value = operation.CloneExecutionMetadata(value)
 	return value
 }
 

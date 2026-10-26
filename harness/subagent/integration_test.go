@@ -71,7 +71,22 @@ func TestChildServerHelper(t *testing.T) {
 	if os.Getenv("UNREAL_SUBAGENT_HELPER") != "1" {
 		return
 	}
-	err := sub.Serve(context.Background(), os.Stdin, os.Stdout, func(ctx context.Context, c sub.ChildConfig, send sub.Sender) (*host.Session, io.Closer, error) {
+	held := &heldFinishOutput{}
+	var output io.WriteCloser = os.Stdout
+	fixtureMode := os.Getenv("UNREAL_SUBAGENT_FINISH_FIXTURE")
+	switch fixtureMode {
+	case "finish-held-exit", "forged-finish", "missing-finish", "invalid-finish":
+		output = held
+	}
+	err := sub.Serve(context.Background(), os.Stdin, output, func(ctx context.Context, c sub.ChildConfig, link sub.ChildLink) (*host.Session, io.Closer, error) {
+		send := link.Send
+		if fixtureMode != "" && fixtureMode != c.Task {
+			return nil, nil, fmt.Errorf("synthetic finish fixture task mismatch")
+		}
+		held.enabled, held.directory = fixtureMode == "finish-held-exit", c.Workspace
+		if fixtureMode == "forged-finish" || fixtureMode == "missing-finish" || fixtureMode == "invalid-finish" {
+			held.forgedMode = fixtureMode
+		}
 		policy, err := permission.New(c.Policy)
 		if err != nil {
 			return nil, nil, err
@@ -79,6 +94,9 @@ func TestChildServerHelper(t *testing.T) {
 		var calls atomic.Int32
 		model := adapter(func(ctx context.Context, r llm.Request, _ llm.RequestOptions) (llm.Response, error) {
 			n := calls.Add(1)
+			if held.forgedMode != "" {
+				return llm.Response{}, nil
+			}
 			if c.Task == "failed" {
 				return response("Finish", `{"status":"failed","summary":"child complete","changedFiles":[],"tests":[],"blockers":["cannot proceed"]}`), nil
 			}
@@ -128,6 +146,9 @@ func TestChildServerHelper(t *testing.T) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(3)
 	}
+	if held.enabled {
+		holdFinishedHelper()
+	}
 	os.Exit(0)
 }
 func newParent(t *testing.T, task string) (*host.Host, *host.Session) {
@@ -171,7 +192,12 @@ func parentAt(t *testing.T, dir, task string, mode host.Mode) (*host.Host, *host
 		}
 		return llm.Response{}, nil
 	})
-	h, err := host.New(t.Context(), host.Config{Directory: dir, Build: factory(sub.Config{Directory: dir, Binary: binary, Arguments: []string{"-test.run=^TestChildServerHelper$"}, Environment: append(os.Environ(), "UNREAL_SUBAGENT_HELPER=1"), Templates: templates}, model)})
+	environment := append(os.Environ(), "UNREAL_SUBAGENT_HELPER=1")
+	switch task {
+	case "finish-held-exit", "forged-finish", "missing-finish", "invalid-finish":
+		environment = append(environment, "UNREAL_SUBAGENT_FINISH_FIXTURE="+task)
+	}
+	h, err := host.New(t.Context(), host.Config{Directory: dir, Build: factory(sub.Config{Directory: dir, Binary: binary, Arguments: []string{"-test.run=^TestChildServerHelper$"}, Environment: environment, Templates: templates}, model)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,11 +392,10 @@ func TestParentCrashRecoversSameChildAndDeduplicatesReady(t *testing.T) {
 	defer ticker.Stop()
 	var before operation.Operation
 	for {
+		// The helper writes the file non-atomically; a partial read means
+		// not ready yet.
 		data, err := os.ReadFile(filepath.Join(dir, "ready.json"))
-		if err == nil {
-			if json.Unmarshal(data, &before) != nil {
-				t.Fatal("invalid helper handshake")
-			}
+		if err == nil && json.Unmarshal(data, &before) == nil {
 			break
 		}
 		select {
@@ -556,7 +581,10 @@ func TestForkCannotControlOriginalChild(t *testing.T) {
 	}
 	h.Close()
 }
-func TestChildCapabilityWideningRejectedBeforeSpawn(t *testing.T) {
+
+// A child is a worker and may run processes (D1); it still cannot widen the
+// parent's tools.
+func TestChildCapabilityBoundsBeforeSpawn(t *testing.T) {
 	for _, which := range []string{"child-process", "tool-expansion"} {
 		t.Run(which, func(t *testing.T) {
 			dir := t.TempDir()
@@ -583,7 +611,7 @@ func TestChildCapabilityWideningRejectedBeforeSpawn(t *testing.T) {
 				}
 				return llm.Response{}, nil
 			})
-			h, err := host.New(t.Context(), host.Config{Directory: dir, Build: factory(sub.Config{Directory: dir, Binary: binary, Templates: templates}, model)})
+			h, err := host.New(t.Context(), host.Config{Directory: dir, Build: factory(sub.Config{Directory: dir, Binary: binary, Arguments: []string{"-test.run=^TestChildServerHelper$"}, Environment: append(os.Environ(), "UNREAL_SUBAGENT_HELPER=1"), Templates: templates}, model)})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -594,6 +622,12 @@ func TestChildCapabilityWideningRejectedBeforeSpawn(t *testing.T) {
 				t.Fatal(err)
 			}
 			result := awaitChild(t, s, true)
+			if which == "child-process" {
+				if result.Status != operation.StatusCompleted {
+					t.Fatal("worker child with process access did not complete", result)
+				}
+				return
+			}
 			if result.Status != operation.StatusFailed || result.Denial == nil {
 				t.Fatal("missing permission denial", result)
 			}

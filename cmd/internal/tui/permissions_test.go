@@ -148,12 +148,13 @@ func TestHumanTUIOnceDenyAndDetachNeverApprovePending(t *testing.T) {
 			ctx := permission.WithController(permission.WithPolicy(t.Context(), permission.Unrestricted()), c)
 			result := c.Request(ctx, permission.Request{ID: "pending-op", Tool: "Bash", Privileged: true, Scope: "AMBIENT filesystem, network, environment, credentials and shared mounts; no OS sandbox"})
 			waitFor(t, func() bool {
-				return strings.Contains(screen.text(), "Allow Once") && strings.Contains(screen.text(), "pending-op") && strings.Contains(screen.text(), "AMBIENT")
+				return strings.Contains(screen.text(), "Allow once") && strings.Contains(screen.text(), "pending-op") && strings.Contains(screen.text(), "AMBIENT")
 			})
 			if action == "detach" {
 				stopHumanUI(t, keys, done)
 			} else {
-				if action == "allow" {
+				// Allow once is selected first; Deny is one step down.
+				if action == "deny" {
 					keys <- Key{Name: "down"}
 				}
 				keys <- Key{Name: "enter"}
@@ -202,7 +203,19 @@ func TestHumanTUIPermissionProjectionAndSmallDisplay(t *testing.T) {
 	if m.Snapshot().Permissions.Mode != permission.ReadOnly {
 		t.Fatal("stale projection changed current mode")
 	}
-	if permissionControlAction(operationPermissionConfirmation(s, permission.Pending{ID: "op", Tool: "write"})).Allow {
-		t.Fatal("default confirmation must deny")
+	confirm := operationPermissionConfirmation(s, permission.Pending{ID: "op", Tool: "write", Scope: "Claude Code Write: /w/a.txt"})
+	if confirm.Title != "Allow Write?" || confirm.Instructions[0] != "Claude Code Write: /w/a.txt" {
+		t.Fatalf("confirmation does not lead with the action: %q %q", confirm.Title, confirm.Instructions)
+	}
+	if !permissionControlAction(confirm).Allow {
+		t.Fatal("confirmation must start on Allow once")
+	}
+	confirm.move(1)
+	if permissionControlAction(confirm).Allow || permissionGrants(confirm) {
+		t.Fatal("Deny must deny")
+	}
+	full := fullPermissionConfirmation(s, 5, "challenge")
+	if permissionGrants(full) {
+		t.Fatal("Full Access confirmation must start on keep current mode")
 	}
 }

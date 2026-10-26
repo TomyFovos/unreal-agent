@@ -18,6 +18,8 @@ type HostRecord struct {
 	Inputs              []inbox.ID                    `json:",omitzero"`
 	ProjectInstructions *projectinstructions.Snapshot `json:",omitzero"`
 	Selection           *RuntimeSelection             `json:",omitzero"`
+	Conversation        *ConversationEpoch            `json:",omitzero"`
+	ModelRequestFailure *ModelRequestFailure          `json:",omitzero"`
 }
 
 const HostProjectInstructions = "project_instructions"
@@ -34,7 +36,23 @@ func (r HostRecord) Validate() error {
 	if r.Kind != HostRuntimeSelection && r.Kind != HostRuntimeApplied && r.Selection != nil {
 		return fmt.Errorf("unexpected runtime selection")
 	}
+	if r.Kind != HostConversationEpoch && r.Conversation != nil {
+		return fmt.Errorf("unexpected model conversation epoch")
+	}
+	if r.Kind != HostModelRequestFailure && r.ModelRequestFailure != nil {
+		return fmt.Errorf("unexpected model request failure")
+	}
 	switch r.Kind {
+	case HostModelRequestFailure:
+		if r.ModelRequestFailure == nil || len(r.Configuration) != 0 || r.Finish != nil || len(r.Inputs) != 0 || r.ProjectInstructions != nil || r.Selection != nil || r.Conversation != nil {
+			return fmt.Errorf("invalid model request failure record")
+		}
+		return r.ModelRequestFailure.Validate()
+	case HostConversationEpoch:
+		if r.Conversation == nil || len(r.Configuration) != 0 || r.Finish != nil || len(r.Inputs) != 0 || r.ProjectInstructions != nil || r.Selection != nil {
+			return fmt.Errorf("invalid model conversation epoch record")
+		}
+		return r.Conversation.Validate()
 	case HostRuntimeSelection, HostRuntimeApplied:
 		if r.Selection == nil || r.Selection.Revision == 0 || r.Selection.RequestID == "" || len(r.Configuration) != 0 || r.Finish != nil || len(r.Inputs) != 0 || r.ProjectInstructions != nil {
 			return fmt.Errorf("invalid runtime selection record")

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
@@ -29,7 +30,17 @@ type Template struct {
 	Workspace              string
 	MutationStateDirectory string `json:",omitzero"`
 	Runtime                jsontext.Value
-	Policy                 permission.Config
+	// Policy is the child's ceiling. With permission modes the child follows
+	// its parent's mode: Baseline is what it may do in Read Only and without
+	// approval in Ask, Policy what Full Access and approvals allow.
+	Policy   permission.Config
+	Baseline *permission.Config `json:",omitzero"`
+	// Default is the runtime a start without one uses, instead of the
+	// parent's current selection.
+	Default *RuntimeRequest `json:",omitzero"`
+	// Subagents are the workers this child may start itself: one level, and
+	// never at ultra effort.
+	Subagents map[string]Template `json:",omitzero"`
 }
 type Plan struct {
 	Version       uint32
@@ -42,6 +53,9 @@ type Plan struct {
 	Text          string                     `json:",omitzero"`
 	Result        *sessionstore.FinishResult `json:",omitzero"`
 	RuntimeBound  bool                       `json:",omitzero"`
+	// Request and Allow answer a child's approval request.
+	Request string `json:",omitzero"`
+	Allow   bool   `json:",omitzero"`
 }
 type ChildConfig struct {
 	Version                uint32
@@ -56,6 +70,8 @@ type ChildConfig struct {
 	Task                   string
 	MutationStateDirectory string                        `json:",omitzero"`
 	ProjectInstructions    *projectinstructions.Snapshot `json:",omitzero"`
+	Baseline               *permission.Config            `json:",omitzero"`
+	Subagents              map[string]Template           `json:",omitzero"`
 	// A text-only child completes from a canonical model response, without a
 	// synthetic tool call. ProviderProcess authorizes only its isolated CLI.
 	TextOnly        bool `json:",omitzero"`
@@ -67,9 +83,27 @@ type Handle struct {
 	ChildID     session.ID
 	OperationID operation.ID
 	Finish      *sessionstore.FinishRecord `json:",omitzero"`
+	// Approvals are the child's requests waiting for this parent (U17).
+	Approvals []Approval `json:",omitzero"`
+}
+
+// Approval is a child's request for its parent agent to decide (U17).
+type Approval struct {
+	ID    string
+	Tool  string `json:",omitzero"`
+	Scope string `json:",omitzero"`
+	Allow bool   `json:",omitzero"`
 }
 type Sender func(context.Context, inbox.Input) (host.Receipt, error)
-type ChildFactory func(context.Context, ChildConfig, Sender) (*host.Session, io.Closer, error)
+
+// ChildLink is what a child runtime gets from its live parent besides the
+// recorded configuration: the channel back, and the parent's current
+// permission mode (empty when the parent has no modes).
+type ChildLink struct {
+	Send Sender
+	Mode permission.Mode
+}
+type ChildFactory func(context.Context, ChildConfig, ChildLink) (*host.Session, io.Closer, error)
 
 func ChildID(parent session.ID, id operation.ID) session.ID {
 	sum := sha256.Sum256([]byte("unreal-agent/subagent/v1\x00" + string(parent) + "\x00" + string(id)))
@@ -87,6 +121,10 @@ func (p Plan) Validate() error {
 	case "send", "cancel":
 		if p.Handle == "" {
 			return fmt.Errorf("child operation handle is required")
+		}
+	case "approve":
+		if p.Handle == "" || p.Request == "" || len(p.Request) > 256 {
+			return fmt.Errorf("child operation handle and request are required")
 		}
 	case "parent":
 		if p.Text == "" {
@@ -183,8 +221,30 @@ func (c ChildConfig) Validate() error {
 			return fmt.Errorf("child transport capability disagrees with runtime")
 		}
 	}
-	if c.Policy.ProcessMode != permission.ProcessDenied || c.Policy.FilesystemUnrestricted || c.Policy.NetworkUnrestricted {
-		return &permission.Error{Code: permission.Unsupported, Capability: "child process", Reason: "bounded child executors required"}
+	// Children are workers: they run commands within their policy (D1).
+	return ValidateWorkers(c.Subagents)
+}
+
+// ValidateWorkers checks the templates a child may start: workers that start
+// no children of their own, never at ultra effort.
+func ValidateWorkers(templates map[string]Template) error {
+	if len(templates) > 32 {
+		return fmt.Errorf("a child may have at most 32 worker templates")
+	}
+	for name, t := range templates {
+		if name == "" || len(name) > 128 {
+			return fmt.Errorf("invalid worker template name")
+		}
+		if len(t.Subagents) != 0 {
+			return fmt.Errorf("worker template %q cannot start children", name)
+		}
+		s := sessionstore.SelectionFromConfiguration(t.Runtime)
+		if s == nil {
+			return fmt.Errorf("worker template %q has no readable runtime", name)
+		}
+		if s.Effort == llm.ReasoningEffortUltra || t.Default != nil && t.Default.Effort == llm.ReasoningEffortUltra {
+			return fmt.Errorf("worker template %q cannot use ultra effort", name)
+		}
 	}
 	return nil
 }

@@ -109,7 +109,7 @@ func TestBlockedProcessWriteIsCanceledAndDrained(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	child := ChildConfig{ParentID: "parent", ChildID: "child", Workspace: t.TempDir()}
-	p := startProcess(ctx, Config{Owner: &host.Session{ID: "parent"}, Binary: "/bin/sh", Arguments: []string{"-c", "sleep 60"}}, child)
+	p := startProcess(ctx, Config{Owner: &host.Session{ID: "parent"}, Binary: "/bin/sh", Arguments: []string{"-c", "sleep 60"}}, child, "")
 	defer func() { p.cancel(); <-p.done }()
 	writeCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -173,5 +173,34 @@ func TestChildHandshakeRejectsUnknownInstructionVersion(t *testing.T) {
 	c.ProjectInstructions = &snapshot
 	if err := c.Validate(); err == nil {
 		t.Fatal("unknown snapshot version accepted")
+	}
+}
+
+// A lead's workers start no children of their own and never run at ultra.
+func TestValidateWorkersKeepsOneLevelWithoutUltra(t *testing.T) {
+	runtime := func(effort string) jsontext.Value {
+		return jsontext.Value(`{"Provider":{"provider":"openai-codex","model":{"id":"gpt-6.1-sol"}},"ReasoningEffort":"` + effort + `"}`)
+	}
+	ok := map[string]Template{"worker-max": {Runtime: runtime("max")}, "worker-low": {Runtime: runtime("low")}}
+	if err := ValidateWorkers(ok); err != nil {
+		t.Fatal(err)
+	}
+	for name, bad := range map[string]map[string]Template{
+		"ultra runtime": {"w": {Runtime: runtime("ultra")}},
+		"ultra default": {"w": {Runtime: runtime("high"), Default: &RuntimeRequest{Provider: "openai-codex", Model: "gpt-6.1-sol", Effort: "ultra"}}},
+		"grandchildren": {"w": {Runtime: runtime("high"), Subagents: ok}},
+		"unreadable":    {"w": {Runtime: jsontext.Value(`{}`)}},
+	} {
+		if ValidateWorkers(bad) == nil {
+			t.Fatal(name, "accepted")
+		}
+	}
+	plan := Plan{Version: 1, Action: "approve", ParentID: "p", Handle: "h"}
+	if plan.Validate() == nil {
+		t.Fatal("approve without a request")
+	}
+	plan.Request = "r"
+	if plan.Validate() != nil {
+		t.Fatal("approve rejected")
 	}
 }

@@ -130,7 +130,9 @@ func TestStructuredCanonicalReceiptReplayAndUncertainOperation(t *testing.T) {
 	rebuilt := newTestCoordinator(emptyFakeStore(), newTestInbox(t), newFakeOperationManager(), contextbuilder.NewBuilder(), registry)
 	rebuilt.cancelModel = func() {}
 	rebuilt.modelOrigin = "resumed"
-	rebuilt.addToolCallsToLocalState(sessionstore.ModelResponse{TurnID: "origin", Response: first.response})
+	if err := rebuilt.restoreItem(sessionstore.Item{Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{TurnID: "origin", Response: first.response}}); err != nil {
+		t.Fatal(err)
+	}
 	status := sessionstore.ToolCallStatus{TurnID: "origin", CallID: call.CallID, Status: tool.CallStatus{}, Operations: []operation.Operation{completed}}
 	rebuilt.rememberBridgeResult(status, outcomes[0].Result, nil)
 	current = rebuilt

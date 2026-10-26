@@ -61,7 +61,9 @@ func viewPicker(mode ViewMode, width int) *Picker {
 }
 
 // OrchestrationSnapshot is a bounded, read-only frontend projection. It holds
-// safe metadata only: no messages, tool state, runtime bindings or error bodies.
+// safe metadata and each running child's latest activity, the short excerpt
+// the Live Dock shows: no full messages, tool state, runtime bindings or error
+// bodies.
 type OrchestrationSnapshot struct {
 	Session   string
 	Turn      string
@@ -77,6 +79,7 @@ type OrchestrationNode struct {
 	RuntimeRevision                                   uint64
 	RuntimeKnown                                      bool
 	TaskLabel, ToolName, SafeTarget, Problem          string
+	Activity                                          string // what a running child does now
 	Elapsed                                           viewer.Duration
 	Active                                            bool
 }
@@ -247,6 +250,9 @@ func BuildOrchestration(s Snapshot, panel viewer.PanelSnapshot, now time.Time, l
 		n.ParentID = "agent:" + string(r.ParentID)
 		n.Status, n.Active = topologyChildStatus(r, s)
 		n.TaskLabel = topologyText(r.Label, 160)
+		if observed(r) && r.Finish == nil {
+			n.Activity = topologyText(r.Activity, 160)
+		}
 		n.ObservedModel = topologyText(r.ObservedModel, 160)
 		n.Elapsed = r.Elapsed
 		if r.NeedsResync || main.NeedsResync || r.Problem != "" {
@@ -448,6 +454,9 @@ func topologyRows(s OrchestrationSnapshot, width int, t Theme) []topologyRow {
 			}
 			if n.TaskLabel != "" {
 				add("task: "+n.TaskLabel, normal)
+			}
+			if n.Activity != "" && n.Active {
+				add("now: "+n.Activity, normal)
 			}
 		}
 		add(n.Problem, warningStyle)

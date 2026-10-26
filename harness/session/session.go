@@ -29,4 +29,9 @@ type Turn struct {
 	// watermark excludes user inputs queued while that request is executing.
 	ToolContinuation TurnID `json:",omitzero"`
 	InputWatermark   int    `json:",omitzero"`
+	// NoAutomaticReplay is recorded before a Native model attempt. Without a
+	// matching durable ModelResponse, restore must wait for new explicit input;
+	// it cannot infer whether the already-issued request reached the server.
+	// InputWatermark is the request's canonical input boundary in this mode.
+	NoAutomaticReplay bool `json:",omitzero"`
 }

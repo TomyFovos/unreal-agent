@@ -187,11 +187,16 @@ func (c Config) Resolve() (Config, error) {
 	if c.FallbackWindow < 0 || c.InputBudget < 0 || c.ResponseReserve < 0 || c.ProtocolReserve < 0 || c.RecentReserve < 0 || c.RetrievalReserve < 0 || c.RetrievalLimit < 0 || c.CheckpointThreshold < 0 || c.LargeToolTokens < 0 {
 		return c, &Error{"invalid_configuration"}
 	}
+	// Like Codex, a request may fill the model's context window: the input
+	// budget is the window less the reserves unless configured lower. An
+	// unknown window (Codex through Docker Sandboxes lists none) falls back to
+	// 768 KiB of estimated bytes: bytes overstate tokens about threefold, so
+	// it stays within the smallest current window, 272k tokens.
 	if c.FallbackWindow == 0 {
-		c.FallbackWindow = 32768
+		c.FallbackWindow = 768 << 10
 	}
 	if c.InputBudget == 0 {
-		c.InputBudget = 24576
+		c.InputBudget = 16 << 20
 	}
 	if c.ResponseReserve == 0 {
 		c.ResponseReserve = 4096

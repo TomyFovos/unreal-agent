@@ -87,6 +87,9 @@ type Options struct {
 	// ProjectInstructions binds this snapshot to a newly created session
 	// instead of discovering one, so a child shares its parent's revision.
 	ProjectInstructions *projectinstructions.Snapshot
+	// PermissionMode starts a child Session in its parent's mode; empty
+	// starts Read Only.
+	PermissionMode permission.Mode
 }
 
 // creationRecords are bound atomically with a new session's header. Discovery
@@ -179,6 +182,8 @@ type Session struct {
 	instructions      *projectinstructions.Metadata
 	boundInstructions *projectinstructions.Snapshot
 	progressEpoch     uint64
+	responding        int           // model calls in flight
+	respondingChanged chan struct{} // closed when responding changes
 	revision          uint64
 	done              chan struct{}
 	running           bool
@@ -238,7 +243,28 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 			lock.Close()
 		}
 	}()
-	restored, err := raw.Resume(ctx, o.ID)
+	readView, viewErr := raw.OpenRestoreView(ctx, o.ID, lock)
+	closeReadView := func() error {
+		if readView == nil {
+			return nil
+		}
+		view := readView
+		readView = nil
+		return view.Close()
+	}
+	defer func() {
+		if closeErr := closeReadView(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
+	var restored sessionstore.ResumeState
+	if errors.Is(viewErr, localfile.ErrRestoreViewUnsupported) {
+		restored, err = raw.Resume(ctx, o.ID)
+	} else if viewErr != nil {
+		err = viewErr
+	} else {
+		restored, err = readView.Resume(ctx, o.ID)
+	}
 	created := false
 	if err == nil && o.Mode == Create {
 		return nil, fs.ErrExist
@@ -257,16 +283,45 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		}
 		restored = sessionstore.ResumeState{Snapshot: snapshot}
 		created = true
-	} else {
-		// Explicit non-destructive v2 -> v3 migration; the original remains .v2.
+	} else if readView == nil || readView.FormatVersion() == 2 {
+		// A migration is a write boundary. Close the old view before publishing
+		// the new header; never mix pages from either side of the migration.
+		if err = closeReadView(); err != nil {
+			return nil, err
+		}
 		if err = raw.Upgrade(ctx, o.ID); err != nil {
 			return nil, err
 		}
+	}
+	if readView == nil {
+		readView, err = raw.OpenRestoreView(ctx, o.ID, lock)
+		if errors.Is(err, localfile.ErrRestoreViewUnsupported) {
+			err = nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if readView != nil {
+			restored, err = readView.Resume(ctx, o.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	var startup restoreStartupReader = raw
+	if readView != nil {
+		startup = readView
 	}
 	base := permission.WithPolicy(h.ctx, o.Policy)
 	var controller *permission.Controller
 	if h.config.PermissionMaximum != nil {
 		controller = permission.NewController(h.ctx, o.Policy, h.config.PermissionMaximum, h.config.ApprovalTimeout)
+		if o.PermissionMode != "" {
+			if err = controller.Follow(o.PermissionMode); err != nil {
+				controller.Close()
+				return nil, err
+			}
+		}
 		base = permission.WithController(permission.WithPolicy(h.ctx, h.config.PermissionMaximum), controller)
 	}
 	cctx, cancel := context.WithCancel(base)
@@ -290,7 +345,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		}
 	}()
 	for after := sessionstore.BeforeFirst; ; {
-		page, e := raw.Items(ctx, o.ID, after, 256)
+		page, e := startup.Items(ctx, o.ID, after, 256)
 		if e != nil {
 			return nil, e
 		}
@@ -302,7 +357,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		}
 		after = page.NextAfter
 	}
-	ops, e := raw.Operations(ctx, o.ID)
+	ops, e := startup.Operations(ctx, o.ID)
 	if err = s.verifyRuntimeSelections(); err != nil {
 		return nil, err
 	}
@@ -311,6 +366,9 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	}
 	for _, op := range ops {
 		s.operations[op.ID] = op
+	}
+	if err = closeReadView(); err != nil {
+		return nil, err
 	}
 	raw.AddObserver(func(_ session.ID, item sessionstore.Item) { s.rememberItem(item, true) })
 	// A new session's creation bindings are part of this run's output.
@@ -341,6 +399,9 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	}
 	if s.runtime.Builder == nil || s.runtime.LLM == nil || s.runtime.Tools == nil || s.runtime.Operations == nil {
 		return nil, fmt.Errorf("incomplete session runtime")
+	}
+	if restored, err = s.reconcileCanonicalReceipts(cctx, restored, ops); err != nil {
+		return nil, err
 	}
 	if s.selection == nil {
 		s.selection = s.runtime.Selection
@@ -383,6 +444,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	pending := s.pendingStop()
 	dependencies := coordinator.Dependencies{SessionID: o.ID, Inbox: s.inbox, Restored: restored,
 		ContextBuilt:     s.contextBuilt,
+		ModelReplayHeld:  s.modelReplayHeld,
 		BeforeTurn:       s.beginTurn,
 		BeforeGeneration: s.runtime.BeforeGeneration,
 		Sessions:         &serializedStore{s}, ContextBuilder: s.runtime.Builder, LLM: s.runtime.LLM, Tools: s.runtime.Tools,

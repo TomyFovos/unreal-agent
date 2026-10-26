@@ -58,7 +58,7 @@ func TestHumanPermissionRealTerminalConfirmationOnceDenyDetach(t *testing.T) {
 	}()
 	client := gateway.NewClient(socket)
 	defer client.Close()
-	waitInteractive(t, func() bool { _, err := client.Methods(t.Context()); return err == nil })
+	waitInteractiveContext(t, func(ctx context.Context) bool { _, err := client.Methods(ctx); return err == nil })
 	fd, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -143,11 +143,12 @@ func TestHumanPermissionRealTerminalConfirmationOnceDenyDetach(t *testing.T) {
 		if _, err = s.SubmitOperation(t.Context(), s.Generation, inbox.ID(id), operation.ID(id), "Bash", spec); err != nil {
 			t.Fatal(err)
 		}
-		readUntil("Allow Once")
+		readUntil("Allow once")
+		readUntil("$ printf once >> marker")
 		if allow {
-			send("\x1b[B\r")
-		} else {
 			send("\r")
+		} else {
+			send("\x1b[B\r")
 		}
 		end := inspectInteractive(t, client, s.ID, func(v host.View) bool {
 			for _, op := range v.Operations {

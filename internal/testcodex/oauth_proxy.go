@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json/v2"
+	"encoding/pem"
 	"io"
 	"math/big"
 	"net"
@@ -31,6 +32,10 @@ type OAuthProxy struct {
 	DirectRequests atomic.Int32
 	Status         atomic.Int32
 	RequestOK      atomic.Bool
+	// Nonsecret loopback bindings for exact packaged-binary fixtures. They never
+	// change the production endpoint, proxy allowlist or TLS validation.
+	ProxyAddress, DirectAddress string
+	CertificatePEM              []byte
 }
 
 const DockerProxyURL = "http://host.docker.internal:3128"
@@ -46,7 +51,20 @@ func NewOAuthProxyWithHandler(t *testing.T, publicSentinel string, handler http.
 	return newOAuthProxy(t, publicSentinel, handler)
 }
 
+// NewOAuthProxyForNativeProcess also supplies a direct fake subscription
+// backend. A test-only libc DNS shim routes the real distribution process to
+// these loopback sockets, retaining CONNECT, HTTPS authority and certificate
+// verification. No global hosts, DNS, CA, credential or proxy files are edited.
+func NewOAuthProxyForNativeProcess(t *testing.T, publicSentinel string, handler, direct http.Handler) *OAuthProxy {
+	t.Helper()
+	return newNativeOAuthProxy(t, publicSentinel, handler, direct)
+}
+
 func newOAuthProxy(t *testing.T, publicSentinel string, handler http.Handler) *OAuthProxy {
+	return newNativeOAuthProxy(t, publicSentinel, handler, nil)
+}
+
+func newNativeOAuthProxy(t *testing.T, publicSentinel string, handler, directHandler http.Handler) *OAuthProxy {
 	t.Helper()
 	fixture := &OAuthProxy{}
 	fixture.Status.Store(http.StatusOK)
@@ -54,7 +72,7 @@ func newOAuthProxy(t *testing.T, publicSentinel string, handler http.Handler) *O
 	if err != nil {
 		t.Fatal(err)
 	}
-	template := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: []string{"chatgpt.com"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: []string{"chatgpt.com"}, IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {
 		t.Fatal(err)
@@ -65,8 +83,16 @@ func newOAuthProxy(t *testing.T, publicSentinel string, handler http.Handler) *O
 	}
 	pool := x509.NewCertPool()
 	pool.AddCert(certificate)
-	startTLS := func(handler http.Handler) *httptest.Server {
+	fixture.CertificatePEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	startTLS := func(handler http.Handler, address string) *httptest.Server {
 		server := httptest.NewUnstartedServer(handler)
+		if address != "" {
+			server.Listener.Close()
+			server.Listener, err = net.Listen("tcp", address)
+			if err != nil {
+				t.Fatal("native fixture listener unavailable", err)
+			}
+		}
 		server.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}, MinVersion: tls.VersionTLS12}
 		server.StartTLS()
 		t.Cleanup(server.Close)
@@ -74,9 +100,14 @@ func newOAuthProxy(t *testing.T, publicSentinel string, handler http.Handler) *O
 	}
 	direct := startTLS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fixture.DirectRequests.Add(1)
+		if directHandler != nil {
+			directHandler.ServeHTTP(w, r)
+			return
+		}
 		w.WriteHeader(http.StatusUnauthorized)
 		io.WriteString(w, `{"error":{"message":"synthetic sentinel was not substituted"}}`)
-	}))
+	}), "")
+	fixture.DirectAddress = direct.Listener.Addr().String()
 	backend := startTLS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fixture.Requests.Add(1)
 		var body struct {
@@ -108,8 +139,8 @@ func newOAuthProxy(t *testing.T, publicSentinel string, handler http.Handler) *O
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"dummy\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"dummy-message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"CODEX_PROXY_OK\"}]}]}}\n\n")
-	}))
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	}), "")
+	proxy := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fixture.Connects.Add(1)
 		if r.Method != http.MethodConnect || r.Host != "chatgpt.com:443" || r.Header.Get("Authorization") != "" || r.Header.Get("Proxy-Authorization") != "" {
 			t.Error("unexpected CONNECT authority or authentication")
@@ -135,7 +166,16 @@ func newOAuthProxy(t *testing.T, publicSentinel string, handler http.Handler) *O
 		go func() { _, _ = io.Copy(upstream, buffered) }()
 		_, _ = io.Copy(client, upstream)
 	}))
+	if directHandler != nil {
+		proxy.Listener.Close()
+		proxy.Listener, err = net.Listen("tcp", "127.0.0.1:3128")
+		if err != nil {
+			t.Fatal("native fixture proxy listener unavailable", err)
+		}
+	}
+	proxy.Start()
 	t.Cleanup(proxy.Close)
+	fixture.ProxyAddress = proxy.Listener.Addr().String()
 	proxyURL, _ := url.Parse(DockerProxyURL)
 	fixture.Transport = &http.Transport{Proxy: http.ProxyURL(proxyURL), TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 		var target string

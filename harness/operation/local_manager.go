@@ -19,6 +19,8 @@ type LocalOperationManager struct {
 	updates         chan Operation
 	pendingUpdates  []Operation
 	approvals       chan admissionResult
+	prepared        chan PreparedOperation
+	preparationAcks chan preparationAck
 }
 
 type admissionResult struct {
@@ -47,6 +49,7 @@ type localRunningOperation struct {
 	operation             Operation
 	remoteJobHandlerIndex int
 	handle                func(*primitives.PrimitiveEvent) (Step, error)
+	executionPrepared     bool
 }
 
 func (current *localRunningOperation) initialize() error {
@@ -83,6 +86,8 @@ func NewLocalOperationManager(ctx context.Context, remoteJobHandlers ...RemoteJo
 		primitiveEvents: make(chan primitives.PrimitiveEvent),
 		updates:         make(chan Operation),
 		approvals:       make(chan admissionResult),
+		prepared:        make(chan PreparedOperation),
+		preparationAcks: make(chan preparationAck),
 	}
 	go manager.run()
 	return manager
@@ -138,8 +143,21 @@ func (manager *LocalOperationManager) run() {
 	accepted := make(map[ID]struct{})
 	waiting := make(map[ID]waitingAdmission)
 	activePrimitives := 0
+	preparing := make(map[ID]*pendingPreparation)
+	var preparationQueue []PreparedOperation
 
 	for {
+		if len(preparationQueue) != 0 {
+			preparationQueue = prunePreparations(preparationQueue, preparing)
+		}
+		var preparedOutput chan PreparedOperation
+		var preparedValue PreparedOperation
+		// A pre-lease/pending snapshot must reach the owner before the durable
+		// preparation checkpoint. Otherwise its later delivery could erase the
+		// committed footprint while the executor is already permitted to run.
+		if len(preparationQueue) != 0 && len(manager.pendingUpdates) == 0 {
+			preparedOutput, preparedValue = manager.prepared, preparationQueue[0]
+		}
 		var updates chan Operation
 		var update Operation
 		if len(manager.pendingUpdates) != 0 {
@@ -148,6 +166,15 @@ func (manager *LocalOperationManager) run() {
 		}
 
 		select {
+		case preparedOutput <- preparedValue:
+			preparationQueue[0] = PreparedOperation{}
+			preparationQueue = preparationQueue[1:]
+		case event := <-manager.remoteJobs.preparations:
+			if value := manager.queuePreparation(event, operations, preparing); value != nil {
+				preparationQueue = append(preparationQueue, *value)
+			}
+		case ack := <-manager.preparationAcks:
+			manager.finishPreparation(ack, operations, preparing)
 		case updates <- update:
 			manager.pendingUpdates[0] = Operation{}
 			manager.pendingUpdates = manager.pendingUpdates[1:]
@@ -290,6 +317,12 @@ func (manager *LocalOperationManager) run() {
 				continue
 			}
 			update.operation.Permission = current.operation.Permission
+			if current.operation.RequiresPreparation() && !current.executionPrepared && update.operation.Denial != nil {
+				update.operation.Permission = &permission.Decision{State: "denied"}
+				if current.operation.Permission != nil {
+					update.operation.Permission.Mode = current.operation.Permission.Mode
+				}
+			}
 			if current.ctx.Err() != nil {
 				step, err := CancelRemoteJob(update.operation)
 				if err == nil {
@@ -364,7 +397,14 @@ func (manager *LocalOperationManager) startOperation(operations map[ID]*localRun
 		if err != nil {
 			cancel()
 			if denial := permission.Failure(err); denial != nil {
-				manager.appendLocalUpdate(PermissionFailure(op, denial))
+				failed := PermissionFailure(op, denial)
+				if denial.Capability == "recovery_dependency" {
+					failed.Permission = &permission.Decision{State: "denied"}
+					if op.Permission != nil {
+						failed.Permission.Mode = op.Permission.Mode
+					}
+				}
+				manager.appendLocalUpdate(failed)
 				return 0, nil
 			}
 			return 0, err
@@ -456,7 +496,7 @@ func (manager *LocalOperationManager) drainLocalPrimitives(active int) {
 
 func (manager *LocalOperationManager) appendLocalUpdate(operation Operation) {
 	operation.State = operation.State.Clone()
-	operation.Idempotency = operation.Idempotency.Clone()
+	operation = CloneExecutionMetadata(operation)
 	manager.pendingUpdates = append(manager.pendingUpdates, operation)
 }
 

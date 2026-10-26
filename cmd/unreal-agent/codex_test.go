@@ -53,12 +53,35 @@ func (w *credentialOutput) String() string {
 
 func waitInteractive(t *testing.T, ready func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !ready() {
-		if time.Now().After(deadline) {
-			t.Fatal("interactive condition timed out")
+	waitInteractiveContext(t, func(context.Context) bool { return ready() })
+}
+
+// Non-RPC predicates must be nonblocking. RPC readiness uses the bounded
+// context form; Session history uses subscription/cursor observation instead.
+func waitInteractiveContext(t *testing.T, ready func(context.Context) bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := waitInteractiveCondition(ctx, ready); err != nil {
+		t.Fatal("interactive condition timed out")
+	}
+}
+
+func waitInteractiveCondition(ctx context.Context, ready func(context.Context) bool) error {
+	for {
+		if err := context.Cause(ctx); err != nil {
+			return err
 		}
-		time.Sleep(time.Millisecond)
+		if ready(ctx) {
+			return context.Cause(ctx)
+		}
+		timer := time.NewTimer(time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return context.Cause(ctx)
+		case <-timer.C:
+		}
 	}
 }
 
@@ -114,13 +137,13 @@ func startInteractiveHost(t *testing.T, config serveConfiguration, options ...st
 	})
 	client := gateway.NewClient(socket)
 	t.Cleanup(func() { _ = client.Close() })
-	waitInteractive(t, func() bool {
+	waitInteractiveContext(t, func(ctx context.Context) bool {
 		select {
 		case <-done:
 			t.Fatalf("serve startup failed: %v", serveErr)
 		default:
 		}
-		_, err := client.Methods(t.Context())
+		_, err := client.Methods(ctx)
 		return err == nil
 	})
 	return client, sessions, output
@@ -165,16 +188,7 @@ func submitInteractive(t *testing.T, client *gateway.Client, view host.View, id,
 
 func inspectInteractive(t *testing.T, client *gateway.Client, id session.ID, ready func(host.View) bool) host.View {
 	t.Helper()
-	var view host.View
-	waitInteractive(t, func() bool {
-		var err error
-		view, err = client.Inspect(t.Context(), id, 0, 256)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return ready(view)
-	})
-	return view
+	return inspectSubscribedInteractive(t, client, id, ready)
 }
 
 func responseCount(view host.View) int {

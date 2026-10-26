@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -22,7 +23,12 @@ type commandCandidate struct {
 }
 
 var commandCatalog = []commandCandidate{
-	{"/stop", "/stop", "hard stop this session", noArguments},
+	{"/stop", "/stop", "stop sub-agents, the main agent, both, or the session", noArguments},
+	{"/stop sub", "/stop sub", "cancel every sub-agent; the main agent goes on", noArguments},
+	{"/stop main", "/stop main", "interrupt the main agent's current work; sub-agents go on", noArguments},
+	{"/stop main+sub", "/stop main+sub", "interrupt the main agent and cancel every sub-agent", noArguments},
+	{"/stop session", "/stop session", "stop this session now (/resume restarts it)", noArguments},
+	{"/stop now", "/stop now", "hard stop this session", noArguments},
 	{"/stop idle", "/stop idle", "stop when the agent is idle", noArguments},
 	{"/resume", "/resume", "resume this stopped session", noArguments},
 	{"/retry", "/retry", "resend the last uncertain input (same input ID)", noArguments},
@@ -44,13 +50,17 @@ var commandCatalog = []commandCandidate{
 	{"/model", "/model [refresh]", "choose provider, model and effort; refresh reloads catalog", noArguments},
 	{"/permissions", "/permissions", "choose human-approved Session permissions; review pending operations", noArguments},
 	{"/analyze", "/analyze", "read-only session analysis", noArguments},
-	{"/view", "/view [MODE]", "choose Chat / Orchestration / Split (120+ columns)", noArguments},
+	{"/view", "/view", "choose Chat / Orchestration / Split (120+ columns)", noArguments},
 	{"/view chat", "/view chat", "show Live Dock conversation", noArguments},
 	{"/view orchestration", "/view orchestration", "show agents and Unreal-owned operations", noArguments},
 	{"/view split", "/view split", "show Chat and Orchestration (120+ columns)", noArguments},
-	{"/export", "/export [last | all]", "choose a public agent response to export as Markdown", noArguments},
+	{"/export", "/export", "export the conversation or a response as Markdown", noArguments},
 	{"/export last", "/export last", "export the latest public agent response as Markdown", noArguments},
 	{"/export all", "/export all", "export the full public conversation as Markdown", noArguments},
+	{"/export pick", "/export pick", "choose a public agent response to export as Markdown", noArguments},
+	{"/copy", "/copy", "copy the conversation or the latest response to the clipboard", noArguments},
+	{"/copy all", "/copy all", "copy the full public conversation as Markdown to the clipboard", noArguments},
+	{"/copy last", "/copy last", "copy the latest public agent response to the clipboard", noArguments},
 	{"/help", "/help", "show commands and keys", noArguments},
 }
 
@@ -103,8 +113,25 @@ func candidates(s Snapshot, u UIState) []commandCandidate {
 		return nil
 	}
 	var out []commandCandidate
-	for _, c := range commandCatalog {
+	for _, c := range menuCatalog() {
 		if strings.HasPrefix(c.Name, u.Input) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// unlisted commands stay typable but the menu leaves them out: agents start
+// and steer children, /stop covers canceling them, and the Split view shows
+// what each child does; API keys are not used.
+var unlisted = []string{"/retry", "/login", "/logout", "/credentials", "/methods", "/children", "/child", "/child-history", "/child-next", "/child-send", "/child-cancel", "/child-resume", "/child-retry"}
+
+// menuCatalog is what the command menu lists: commands, not their choices
+// (such as /view split), which appear after choosing the command.
+func menuCatalog() []commandCandidate {
+	var out []commandCandidate
+	for _, c := range commandCatalog {
+		if !strings.Contains(c.Name, " ") && !slices.Contains(unlisted, c.Name) {
 			out = append(out, c)
 		}
 	}
@@ -300,24 +327,19 @@ func (c *completion) apply(e *Editor, s Snapshot, u *UIState) {
 	u.MenuNavigated = false
 }
 func helpSheet(t Theme, short bool) *Sheet {
-	session := []string{"session  /stop  /stop idle  /resume  /retry  /detach"}
-	auth := []string{"auth     /login PROVIDER ID  /logout PROVIDER ID", "         /credentials  /methods"}
-	child := []string{"child    /child ID  /child-history [after] [limit]  /child-next", "         /child-send TEXT  /child-cancel  /child-resume  /child-retry"}
+	session := []string{"session  /stop: sub-agents, main agent, both, or the session", "         /resume  /detach"}
 	keys := []string{"keys     " + t.symbol("⏎", "enter") + " send  " + t.symbol("⇥", "tab") + " complete  " + t.symbol("↑↓", "up/down") + " menu  PgUp/PgDn scroll  ^D detach", "         ^C cancels key entry or waiting; otherwise stops the session"}
 	var lines []string
 	if short {
 		lines = append(lines, keys...)
-		lines = append(lines, child...)
-		lines = append(lines, auth...)
 		lines = append(lines, session...)
 	} else {
 		lines = append(lines, session...)
-		lines = append(lines, auth...)
-		lines = append(lines, child...)
 		lines = append(lines, keys...)
 	}
 	lines = append(lines, "Type / to search commands. /model, /analyze, /export, /view. Enter/Esc closes.")
-	lines = append(lines, "export   /export last  /export (choose response)  /export all (full conversation)")
-	lines = append(lines, "view     /view chat  /view orchestration  /view split (120+ columns)")
+	lines = append(lines, "export   /export: latest response, full conversation, or choose a response")
+	lines = append(lines, "copy     /copy: full conversation or latest response, to the clipboard")
+	lines = append(lines, "view     /view: Chat, Orchestration or Split (120+ columns)")
 	return &Sheet{Title: "help", Lines: lines}
 }

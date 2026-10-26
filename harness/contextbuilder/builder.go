@@ -60,6 +60,12 @@ type builder struct {
 	turnBounds                map[session.TurnID]string
 	lastUnit                  string
 	responseSerial            uint64
+	conversation              *sessionstore.ConversationEpoch
+	conversationOffset        int
+	conversationSnapshot      string
+	conversationGoal          string
+	lastExternalGoal          string
+	hasExternalGoal           bool
 }
 
 var _ Builder = (*builder)(nil)
@@ -100,6 +106,9 @@ func (current *builder) AddExternalInput(input inbox.Input) error {
 		Data: llm.Message{Role: llm.RoleUser, Text: text},
 	})
 	current.addUnit(current.stagedSuffix[len(current.stagedSuffix)-1], contextengine.UserMessage, contextengine.Pin, true, true, "", nil)
+	// This aliases the already decoded canonical input, with no extra scan or
+	// copy on ordinary providers. Public continuation filtering is lazy.
+	current.lastExternalGoal, current.hasExternalGoal = text, true
 	return nil
 }
 
@@ -109,6 +118,11 @@ func (current *builder) AddPeerInput(input inbox.Input) error {
 	peer, err := input.DecodePeerMessage()
 	if err != nil {
 		return err
+	}
+	if peer.Kind == "ready" {
+		// A child's ready notice repeats the handle its start returned, and it
+		// can reach the model after the child already ended, as if it ran.
+		return nil
 	}
 	encoded, err := json.Marshal(peer)
 	if err != nil {
@@ -229,20 +243,36 @@ func (current *builder) AddToolResult(
 	payload []llm.ToolResultOutput,
 	running bool,
 ) {
+	current.addToolResult(llm.ToolResult{CallID: callID, Output: payload}, running)
+}
+
+// AddTypedToolResult is used only by a Host requiring terminal batch semantics.
+// The outcome is derived from canonical status/Operations and the Translator.
+func (current *builder) AddTypedToolResult(result llm.ToolResult, running bool) {
+	current.addToolResult(result, running)
+}
+
+func (current *builder) addToolResult(result llm.ToolResult, running bool) {
+	callID, payload := result.CallID, result.Output
 	runningOutput := []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: ToolCallRunningPayload}}
 	if running {
 		payload = runningOutput
 	}
 	var kept []llm.Item
 	origins := map[int]string{}
+	removedBeforeEpoch := 0
 	for i, item := range current.stagedSuffix {
 		if result, ok := item.Data.(llm.ToolResult); ok && result.CallID == callID && slices.Equal(result.Output, runningOutput) {
+			if current.conversation != nil && len(current.committedPrefix)+i < current.conversationOffset {
+				removedBeforeEpoch++
+			}
 			continue
 		}
 		origins[len(kept)] = current.stagedOrigins[i]
 		kept = append(kept, item)
 	}
 	current.stagedSuffix, current.stagedOrigins = kept, origins
+	current.conversationOffset -= removedBeforeEpoch
 	origin, ok := current.callOrigins[callID]
 	if !ok {
 		origin = current.historyProvider
@@ -250,9 +280,9 @@ func (current *builder) AddToolResult(
 	current.stagedOrigins[len(current.stagedSuffix)] = origin
 	current.stagedSuffix = append(current.stagedSuffix, llm.Item{
 		Type: llm.ItemToolResult,
-		Data: llm.ToolResult{CallID: callID, Output: payload},
+		Data: llm.ToolResult{CallID: callID, Output: payload, State: result.State},
 	})
-	current.contextReceipt(callID, payload, running)
+	current.contextReceipt(callID, payload, running, result.State)
 }
 
 func (current *builder) Commit() {
@@ -266,6 +296,10 @@ func (current *builder) Commit() {
 }
 
 func (current *builder) Build() (Result, error) {
+	if current.conversation != nil && current.provider == "claude-native" {
+		request, err := current.conversationRequest()
+		return Result{Request: request}, err
+	}
 	if current.engine != nil {
 		return current.buildCompacted()
 	}

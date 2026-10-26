@@ -69,6 +69,36 @@ func SafeToolTarget(c llm.ToolCall) string {
 		target = a.Name
 	case "SubagentStart":
 		target = a.Task
+	case "claude_code":
+		// A call Claude Code ran itself: show its tool and what it acted on.
+		var o struct {
+			Tool  string `json:"tool"`
+			Input struct {
+				FilePath     string `json:"file_path"`
+				NotebookPath string `json:"notebook_path"`
+				Command      string `json:"command"`
+				URL          string `json:"url"`
+				Pattern      string `json:"pattern"`
+				Path         string `json:"path"`
+				Description  string `json:"description"`
+			} `json:"input"`
+		}
+		if json.Unmarshal([]byte(c.Arguments), &o) != nil {
+			return ""
+		}
+		detail := o.Input.FilePath
+		for _, v := range []string{o.Input.NotebookPath, o.Input.URL, o.Input.Pattern, o.Input.Path, o.Input.Description} {
+			if detail == "" {
+				detail = v
+			}
+		}
+		if command := strings.SplitN(o.Input.Command, "\n", 2)[0]; command != "" {
+			if shellEnvironmentAssignment.MatchString(command) || strings.HasPrefix(strings.TrimSpace(command), "env ") {
+				return o.Tool
+			}
+			detail = command
+		}
+		target = strings.TrimSpace(o.Tool + " " + detail)
 	}
 	// Never expose credential-shaped display arguments, even within a recognized
 	// field. Check before clipping so truncation cannot hide a sensitive prefix.

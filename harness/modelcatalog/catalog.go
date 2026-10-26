@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -25,7 +26,35 @@ type Model struct {
 	DefaultEffort      llm.ReasoningEffort
 	ContextWindow      int64
 	UnsupportedEfforts bool
+	// No verified effort metadata: omit the optional request feature rather
+	// than claiming support or inventing an effort value.
+	EffortUnknown bool `json:",omitzero"`
+	// MultiAgentEffort is what Codex sends when ultra is selected.
+	MultiAgentEffort llm.ReasoningEffort `json:",omitzero"`
 }
+
+// RequestEffort is the effort a Codex request carries for the selected one.
+// Codex never sends ultra: ultra selects automatic delegation and sends the
+// model's multi-agent effort, else max, else the highest other level, else
+// medium (codex-rs resolve_reasoning_effort).
+func (m Model) RequestEffort(selected llm.ReasoningEffort) llm.ReasoningEffort {
+	if selected != llm.ReasoningEffortUltra {
+		return selected
+	}
+	if m.MultiAgentEffort.Valid() && m.MultiAgentEffort != llm.ReasoningEffortUltra {
+		return m.MultiAgentEffort
+	}
+	if slices.Contains(m.Efforts, llm.ReasoningEffortMax) {
+		return llm.ReasoningEffortMax
+	}
+	for i := len(m.Efforts) - 1; i >= 0; i-- {
+		if m.Efforts[i] != llm.ReasoningEffortUltra {
+			return m.Efforts[i]
+		}
+	}
+	return llm.ReasoningEffortMedium
+}
+
 type Catalog struct {
 	Models        []Model
 	Available     bool
@@ -40,8 +69,43 @@ type Catalog struct {
 type Provider struct {
 	ID, Name, Availability string
 	Tools                  bool
+	Reason                 AvailabilityReason `json:",omitzero"`
 	Catalog                Catalog
 	ToolBridge             string `json:",omitzero"`
+}
+
+// AvailabilityReason is deliberately independent of provider error text.
+type AvailabilityReason string
+
+const (
+	AuthRequired         AvailabilityReason = "auth_required"
+	CLIMissing           AvailabilityReason = "cli_missing_or_unsupported"
+	ManagedTrustRequired AvailabilityReason = "managed_trust_required"
+	ProxyInvalid         AvailabilityReason = "docker_proxy_invalid"
+	CatalogUnavailable   AvailabilityReason = "catalog_unavailable"
+	ProviderDisabled     AvailabilityReason = "operator_disabled"
+	ProviderCheckFailed  AvailabilityReason = "provider_check_failed"
+)
+
+func (r AvailabilityReason) Hint() string {
+	switch r {
+	case AuthRequired:
+		return "sign in with the external CLI"
+	case CLIMissing:
+		return "install a supported external CLI"
+	case ManagedTrustRequired:
+		return "configure providers: audit policy and explicitly approve trust"
+	case ProxyInvalid:
+		return "verify the selected Docker OAuth source and HTTPS proxy"
+	case CatalogUnavailable:
+		return "refresh the external CLI model catalog"
+	case ProviderDisabled:
+		return "configure providers to enable this provider"
+	case ProviderCheckFailed:
+		return "run provider preflight; no fallback"
+	default:
+		return ""
+	}
 }
 
 // Capabilities describe a live registration, not a canonical permission grant.
@@ -56,6 +120,10 @@ func ProviderName(id string) string {
 		return "OpenAI Codex"
 	case "claude-code":
 		return "Claude Code"
+	case "claude-native":
+		return "Claude Native"
+	case "claude":
+		return "Claude"
 	default:
 		return id
 	}
@@ -67,6 +135,9 @@ func (m Model) Matches(id string) bool {
 }
 
 func (m Model) AllowsEffort(e llm.ReasoningEffort) bool {
+	if m.EffortUnknown {
+		return e == ""
+	}
 	if m.SupportsEffort != nil && !*m.SupportsEffort {
 		return e == ""
 	}
@@ -149,7 +220,8 @@ func ReadCodexCache(path string) Catalog {
 			Levels     []struct {
 				Effort llm.ReasoningEffort `json:"effort"`
 			} `json:"supported_reasoning_levels"`
-			Context int64 `json:"context_window"`
+			Context    int64               `json:"context_window"`
+			MultiAgent llm.ReasoningEffort `json:"multi_agent_reasoning_effort"`
 		} `json:"models"`
 	}
 	if json.Unmarshal(b, &raw) != nil {
@@ -166,6 +238,9 @@ func ReadCodexCache(path string) Catalog {
 		}
 		seen[m.ID] = true
 		model := Model{ID: m.ID, Name: m.Name, DefaultEffort: m.Default, ContextWindow: max(0, m.Context)}
+		if m.MultiAgent.Valid() {
+			model.MultiAgentEffort = m.MultiAgent
+		}
 		if model.Name == "" {
 			model.Name = model.ID
 		}

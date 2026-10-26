@@ -420,21 +420,25 @@ func TestExportPickerNavigationResponsiveAndCommandDiscovery(t *testing.T) {
 			}
 		}
 	}
-	var names []string
+	var names, copies []string
 	for _, candidate := range commandCatalog {
-		if strings.HasPrefix(candidate.Name, "/copy") {
-			t.Fatal("removed command still discoverable")
-		}
 		if strings.HasPrefix(candidate.Name, "/export") {
 			names = append(names, candidate.Name)
 		}
+		if strings.HasPrefix(candidate.Name, "/copy") {
+			copies = append(copies, candidate.Name)
+		}
 	}
-	if strings.Join(names, ",") != "/export,/export last,/export all" {
+	if strings.Join(names, ",") != "/export,/export last,/export all,/export pick" {
 		t.Fatal("export command discovery missing", names)
+	}
+	// The clipboard copy the user asked for (10/9, 10/26) is a command again.
+	if strings.Join(copies, ",") != "/copy,/copy all,/copy last" {
+		t.Fatal("copy command discovery missing", copies)
 	}
 	for _, short := range []bool{false, true} {
 		help := strings.Join(helpSheet(Theme{}, short).Lines, "\n")
-		if strings.Contains(help, "/copy") || !strings.Contains(help, "/export last") || !strings.Contains(help, "/export all") {
+		if !strings.Contains(help, "/copy: full conversation or latest response") || !strings.Contains(help, "/export: latest response, full conversation, or choose a response") {
 			t.Fatal("help outdated")
 		}
 	}

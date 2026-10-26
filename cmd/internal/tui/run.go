@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 	"uuid"
 
 	"github.com/unreallabsai/unreal-agent/harness/analysis"
@@ -49,9 +50,12 @@ type Config struct {
 	Theme            *Theme
 	// Legacy Panel remains available to embedders. Live Dock uses structured
 	// Viewer data; both hooks are read-only projections, never Session access.
-	Panel               func(width, height int) string
-	Viewer              func(time.Time) viewer.PanelSnapshot
-	ViewChanged         func(ViewMode) // frontend read-only observation scope
+	Panel       func(width, height int) string
+	Viewer      func(time.Time) viewer.PanelSnapshot
+	ViewChanged func(ViewMode) // frontend read-only observation scope
+	// InitialView is the first view; empty means Split, which narrow
+	// terminals show as Chat until they reach 120 columns.
+	InitialView         ViewMode
 	Updates             <-chan struct{}
 	Command             func(context.Context, string) (string, bool)
 	ModelCatalog        func(context.Context) (modelcatalog.Catalog, error)
@@ -75,6 +79,9 @@ type commandResult struct {
 	picker               *Picker
 	transcript           *transcriptPage
 	transcriptTop        bool
+	// clipboard is text for the terminal's clipboard (OSC 52), written by the
+	// render loop so it never interleaves with a frame.
+	clipboard string
 }
 
 func Run(ctx context.Context, c Config) error {
@@ -112,7 +119,10 @@ func Run(ctx context.Context, c Config) error {
 	defer func() { cancel(); <-watchDone }()
 	var editor Editor
 	defer editor.Clear()
-	u := UIState{cache: &bodyCache{}}
+	u := UIState{cache: &bodyCache{}, View: ViewSplit}
+	if c.InitialView != "" {
+		u.View = c.InitialView
+	}
 	files := newFileCompletion(ctx)
 	defer files.close(&u)
 	if c.Theme != nil {
@@ -164,9 +174,25 @@ func Run(ctx context.Context, c Config) error {
 			u.Notification.Until = time.Now().Add(8 * time.Second)
 		}
 	}
-	stopSession := func(mode inbox.ControlMode) {
-		payload, _ := json.Marshal(inbox.ControlMessage{Mode: mode, Reason: "terminal user requested stop"})
-		send(inbox.Input{ID: inbox.ID(uuid.New().String()), Kind: inbox.InputControl, Payload: payload})
+	stopSession := func(modes ...inbox.ControlMode) {
+		inputs := make([]inbox.Input, len(modes))
+		for i, mode := range modes {
+			payload, _ := json.Marshal(inbox.ControlMessage{Mode: mode, Reason: "terminal user requested stop"})
+			inputs[i] = inbox.Input{ID: inbox.ID(uuid.New().String()), Kind: inbox.InputControl, Payload: payload}
+		}
+		if len(inputs) == 1 {
+			send(inputs[0])
+			return
+		}
+		generation := m.Snapshot().Generation
+		start("sending  stop request", func(ctx context.Context) commandResult {
+			for _, input := range inputs {
+				if _, err := c.Client.Submit(ctx, c.ID, generation, input); err != nil {
+					return commandResult{err: err}
+				}
+			}
+			return commandResult{}
+		})
 	}
 	var renderer Renderer
 	var complete completion
@@ -180,6 +206,9 @@ func Run(ctx context.Context, c Config) error {
 	previousStreaming := false
 	previousView := ViewChat
 	var frame Frame
+	// queued is a key the loop handles before reading the next real one: a
+	// command picker's choice is typed into the editor and submitted.
+	queued := make(chan Key, 1)
 	var permissionConnection permission.ControlConnection
 	var permissionGeneration string
 	var cancelPermission context.CancelFunc
@@ -402,6 +431,11 @@ func Run(ctx context.Context, c Config) error {
 				} else if result.sheet != nil {
 					u.Sheet = result.sheet
 					u.Notification = Notification{}
+				} else if result.clipboard != "" {
+					if _, err := io.WriteString(c.Output, clipboardSequence(result.clipboard)); err != nil {
+						return err
+					}
+					notice(result.text, result.kind)
 				} else if result.text != "" {
 					notice(result.text, result.kind)
 				} else {
@@ -409,7 +443,7 @@ func Run(ctx context.Context, c Config) error {
 				}
 			}
 			dirty = true
-		case key, ok := <-c.Keys:
+		case key, ok := <-nextKeys(queued, c.Keys):
 			if !ok || key.Name == "detach" {
 				return nil
 			}
@@ -565,7 +599,7 @@ func Run(ctx context.Context, c Config) error {
 							u.Picker = nil
 							continue
 						}
-						if !permissionReviewFits(width, height) && p.Selection == 1 {
+						if !permissionReviewFits(width, height) && permissionGrants(p) {
 							notice("Resize to at least 80x24 to review permission scope", "warning")
 							continue
 						}
@@ -582,6 +616,13 @@ func Run(ctx context.Context, c Config) error {
 						})
 						continue
 					}
+					if p.Kind == "command" {
+						chosen := p.Commands[p.Selection]
+						u.Picker = nil
+						editor.replace(chosen)
+						queued <- Key{Name: "enter"}
+						continue
+					}
 					if p.Kind == "view" {
 						chosen := p.Views[p.Selection]
 						if chosen == ViewSplit && width < 120 {
@@ -595,7 +636,7 @@ func Run(ctx context.Context, c Config) error {
 					if p.Kind == "provider" {
 						b := p.Providers[p.Selection]
 						if b.Availability != "available" {
-							notice("provider "+b.Availability, "warning")
+							notice("provider "+b.Availability+" · "+b.Reason.Hint(), "warning")
 							continue
 						}
 						current := s.Selection
@@ -825,7 +866,7 @@ func Run(ctx context.Context, c Config) error {
 				continue
 			}
 			u.Notification = Notification{}
-			if u.Sheet != nil {
+			if u.Sheet != nil && u.Private == nil {
 				u.Sheet = nil
 				complete.resetMenu(&u)
 				continue
@@ -893,12 +934,16 @@ func Run(ctx context.Context, c Config) error {
 				u.View, u.Sheet, u.Picker = chosen, nil, nil
 				previousWidth = -1
 			case "/export":
-				if len(parts) > 2 || len(parts) == 2 && parts[1] != "last" && parts[1] != "all" {
-					notice("usage: /export [last | all]", "warning")
+				if len(parts) > 2 || len(parts) == 2 && parts[1] != "last" && parts[1] != "all" && parts[1] != "pick" {
+					notice("usage: /export [last | all | pick]", "warning")
+					continue
+				}
+				if len(parts) == 1 {
+					u.Picker, u.Sheet = commandPicker("Export as Markdown", []string{"Latest response", "Full conversation", "Choose a response…"}, []string{"/export last", "/export all", "/export pick"}), nil
 					continue
 				}
 				through := s.After
-				if len(parts) == 1 {
+				if parts[1] == "pick" {
 					start("loading exportable canonical responses", func(ctx context.Context) commandResult {
 						through, err := exportBoundary(ctx, c.Client, c.ID, through)
 						if err != nil {
@@ -922,6 +967,33 @@ func Run(ctx context.Context, c Config) error {
 						path, err = ExportLastResponse(ctx, c.Client, c.ID, through, c.ExportDirectory)
 					}
 					return commandResult{text: "exported to " + path, err: err}
+				})
+			case "/copy":
+				if len(parts) > 2 || len(parts) == 2 && parts[1] != "last" && parts[1] != "all" {
+					notice("usage: /copy [all | last]", "warning")
+					continue
+				}
+				if len(parts) == 1 {
+					u.Picker, u.Sheet = commandPicker("Copy to the clipboard", []string{"Full conversation", "Latest response"}, []string{"/copy all", "/copy last"}), nil
+					continue
+				}
+				last := len(parts) == 2 && parts[1] == "last"
+				through := s.After
+				start("copying the public conversation", func(ctx context.Context) commandResult {
+					through, err := exportBoundary(ctx, c.Client, c.ID, through)
+					if err != nil {
+						return commandResult{err: err}
+					}
+					var text string
+					if last {
+						text, err = LastResponseText(ctx, c.Client, c.ID, through)
+					} else {
+						text, err = ConversationText(ctx, c.Client, c.ID, through)
+					}
+					if err != nil {
+						return commandResult{err: err}
+					}
+					return commandResult{clipboard: text, text: fmt.Sprintf("copied %d characters to the clipboard (terminal OSC 52)", utf8.RuneCountInString(text))}
 				})
 			case "/help":
 				u.Sheet = helpSheet(u.Theme, height < 20)
@@ -990,11 +1062,19 @@ func Run(ctx context.Context, c Config) error {
 					return commandResult{text: "session resumed", err: err}
 				})
 			case "/stop":
-				mode := inbox.StopHard
-				if len(parts) > 1 && parts[1] == "idle" {
-					mode = inbox.StopWhenIdle
+				if len(parts) == 1 {
+					p := commandPicker("Stop", []string{"Sub-agents: cancel every child agent", "Main agent: interrupt its current work (sub-agents go on)", "Main agent and sub-agents", "Session: stop now (/resume restarts it)"}, []string{"/stop sub", "/stop main", "/stop main+sub", "/stop session"})
+					p.Selection = 1 // interrupting the main agent loses nothing
+					u.Picker, u.Sheet = p, nil
+					continue
 				}
-				stopSession(mode)
+				modes := map[string][]inbox.ControlMode{"sub": {inbox.CancelChildren}, "main": {inbox.InterruptAgent}, "main+sub": {inbox.InterruptAgent, inbox.CancelChildren}, "session": {inbox.StopHard}, "now": {inbox.StopHard}, "idle": {inbox.StopWhenIdle}}
+				chosen := modes[parts[len(parts)-1]]
+				if len(parts) != 2 || chosen == nil {
+					notice("usage: /stop [sub | main | main+sub | session]", "warning")
+					continue
+				}
+				stopSession(chosen...)
 			case "/login":
 				if len(parts) != 3 {
 					notice("usage: /login PROVIDER ID (then enter key privately)", "warning")
@@ -1057,4 +1137,12 @@ func Run(ctx context.Context, c Config) error {
 			}
 		}
 	}
+}
+
+// nextKeys is where the next key comes from: a queued key before real input.
+func nextKeys(queued chan Key, keys <-chan Key) <-chan Key {
+	if len(queued) > 0 {
+		return queued
+	}
+	return keys
 }

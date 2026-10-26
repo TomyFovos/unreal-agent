@@ -158,14 +158,7 @@ Structured mode provides Unreal-owned actions without SDK MCP grants. MCP mode
 requires administrator exact grants. Both require existing executor permissions
 and work through the same normal launcher without a smoke-specific configuration.
 
-Side-effecting built-ins remain removed by `--tools ""` and safe mode. Text requests
-retain deny-all/strict-empty MCP. Structured requests add only the read-only
-`StructuredOutput` serializer, block all MCP and side-effecting built-ins, and use
-strict-empty MCP. The serializer creates no Operation; independently validated
-proposals use the Unreal Registry/Permission/Operation path. MCP requests retain
-the sole attested Unreal SDK server and exact generated allowlist. A denied
-StructuredOutput generation returns typed unavailable, never unsafe/provider fallback.
-See [bridge modes and reviewed development profiles](claude-tool-bridge.md).
+Claude runs through the signed-in Claude Code CLI; see [Claude route](claude-route.md).
 
 ## Host reuse and Session compatibility
 

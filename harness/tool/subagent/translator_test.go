@@ -3,6 +3,7 @@ package subagent
 import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	runtime "github.com/unreallabsai/unreal-agent/harness/subagent"
 	"testing"
 )
 
@@ -23,5 +24,45 @@ func TestFinishRejectsOtherPendingCallsBeforeSubmit(t *testing.T) {
 	c.eligible = true
 	if s := tr.Translate(c, call); s.Error != "" || len(c.specs) != 1 {
 		t.Fatal(s, c.specs)
+	}
+}
+
+func TestApproveAnswersAChildRequest(t *testing.T) {
+	tr := translator{action: "approve", owner: "parent"}
+	c := &ctx{}
+	if s := tr.Translate(c, llm.ToolCall{Name: "SubagentApprove", Arguments: `{"handle":"child-op","request":"req-1","allow":true}`}); s.Error != "" || len(c.specs) != 1 {
+		t.Fatal(s, c.specs)
+	}
+	p, err := runtime.DecodePlan(operation.Operation{ID: "approve", Type: c.specs[0].Type, Version: c.specs[0].Version, MaxOutputLength: operation.DefaultMaxOutputLength, State: c.specs[0].State})
+	if err != nil || p.Action != "approve" || p.Handle != "child-op" || p.Request != "req-1" || !p.Allow {
+		t.Fatal(p, err)
+	}
+	if s := tr.Translate(c, llm.ToolCall{Name: "SubagentApprove", Arguments: `{"handle":"child-op","allow":true}`}); s.Error == "" {
+		t.Fatal("approval without a request")
+	}
+}
+
+// A child with worker templates is a parent too; one without is not.
+func TestChildWithWorkersGetsParentTools(t *testing.T) {
+	enabled := func(templates map[string]runtime.Template, child bool) map[string]bool {
+		extensions, err := Extensions("s", templates, child)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]bool{}
+		for _, e := range extensions {
+			out[e.Definition.Tool.Name] = e.Enabled
+		}
+		return out
+	}
+	worker := map[string]runtime.Template{"worker": {}}
+	if got := enabled(nil, true); got["SubagentStart"] || got["SubagentApprove"] || !got["Finish"] || !got["SendParent"] {
+		t.Fatal("plain child", got)
+	}
+	if got := enabled(worker, true); !got["SubagentStart"] || !got["SubagentApprove"] || !got["Finish"] {
+		t.Fatal("lead child", got)
+	}
+	if got := enabled(worker, false); !got["SubagentStart"] || !got["SubagentApprove"] || got["Finish"] {
+		t.Fatal("parent", got)
 	}
 }

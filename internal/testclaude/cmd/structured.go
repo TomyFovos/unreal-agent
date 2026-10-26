@@ -19,6 +19,36 @@ import (
 // Offline structured-output fixture. Every generation is a separate process.
 // It inspects only supplied context/receipts, never the workspace or commands.
 func structured(dir, path string, args []string, c configuration) {
+	// Bounded synthetic-only phase evidence. No protocol payload or arguments.
+	started := time.Now()
+	generation, isChild := 0, false
+	progress := func(phase int, exitKnown bool, exitCode int) {
+		record := struct {
+			Phase, Generation, PID int
+			Child, ExitKnown       bool
+			ExitCode               int
+			ElapsedMillis          int64
+		}{phase, generation, os.Getpid(), isChild, exitKnown, exitCode, time.Since(started).Milliseconds()}
+		b, err := json.Marshal(record)
+		if err != nil || len(b) > 512 {
+			os.Exit(141)
+		}
+		f, err := os.OpenFile(filepath.Join(dir, "structured-progress.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
+			os.Exit(141)
+		}
+		st, err := f.Stat()
+		if err != nil || st.Size() >= 256<<10 {
+			f.Close()
+			os.Exit(141)
+		}
+		n, err := f.Write(append(b, '\n'))
+		closeErr := f.Close()
+		if err != nil || closeErr != nil || n != len(b)+1 {
+			os.Exit(141)
+		}
+	}
+	progress(1, false, 0)
 	if c.IgnoreTermination {
 		signal.Ignore(syscall.SIGTERM)
 	}
@@ -76,6 +106,7 @@ func structured(dir, path string, args []string, c configuration) {
 		os.Exit(134)
 	}
 	entry.Input, _ = user["message"].(map[string]any)["content"].(string)
+	progress(2, false, 0)
 	model := "claude-configured-a"
 	for i, arg := range args {
 		if i+1 < len(args) {
@@ -120,11 +151,12 @@ func structured(dir, path string, args []string, c configuration) {
 		return
 	}
 	if strings.Contains(entry.System, "CHILD_GUIDANCE") {
+		isChild = true
 		c.BridgeSteps = c.BridgeChildSteps
 	} else if c.BridgeOnce && strings.Contains(entry.Input, "Bridge fixture completed") {
 		c.BridgeSteps = nil
 	}
-	generation := 0
+	generation = 0
 	if start := strings.LastIndex(entry.System, "Unreal structured generation: "); start >= 0 {
 		_, _ = fmt.Sscanf(entry.System[start:], "Unreal structured generation: %d.", &generation)
 	}
@@ -165,6 +197,7 @@ func structured(dir, path string, args []string, c configuration) {
 			os.Exit(137)
 		}
 	}
+	progress(3, false, 0)
 	output := any(map[string]any{"type": "final", "final": map[string]any{"message": "Bridge fixture completed"}})
 	if generation < len(script) {
 		s := script[generation]
@@ -186,17 +219,23 @@ func structured(dir, path string, args []string, c configuration) {
 					os.Exit(138)
 				}
 			}
-			var old string
+			var old, replacement string
 			for _, line := range strings.Split(observed.Content, "\n") {
 				if strings.HasPrefix(line, "MIDDLE_EDIT_TARGET=") {
 					old = line
+					replacement = "MIDDLE_EDIT_TARGET=after"
+					break
+				}
+				if line == "UNREAL_REPAIR_BEFORE" {
+					old = line
+					replacement = "UNREAL_REPAIR_AFTER"
 					break
 				}
 			}
 			if old == "" || observed.Path == "" || observed.Revision == nil || !observed.Revision.Exists || len(observed.Revision.Digest) != 64 {
 				os.Exit(139)
 			}
-			encoded, err := json.Marshal(map[string]any{"path": observed.Path, "old_text": old, "new_text": "MIDDLE_EDIT_TARGET=after", "expected": observed.Revision})
+			encoded, err := json.Marshal(map[string]any{"path": observed.Path, "old_text": old, "new_text": replacement, "expected": observed.Revision})
 			if err != nil {
 				os.Exit(140)
 			}
@@ -255,6 +294,7 @@ func structured(dir, path string, args []string, c configuration) {
 	}
 	emit(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": "serializer-only", "content": "Structured output provided successfully"}}}, "tool_use_result": map[string]any{"structured_output": output}})
 	emit(map[string]any{"type": "result", "subtype": "success", "is_error": false, "structured_output": output, "result": "private-helper-result", "usage": map[string]any{"input_tokens": 10, "output_tokens": 2, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}, "session_id": "private-session-sensitive"})
+	progress(4, false, 0)
 	if c.StructuredAfterResultMillis > 0 {
 		time.Sleep(time.Duration(c.StructuredAfterResultMillis) * time.Millisecond)
 	}
@@ -267,6 +307,7 @@ func structured(dir, path string, args []string, c configuration) {
 		}
 	}
 	fmt.Fprintln(os.Stderr, "private-token-sensitive")
+	progress(5, true, c.Exit) // exit intent only, never a claim of process reap.
 	os.Exit(c.Exit)
 }
 

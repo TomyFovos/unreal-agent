@@ -1,5 +1,47 @@
 # Local snapshot distribution
 
+The current common development kit uses the **same archive and setup** in both
+asp and devlore. From its extracted directory, run:
+
+```sh
+bash development.sh --configure-providers --replace-pilot-launcher
+```
+
+It asks independently for the Codex authentication route and this environment's
+Claude policy audit/trust. Native `unreal-agent providers` performs only auth and
+catalog preflight; unsupported/unavailable providers retain closed status codes.
+No model inference, credential import or tool execution occurs during setup.
+Use `/model` for provider/model/effort and `/permissions` for human authorization.
+
+After a settings/build change, opening an existing Git workspace starts a
+**new Session in a separate instance** without asking. Old config, Host,
+history and reconnect references remain unchanged. A private, atomic workspace binding makes
+that choice persistent. `--instance`/`--config` remain explicit destinations.
+A new session name alone cannot change an already-started Host's registration.
+See the packaged Japanese README for both environments' identical commands.
+The provider-specific Pilot profiles below are retained compatibility paths.
+
+An unchanged profile reuses its original instance after the native launcher has
+saved `runtime.json`, across new Bash sessions and an identical reinstall. The
+wrapper compares native `managedPolicyMode` with the same Runtime → Providers →
+Launcher precedence; an empty config object overrides lower-precedence values,
+while an absent/null pointer does not. It neither rewrites the native config nor
+treats a cached availability change as approval to change the provider route.
+
+The packaged regression gate below uses fresh synthetic HOMEs, fake provider
+authentication/catalog/generations and the archive's actual installed wrapper.
+It checks native first-run saving, three normal `unreal development` openings,
+reinstall, detach, stopped-Session resume and explicitly approved profile updates.
+Read-only Gateway inspection observes the results; it does not replace wrapper
+reconnection. Existing separate routing tests verify Codex → Claude → Codex with
+canonical receipts in the same archive. No real inference is part of this gate.
+
+```sh
+UNREAL_COMMON_KIT_DIRECTORY=/absolute/path/to/extracted/common-kit \
+UNREAL_COMMON_BIN_DIR=/absolute/path/to/extracted/common-kit \
+go test ./cmd/unreal-agent -run '^TestCommon' -count=1 -v
+```
+
 For an existing **asp** Sandbox using Docker host-owned ChatGPT OAuth, see
 [Docker Sandbox OAuth compatibility](docker-sandbox-oauth.md). Old 6284e49
 binaries cannot use the new explicit `docker_sandbox_oauth` route. Build a new

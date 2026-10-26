@@ -3,6 +3,8 @@ package subagent
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -14,8 +16,11 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"io/fs"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 type Config struct {
@@ -37,6 +42,7 @@ type job struct {
 	cancel     chan struct{}
 	once       sync.Once
 	connection *processChannel
+	approvals  []Approval // the child's requests waiting for this parent
 }
 type Manager struct {
 	ctx      context.Context
@@ -172,6 +178,14 @@ func (m *Manager) run(j *job, p Plan) {
 				payload, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(p.ParentID), Target: string(target), Handle: string(p.Handle), Kind: "message", Text: p.Text})
 				_, err = connection.send(ctx, inbox.Input{ID: inbox.ID("send:" + string(op.ID)), Kind: inbox.InputPeer, Payload: payload})
 			}
+		case "approve":
+			err = m.approve(ctx, p)
+			if err == nil {
+				state.TerminalResult = "Denied the child's request " + p.Request
+				if p.Allow {
+					state.TerminalResult = "Allowed the child's request " + p.Request
+				}
+			}
 		case "cancel":
 			_, err = m.ownedChild(p.Handle)
 			if err == nil {
@@ -199,7 +213,12 @@ func (m *Manager) run(j *job, p Plan) {
 	}
 	if err != nil && status != operation.StatusCanceled {
 		status = operation.StatusFailed
-		state.TerminalError = "subagent " + p.Action + " failed"
+		// The reason reaches the parent's model and the subagent command;
+		// without it neither can tell what to fix.
+		state.TerminalError = "subagent " + p.Action + " failed: " + clipError(err.Error())
+		if errors.As(err, new(childStopped)) {
+			state.TerminalError = "the child stopped with an error: " + clipError(err.Error())
+		}
 		if denial := permission.Failure(err); denial != nil {
 			op.Denial = denial
 			state.TerminalError = denial.Error()
@@ -237,6 +256,29 @@ func (m *Manager) ownedChild(id operation.ID) (Plan, error) {
 	}
 	return Plan{}, fmt.Errorf("child operation not owned")
 }
+
+// approve answers a request the child still waits on (U17).
+func (m *Manager) approve(ctx context.Context, p Plan) error {
+	connection, err := m.connection(ctx, p.Handle)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	waiting := false
+	if j := m.jobs[p.Handle]; j != nil {
+		for _, a := range j.approvals {
+			waiting = waiting || a.ID == p.Request
+		}
+	}
+	m.mu.Unlock()
+	if !waiting {
+		return fmt.Errorf("the child is not waiting for request %q", p.Request)
+	}
+	f := connection.endpoint.envelope("decide")
+	f.Approval = &Approval{ID: p.Request, Allow: p.Allow}
+	return connection.write(ctx, f)
+}
+
 func (m *Manager) connection(ctx context.Context, id operation.ID) (*processChannel, error) {
 	if _, err := m.ownedChild(id); err != nil {
 		return nil, err
@@ -289,7 +331,7 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 		return operation.StatusFailed, fmt.Errorf("child template changed")
 	}
 	snapshot := m.config.Owner.BoundProjectInstructions()
-	child := ChildConfig{MutationStateDirectory: allowed.MutationStateDirectory, ProjectInstructions: snapshot, Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: j.operation.ID, SessionDirectory: m.config.Directory, Workspace: allowed.Workspace, Runtime: allowed.Runtime, Policy: allowed.Policy, ReadyID: inbox.ID("ready:" + string(j.operation.ID)), Task: p.Text}
+	child := ChildConfig{MutationStateDirectory: allowed.MutationStateDirectory, ProjectInstructions: snapshot, Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: j.operation.ID, SessionDirectory: m.config.Directory, Workspace: allowed.Workspace, Runtime: allowed.Runtime, Policy: allowed.Policy, Baseline: allowed.Baseline, Subagents: allowed.Subagents, ReadyID: inbox.ID("ready:" + string(j.operation.ID)), Task: p.Text}
 	if s := sessionstore.SelectionFromConfiguration(allowed.Runtime); s != nil && s.Provider == "claude-code" {
 		child.TextOnly = !sessionstore.ToolBridgeEnabledFromConfiguration(child.Runtime)
 		child.ProviderProcess = true
@@ -297,21 +339,17 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 	if err := child.Validate(); err != nil {
 		return operation.StatusFailed, err
 	}
-	if control := permission.ControllerFromContext(ctx); control != nil && control.Snapshot().Mode != permission.FullAccess {
-		// Allow Once authorizes this child start, not subsequent privileged
-		// child Operations. Children do not receive the parent's approval lease.
-		if len(child.Policy.WriteRoots) != 0 {
-			return operation.StatusFailed, &permission.Error{Code: permission.Denied, Capability: "child", Reason: "individual approval cannot delegate child write access"}
-		}
-		for _, name := range child.Policy.Tools {
-			if !permission.ReadOnlyTool(name) && name != "Finish" && name != "SendParent" {
-				return operation.StatusFailed, &permission.Error{Code: permission.Denied, Capability: "child", Reason: "individual approval requires a read-only child template"}
-			}
-		}
-	}
+	// With permission modes the child follows this Session's mode (D1, U17),
+	// so its start holds the operator maximum (permission.Request.Orchestration),
+	// which bounds the child process and its template.
 	policy := permission.FromContext(ctx)
 	if err := policy.CheckProcess(); err != nil {
 		return operation.StatusFailed, err
+	}
+	control := permission.ControllerFromContext(ctx)
+	var mode permission.Mode
+	if control != nil {
+		mode = control.Snapshot().Mode
 	}
 	for _, name := range child.Policy.Tools {
 		if err := policy.CheckTool(name); err != nil {
@@ -319,7 +357,7 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 		}
 	}
 	handle := Handle{Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: j.operation.ID}
-	collect := func() (bool, error) {
+	collect := func(requireTerminal bool) (bool, error) {
 		view, err := ReadChild(ctx, m.config.Directory, p.ChildID, 0, 1)
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
@@ -356,12 +394,23 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 		if view.Finish == nil {
 			return false, nil
 		}
+		if requireTerminal {
+			// A live channel's finish notification is not execution authority.
+			// Only a fully drained canonical child may be torn down early;
+			// active/uncertain child work remains owned by its existing runtime.
+			for _, op := range view.View.Operations {
+				if op.Status != operation.StatusCompleted && op.Status != operation.StatusFailed && op.Status != operation.StatusCanceled {
+					return false, nil
+				}
+			}
+		}
 		handle.Finish = view.Finish
+		handle.Approvals = nil
 		state.Handle, _ = json.Marshal(handle)
 		state.TerminalResult = view.Finish.Result.Summary
 		return true, nil
 	}
-	if done, err := collect(); done || err != nil {
+	if done, err := collect(false); done || err != nil {
 		return finishStatus(handle), err
 	}
 	state.Handle, _ = json.Marshal(handle)
@@ -374,12 +423,16 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 		return operation.StatusCanceled, context.Cause(ctx)
 	default:
 	}
-	channel := startProcess(ctx, m.config, child)
+	channel := startProcess(ctx, m.config, child, mode)
 	m.mu.Lock()
 	j.connection = channel
+	j.approvals = nil
 	m.notify()
 	m.mu.Unlock()
 	defer func() { channel.cancel(); <-channel.done }()
+	if control != nil {
+		m.workers.Go(func() { followMode(ctx, channel, control, mode) })
+	}
 	var canceled bool
 	var timer <-chan time.Time
 	cancellation := j.cancel
@@ -401,19 +454,122 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 		case <-timer:
 			channel.cancel()
 			timer = nil
+		case event := <-channel.approvals:
+			m.mu.Lock()
+			j.approvals = slices.DeleteFunc(j.approvals, func(a Approval) bool { return a.ID == event.approval.ID })
+			if !event.done {
+				j.approvals = append(j.approvals, event.approval)
+			}
+			handle.Approvals = slices.Clone(j.approvals)
+			m.notify()
+			m.mu.Unlock()
+			state.Handle, _ = json.Marshal(handle)
+			update, _ := operation.UpdateRemoteJob(j.operation, *state, operation.StatusAwaiting)
+			m.emit(*update.Operation)
+			if !event.done {
+				m.workers.Go(func() { m.askParent(ctx, j, child, channel, event.approval) })
+			}
+		case <-channel.finishHint:
+			if !canceled {
+				if done, err := collect(true); done || err != nil {
+					// spawn's defer cancels and joins this exact child channel
+					// before run can publish a terminal parent Operation.
+					return finishStatus(handle), err
+				}
+			}
 		case <-channel.done:
 			if canceled {
 				return operation.StatusCanceled, nil
 			}
-			if done, err := collect(); done || err != nil {
+			if done, err := collect(false); done || err != nil {
 				return finishStatus(handle), err
 			}
-			if channel.err != nil {
-				return operation.StatusFailed, channel.err
+			err := channel.err
+			if err == nil {
+				err = fmt.Errorf("child exited without canonical Finish")
 			}
-			return operation.StatusFailed, fmt.Errorf("child exited without canonical Finish")
+			select {
+			case <-channel.connected:
+				err = childStopped{err}
+			default:
+			}
+			return operation.StatusFailed, err
 		}
 	}
+}
+
+// childStopped is a child that started and then ended with an error, which
+// "start failed" would misreport.
+type childStopped struct{ err error }
+
+func (e childStopped) Error() string { return e.err.Error() }
+func (e childStopped) Unwrap() error { return e.err }
+
+// followMode keeps a live child in this Session's permission mode.
+func followMode(ctx context.Context, channel *processChannel, control *permission.Controller, sent permission.Mode) {
+	for {
+		snapshot, changed := control.Watch()
+		if !snapshot.Stopped && snapshot.Mode != sent {
+			f := channel.endpoint.envelope("mode")
+			f.Mode = snapshot.Mode
+			if channel.write(ctx, f) != nil {
+				return
+			}
+			sent = snapshot.Mode
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-channel.done:
+			return
+		case <-changed:
+		}
+	}
+}
+
+// askParent wakes this Session's model with a child's request (U17). It is
+// a peer message: provenance for the model, not an instruction. A model call
+// in flight may answer the request itself (Claude waits with the subagent
+// command); a notice then would only start another turn after the answer.
+// So an idle parent hears at once, a busy one when its call ends with the
+// request still open.
+func (m *Manager) askParent(ctx context.Context, j *job, child ChildConfig, channel *processChannel, a Approval) {
+	for {
+		m.mu.Lock()
+		open := slices.ContainsFunc(j.approvals, func(p Approval) bool { return p.ID == a.ID })
+		changed := m.changed
+		m.mu.Unlock()
+		if !open {
+			return
+		}
+		busy, responded := m.config.Owner.ModelBusy()
+		if !busy {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
+		case <-responded:
+		}
+	}
+	text := fmt.Sprintf("Child %s asks for approval of request %s: %s %s. Allow or deny it as its parent; it waits until you answer.", child.OperationID, a.ID, a.Tool, a.Scope)
+	payload, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(child.ChildID), Target: string(child.ParentID), Handle: string(child.OperationID), Kind: "message", Text: text})
+	sum := sha256.Sum256([]byte(string(child.OperationID) + "\x00" + channel.endpoint.connection + "\x00" + a.ID))
+	input := inbox.Input{ID: inbox.ID("approval:" + hex.EncodeToString(sum[:16])), Kind: inbox.InputPeer, Payload: payload}
+	_, _ = m.config.Owner.SubmitPeer(ctx, m.config.Owner.Generation, string(child.ChildID), string(child.OperationID), input)
+}
+
+func clipError(text string) string {
+	text = strings.ToValidUTF8(text, "\uFFFD")
+	if len(text) > 2000 {
+		cut := 2000
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		text = text[:cut] + "…"
+	}
+	return text
 }
 
 func sameJSON(a, b []byte) bool {

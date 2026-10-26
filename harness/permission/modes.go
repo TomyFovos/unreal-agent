@@ -58,6 +58,14 @@ type Decision struct {
 type Request struct {
 	ID, Tool, Scope string
 	Privileged      bool
+	// Orchestration starts or steers a child agent, which applies the mode to
+	// itself: it holds the maximum, and mode changes reach the child instead
+	// of revoking this.
+	Orchestration bool
+	// ReadOnlyCommand is a shell command that only reads (ReadOnlyCommand):
+	// it runs in every mode, as Codex runs its known-safe commands, with the
+	// maximum's permission to start the process.
+	ReadOnlyCommand bool
 }
 type Pending struct {
 	ID, Tool, Scope string
@@ -203,7 +211,7 @@ func (c *Controller) denied(mode Mode, state string) Permit {
 func (c *Controller) permitLocked(ctx context.Context, r Request, state string, grant *Policy) Permit {
 	child, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(c.ctx, cancel)
-	if r.Privileged || c.mode == FullAccess {
+	if (r.Privileged || c.mode == FullAccess) && !r.Orchestration && !r.ReadOnlyCommand {
 		c.active[r.ID] = cancel
 	}
 	child = context.WithValue(child, contextKey{}, FromContext(ctx).bind(c, grant, child))
@@ -243,6 +251,9 @@ func (c *Controller) Request(ctx context.Context, r Request) <-chan Permit {
 		if c.mode == FullAccess {
 			grant = c.maximum
 			state = "full_access"
+		}
+		if r.Orchestration || r.ReadOnlyCommand {
+			grant = c.maximum
 		}
 		result <- c.permitLocked(ctx, r, state, grant)
 		return result
@@ -367,6 +378,45 @@ func (c *Controller) Decide(key string, rev uint64, id string, allow bool) error
 	}
 	p := c.pending[id]
 	if p == nil {
+		return ErrControl
+	}
+	if !time.Now().Before(p.deadline) || p.ctx.Err() != nil {
+		c.finishLocked(p, c.denied(Ask, "timeout"))
+		return ErrControl
+	}
+	result := c.denied(Ask, "denied")
+	if allow {
+		result = c.permitLocked(p.ctx, p.request, "allow_once", c.maximum)
+	}
+	c.finishLocked(p, result)
+	return nil
+}
+
+// Follow sets a child Session's mode from its parent agent, which holds the
+// human's choice; a child has no human control stream. Like SetMode, a change
+// ends active and pending authority.
+func (c *Controller) Follow(mode Mode) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ctx.Err() != nil || !mode.Valid() {
+		return ErrControl
+	}
+	if c.mode == mode {
+		return nil
+	}
+	c.revokeLocked("revoked")
+	c.mode = mode
+	c.notifyLocked()
+	return nil
+}
+
+// Answer decides a child Session's pending request for its parent agent, which
+// approves child Operations instead of a human (U17).
+func (c *Controller) Answer(id string, allow bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p := c.pending[id]
+	if c.ctx.Err() != nil || c.mode != Ask || p == nil {
 		return ErrControl
 	}
 	if !time.Now().Before(p.deadline) || p.ctx.Err() != nil {

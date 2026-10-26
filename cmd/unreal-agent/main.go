@@ -13,10 +13,23 @@ import (
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	if err := runExecutable(ctx, filepath.Base(os.Args[0]), os.Args[1:], os.Stderr); err != nil {
+	if err := runExecutableWithStreams(ctx, filepath.Base(os.Args[0]), os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func runExecutableWithStreams(ctx context.Context, name string, args []string, stdout, diagnostics io.Writer) error {
+	if isSubagentCommand(name, args) {
+		return runSubagentCLI(ctx, args[1:], os.Stdin, stdout)
+	}
+	output := diagnostics
+	// The metadata-only subcommand is consumed by setup as machine JSON.
+	// Plain "unreal providers" remains a positional launcher session name.
+	if name != "unreal" && len(args) != 0 && args[0] == "providers" {
+		output = stdout
+	}
+	return runExecutable(ctx, name, args, output)
 }
 
 func runExecutable(ctx context.Context, name string, args []string, output io.Writer) error {

@@ -45,19 +45,44 @@ func fullPermissionConfirmation(s Snapshot, revision uint64, challenge string) *
 		"Continues after detach; Session stop/resume and Host restart require reapproval. /permissions can revoke. Operator maximum and explicit denies still apply.",
 	}}
 }
+
+// operationPermissionConfirmation shows what will run first and starts on
+// Allow once; Deny is one step down.
 func operationPermissionConfirmation(s Snapshot, op permission.Pending) *Picker {
-	return &Picker{Kind: "permission-once", Title: "Session " + SafeText(string(s.ID)) + " · " + SafeText(op.Tool), Options: []string{"Deny this Operation", "Allow Once (this Operation only)"}, PermissionRevision: s.Permissions.Revision, PermissionOperation: op.ID, Instructions: []string{
-		"Operation: " + SafeText(op.ID),
-		"Scope: " + SafeText(op.Scope),
-		"Unanswered, timeout, cancellation and detach deny. No automatic approval.",
-	}}
+	p := &Picker{Kind: "permission-once", Title: "Allow " + toolLabel(SafeText(op.Tool)) + "?", Options: []string{"Allow once", "Deny"}, PermissionRevision: s.Permissions.Revision, PermissionOperation: op.ID, Instructions: []string{SafeText(op.Scope)}}
+	if op.Tool == "Bash" {
+		p.Footer = append(p.Footer, "Runs as you, with your files, network and credentials; no OS sandbox.")
+	}
+	p.Footer = append(p.Footer,
+		"Esc: answer later in /permissions. Timeout or detach denies.",
+		"Session "+SafeText(string(s.ID))+" · request "+SafeText(op.ID))
+	return p
 }
+
+func toolLabel(name string) string {
+	if name != "" && name[0] >= 'a' && name[0] <= 'z' {
+		return string(name[0]-'a'+'A') + name[1:]
+	}
+	return name
+}
+
+// permissionGrants reports whether confirming the picker's selection grants.
+func permissionGrants(p *Picker) bool {
+	switch p.Kind {
+	case "permission-once":
+		return p.Selection == 0
+	case "permission-full":
+		return p.Selection == 1
+	}
+	return false
+}
+
 func permissionControlAction(p *Picker) permission.ControlRequest {
 	r := permission.ControlRequest{Expected: p.PermissionRevision}
 	if p.Kind == "permission-once" {
 		r.Action = "decide"
 		r.Operation = p.PermissionOperation
-		r.Allow = p.Selection == 1
+		r.Allow = permissionGrants(p)
 	}
 	if p.Kind == "permission-full" {
 		r.Action = "set_mode"

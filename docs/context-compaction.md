@@ -135,8 +135,10 @@ input budget = min(configured InputBudget,
                                   - ProtocolReserve)
 ```
 
-Trusted context-window metadata already recorded in RuntimeSelection is used
-when available. An unknown window uses the configurable conservative fallback;
+The default InputBudget is the largest allowed value, so the context window
+decides, as in Codex: a request may fill the model's window less the reserves.
+Set a lower InputBudget to bound requests. Trusted context-window metadata
+already recorded in RuntimeSelection is used when available. An unknown window uses the configurable conservative fallback;
 the engine does not invent a provider window or discover a catalog every turn.
 New selections also use an already available matching CLI catalog window. Resume
 preserves the canonical selection; absent metadata still uses fallback.
@@ -198,8 +200,8 @@ top-level `Context` uses the same JSON field style as the runtime configuration:
   "Context": {
     "Version": 1,
     "Mode": "bounded",
-    "FallbackWindow": 32768,
-    "InputBudget": 24576,
+    "FallbackWindow": 786432,
+    "InputBudget": 16777216,
     "ResponseReserve": 4096,
     "ProtocolReserve": 1024,
     "RecentReserve": 12000,
@@ -304,7 +306,7 @@ updated binary. Do not remove history, socket locks or canonical state.
 For the existing multi-provider Team smoke store:
 
 ```bash
-cd /home/e230038/src/unreal-agent
+cd /path/to/unreal-agent
 ./bin/unreal --config "$HOME/.config/unreal-agent/multi-provider-main-smoke.json" \
   --state-directory "$HOME/.local/state/unreal-agent-claude-team-smoke" \
   --socket "$HOME/.local/state/unreal-agent-claude-team-smoke/run/host.sock" \

@@ -19,14 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
-	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
-	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
-	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/internal/privateexport"
 	"github.com/unreallabsai/unreal-agent/internal/testclaude"
 )
@@ -62,7 +59,7 @@ func TestNormalLauncherFirstRunTwoProvidersDefaultPathsReuseAndResume(t *testing
 	var choices int
 	l := launcher{start: f.start, choose: func(ids []string) (string, error) {
 		choices++
-		if !reflect.DeepEqual(ids, []string{"claude-code", "openai-codex"}) {
+		if !reflect.DeepEqual(ids, []string{claudeagent.ProviderID, "openai-codex"}) {
 			t.Fatal("unstable initial choices", ids)
 		}
 		return "openai-codex", nil
@@ -102,8 +99,8 @@ func TestNormalLauncherFirstRunTwoProvidersDefaultPathsReuseAndResume(t *testing
 	if err != nil || config.Runtime.Provider.Provider != "openai-codex" || len(config.Providers) != 1 {
 		t.Fatal("bootstrap not persisted", err)
 	}
-	if config.Providers["claude-code"].ClaudeCode.ToolBridge.ResolvedMode() != claudecode.BridgeModeStructured {
-		t.Fatal("new normal bootstrap did not select structured explicitly")
+	if claude := config.Providers[claudeagent.ProviderID].Claude; claude == nil || claude.Binary != cli.Binary {
+		t.Fatal("new normal bootstrap did not register the Claude Code route (U21) with its CLI")
 	}
 	if config.Permissions.ProcessMode != permission.ProcessDenied || config.Permissions.FilesystemUnrestricted || config.Permissions.NetworkUnrestricted || len(config.Permissions.WriteRoots) != 0 || slices.Contains(config.Permissions.Tools, "Bash") {
 		t.Fatal("smoke permission profile became the default")
@@ -139,69 +136,6 @@ func TestNormalLauncherFirstRunTwoProvidersDefaultPathsReuseAndResume(t *testing
 	}
 }
 
-func TestNormalStructuredRegistrationDoesNotRequireMCPGrant(t *testing.T) {
-	for _, blocked := range []bool{false, true} {
-		t.Run(map[bool]string{false: "no-mcp-grant", true: "serializer-denied"}[blocked], func(t *testing.T) {
-			f, cli := normalFixture(t, true, true)
-			f.config.Permissions = permission.Config{Tools: []string{"read", "grep", "glob"}, ReadRoots: []string{f.config.Runtime.Workspace}, NetworkOrigins: f.config.Permissions.NetworkOrigins}
-			f.config.Launcher = &normalLauncherConfig{Version: 1, ClaudeCode: &claudecode.Config{Binary: cli.Binary, ManagedPolicyMode: "trust", ToolBridge: claudecode.ToolBridgeConfig{Enabled: true, Mode: claudecode.BridgeModeStructured}}}
-			f.writeConfig(t)
-			if err := os.WriteFile(filepath.Join(f.config.Runtime.Workspace, "normal-read.txt"), []byte("NORMAL_STRUCTURED_RECEIPT"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			cli.Set(t, testclaude.Config{Subscription: "team", Catalog: hostClaudeCatalog, BridgeManagedPermissionsOnly: true, StructuredInitializeError: blocked, BridgeSteps: []testclaude.BridgeStep{{Name: "read", Arguments: `{"path":"normal-read.txt"}`, Contains: "NORMAL_STRUCTURED_RECEIPT"}}})
-			l := launcher{start: f.start, attach: func(ctx context.Context, c *gateway.Client, id session.ID) error {
-				v, err := c.Inspect(ctx, id, 0, 256)
-				if err != nil {
-					return err
-				}
-				out, err := modelExchange(ctx, c.Extension, modelRequest{Action: "model.providers", ID: id})
-				if err != nil || len(out.Providers) != 2 {
-					t.Fatal("multi-provider registration lost", err)
-				}
-				for _, p := range out.Providers {
-					if p.ID == "claude-code" {
-						expected := "available"
-						if blocked {
-							expected = "blocked_by_policy"
-						}
-						if p.Availability != "available" || p.ToolBridge != expected || p.Tools == blocked {
-							t.Fatal("MCP policy affected structured registration", p.Availability, p.ToolBridge, p.Tools)
-						}
-					}
-				}
-				multiSelect(t, c, v, 0, "claude-code", "discovered-b", "high")
-				submitInteractive(t, c, v, "structured-normal-input", "Exercise the normal fake Claude runtime.")
-				end := inspectInteractive(t, c, id, func(v host.View) bool {
-					if v.Failure != "" {
-						t.Fatal(v.Failure)
-					}
-					if blocked {
-						return responseCount(v) == 1
-					}
-					return hasBridgeFinal(v)
-				})
-				if blocked {
-					if len(end.Operations) != 0 {
-						t.Fatal("denied serializer caused execution")
-					}
-				} else {
-					if len(end.Operations) != 1 || multiReport(t, end).ToolBridgeMode != "structured" {
-						t.Fatal("normal structured registry/Operation path lost")
-					}
-				}
-				return nil
-			}}
-			if err := l.run(t.Context(), []string{"normal-structured"}, io.Discard); err != nil {
-				t.Fatal(err)
-			}
-			if !blocked && len(cli.StructuredProbes(t)) == 0 {
-				t.Fatal("normal launcher did not use official non-inference schema probe")
-			}
-		})
-	}
-}
-
 func TestNormalLauncherFirstRunProviderAvailabilityAndExplicitInitialOverride(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
@@ -210,10 +144,10 @@ func TestNormalLauncherFirstRunProviderAvailabilityAndExplicitInitialOverride(t 
 		failure           string
 	}{
 		{"codex-only", true, false, "", "openai-codex", ""},
-		{"claude-only", false, true, "", "claude-code", ""},
-		{"both-explicit-claude", true, true, "claude-code", "claude-code", ""},
+		{"claude-only", false, true, "", claudeagent.ProviderID, ""},
+		{"both-explicit-claude", true, true, claudeagent.ProviderID, claudeagent.ProviderID, ""},
 		{"neither", false, false, "", "", "providers_unavailable"},
-		{"explicit-unavailable-no-fallback", true, false, "claude-code", "", "initial_provider_unavailable"},
+		{"explicit-unavailable-no-fallback", true, false, claudeagent.ProviderID, "", "initial_provider_unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, cli := normalFixture(t, tc.codex, tc.claude)
@@ -228,12 +162,14 @@ func TestNormalLauncherFirstRunProviderAvailabilityAndExplicitInitialOverride(t 
 					t.Fatal("wrong initial provider", err)
 				}
 				p, err := modelExchange(ctx, c.Extension, modelRequest{Action: "model.providers", ID: id})
-				want := 1
-				if tc.codex && tc.claude {
-					want = 2
+				if err != nil || len(p.Providers) != 2 {
+					t.Fatal("supported provider missing", err)
 				}
-				if err != nil || len(p.Providers) != want {
-					t.Fatal("wrong provider count", err)
+				for _, entry := range p.Providers {
+					wantAvailable := tc.codex && entry.ID == "openai-codex" || tc.claude && entry.ID == claudeagent.ProviderID
+					if (entry.Availability == "available") != wantAvailable || !wantAvailable && (entry.Reason == "" || entry.Reason.Hint() == "" || len(entry.Catalog.Models) != 0) {
+						t.Fatal("availability or safe reason incorrect")
+					}
 				}
 				return nil
 			}}
@@ -387,154 +323,6 @@ func TestNormalLauncherPreservesExistingConfigAndRejectsIncompatibleHostReuse(t 
 	}
 }
 
-func TestNormalClaudePolicyCapabilitySplitAndTextTurn(t *testing.T) {
-	for _, mode := range []string{"blocked_by_policy", "available", "disabled", "unknown"} {
-		t.Run(mode, func(t *testing.T) {
-			f, cli := normalFixture(t, false, true)
-			cfg := claudeServeConfiguration(t, cli)
-			// Restore the launcher's home so default paths remain private/short.
-			t.Setenv("HOME", filepath.Dir(filepath.Dir(filepath.Dir(f.o.config))))
-			cfg.Permissions = permission.Config{Tools: []string{"read", "grep", "glob"}, ReadRoots: []string{cfg.Runtime.Workspace}}
-			cfg.Launcher = &normalLauncherConfig{Version: 1, DiscoverProviders: new(false)}
-			cfg.Runtime.ClaudeCode.ManagedPolicyMode = "trust"
-			cfg.Runtime.ClaudeCode.ToolBridge.Enabled = mode != "disabled"
-			rules := []map[string]any{}
-			if mode == "available" {
-				for _, name := range cfg.Permissions.Tools {
-					rules = append(rules, map[string]any{"behavior": "allow", "source": "policySettings", "rule": "mcp__unreal__unreal_" + name})
-				}
-			}
-			rawRules, _ := json.Marshal(rules)
-			fake := testclaude.Config{Subscription: "team", Catalog: hostClaudeCatalog, BridgeManagedPermissionsOnly: true, BridgePermissionRules: string(rawRules)}
-			if mode == "available" {
-				target := filepath.Join(cfg.Runtime.Workspace, "normal-read.txt")
-				if err := os.WriteFile(target, []byte("NORMAL_READ_OWNER"), 0600); err != nil {
-					t.Fatal(err)
-				}
-				args, _ := json.Marshal(map[string]string{"path": target})
-				fake.BridgeSteps = []testclaude.BridgeStep{{Name: "read", Arguments: string(args), Contains: "NORMAL_READ_OWNER"}}
-			}
-			if mode == "unknown" {
-				fake.BridgeSource = "project"
-			}
-			cli.Set(t, fake)
-			f.config = cfg
-			f.writeConfig(t)
-			var opened host.View
-			l := launcher{start: f.start, attach: func(ctx context.Context, c *gateway.Client, id session.ID) error {
-				v, err := c.Inspect(ctx, id, 0, 256)
-				if err != nil || !v.Running {
-					t.Fatal("policy blocked normal Host stopped", err)
-				}
-				opened = v
-				p, err := modelExchange(ctx, c.Extension, modelRequest{Action: "model.providers", ID: id})
-				if err != nil || len(p.Providers) != 1 || p.Providers[0].Availability != "available" || p.Providers[0].ToolBridge != mode || p.Providers[0].Tools != (mode == "available") {
-					t.Fatalf("wrong policy capability: %+v, %v", p.Providers, err)
-				}
-				if len(v.Operations) != 0 || responseCount(v) != 0 || len(cli.Calls(t)) != 0 {
-					t.Fatal("registration executed work/inference")
-				}
-				return nil
-			}}
-			if err := l.run(t.Context(), []string{"team"}, io.Discard); err != nil {
-				t.Fatal(err)
-			}
-			if mode == "available" {
-				c := gateway.NewClient(f.o.socket)
-				defer c.Close()
-				submitInteractive(t, c, opened, "native-read", "Use the Unreal read tool")
-				done := inspectInteractive(t, c, "team", func(v host.View) bool { return hasBridgeFinal(v) })
-				if len(done.Operations) != 1 || done.Operations[0].ToolName != "read" || done.Operations[0].Status != operation.StatusCompleted {
-					t.Fatal("normal grant did not use Unreal Operation")
-				}
-				calls := cli.Calls(t)
-				if len(calls) != 1 {
-					t.Fatal("duplicate native bridge execution")
-				}
-				cliArgument(t, calls[0], "--tools", "")
-				cliArgument(t, calls[0], "--allowedTools", "mcp__unreal__unreal_read,mcp__unreal__unreal_grep,mcp__unreal__unreal_glob")
-				return
-			} // previous bridge integration exercises granted execution
-			c := gateway.NewClient(f.o.socket)
-			defer c.Close()
-			health, err := modelExchange(t.Context(), c.Extension, modelRequest{Action: "runtime.health", ID: "team"})
-			if err != nil || health.Capabilities["claude-code"].ToolBridge != mode {
-				t.Fatal("safe runtime status unavailable", err)
-			}
-			// Only the native fake runs. The real Host -> Coordinator -> provider
-			// path must construct Tools=[] while retaining requested config.
-			submitInteractive(t, c, opened, "text", "Reply as text using no tools")
-			done := inspectInteractive(t, c, "team", func(v host.View) bool { return responseCount(v) == 1 })
-			calls := cli.Calls(t)
-			if len(calls) != 1 || len(done.Operations) != 0 {
-				t.Fatal("text capability created tools or duplicate inference")
-			}
-			for flag, value := range map[string]string{"--tools": "", "--disallowedTools": "*", "--mcp-config": `{"mcpServers":{}}`} {
-				cliArgument(t, calls[0], flag, value)
-			}
-			if !slices.Contains(calls[0].Arguments, "--safe-mode") || !slices.Contains(calls[0].Arguments, "--strict-mcp-config") {
-				t.Fatal("normal text isolation weakened")
-			}
-			assertNoCredentialLeak(t, calls[0].Input, "launcher-token-sensitive", "launcher-account-sensitive")
-			for _, item := range done.History.Items {
-				if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Kind == "configuration" && mode != "disabled" && !sessionstore.ToolBridgeEnabledFromConfiguration(record.Configuration) {
-					t.Fatal("effective health rewrote immutable desired bridge configuration")
-				}
-			}
-		})
-	}
-}
-
-func TestNormalBridgeRegistrationWithExistingChildTemplatesIsInert(t *testing.T) {
-	f, cli := normalFixture(t, true, true)
-	codex := f.config.Runtime
-	cfg := claudeServeConfiguration(t, cli)
-	t.Setenv("HOME", filepath.Dir(filepath.Dir(filepath.Dir(f.o.config))))
-	cfg.Runtime.ClaudeCode.ManagedPolicyMode = "trust"
-	cfg.Runtime.ClaudeCode.ToolBridge.Enabled = true
-	cfg.Launcher = &normalLauncherConfig{Version: 1, DiscoverProviders: new(false)}
-	cfg.Providers = map[string]agentrunner.ProviderRuntime{"openai-codex": {Provider: codex.Provider, ReasoningEffort: codex.ReasoningEffort}}
-	exposed := []string{"read", "SubagentStart", "SubagentSend", "SubagentCancel"}
-	// Existing child launch policy requires all three explicit process grants.
-	// This reviewed fixture is not the conservative bootstrap default.
-	cfg.Permissions = permission.Config{Tools: append(slices.Clone(exposed), "Finish"), ReadRoots: []string{cfg.Runtime.Workspace}, NetworkOrigins: []string{codex.Provider.Endpoint}, ProcessMode: permission.ProcessUnrestricted, FilesystemUnrestricted: true, NetworkUnrestricted: true}
-	cfg.Subagents = map[string]childTemplate{"worker": {Runtime: cfg.Runtime, Permissions: permission.Config{Tools: []string{"Finish", "read"}, ReadRoots: []string{cfg.Runtime.Workspace}}}}
-	rules := []map[string]any{}
-	for _, name := range exposed {
-		rules = append(rules, map[string]any{"behavior": "allow", "source": "policySettings", "rule": "mcp__unreal__unreal_" + name})
-	}
-	raw, _ := json.Marshal(rules)
-	cli.Set(t, testclaude.Config{Subscription: "team", Catalog: hostClaudeCatalog, BridgeManagedPermissionsOnly: true, BridgePermissionRules: string(raw)})
-	f.config = cfg
-	f.writeConfig(t)
-	l := launcher{start: f.start, attach: func(ctx context.Context, c *gateway.Client, id session.ID) error {
-		v, err := c.Inspect(ctx, id, 0, 256)
-		if err != nil {
-			return err
-		}
-		health, err := modelExchange(ctx, c.Extension, modelRequest{Action: "runtime.health"})
-		if err != nil || health.Capabilities["claude-code"].ToolBridge != "available" || !health.Capabilities["claude-code"].Tools {
-			t.Fatal("child schemas prevented bridge registration", err)
-		}
-		if len(v.Operations) != 0 || len(cli.Calls(t)) != 0 || responseCount(v) != 0 || f.calls.Load() != 0 {
-			t.Fatal("registration started a child, Operation or inference")
-		}
-		return nil
-	}}
-	if err := l.run(t.Context(), []string{"normal-child-registry"}, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	sessions, err := os.ReadDir(f.o.sessions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range sessions {
-		if strings.HasPrefix(entry.Name(), "child-") || strings.Contains(entry.Name(), "provider-registration") {
-			t.Fatal("registration created a durable child/Session")
-		}
-	}
-}
-
 func TestNormalLauncherExplicitOverridesDoNotReadOrOverwriteDefaultConfig(t *testing.T) {
 	f, cli := normalFixture(t, true, true)
 	if err := os.WriteFile(f.o.config, []byte(`{"invalid-default":true}`), 0600); err != nil {
@@ -565,7 +353,7 @@ func TestNormalDiscoveryTeamTrustAndRestartRetainsCanonicalSelection(t *testing.
 	f, cli := normalFixture(t, true, true)
 	f.config.Permissions.Tools = []string{"read", "grep", "glob"}
 	f.config.Permissions.ReadRoots = []string{f.config.Runtime.Workspace}
-	f.config.Launcher = &normalLauncherConfig{Version: 1, ClaudeCode: &claudecode.Config{Binary: cli.Binary, ManagedPolicyMode: "trust", ToolBridge: claudecode.ToolBridgeConfig{Enabled: true}}}
+	f.config.Launcher = &normalLauncherConfig{Version: 1, ClaudeBinary: cli.Binary}
 	f.writeConfig(t)
 	cli.Set(t, testclaude.Config{Subscription: "team", Catalog: hostClaudeCatalog, BridgeManagedPermissionsOnly: true})
 	var before host.View
@@ -579,14 +367,14 @@ func TestNormalDiscoveryTeamTrustAndRestartRetainsCanonicalSelection(t *testing.
 			t.Fatal("normal trust discovery missing providers", err)
 		}
 		for _, p := range out.Providers {
-			if p.ID == "claude-code" && (p.Availability != "available" || p.Tools || p.ToolBridge != "blocked_by_policy") {
-				t.Fatal("policy denial killed text capability")
+			if p.ID == claudeagent.ProviderID && (p.Availability != "available" || !p.Tools) {
+				t.Fatal("the Claude Code route was not registered from the Team login", p.Availability, p.Tools)
 			}
 		}
-		multiSelect(t, c, v, 0, "claude-code", "discovered-b", "high")
+		multiSelect(t, c, v, 0, claudeagent.ProviderID, "discovered-b", "high")
 		submitInteractive(t, c, v, "selected-text", "Use the fake selected Claude runtime")
 		before = inspectInteractive(t, c, id, func(v host.View) bool {
-			return responseCount(v) == 1 && multiReport(t, v).Selection.Provider == "claude-code"
+			return responseCount(v) == 1 && multiReport(t, v).Selection.Provider == claudeagent.ProviderID
 		})
 		return nil
 	}}
@@ -610,7 +398,7 @@ func TestNormalDiscoveryTeamTrustAndRestartRetainsCanonicalSelection(t *testing.
 			return err
 		}
 		selection := multiReport(t, v).Selection
-		if selection == nil || selection.Provider != "claude-code" || selection.Model != "discovered-b" || selection.Effort != "high" || selection.Revision != 1 {
+		if selection == nil || selection.Provider != claudeagent.ProviderID || selection.Model != "discovered-b" || selection.Effort != "high" || selection.Revision != 1 {
 			t.Fatal("restart overwrote canonical runtime with startup Codex")
 		}
 		if len(v.History.Items) < len(before.History.Items) || !reflect.DeepEqual(v.History.Items[:len(before.History.Items)], before.History.Items) {
@@ -629,7 +417,7 @@ func TestNormalDiscoveryTeamTrustAndRestartRetainsCanonicalSelection(t *testing.
 func TestNormalRegisteredUnavailableInitialProviderNeverAutomaticallyFallsBack(t *testing.T) {
 	f, cli := normalFixture(t, false, true)
 	f.config.Launcher = &normalLauncherConfig{Version: 1}
-	f.config.Launcher.ClaudeCode = &claudecode.Config{Binary: cli.Binary, ManagedPolicyMode: "trust"}
+	f.config.Launcher.ClaudeBinary = cli.Binary
 	f.writeConfig(t) // initial Codex retained even though only Claude is healthy
 	var v host.View
 	l := launcher{start: f.start, attach: func(ctx context.Context, c *gateway.Client, id session.ID) error {

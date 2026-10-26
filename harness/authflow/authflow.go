@@ -22,6 +22,7 @@ type Support struct {
 
 func Matrix() []Support {
 	return []Support{
+		{Provider: "claude-native", Method: credential.OAuth, Status: "private_oauth", Owner: credential.Managed, Inference: "dedicated single-Team Messages dispatcher", Reviewed: "2026-10-24", Source: "https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan", Reason: "explicit Native service login; subscription-or-reject preflight; actual accounting UNKNOWN"},
 		{Provider: "openai", Method: credential.APIKey, Status: "supported", Owner: credential.Managed, Inference: "existing Responses adapter", Reviewed: "2026-09-27", Source: "https://developers.openai.com/api/docs/quickstart"},
 		{Provider: "anthropic", Method: credential.APIKey, Status: "configuration_only", Owner: credential.Managed, Inference: "requires an explicitly installed Anthropic adapter", Reviewed: "2026-09-27", Source: "https://platform.claude.com/docs/en/api/overview", Reason: "API-key storage is supported; this fork currently ships Responses adapters"},
 		{Provider: "anthropic", Method: credential.OAuth, Status: "unsupported", Owner: credential.External, Reviewed: "2026-09-27", Source: "https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use", Reason: "Claude.ai subscription credential mediation is not permitted"},

@@ -331,7 +331,7 @@ func (e Executor) edit(ctx context.Context, id string, r Request) Result {
 			}
 			return mutation.Request{}, mutation.PrepareFailure{Code: mutation.Code(code), Reason: reason}
 		}
-		snap, err := e.Files.Snapshot(ctx, r.Path)
+		snap, err := e.Files.SnapshotForMutation(ctx, r.Path)
 		if err != nil {
 			return mutation.Request{}, mutation.PrepareFailure{Code: mutation.Code(errorCode(ctx, err)), Denial: permission.Failure(err), Reason: mutation.FailureReason(err)}
 		}

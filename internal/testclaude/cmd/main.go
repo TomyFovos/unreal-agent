@@ -44,6 +44,9 @@ type configuration struct {
 	StructuredAfterResultMillis                                         int
 	StructuredTrailing                                                  string
 	StructuredHoldAfterResult                                           bool
+	AgentSteps                                                          []agentStep
+	AgentFinal                                                          string
+	AgentOnce                                                           bool
 }
 type bridgeStep struct {
 	Name, Arguments, Contains           string
@@ -149,6 +152,11 @@ func main() {
 		if signedOut {
 			os.Exit(1)
 		}
+		return
+	}
+	// The Claude route (U21): host-approved tools over the control protocol.
+	if slices.Contains(args, "--permission-prompt-tool") {
+		agent(dir, args, c)
 		return
 	}
 	if slices.Contains(args, `{"mcpServers":{"unreal":{"type":"sdk","name":"unreal"}}}`) {

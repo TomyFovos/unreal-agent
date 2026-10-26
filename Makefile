@@ -1,4 +1,4 @@
-.PHONY: build test check test-claude-structured-unit test-claude-structured snapshot test-snapshot test-pilot-kit test-pilot-provider test-asp-oauth test-devlore-launcher test-daily-development
+.PHONY: build test check snapshot test-snapshot test-pilot-kit test-pilot-provider test-asp-oauth test-devlore-launcher test-daily-development
 
 GORELEASER ?= goreleaser
 BIN_DIR ?= bin
@@ -14,7 +14,6 @@ test-pilot-kit:
 
 test-pilot-provider:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_pilot_provider.py'
-	go test ./cmd/unreal-agent -run '^TestPilotProvider'
 
 test-asp-oauth:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_asp_oauth.py'
@@ -26,7 +25,6 @@ test-devlore-launcher:
 
 test-daily-development:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_daily_development.py'
-	go test ./cmd/unreal-agent -run '^TestDailyDevelopment'
 
 build:
 	mkdir -p "$(BIN_DIR)"
@@ -41,15 +39,3 @@ test:
 check:
 	go vet ./...
 	@test -z "$$(gofmt -l cmd harness internal)" || { gofmt -l cmd harness internal; exit 1; }
-
-# No Claude process/auth/SDK dependency: schema, requests, corpus, errors, round
-# controller, then existing Registry/Permission/Operation/context boundaries.
-test-claude-structured-unit:
-	go test ./harness/llm/clients/claudecode -run '^Test(Structured(Layer|Assistant|MultipleSerializer|ResultValidation|StreamStage|PreinitStages|FinalResultAuthoritative|ResultBound|SchemaSnapshot)|SDKAssistantErrorsAreClosedAndTyped|SDKAssistantErrorDoesNotClassifyFreeText)'
-	go test ./harness/coordinator ./harness/tool/... ./harness/operation ./harness/native ./harness/permission ./harness/contextbuilder ./harness/contextengine
-
-# Unit gate always precedes fake CLI/Host integration. Real inference is never
-# included; TestStructuredRealAdapterSchemaProbe skips without explicit flags.
-test-claude-structured: test-claude-structured-unit
-	go test ./harness/llm/clients/claudecode -run '^Test(Structured(OfficialControl|SchemaAndInvalidProtocol|CannotExecute|PolicyDenial|LaunchAndConfig|RoundLimit|ProviderCrash|ProviderUsesPublicAction)|SDKAssistantErrorsAlsoFailClosedInMCP)'
-	go test ./cmd/unreal-agent -run '^TestClaudeStructured'

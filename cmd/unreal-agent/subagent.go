@@ -14,17 +14,17 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
-	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openaicodex"
+	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/mutation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
-	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 	subtool "github.com/unreallabsai/unreal-agent/harness/tool/subagent"
@@ -35,29 +35,24 @@ import (
 type childTemplate struct {
 	Runtime     agentrunner.RuntimeIdentity
 	Permissions permission.Config
+	// Baseline is what the child may do in Read Only and without approval in
+	// Ask; Permissions is its ceiling (see subagent.Template).
+	Baseline *permission.Config `json:",omitzero"`
+	// Pinned starts the child with Runtime's own selection when the start
+	// names none, instead of the parent's current one.
+	Pinned bool `json:",omitzero"`
+	// Workers are the templates this child may start itself.
+	Workers map[string]childTemplate `json:",omitzero"`
 }
 
 func runtimeProviders(identity agentrunner.RuntimeIdentity) (*provider.Registry, error) {
 	selected := identity.Provider
 	models := []provider.Model{selected.Model}
-	if selected.Provider == "claude-code" && identity.ClaudeCode != nil {
-		for _, m := range identity.ClaudeCode.Models {
-			if m.ID == selected.Model.ID {
-				continue
-			}
-			pm := selected.Model
-			pm.ID = m.ID
-			models = append(models, pm)
-		}
-	}
 	return provider.New(provider.Defaults(map[string][]provider.Model{selected.Provider: models})...)
 }
 func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]childTemplate, parentPolicy *permission.Policy, credentialDirectory, codexAuthFile string) (agentrunner.RuntimeConfig, map[string]subagent.Template, error) {
 	if len(configured) == 0 {
 		return c, nil, nil
-	}
-	if len(c.Backends) == 0 && c.Identity.Provider.Provider == "claude-code" && !c.ProviderSupportsTools("claude-code") {
-		return c, nil, errors.New("subagent: claude-code is text-only; tools unsupported without registered child runtimes")
 	}
 	// Canonical templates stay unchanged; additional provider bindings live in
 	// selected child configurations, so old children retain their exact identity.
@@ -75,78 +70,28 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 	}
 	templates := map[string]subagent.Template{}
 	for name, source := range configured {
-		if len(c.Backends) == 0 && source.Runtime.Provider.Provider == "claude-code" && (source.Runtime.ClaudeCode == nil || !source.Runtime.ClaudeCode.ToolBridge.Enabled) {
-			return c, nil, errors.New("subagent: Claude text-only children require registered runtimes and response-based Finish")
+		workers := map[string]subagent.Template{}
+		for worker, nested := range source.Workers {
+			if len(nested.Workers) != 0 {
+				return c, nil, fmt.Errorf("subagent template %q: workers cannot start children", name)
+			}
+			// A worker runs in its lead's process, which has no runtime
+			// choice: its template is fixed.
+			nested.Pinned = false
+			converted, err := childTemplateFor(c, worker, nested, parentPolicy)
+			if err != nil {
+				return c, nil, err
+			}
+			workers[worker] = converted
 		}
-
-		if strings.TrimSpace(name) == "" || len(name) > 128 {
-			return c, nil, errors.New("subagent: invalid template name")
-		}
-		if err := parentPolicy.CheckProcess(); err != nil {
-			return c, nil, err
-		}
-		if source.Runtime.LanguageServers != "" || source.Runtime.DebugAdapters != "" {
-			return c, nil, errors.New("subagent: external language/debug runtime is unsupported by bounded child policy")
-		}
-		registry, err := runtimeProviders(source.Runtime)
+		template, err := childTemplateFor(c, name, source, parentPolicy)
 		if err != nil {
 			return c, nil, err
 		}
-		_, identity, err := agentrunner.NewRuntimeFactory(agentrunner.RuntimeConfig{Identity: source.Runtime, SessionDirectory: c.SessionDirectory, Providers: registry, Credentials: c.Credentials})
-		if err != nil {
-			return c, nil, fmt.Errorf("subagent template %q: %w", name, err)
-		}
-		var resolved agentrunner.RuntimeIdentity
-		if err = json.Unmarshal(identity, &resolved); err != nil {
-			return c, nil, err
-		}
-		if slices.Contains(resolved.DisallowedTools, "Finish") {
-			return c, nil, errors.New("subagent: Finish cannot be disabled in a child")
-		}
-		files, err := mutation.New(mutation.Config{Root: resolved.Workspace, Authorize: func(ctx context.Context, path string, write bool) error {
-			return permission.FromContext(ctx).CheckPath(path, write)
-		}})
-		if err != nil {
-			return c, nil, err
-		}
-		template := subagent.Template{Workspace: resolved.Workspace, Runtime: identity, Policy: source.Permissions, MutationStateDirectory: files.StateDirectory()}
-		// Reuse the protocol validator for bounded child capabilities, including
-		// required Finish; this creates no Session or process.
-		check := subagent.ChildConfig{Version: 1, ParentID: "validation", OperationID: "validation", ChildID: subagent.ChildID("validation", "validation"), ReadyID: "ready:validation", Task: "validation", Workspace: template.Workspace, SessionDirectory: template.Workspace, Runtime: template.Runtime, Policy: template.Policy}
-		if resolved.Provider.Provider == "claude-code" {
-			check.TextOnly = !sessionstore.ToolBridgeEnabledFromConfiguration(identity)
-			check.ProviderProcess = true
-		}
-		if err = check.Validate(); err != nil {
-			return c, nil, err
-		}
-		policy, err := permission.New(template.Policy)
-		if err != nil {
-			return c, nil, err
-		}
-		policy.Close()
-		for _, capability := range template.Policy.Tools {
-			if err = parentPolicy.CheckTool(capability); err != nil {
-				return c, nil, err
-			}
-		}
-		for _, root := range template.Policy.ReadRoots {
-			if err = parentPolicy.CheckPath(root, false); err != nil {
-				return c, nil, err
-			}
-		}
-		for _, root := range template.Policy.WriteRoots {
-			if err = parentPolicy.CheckPath(root, true); err != nil {
-				return c, nil, err
-			}
-		}
-		for _, origin := range template.Policy.NetworkOrigins {
-			u, e := url.Parse(origin)
-			if e != nil {
-				return c, nil, e
-			}
-			if err = parentPolicy.CheckURL(u); err != nil {
-				return c, nil, err
+		if len(workers) > 0 {
+			template.Subagents = workers
+			if err = subagent.ValidateWorkers(workers); err != nil {
+				return c, nil, fmt.Errorf("subagent template %q: %w", name, err)
 			}
 		}
 		templates[name] = template
@@ -185,6 +130,87 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 	c.NewTools = withSubagentTools(c.NewTools, execution, c.Identity.DisallowedTools)
 	return c, templates, nil
 }
+
+// childTemplateFor resolves one operator template for the parent's checks.
+func childTemplateFor(c agentrunner.RuntimeConfig, name string, source childTemplate, parentPolicy *permission.Policy) (subagent.Template, error) {
+	var template subagent.Template
+	if strings.TrimSpace(name) == "" || len(name) > 128 {
+		return template, errors.New("subagent: invalid template name")
+	}
+	if err := parentPolicy.CheckProcess(); err != nil {
+		return template, err
+	}
+	if source.Runtime.LanguageServers != "" || source.Runtime.DebugAdapters != "" {
+		return template, errors.New("subagent: external language/debug runtime is unsupported by bounded child policy")
+	}
+	registry, err := runtimeProviders(source.Runtime)
+	if err != nil {
+		return template, err
+	}
+	_, identity, err := agentrunner.NewRuntimeFactory(agentrunner.RuntimeConfig{Identity: source.Runtime, SessionDirectory: c.SessionDirectory, Providers: registry, Credentials: c.Credentials})
+	if err != nil {
+		return template, fmt.Errorf("subagent template %q: %w", name, err)
+	}
+	var resolved agentrunner.RuntimeIdentity
+	if err = json.Unmarshal(identity, &resolved); err != nil {
+		return template, err
+	}
+	if slices.Contains(resolved.DisallowedTools, "Finish") {
+		return template, errors.New("subagent: Finish cannot be disabled in a child")
+	}
+	files, err := mutation.New(mutation.Config{Root: resolved.Workspace, Authorize: func(ctx context.Context, path string, write bool) error {
+		return permission.FromContext(ctx).CheckPath(path, write)
+	}})
+	if err != nil {
+		return template, err
+	}
+	template = subagent.Template{Workspace: resolved.Workspace, Runtime: identity, Policy: source.Permissions, Baseline: source.Baseline, MutationStateDirectory: files.StateDirectory()}
+	if source.Pinned {
+		template.Default = &subagent.RuntimeRequest{Provider: resolved.Provider.Provider, Model: resolved.Provider.Model.ID, Effort: resolved.ReasoningEffort}
+	}
+	// Reuse the protocol validator for child capabilities, including required
+	// Finish; this creates no Session or process.
+	check := subagent.ChildConfig{Version: 1, ParentID: "validation", OperationID: "validation", ChildID: subagent.ChildID("validation", "validation"), ReadyID: "ready:validation", Task: "validation", Workspace: template.Workspace, SessionDirectory: template.Workspace, Runtime: template.Runtime, Policy: template.Policy}
+	if err = check.Validate(); err != nil {
+		return template, err
+	}
+	for _, config := range []*permission.Config{&template.Policy, template.Baseline} {
+		if config == nil {
+			continue
+		}
+		policy, err := permission.New(*config)
+		if err != nil {
+			return template, err
+		}
+		policy.Close()
+	}
+	for _, capability := range template.Policy.Tools {
+		if err = parentPolicy.CheckTool(capability); err != nil {
+			return template, err
+		}
+	}
+	for _, root := range template.Policy.ReadRoots {
+		if err = parentPolicy.CheckPath(root, false); err != nil {
+			return template, err
+		}
+	}
+	for _, root := range template.Policy.WriteRoots {
+		if err = parentPolicy.CheckPath(root, true); err != nil {
+			return template, err
+		}
+	}
+	for _, origin := range template.Policy.NetworkOrigins {
+		u, e := url.Parse(origin)
+		if e != nil {
+			return template, e
+		}
+		if err = parentPolicy.CheckURL(u); err != nil {
+			return template, err
+		}
+	}
+	return template, nil
+}
+
 func withSubagentTools(base agentrunner.ToolFactory, configuration subagent.Config, disabled []string) agentrunner.ToolFactory {
 	disabled = slices.Clone(disabled)
 	if base == nil {
@@ -283,10 +309,15 @@ func runChild(ctx context.Context, args []string, diagnostics io.Writer) error {
 		}
 		resolver = withExternalCodexCredentials(resolver, *codexFile)
 	}
-	return subagent.Serve(ctx, os.Stdin, os.Stdout, childFactory(resolver))
+	return subagent.Serve(ctx, os.Stdin, os.Stdout, childFactory(resolver, *codexFile))
 }
-func childFactory(resolver credential.Resolver) subagent.ChildFactory {
-	return func(ctx context.Context, c subagent.ChildConfig, send subagent.Sender) (*host.Session, io.Closer, error) {
+
+// childApprovalTimeout keeps a child's request open until its parent answers
+// (U17); a parent that stops ends it instead.
+const childApprovalTimeout = 1000 * time.Hour
+
+func childFactory(resolver credential.Resolver, codexFile string) subagent.ChildFactory {
+	return func(ctx context.Context, c subagent.ChildConfig, link subagent.ChildLink) (*host.Session, io.Closer, error) {
 		if err := c.Validate(); err != nil {
 			return nil, nil, err
 		}
@@ -306,12 +337,29 @@ func childFactory(resolver credential.Resolver) subagent.ChildFactory {
 		}
 		var tools agentrunner.ToolFactory
 		if !c.TextOnly {
+			execution := subagent.Config{Child: &c, SendParent: link.Send}
+			if len(c.Subagents) > 0 {
+				// A lead starts its workers with this same child process command.
+				binary, err := os.Executable()
+				if err != nil {
+					return nil, nil, err
+				}
+				execution.Directory, execution.Binary, execution.Arguments = c.SessionDirectory, binary, os.Args[1:]
+				execution.Environment, execution.Templates = os.Environ(), c.Subagents
+			}
 			tools = withSubagentTools(func(ctx context.Context, tools agentrunner.ToolConfig) (agentrunner.Tools, error) {
 				tools.MutationStateDirectory = c.MutationStateDirectory
 				return agentrunner.DefaultTools(ctx, tools, identity.DisallowedTools)
-			}, subagent.Config{Child: &c, SendParent: send}, identity.DisallowedTools)
+			}, execution, identity.DisallowedTools)
 		}
-		factory, resolved, err := agentrunner.NewRuntimeFactory(agentrunner.RuntimeConfig{Identity: identity, SessionDirectory: c.SessionDirectory, Providers: registry, Credentials: resolver, NewTools: tools, ProviderProcess: c.ProviderProcess, TaskInput: c.InitialInput().ID})
+		runtime := agentrunner.RuntimeConfig{Identity: identity, SessionDirectory: c.SessionDirectory, Providers: registry, Credentials: resolver, NewTools: tools, ProviderProcess: c.ProviderProcess, TaskInput: c.InitialInput().ID}
+		if codexFile != "" {
+			// Codex sends a selected ultra as the model's multi-agent effort,
+			// which this catalog names.
+			read := codexCatalogReader(codexFile, isDockerSandboxCodex(identity.Provider.Auth), os.Getenv)
+			runtime.Catalogs = map[string]func(context.Context) (modelcatalog.Catalog, error){"openai-codex": func(ctx context.Context) (modelcatalog.Catalog, error) { return read(ctx, false) }}
+		}
+		factory, resolved, err := agentrunner.NewRuntimeFactory(runtime)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -325,16 +373,42 @@ func childFactory(resolver credential.Resolver) subagent.ChildFactory {
 		if !bytes.Equal(old, resolved) {
 			return nil, nil, errors.New("child runtime resolution differs from recorded configuration")
 		}
-		policy, err := permission.New(c.Policy)
+		// A parent with permission modes makes this child follow its mode: the
+		// template's Policy is the ceiling, its Baseline what Read Only and
+		// Ask allow without approval. Otherwise Policy is fixed.
+		hostConfig := host.Config{Directory: c.SessionDirectory, Build: factory}
+		baseline, maximum := c.Policy, (*permission.Policy)(nil)
+		if link.Mode != "" {
+			if c.Baseline != nil {
+				baseline = *c.Baseline
+			}
+			if maximum, err = permission.New(c.Policy); err != nil {
+				return nil, nil, err
+			}
+			hostConfig.PermissionMaximum, hostConfig.ApprovalTimeout = maximum, childApprovalTimeout
+		}
+		policy, err := permission.New(baseline)
 		if err != nil {
+			if maximum != nil {
+				maximum.Close()
+			}
 			return nil, nil, err
 		}
-		owner, err := host.New(ctx, host.Config{Directory: c.SessionDirectory, Build: factory})
+		owner, err := host.New(ctx, hostConfig)
 		if err != nil {
 			policy.Close()
+			if maximum != nil {
+				maximum.Close()
+			}
 			return nil, nil, err
 		}
-		closeOwner := closeFunc(func() error { return errors.Join(owner.Close(), policy.Close()) })
+		closeOwner := closeFunc(func() error {
+			err := errors.Join(owner.Close(), policy.Close())
+			if maximum != nil {
+				err = errors.Join(err, maximum.Close())
+			}
+			return err
+		})
 		configuration, err := json.Marshal(c)
 		if err != nil {
 			closeOwner.Close()
@@ -344,7 +418,7 @@ func childFactory(resolver credential.Resolver) subagent.ChildFactory {
 		if c.ProjectInstructions != nil {
 			snapshot = *c.ProjectInstructions
 		}
-		current, err := owner.Open(ctx, host.Options{TextOnlyChild: c.TextOnly, ProjectInstructions: &snapshot, Workspace: c.Workspace, ID: c.ChildID, Lifecycle: "child", Policy: policy, Configuration: configuration, Initial: []inbox.Input{c.InitialInput()}, Heartbeat: 0})
+		current, err := owner.Open(ctx, host.Options{TextOnlyChild: c.TextOnly, ProjectInstructions: &snapshot, Workspace: c.Workspace, ID: c.ChildID, Lifecycle: "child", Policy: policy, Configuration: configuration, Initial: []inbox.Input{c.InitialInput()}, Heartbeat: 0, PermissionMode: link.Mode})
 		if err != nil {
 			closeOwner.Close()
 			return nil, nil, err
@@ -357,28 +431,17 @@ type closeFunc func() error
 
 func (f closeFunc) Close() error { return f() }
 
-// Only nonsecret account source locations cross the restricted process boundary.
-// API keys, OAuth tokens, proxy credentials and parent OTEL settings do not.
-func childEnvironment(c agentrunner.RuntimeConfig) []string {
-	env := []string{"PATH=/usr/bin:/bin", "LANG=C.UTF-8"}
-	// Only the closed, nonsecret kit mode crosses to a child. The child still
-	// independently validates the explicitly selected source before each turn.
-	if (isDockerSandboxCodex(c.Identity.Provider.Auth) || isDockerSandboxCodex(c.Backends["openai-codex"].Provider.Auth)) && os.Getenv("SBX_CRED_OPENAI_MODE") == "oauth" {
-		env = append(env, "SBX_CRED_OPENAI_MODE=oauth")
-		// Forward only a validated, public Docker relay. No arbitrary proxy
-		// URL, proxy credential, NO_PROXY bypass, or parent environment crosses.
-		if proxy, err := openaicodex.DockerSandboxProxyURL(nil); err == nil {
-			env = append(env, "HTTPS_PROXY="+proxy.String())
+// childEnvironment gives a child the Host's environment, so its commands find
+// the same tools (PATH, HOME, GOPATH ...) as the parent's (D1). Each provider
+// route still authenticates only with the subscription (U5); Codex token
+// variables stay behind as the launcher's Host environment drops them.
+func childEnvironment(agentrunner.RuntimeConfig) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		key, _, _ := strings.Cut(kv, "=")
+		if key != "OPENAI_CODEX_ACCESS_TOKEN" && key != "OPENAI_CODEX_ACCOUNT_ID" {
+			env = append(env, kv)
 		}
-	}
-	if c.Identity.Provider.Provider != "claude-code" && c.Backends["claude-code"].Provider.Provider == "" {
-		return env
-	}
-	if home, e := os.UserHomeDir(); e == nil && filepath.IsAbs(home) && !strings.ContainsAny(home, "\x00\r\n") {
-		env = append(env, "HOME="+home)
-	}
-	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); filepath.IsAbs(dir) && !strings.ContainsAny(dir, "\x00\r\n") {
-		env = append(env, "CLAUDE_CONFIG_DIR="+dir)
 	}
 	return env
 }

@@ -16,6 +16,9 @@ const (
 	BashName      = "Bash"
 	ViewImageName = "ViewImage"
 	SkillUseName  = "SkillUse"
+	// ClaudeCodeName records a call Claude Code ran itself (U21). Unreal keeps
+	// its reported result as a receipt and never executes the call.
+	ClaudeCodeName = "claude_code"
 )
 
 type registry struct {
@@ -36,6 +39,7 @@ type StaticTranslators struct {
 	Read, Write, Edit, Grep, Glob Translator
 	Bash                          Translator
 	ViewImage                     Translator
+	ClaudeCode                    Translator
 }
 
 func NewRegistry(configured StaticTranslators, enabled ...string) Registry {
@@ -53,10 +57,14 @@ func NewRegistry(configured StaticTranslators, enabled ...string) Registry {
 	if configured.ViewImage == nil {
 		configured.ViewImage = unavailableTranslator{name: ViewImageName}
 	}
+	if configured.ClaudeCode == nil {
+		configured.ClaudeCode = unavailableTranslator{name: ClaudeCodeName}
+	}
 	current.staticTranslators = map[string]Translator{
-		BashName:      configured.Bash,
-		ViewImageName: configured.ViewImage,
-		SkillUseName:  &skillUseTranslator{registry: current},
+		BashName:       configured.Bash,
+		ViewImageName:  configured.ViewImage,
+		SkillUseName:   &skillUseTranslator{registry: current},
+		ClaudeCodeName: configured.ClaudeCode,
 	}
 	for name, translator := range map[string]Translator{ASTGrepName: configured.ASTGrep, ASTEditName: configured.ASTEdit, ReadName: configured.Read, WriteName: configured.Write, EditName: configured.Edit, GrepName: configured.Grep, GlobName: configured.Glob} {
 		if translator == nil {
@@ -71,6 +79,11 @@ func (current *registry) StaticDefinitions() []Definition {
 	var definitions []Definition
 	for _, definition := range staticDefinitions() {
 		if _, enabled := current.enabled[definition.Tool.Name]; enabled {
+			if definition.Tool.Name == BashName {
+				if described, ok := current.staticTranslators[BashName].(interface{ ShellDescription() string }); ok {
+					definition.Tool.Description = described.ShellDescription()
+				}
+			}
 			definitions = append(definitions, definition)
 		}
 	}

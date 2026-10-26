@@ -57,6 +57,14 @@ func (w *serializedStore) AppendModelResponse(ctx context.Context, id session.ID
 	defer w.mu.Unlock()
 	return w.store.AppendModelResponse(ctx, id, r)
 }
+
+// Conversation decisions use the same single Session writer and observer
+// boundary as existing canonical records, never a second persistence path.
+func (w *serializedStore) AppendHostRecord(ctx context.Context, id session.ID, r sessionstore.HostRecord) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.store.AppendHostRecord(ctx, id, r)
+}
 func (w *serializedStore) AppendToolCallStatus(ctx context.Context, id session.ID, s sessionstore.ToolCallStatus) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -68,7 +76,7 @@ func (w *serializedStore) SaveOperation(ctx context.Context, id session.ID, op o
 	if err := w.store.SaveOperation(ctx, id, op); err != nil {
 		return err
 	}
-	op = clone(op)
+	op = cloneSavedOperationCheckpoint(op, w.operations[op.ID])
 	w.operations[op.ID] = op
 	w.broadcast(Event{Kind: "operation", Operation: &op})
 	return nil

@@ -15,27 +15,33 @@ type remoteJobHandlerUpdate struct {
 }
 
 type remoteJobHandlers struct {
-	handlers []RemoteJobHandler
-	closed   []bool
-	updates  chan remoteJobHandlerUpdate
-	workers  sync.WaitGroup
+	handlers     []RemoteJobHandler
+	closed       []bool
+	updates      chan remoteJobHandlerUpdate
+	preparations chan remotePreparation
+	workers      sync.WaitGroup
 }
 
 func newRemoteJobHandlers(ctx context.Context, handlers []RemoteJobHandler) *remoteJobHandlers {
 	router := &remoteJobHandlers{
-		handlers: append([]RemoteJobHandler(nil), handlers...),
-		closed:   make([]bool, len(handlers)),
-		updates:  make(chan remoteJobHandlerUpdate),
+		handlers:     append([]RemoteJobHandler(nil), handlers...),
+		closed:       make([]bool, len(handlers)),
+		updates:      make(chan remoteJobHandlerUpdate),
+		preparations: make(chan remotePreparation),
 	}
 	for index, handler := range router.handlers {
 		if handler != nil {
 			router.workers.Go(func() { router.forward(ctx, index, handler) })
+			if preparing, ok := handler.(PreparingRemoteJobHandler); ok {
+				router.workers.Go(func() { router.forwardPreparations(ctx, index, preparing) })
+			}
 		}
 	}
 	return router
 }
 
 func (router *remoteJobHandlers) add(ctx context.Context, current Operation) (int, error) {
+	current = CloneExecutionMetadata(current)
 	state, err := DecodeRemoteJobState(current)
 	if err != nil {
 		return -1, err
@@ -108,6 +114,9 @@ func (router *remoteJobHandlers) forward(ctx context.Context, index int, handler
 }
 
 func validateRemoteJobUpdate(current Operation, updated Operation) error {
+	if !SameExecutionMetadata(current, updated) {
+		return fmt.Errorf("remote job handler changed execution evidence for operation %q", current.ID)
+	}
 	if updated.MaxOutputLength != current.MaxOutputLength {
 		return fmt.Errorf("remote job handler changed output limit for operation %q", current.ID)
 	}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"io"
 	"sync"
@@ -29,6 +30,11 @@ type frame struct {
 	Receipt    *host.Receipt              `json:",omitzero"`
 	Finish     *sessionstore.FinishRecord `json:",omitzero"`
 	Error      string                     `json:",omitzero"`
+	// Mode is the parent's permission mode (hello, mode). Approval is a
+	// child's request (approval, approval_done) or the parent's answer
+	// (decide). None of these is durable: a restarted child asks again.
+	Mode     permission.Mode `json:",omitzero"`
+	Approval *Approval       `json:",omitzero"`
 }
 
 func encodeFrame(f frame) ([]byte, error) {

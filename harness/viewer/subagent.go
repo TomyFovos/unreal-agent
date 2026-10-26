@@ -167,6 +167,13 @@ func (c HostControls) CancelChild(ctx context.Context, r ControlRequest) (host.R
 	}
 	return subagent.CancelChild(ctx, owner, subagent.ControlRequest(r))
 }
+func (c HostControls) ApproveChild(ctx context.Context, r ControlRequest) (host.Receipt, error) {
+	owner, err := c.owner(ctx, r)
+	if err != nil {
+		return host.Receipt{}, err
+	}
+	return subagent.ApproveChild(ctx, owner, subagent.ControlRequest(r))
+}
 func (c HostControls) ResumeChild(ctx context.Context, r ControlRequest) error {
 	owner, err := c.owner(ctx, r)
 	if err != nil {

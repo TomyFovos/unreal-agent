@@ -65,6 +65,21 @@ func (s *screenObserver) Write(p []byte) (int, error) {
 			}
 			continue
 		}
+		if strings.HasPrefix(data, "\x1b]") {
+			// OSC (for example the clipboard): skip through BEL or ST.
+			if end := strings.IndexAny(data, "\x07"); end >= 0 {
+				data = data[end+1:]
+			} else if end := strings.Index(data, "\x1b\\"); end >= 0 {
+				data = data[end+2:]
+			} else {
+				break
+			}
+			continue
+		}
+		if strings.HasPrefix(data, "\x1b") {
+			data = data[min(2, len(data)):] // other escapes carry no text
+			continue
+		}
 		end := strings.IndexByte(data, 27)
 		if end < 0 {
 			end = len(data)
@@ -138,11 +153,11 @@ func TestLiveRunHelpCompletionScrollAndPastedUnknownCommand(t *testing.T) {
 		t.Fatal("closing help submitted input")
 	}
 	f.mu.Unlock()
-	keys <- Key{Text: "/logi"}
+	keys <- Key{Text: "/mo"}
 	keys <- Key{Name: "tab"}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "cmd › /login") && out.cursorX() == 16 })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "cmd › /model") && out.cursorX() == 15 })
 	// Clear the completed command with existing editing keys, then feed fragmented paste.
-	for i := 0; i < len("/login "); i++ {
+	for i := 0; i < len("/model"); i++ {
 		keys <- Key{Name: "backspace"}
 	}
 	var decoder Decoder

@@ -157,15 +157,7 @@ observed model を read-only projection として公開します。未観測 chi
 `/view orchestration` と Wide `/view split` はこの既存 projection から親子関係と
 Operation を表示します。Tool Bridge 専用の別 UI は作りません。
 
-Claude は既定で text-only です。`--safe-mode`、empty built-in tools、no session persistence
-を維持し、明示 opt-in の [Tool Bridge v1](claude-tool-bridge.md) では SDK provenance を
-確認した Unreal server だけを公開します。builtin/foreign MCP/Claude task の実行は拒否します。
-**Claude built-in tool execution = 0**。bridge 有効時は Claude parent が共有 SubagentStart を
-要求できます。実際の child runtime 決定・permission・起動は Unreal が所有します。
-operator command/core API も引き続き利用可能です。
-`managedPolicyMode=trust` は管理者 policy の安全性検証ではなく、組織 policy を external trusted
-administrative boundary としてユーザーが明示的に信頼する設定です。managed hooks/env/telemetry 等の
-副作用はその境界にあり、Unreal Operation 内の実行保証とは別です。
+Claude は公式 Claude Code CLI 経由の provider `claude` です（[Claude route](claude-route.md)）。
 
 ## 実機 smoke（ユーザーが実行）
 
@@ -174,7 +166,7 @@ administrative boundary としてユーザーが明示的に信頼する設定�
 child template を含む別 Session 用 config を作ります。既存 history を削除しません。
 
 ```bash
-cd /home/e230038/src/unreal-agent
+cd /path/to/unreal-agent
 python3 - <<'PY'
 import copy, json, os
 from pathlib import Path

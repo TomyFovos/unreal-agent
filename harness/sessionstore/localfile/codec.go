@@ -27,6 +27,13 @@ type logRecord struct {
 	Data jsontext.Value `json:"data"`
 }
 
+// recordValue encodes canonical values directly into their envelope. Keeping
+// logRecord's raw Data for decoding avoids changing the persisted format.
+type recordValue struct {
+	Type recordType `json:"type"`
+	Data any        `json:"data"`
+}
+
 type sessionRecord struct {
 	Version int
 	Session session.Session
@@ -236,6 +243,21 @@ func replayItem(state *storedState, record itemRecord) error {
 }
 
 func encodeRecord(kind recordType, value any) ([]byte, error) {
+	// These private record types contain the canonical values that we persist.
+	// Marshal the complete envelope once so large values are not copied into a
+	// raw JSON value and then validated and copied again. The full envelope still
+	// receives JSON's normal validation, including its combined depth limit.
+	switch value.(type) {
+	case sessionRecord, itemRecord, operationRecord:
+		encoded, err := json.Marshal(recordValue{Type: kind, Data: value})
+		if err == nil {
+			return finishRecord(encoded)
+		}
+		// Preserve the established validation error's context and precedence.
+	}
+
+	// Arbitrary values retain their standalone marshal context. A custom
+	// marshaler may observe its encoder's depth or JSON pointer.
 	data, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
@@ -244,6 +266,10 @@ func encodeRecord(kind recordType, value any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return finishRecord(encoded)
+}
+
+func finishRecord(encoded []byte) ([]byte, error) {
 	if bytes.IndexByte(encoded, '\n') >= 0 {
 		return nil, fmt.Errorf("encoded record contains a newline")
 	}

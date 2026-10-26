@@ -29,7 +29,9 @@ const (
 )
 
 type Spec struct {
-	MaxOutputLength int `json:",omitzero"`
+	// Dependencies are Host-supplied execution prerequisites, never permission grants.
+	Prerequisites   *Prerequisites `json:",embed"`
+	MaxOutputLength int            `json:",omitzero"`
 	Type            Type
 	Version         Version
 	State           jsontext.Value `json:",omitzero"`
@@ -37,6 +39,9 @@ type Spec struct {
 }
 
 type Operation struct {
+	// ExecutionBasis binds the concrete executor footprint before canonical publication.
+	// RecoveryBasis carries bounded uncertainty constraints; neither grants authority.
+	Execution  *ExecutionMetadata   `json:",embed"`
 	Permission *permission.Decision `json:",omitzero"`
 	// ToolName records origin for current-policy checks on resume; it is not a grant.
 	ToolName        string            `json:",omitzero"`
@@ -46,8 +51,8 @@ type Operation struct {
 	Type            Type
 	Version         Version
 	Status          Status
-	State           jsontext.Value `json:",omitzero"`
-	Idempotency     jsontext.Value `json:",omitzero"`
+	State           jsontext.Value       `json:",omitzero"`
+	Idempotence     *IdempotencyMetadata `json:",embed"`
 }
 
 type PrimitiveDispatch struct {

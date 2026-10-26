@@ -21,13 +21,35 @@ type bridgeReply struct {
 	err      error
 }
 type bridgeRequest struct {
-	ctx      context.Context
-	origin   session.TurnID
-	response llm.Response
-	reply    chan bridgeReply
-	begin    bool
-	refresh  bool
-	reserve  int64
+	ctx        context.Context
+	origin     session.TurnID
+	response   llm.Response
+	reply      chan bridgeReply
+	begin      bool
+	refresh    bool
+	reserve    int64
+	projection *llm.ContextProjection
+}
+
+func (current *coordinator) refreshProjectedToolContext(ctx context.Context, origin session.TurnID) func(context.Context, llm.ContextProjection) (llm.Request, int64, error) {
+	return func(callCtx context.Context, projection llm.ContextProjection) (llm.Request, int64, error) {
+		request := bridgeRequest{ctx: callCtx, origin: origin, reply: make(chan bridgeReply, 1), refresh: true, projection: &projection}
+		select {
+		case current.bridgeRequests <- request:
+		case <-ctx.Done():
+			return llm.Request{}, 0, ctx.Err()
+		case <-callCtx.Done():
+			return llm.Request{}, 0, callCtx.Err()
+		}
+		select {
+		case reply := <-request.reply:
+			return reply.request, reply.budget, reply.err
+		case <-ctx.Done():
+			return llm.Request{}, 0, ctx.Err()
+		case <-callCtx.Done():
+			return llm.Request{}, 0, callCtx.Err()
+		}
+	}
 }
 
 func (current *coordinator) refreshToolContext(ctx context.Context, origin session.TurnID) func(context.Context, int64) (llm.Request, int64, error) {
@@ -82,8 +104,8 @@ type bridgeRound struct {
 // A disposable replay index rebuilt from public canonical ToolCalls/receipts.
 // It is not a second operation history and never authorizes re-execution.
 type canonicalBridgeCall struct {
-	call    llm.ToolCall
-	outcome *llm.ToolOutcome
+	identity [32]byte
+	outcome  *llm.ToolOutcome
 }
 
 func (current *coordinator) flushDeferredContext() error {
@@ -148,7 +170,15 @@ func (current *coordinator) acceptBridgeRequest(ctx context.Context, request bri
 		}
 		var built contextbuilder.Result
 		var err error
-		if b, ok := current.dependencies.ContextBuilder.(interface {
+		if request.projection != nil {
+			if b, ok := current.dependencies.ContextBuilder.(interface {
+				BuildWithProjection(llm.ContextProjection) (contextbuilder.Result, error)
+			}); ok {
+				built, err = b.BuildWithProjection(*request.projection)
+			} else {
+				err = errors.New("context projection unsupported")
+			}
+		} else if b, ok := current.dependencies.ContextBuilder.(interface {
 			BuildWithReserve(int64) (contextbuilder.Result, error)
 		}); ok {
 			built, err = b.BuildWithReserve(request.reserve)
@@ -165,6 +195,10 @@ func (current *coordinator) acceptBridgeRequest(ctx context.Context, request bri
 		request.reply <- reply
 		return nil
 	}
+	if current.toolAdmissionErr != nil {
+		request.reply <- bridgeReply{err: current.toolAdmissionErr}
+		return nil
+	}
 	round := &bridgeRound{request: request, turn: current.state.currentTurnID, results: map[string]llm.ToolOutcome{}}
 	seen := map[string]bool{}
 	for _, item := range request.response.Output {
@@ -176,8 +210,14 @@ func (current *coordinator) acceptBridgeRequest(ctx context.Context, request bri
 			}
 		case llm.ItemToolCall:
 			call, ok := item.Data.(llm.ToolCall)
-			if !ok || call.CallID == "" || seen[call.CallID] {
-				return errors.New("invalid tool rendezvous identity")
+			if !ok || call.CallID == "" {
+				request.reply <- bridgeReply{err: llm.ErrToolIdentityConflict}
+				return nil
+			}
+			if seen[call.CallID] {
+				_, err := current.checkToolAdmission(request.response)
+				request.reply <- bridgeReply{err: err}
+				return nil
 			}
 			seen[call.CallID] = true
 			round.calls = append(round.calls, call.CallID)
@@ -191,7 +231,8 @@ func (current *coordinator) acceptBridgeRequest(ctx context.Context, request bri
 	if len(request.response.Output) == 1 && len(round.calls) == 1 {
 		call := request.response.Output[0].Data.(llm.ToolCall)
 		if prior := current.structuredCalls[call.CallID]; prior != nil {
-			if prior.call.Name != call.Name || prior.call.Arguments != call.Arguments {
+			digest, err := toolFingerprint(call)
+			if err != nil || prior.identity != digest {
 				request.reply <- bridgeReply{err: llm.ErrToolIdentityConflict}
 				return nil
 			}
@@ -205,6 +246,11 @@ func (current *coordinator) acceptBridgeRequest(ctx context.Context, request bri
 	}
 	current.bridge, current.bridgeActive = round, true
 	if _, err := current.handleModelResponse(ctx, sessionstore.ModelResponse{TurnID: round.turn, Response: request.response}); err != nil {
+		if errors.Is(err, llm.ErrToolIdentityConflict) || errors.Is(err, llm.ErrToolRecoveryRequired) {
+			current.bridge = nil
+			request.reply <- bridgeReply{err: err}
+			return nil
+		}
 		return err
 	}
 	current.state.selectionBoundary, current.state.callModel = false, false
@@ -212,6 +258,9 @@ func (current *coordinator) acceptBridgeRequest(ctx context.Context, request bri
 }
 
 func (current *coordinator) rememberBridgeResult(status sessionstore.ToolCallStatus, result llm.ToolResult, translator tool.ResultTranslator) {
+	if current.bridge == nil && current.structuredCalls[status.CallID] == nil {
+		return // no callback/replay consumer; do not classify the same receipt twice
+	}
 	failed := status.Status.Error != ""
 	if classifier, ok := translator.(tool.ResultFailureClassifier); ok {
 		failed = failed || classifier.ResultFailed(status.Status, status.Operations)

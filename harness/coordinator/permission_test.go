@@ -27,12 +27,12 @@ func TestDeniedToolDoesNotTranslateOrDispatch(t *testing.T) {
 	store := emptyFakeStore()
 	current := newTestCoordinator(store, newTestInbox(t), newFakeOperationManager(), contextbuilder.NewBuilder(), tool.NewRegistry(tool.StaticTranslators{Bash: translator}, tool.BashName))
 	statuses, err := current.handleModelResponse(permission.WithPolicy(t.Context(), permission.DenyAll()), sessionstore.ModelResponse{
-		TurnID: "turn", Response: llm.Response{Output: []llm.Item{{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "call", Name: tool.BashName}}}},
+		TurnID: "turn", Response: llm.Response{Output: []llm.Item{{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "call", Name: tool.BashName, Arguments: `{}`}}}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(statuses) != 1 || statuses[0].Status.Denial == nil || len(translator.calls) != 0 || len(statuses[0].Operations) != 0 {
+	if len(statuses) != 1 || len(store.appendedStatuses) != 1 || store.appendedStatuses[0].Status.Denial == nil || len(translator.calls) != 0 || len(statuses[0].Operations) != 0 {
 		t.Fatalf("denied call=%#v", statuses)
 	}
 }
@@ -41,7 +41,7 @@ func TestHiddenToolHistoryStillRestores(t *testing.T) {
 	store := emptyFakeStore()
 	store.items = []sessionstore.Item{
 		storedItem(1, sessionstore.ItemTurn, session.Turn{ID: "turn", Type: session.TurnRegular}),
-		storedItem(2, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{Output: []llm.Item{{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "call", Name: tool.ViewImageName}}}}}),
+		storedItem(2, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{Output: []llm.Item{{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "call", Name: tool.ViewImageName, Arguments: `{}`}}}}}),
 		storedItem(3, sessionstore.ItemToolCallStatus, sessionstore.ToolCallStatus{TurnID: "turn", CallID: "call", Status: tool.CallStatus{}}),
 	}
 	registry := tool.NewRegistry(tool.StaticTranslators{ViewImage: testTranslator{}})

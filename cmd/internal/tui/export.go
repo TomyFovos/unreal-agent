@@ -241,22 +241,50 @@ func ResponseChoices(ctx context.Context, r Reader, id session.ID, through sessi
 }
 
 func ExportLastResponse(ctx context.Context, r Reader, id session.ID, through sessionstore.Sequence, dir string) (string, error) {
-	index, err := indexConversation(ctx, r, id, through)
+	choice, err := latestResponse(ctx, r, id, through)
 	if err != nil {
 		return "", err
 	}
+	return ExportResponse(ctx, r, id, choice, dir)
+}
+
+// LastResponseText is the latest public agent response, as /export last writes it.
+func LastResponseText(ctx context.Context, r Reader, id session.ID, through sessionstore.Sequence) (string, error) {
+	choice, err := latestResponse(ctx, r, id, through)
+	if err != nil {
+		return "", err
+	}
+	return responseText(ctx, r, id, choice)
+}
+
+func latestResponse(ctx context.Context, r Reader, id session.ID, through sessionstore.Sequence) (ResponseChoice, error) {
+	index, err := indexConversation(ctx, r, id, through)
+	if err != nil {
+		return ResponseChoice{}, err
+	}
 	if index.latest == 0 {
-		return "", &ExportError{Code: "no_responses"}
+		return ResponseChoice{}, &ExportError{Code: "no_responses"}
 	}
 	if len(index.responses) == 0 || index.responses[len(index.responses)-1].Sequence != index.latest {
-		return "", &ExportError{Code: "response_not_exportable"}
+		return ResponseChoice{}, &ExportError{Code: "response_not_exportable"}
 	}
-	return ExportResponse(ctx, r, id, index.responses[len(index.responses)-1], dir)
+	return index.responses[len(index.responses)-1], nil
 }
 
 // ExportResponse rereads the selected canonical record, not its preview. One
 // response may have multiple public message parts, joined by two newlines.
 func ExportResponse(ctx context.Context, r Reader, id session.ID, choice ResponseChoice, dir string) (string, error) {
+	text, err := responseText(ctx, r, id, choice)
+	if err != nil {
+		return "", err
+	}
+	return writeMarkdown(ctx, dir, "response", func(w io.Writer) error {
+		_, err := io.WriteString(w, text)
+		return err
+	})
+}
+
+func responseText(ctx context.Context, r Reader, id session.ID, choice ResponseChoice) (string, error) {
 	if choice.Sequence == 0 {
 		return "", &ExportError{Code: "response_unavailable"}
 	}
@@ -277,10 +305,7 @@ func ExportResponse(ctx context.Context, r Reader, id session.ID, choice Respons
 	if text == "" {
 		return "", &ExportError{Code: "response_unavailable"}
 	}
-	return writeMarkdown(ctx, dir, "response", func(w io.Writer) error {
-		_, err := io.WriteString(w, text)
-		return err
-	})
+	return text, nil
 }
 
 // ExportConversation makes two paged passes over an immutable canonical prefix:
@@ -295,66 +320,86 @@ func ExportConversation(ctx context.Context, r Reader, id session.ID, through se
 		return "", &ExportError{Code: "no_conversation"}
 	}
 	return writeMarkdown(ctx, dir, "session", func(w io.Writer) error {
-		if _, err := fmt.Fprintf(w, "# Unreal Agent Session Export\n\nSession: %s\nExported: %s\n", metadataText(string(id)), time.Now().Format("2006-01-02 15:04:05 MST")); err != nil {
-			return err
-		}
-		var writeErr error
-		lastSection := -1
-		err := readHistory(ctx, r, id, 0, through, func(item host.HistoryItem) bool {
-			var role, text, observed string
-			var turn exportTurn
-			switch item.Kind {
-			case sessionstore.ItemInput:
-				if input, ok := item.Data.(inbox.Input); ok {
-					text, role = publicUserText(input), "You"
-					// Canonical external inputs precede the Turn that consumes
-					// them. Unconsumed input stays in an unnumbered section.
-					i := sort.Search(len(index.order), func(i int) bool { return index.order[i].sequence > item.Sequence })
-					if i < len(index.order) {
-						turn = index.order[i]
-					}
-				}
-			case sessionstore.ItemModelResponse:
-				if response, ok := item.Data.(sessionstore.ModelResponse); ok {
-					turn = index.turns[response.TurnID]
-					if !turn.internal {
-						text, role, observed = publicAgentText(response), "Agent", metadataText(response.Response.Model)
-					}
-				}
-			}
-			if text == "" {
-				return true
-			}
-			if lastSection != turn.number {
-				if turn.number == 0 {
-					_, writeErr = io.WriteString(w, "\n## Conversation (turn unknown)\n")
-				} else {
-					_, writeErr = fmt.Fprintf(w, "\n## Turn %d\n", turn.number)
-				}
-				if writeErr == nil {
-					writeErr = writeTurnMetadata(w, turn)
-				}
-				lastSection = turn.number
-			}
-			if writeErr == nil {
-				_, writeErr = fmt.Fprintf(w, "\n### %s\n\n", role)
-			}
-			if writeErr == nil && observed != "" {
-				_, writeErr = fmt.Fprintf(w, "Observed model: %s\n\n", observed)
-			}
-			if writeErr == nil {
-				_, writeErr = io.WriteString(w, text)
-			}
-			if writeErr == nil {
-				_, writeErr = io.WriteString(w, "\n")
-			}
-			return writeErr == nil
-		})
-		if err != nil {
-			return exportFailure(ctx, err, "history_unavailable")
-		}
-		return writeErr
+		return writeConversation(ctx, r, id, through, index, w)
 	})
+}
+
+// ConversationText is the full public conversation, as /export all writes it.
+func ConversationText(ctx context.Context, r Reader, id session.ID, through sessionstore.Sequence) (string, error) {
+	index, err := indexConversation(ctx, r, id, through)
+	if err != nil {
+		return "", err
+	}
+	if index.users == 0 && len(index.responses) == 0 {
+		return "", &ExportError{Code: "no_conversation"}
+	}
+	var b strings.Builder
+	if err = writeConversation(ctx, r, id, through, index, &b); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+func writeConversation(ctx context.Context, r Reader, id session.ID, through sessionstore.Sequence, index conversationIndex, w io.Writer) error {
+	if _, err := fmt.Fprintf(w, "# Unreal Agent Session Export\n\nSession: %s\nExported: %s\n", metadataText(string(id)), time.Now().Format("2006-01-02 15:04:05 MST")); err != nil {
+		return err
+	}
+	var writeErr error
+	lastSection := -1
+	err := readHistory(ctx, r, id, 0, through, func(item host.HistoryItem) bool {
+		var role, text, observed string
+		var turn exportTurn
+		switch item.Kind {
+		case sessionstore.ItemInput:
+			if input, ok := item.Data.(inbox.Input); ok {
+				text, role = publicUserText(input), "You"
+				// Canonical external inputs precede the Turn that consumes
+				// them. Unconsumed input stays in an unnumbered section.
+				i := sort.Search(len(index.order), func(i int) bool { return index.order[i].sequence > item.Sequence })
+				if i < len(index.order) {
+					turn = index.order[i]
+				}
+			}
+		case sessionstore.ItemModelResponse:
+			if response, ok := item.Data.(sessionstore.ModelResponse); ok {
+				turn = index.turns[response.TurnID]
+				if !turn.internal {
+					text, role, observed = publicAgentText(response), "Agent", metadataText(response.Response.Model)
+				}
+			}
+		}
+		if text == "" {
+			return true
+		}
+		if lastSection != turn.number {
+			if turn.number == 0 {
+				_, writeErr = io.WriteString(w, "\n## Conversation (turn unknown)\n")
+			} else {
+				_, writeErr = fmt.Fprintf(w, "\n## Turn %d\n", turn.number)
+			}
+			if writeErr == nil {
+				writeErr = writeTurnMetadata(w, turn)
+			}
+			lastSection = turn.number
+		}
+		if writeErr == nil {
+			_, writeErr = fmt.Fprintf(w, "\n### %s\n\n", role)
+		}
+		if writeErr == nil && observed != "" {
+			_, writeErr = fmt.Fprintf(w, "Observed model: %s\n\n", observed)
+		}
+		if writeErr == nil {
+			_, writeErr = io.WriteString(w, text)
+		}
+		if writeErr == nil {
+			_, writeErr = io.WriteString(w, "\n")
+		}
+		return writeErr == nil
+	})
+	if err != nil {
+		return exportFailure(ctx, err, "history_unavailable")
+	}
+	return writeErr
 }
 
 func metadataText(raw string) string {

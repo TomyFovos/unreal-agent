@@ -62,7 +62,12 @@ func TestLiveExportLastPickerAndAllNoCanonicalMutationOrScrollReset(t *testing.T
 	if exportBody(t, paths[0]) != text || !strings.Contains(out.text(), "scrollback:") {
 		t.Fatal("export last used clipped text or reset scroll")
 	}
+	// /export offers its choices first; the third picks a response.
 	keys <- Key{Text: "/export"}
+	keys <- Key{Name: "enter"}
+	waitFor(t, func() bool { return strings.Contains(out.text(), "Export as Markdown") })
+	keys <- Key{Name: "down"}
+	keys <- Key{Name: "down"}
 	keys <- Key{Name: "enter"}
 	waitFor(t, func() bool { return strings.Contains(out.text(), "Export response") })
 	keys <- Key{Name: "down"}
@@ -80,7 +85,12 @@ func TestLiveExportLastPickerAndAllNoCanonicalMutationOrScrollReset(t *testing.T
 		t.Fatal("picker did not export correct canonical response or changed scroll")
 	}
 	// Esc closes the conversation picker without exporting or opening analysis.
+	// /export offers its choices first; the third picks a response.
 	keys <- Key{Text: "/export"}
+	keys <- Key{Name: "enter"}
+	waitFor(t, func() bool { return strings.Contains(out.text(), "Export as Markdown") })
+	keys <- Key{Name: "down"}
+	keys <- Key{Name: "down"}
 	keys <- Key{Name: "enter"}
 	waitFor(t, func() bool { return strings.Contains(out.text(), "Export response") })
 	keys <- Key{Name: "escape"}
@@ -168,21 +178,21 @@ func TestPastedExportPrivateEntryRemovedCopyAndInvalidArguments(t *testing.T) {
 	keys <- Key{Name: "enter"}
 	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.logins == 1 })
 	waitFor(t, func() bool { return strings.Contains(out.text(), "API key stored") })
-	keys <- Key{Text: "/copy last"}
+	keys <- Key{Text: "/clipboard last"}
 	keys <- Key{Name: "enter"}
 	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.inputs) == 1 })
-	// Removed commands are now normal messages. Observe completion rather
+	// Unknown commands are normal messages. Observe completion rather
 	// than interpreting an earlier idle frame as acknowledgement of Submit.
 	waitFor(t, func() bool { return strings.Contains(out.text(), "cancel waiting") })
 	close(release)
 	waitFor(t, func() bool { return !strings.Contains(out.text(), "cancel waiting") })
 	keys <- Key{Text: "/export turn 1"}
 	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "usage: /export [last | all]") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "usage: /export [last | all | pick]") })
 	exportFiles(t, dir, 1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.inputs) != 1 || string(f.inputs[0].Payload) != `"/copy last"` || f.login != "/export last" {
+	if len(f.inputs) != 1 || string(f.inputs[0].Payload) != `"/clipboard last"` || f.login != "/export last" {
 		t.Fatal("command safety changed")
 	}
 }
@@ -214,7 +224,12 @@ func TestLiveExportPickerArrowScrollTabEscapeAndAnalysisSeparation(t *testing.T)
 				}
 			}()
 			waitFor(t, func() bool { return strings.Contains(out.text(), "agent-24") })
+			// /export offers its choices first; the third picks a response.
 			keys <- Key{Text: "/export"}
+			keys <- Key{Name: "enter"}
+			waitFor(t, func() bool { return strings.Contains(out.text(), "Export as Markdown") })
+			keys <- Key{Name: "down"}
+			keys <- Key{Name: "down"}
 			keys <- Key{Name: "enter"}
 			waitFor(t, func() bool { return strings.Contains(out.text(), "Export response") })
 			for i := 23; i >= 0; i-- {
@@ -258,21 +273,21 @@ func TestLiveExportPickerArrowScrollTabEscapeAndAnalysisSeparation(t *testing.T)
 	}
 }
 
+// Tab completes the command; its choices (last, all, pick) come after
+// choosing it, so they are not completion candidates.
 func TestExportTabCommandCompletion(t *testing.T) {
-	for i, want := range []string{"/export", "/export last", "/export all"} {
-		u := plainUI()
-		var editor Editor
-		editor.replace("/ex")
-		var complete completion
-		complete.resetMenu(&u)
-		u.Input = editor.Text()
-		for range i {
-			complete.move(&editor, idleSnapshot(), &u, 1)
-		}
-		complete.apply(&editor, idleSnapshot(), &u)
-		if editor.Text() != want {
-			t.Fatal("Tab completion mismatch", editor.Text(), want)
-		}
+	u := plainUI()
+	var editor Editor
+	editor.replace("/ex")
+	var complete completion
+	complete.resetMenu(&u)
+	u.Input = editor.Text()
+	if options := menuOptions(idleSnapshot(), u); len(options) != 1 || options[0].Name != "/export" {
+		t.Fatal("menu offers export choices", options)
+	}
+	complete.apply(&editor, idleSnapshot(), &u)
+	if editor.Text() != "/export" {
+		t.Fatal("Tab completion mismatch", editor.Text())
 	}
 }
 

@@ -114,11 +114,18 @@ type Config struct {
 	// processes for this workspace. It must not be deleted while operations exist.
 	StateDir  string
 	Authorize Authorizer
+	// ObserveIO is an optional diagnostic/test observer at target metadata,
+	// body-read and revision-hash boundaries. It receives paths and phase names
+	// only and grants no authority. Production observers must not block or
+	// mutate Service state; tests may block a boundary to inject cancellation.
+	ObserveIO func(path, phase string)
 }
 type Service struct {
 	root, alias, state string
 	authorize          Authorizer
 	hook               func(string, int) error
+	// observeIO is an optional observation point at body I/O and hashing.
+	observeIO func(string, string)
 }
 
 func New(config Config) (*Service, error) {
@@ -162,7 +169,7 @@ func New(config Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Service{root: root, alias: alias, state: state, authorize: config.Authorize}, nil
+	return &Service{root: root, alias: alias, state: state, authorize: config.Authorize, observeIO: config.ObserveIO}, nil
 }
 func (s *Service) Root() string { return s.root }
 
@@ -195,11 +202,21 @@ func (s *Service) Path(path string) (string, error) {
 	return path, nil
 }
 func (s *Service) Snapshot(ctx context.Context, path string) (Snapshot, error) {
+	return s.snapshot(ctx, path, false)
+}
+
+// SnapshotForMutation observes a mutation target using the same write grant as
+// apply's Expected-revision check. It grants no access to a different target.
+func (s *Service) SnapshotForMutation(ctx context.Context, path string) (Snapshot, error) {
+	return s.snapshot(ctx, path, true)
+}
+
+func (s *Service) snapshot(ctx context.Context, path string, write bool) (Snapshot, error) {
 	canonical, err := s.Path(path)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if err = s.authorize(ctx, canonical, false); err != nil {
+	if err = s.authorize(ctx, canonical, write); err != nil {
 		return Snapshot{}, err
 	}
 	if err = ctx.Err(); err != nil {
@@ -213,20 +230,44 @@ func (s *Service) Snapshot(ctx context.Context, path string) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	defer lock.Close()
-	parent, base, err := s.authorizedParent(ctx, canonical, false)
+	parent, base, err := s.authorizedParent(ctx, canonical, write)
 	if err != nil {
 		return Snapshot{}, err
 	}
 	defer parent.Close()
-	data, exists, _, err := readTarget(parent, base)
+	data, exists, _, err := s.readSnapshotTarget(ctx, canonical, parent, base)
 	if err != nil {
 		return Snapshot{}, err
 	}
 	revision := Revision{}
 	if exists {
-		revision = RevisionOf(data)
+		revision = s.observedRevision(canonical, data)
 	}
 	return Snapshot{Path: canonical, Revision: revision, Data: data}, nil
+}
+
+func (s *Service) readSnapshotTarget(ctx context.Context, path string, parent *os.File, base string) ([]byte, bool, os.FileMode, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, 0, err
+	}
+	if s.observeIO != nil {
+		s.observeIO(path, "read")
+		if err := ctx.Err(); err != nil {
+			return nil, false, 0, err
+		}
+	}
+	data, exists, mode, err := readTarget(parent, base)
+	if err == nil {
+		err = ctx.Err()
+	}
+	return data, exists, mode, err
+}
+
+func (s *Service) observedRevision(path string, data []byte) Revision {
+	if s.observeIO != nil {
+		s.observeIO(path, "hash")
+	}
+	return RevisionOf(data)
 }
 func (s *Service) lock(ctx context.Context, key string) (*os.File, error) {
 	sum := sha256.Sum256([]byte(s.root + "\x00" + key))
@@ -302,7 +343,8 @@ func (s *Service) apply(ctx context.Context, request Request) Result {
 			}
 		}
 	}()
-	// Every target is opened and validated before creating any replacement.
+	// Authorize every target before any body observation, then retain the exact
+	// approved descriptors through revision checking and replacement.
 	for i, path := range paths {
 		if err := ctx.Err(); err != nil {
 			result.Code = Canceled
@@ -327,16 +369,36 @@ func (s *Service) apply(ctx context.Context, request Request) Result {
 			return result
 		}
 		targets[i] = prepared{parent: parent, base: base, mode: 0600}
-		data, exists, mode, err := readTarget(parent, base)
+		if s.hook != nil {
+			if s.hook("after_parent", i) != nil {
+				result.Code = Failed
+				return result
+			}
+		}
+	}
+	var independenceErr error
+	ctx, independenceErr = s.prepareIndependence(ctx, request)
+	if independenceErr != nil || s.checkIndependenceMetadata(ctx, request, 0) != nil || s.checkExecutionFootprint(ctx, request, -1, nil) != nil {
+		result.Reason = ReasonUnsafeParent
+		return result
+	}
+	// Every target is validated before creating any replacement. These existing
+	// Expected reads use the mutation's write grant, including during recovery.
+	for i, path := range paths {
+		p := targets[i]
+		data, exists, mode, err := s.readSnapshotTarget(ctx, path, p.parent, p.base)
 		if err != nil {
 			result.Reason = FailureReason(err)
 			result.Code = Invalid
-			result.Targets[i].Code = Invalid
+			if ctx.Err() != nil {
+				result.Code = Canceled
+			}
+			result.Targets[i].Code = result.Code
 			return result
 		}
 		revision := Revision{}
 		if exists {
-			revision = RevisionOf(data)
+			revision = s.observedRevision(path, data)
 			targets[i].mode = mode
 		}
 		result.Targets[i].Revision = revision
@@ -360,6 +422,12 @@ func (s *Service) apply(ctx context.Context, request Request) Result {
 				result.Targets[i].Code = Failed
 				return result
 			}
+		}
+		if s.checkIndependence(ctx, request, i) != nil || s.checkIndependenceParent(ctx, i, p.parent) != nil || s.checkExecutionFootprint(ctx, request, i, p.parent) != nil {
+			result.Code = Invalid
+			result.Reason = ReasonUnsafeParent
+			result.Targets[i].Code = Invalid
+			return result
 		}
 		replaced, err := replaceTarget(p.parent, p.base, request.Changes[i].Content, p.mode)
 		if err != nil {

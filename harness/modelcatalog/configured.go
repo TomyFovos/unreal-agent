@@ -19,7 +19,7 @@ func Configured(models []Model) (Catalog, error) {
 	seen := map[string]bool{}
 	for _, m := range models {
 		noEffort := m.SupportsEffort != nil && !*m.SupportsEffort
-		if !validID(m.ID) || strings.HasPrefix(m.ID, "-") || seen[m.ID] || len(m.Name) > 256 || strings.ContainsAny(m.Name, "\x00\x1b\r\n") || m.ContextWindow < 0 || len(m.Efforts) == 0 && !noEffort || len(m.Efforts) > 5 || m.UnsupportedEfforts || noEffort && len(m.Efforts) != 0 {
+		if !validID(m.ID) || strings.HasPrefix(m.ID, "-") || seen[m.ID] || len(m.Name) > 256 || strings.ContainsAny(m.Name, "\x00\x1b\r\n") || m.ContextWindow < 0 || len(m.Efforts) == 0 && !noEffort || len(m.Efforts) > 6 || m.UnsupportedEfforts || noEffort && len(m.Efforts) != 0 {
 			return Catalog{}, errors.New("invalid configured model catalog")
 		}
 		seen[m.ID] = true

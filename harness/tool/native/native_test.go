@@ -48,8 +48,8 @@ func TestInvalidArgumentsNeverSubmit(t *testing.T) {
 	}
 }
 
-func TestTypedOutcomeClassifiesNoMatchWithoutChangingOperation(t *testing.T) {
-	translator := New("edit").(tool.ResultFailureClassifier)
+func TestTypedOutcomeClassifiesReadWithoutChangingOperation(t *testing.T) {
+	translator := New("read").(tool.ResultFailureClassifier)
 	spec, err := files.Spec(files.Request{Version: files.Version, Action: "read", Path: "fixture.txt"})
 	if err != nil {
 		t.Fatal(err)
@@ -57,14 +57,14 @@ func TestTypedOutcomeClassifiesNoMatchWithoutChangingOperation(t *testing.T) {
 	for _, tc := range []struct {
 		code   string
 		failed bool
-	}{{"ok", false}, {"applied", false}, {"binary", false}, {"no_match", true}, {"stale", true}, {"permission_denied", true}, {"unknown", true}} {
+	}{{"ok", false}, {"applied", true}, {"binary", false}, {"no_match", true}, {"stale", true}, {"permission_denied", true}, {"unknown", true}} {
 		t.Run(tc.code, func(t *testing.T) {
 			op := operation.Operation{ID: "op", Type: spec.Type, Version: spec.Version, MaxOutputLength: spec.MaxOutputLength, Status: operation.StatusCompleted, State: spec.State}
 			state, err := operation.DecodeRemoteJobState(op)
 			if err != nil {
 				t.Fatal(err)
 			}
-			state.Handle = files.EncodeResult(files.Result{Version: files.Version, Code: tc.code})
+			state.Handle = files.EncodeResult(files.Result{Version: files.Version, Code: tc.code, Path: "fixture.txt", Binary: tc.code == "binary"})
 			state.TerminalResult = tc.code
 			step, err := operation.UpdateRemoteJob(op, state, operation.StatusCompleted)
 			if err != nil {

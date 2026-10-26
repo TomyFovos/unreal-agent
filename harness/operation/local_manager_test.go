@@ -117,7 +117,7 @@ func TestLocalOperationManagerQueuesUpdatesWhileUnread(t *testing.T) {
 			if update.ID != current.ID {
 				continue
 			}
-			key := string(update.Status) + "\x00" + string(update.State) + "\x00" + string(update.Idempotency)
+			key := string(update.Status) + "\x00" + string(update.State) + "\x00" + string(update.Idempotency())
 			if _, exists := seen[key]; exists {
 				t.Fatalf("duplicate update = %#v", update)
 			}

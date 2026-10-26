@@ -59,6 +59,12 @@ const (
 	UpdateSettings    ControlMode = "settings"
 	CancelOperation   ControlMode = "cancel_operation"
 	DispatchOperation ControlMode = "dispatch_operation"
+	// InterruptAgent ends the agent's current work, its model call and its own
+	// operations, and leaves the Session waiting for the user's next input.
+	// Child agents run on.
+	InterruptAgent ControlMode = "interrupt"
+	// CancelChildren cancels every child agent the Session started.
+	CancelChildren ControlMode = "cancel_children"
 )
 
 type Settings struct {
@@ -88,7 +94,7 @@ func (input Input) DecodeControlMessage() (ControlMessage, error) {
 		return ControlMessage{}, fmt.Errorf("control mode %q does not accept parameters", request.Mode)
 	}
 	switch request.Mode {
-	case StopHard, StopWhenIdle:
+	case StopHard, StopWhenIdle, InterruptAgent, CancelChildren:
 	case Heartbeat:
 		if request.Reason == "" {
 			return ControlMessage{}, fmt.Errorf("heartbeat reason is empty")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,18 +26,19 @@ func TestCommandMenuArrowsReachEveryCandidateAndScrollBothWays(t *testing.T) {
 	for _, size := range [][2]int{{80, 24}, {60, 20}, {44, 14}, {120, 24}} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			s, u := idleSnapshot(), childUI(3)
+			menu := menuCatalog()
 			var e Editor
 			e.replace("/")
 			var complete completion
 			complete.resetMenu(&u)
 			u.Input = e.Text()
-			if len(menuOptions(s, u)) != len(commandCatalog) {
+			if len(menuOptions(s, u)) != len(menu) {
 				t.Fatal("slash did not open the complete menu")
 			}
 			check := func(i int) Frame {
 				t.Helper()
 				candidate, ok := selectedCommand(s, u)
-				if !ok || candidate.Name != commandCatalog[i].Name {
+				if !ok || candidate.Name != menu[i].Name {
 					t.Fatalf("selection %d: %+v", i, candidate)
 				}
 				f := RenderFrame(s, u, size[0], size[1])
@@ -56,18 +58,18 @@ func TestCommandMenuArrowsReachEveryCandidateAndScrollBothWays(t *testing.T) {
 			if f := check(0); !strings.Contains(frameText(f), "↓ more") {
 				t.Fatal("missing below-viewport indication")
 			}
-			for i := 1; i < len(commandCatalog); i++ {
+			for i := 1; i < len(menu); i++ {
 				if !complete.move(&e, s, &u, 1) {
 					t.Fatal("menu rejected ArrowDown")
 				}
 				check(i)
 			}
-			if u.MenuOffset == 0 || !strings.Contains(frameText(check(len(commandCatalog)-1)), "↑ more") {
+			if u.MenuOffset == 0 || !strings.Contains(frameText(check(len(menu)-1)), "↑ more") {
 				t.Fatal("menu did not scroll down")
 			}
 			complete.move(&e, s, &u, 1)
-			check(len(commandCatalog) - 1)
-			for i := len(commandCatalog) - 2; i >= 0; i-- {
+			check(len(menu) - 1)
+			for i := len(menu) - 2; i >= 0; i-- {
 				complete.move(&e, s, &u, -1)
 				check(i)
 			}
@@ -82,14 +84,15 @@ func TestCommandMenuArrowsReachEveryCandidateAndScrollBothWays(t *testing.T) {
 
 func TestCommandMenuSelectionSurvivesSmallBudgetsAndResize(t *testing.T) {
 	s, u := idleSnapshot(), plainUI()
+	menu := menuCatalog()
 	u.Input = "/"
 	for budget := 1; budget <= 8; budget++ {
 		u.MenuOffset = 0
 		for _, direction := range []int{1, -1} {
-			for n := 0; n < len(commandCatalog); n++ {
+			for n := 0; n < len(menu); n++ {
 				i := n
 				if direction < 0 {
-					i = len(commandCatalog) - 1 - n
+					i = len(menu) - 1 - n
 				}
 				u.MenuSelection = i
 				rows, offset := commandSheetWithin(s, u, makeLayout(80, 24), budget)
@@ -97,14 +100,14 @@ func TestCommandMenuSelectionSurvivesSmallBudgetsAndResize(t *testing.T) {
 				for _, row := range rows {
 					values = append(values, row.plain())
 				}
-				if len(rows) > budget || !strings.Contains(selectedMenuRow(values), commandCatalog[i].Usage) {
+				if len(rows) > budget || !strings.Contains(selectedMenuRow(values), menu[i].Usage) {
 					t.Fatalf("budget %d selection %d: %v", budget, i, values)
 				}
 				u.MenuOffset = offset
 			}
 		}
 	}
-	u.MenuSelection = len(commandCatalog) - 1
+	u.MenuSelection = len(menu) - 1
 	for _, size := range [][2]int{{160, 40}, {44, 14}, {60, 20}, {80, 24}} {
 		f := RenderFrame(s, u, size[0], size[1])
 		bounds(t, f, size[0], size[1])
@@ -113,10 +116,14 @@ func TestCommandMenuSelectionSurvivesSmallBudgetsAndResize(t *testing.T) {
 		}
 		u.MenuOffset = f.MenuOffset
 	}
-	u.MenuSelection = 5
+	for i, c := range menu {
+		if c.Name == "/model" {
+			u.MenuSelection = i
+		}
+	}
 	u.Theme = Theme{ASCII: true, Plain: true}
 	f := RenderFrame(s, u, 44, 14)
-	if !strings.HasPrefix(selectedMenuRow(f.Lines), "* /login") || strings.ContainsAny(frameText(f), "↑↓›─") {
+	if !strings.HasPrefix(selectedMenuRow(f.Lines), "* /model") || strings.ContainsAny(frameText(f), "↑↓›─") {
 		t.Fatal("menu chrome ignored ASCII mode: " + frameText(f))
 	}
 }
@@ -124,20 +131,20 @@ func TestCommandMenuSelectionSurvivesSmallBudgetsAndResize(t *testing.T) {
 func TestCommandMenuFilteredNavigationTabAndInputGuards(t *testing.T) {
 	s, u := idleSnapshot(), plainUI()
 	var e Editor
-	e.replace("/ch")
+	e.replace("/")
 	var complete completion
 	complete.resetMenu(&u)
 	u.Input = e.Text()
 	options := menuOptions(s, u)
 	if len(options) < 2 {
-		t.Fatal("child prefix did not filter")
+		t.Fatal("the menu did not list commands")
 	}
 	for i := range options {
 		if i > 0 {
 			complete.move(&e, s, &u, 1)
 		}
 		candidate, ok := selectedCommand(s, u)
-		if !ok || candidate.Name != options[i].Name || !strings.HasPrefix(candidate.Name, "/ch") {
+		if !ok || candidate.Name != options[i].Name || !strings.HasPrefix(candidate.Name, "/") {
 			t.Fatal("navigation escaped the filtered list")
 		}
 	}
@@ -248,7 +255,7 @@ func startCommandUXRun(t *testing.T, size [2]int, command func(context.Context, 
 func (r commandUXRun) selectCommand(t *testing.T, name string) {
 	t.Helper()
 	r.keys <- Key{Text: "/"}
-	for _, candidate := range commandCatalog {
+	for _, candidate := range menuCatalog() {
 		if candidate.Name == name {
 			waitFor(t, func() bool {
 				return strings.Contains(selectedMenuRow(strings.Split(r.out.text(), "\n")), candidate.Usage)
@@ -261,14 +268,23 @@ func (r commandUXRun) selectCommand(t *testing.T, name string) {
 }
 
 func TestRunCommandMenuEnterExecutesCompleteCandidate(t *testing.T) {
-	for _, name := range []string{"/help", "/retry", "/credentials", "/methods", "/stop", "/stop idle", "/resume", "/detach", "/child-history", "/child-next"} {
+	for _, name := range []string{"/help", "/stop sub", "/stop main", "/stop main+sub", "/stop session", "/resume", "/detach"} {
 		t.Run(name, func(t *testing.T) {
-			commands := make(chan string, 1)
 			r := startCommandUXRun(t, [2]int{80, 24}, func(_ context.Context, line string) (string, bool) {
-				commands <- line
 				return "child command handled", true
 			})
-			r.selectCommand(t, name)
+			if strings.HasPrefix(name, "/stop") {
+				// /stop offers its choices, starting on the main agent.
+				r.selectCommand(t, "/stop")
+				r.keys <- Key{Name: "enter"}
+				waitFor(t, func() bool { return strings.Contains(r.out.text(), "Main agent: interrupt") })
+				moves := map[string][]string{"/stop sub": {"up"}, "/stop main+sub": {"down"}, "/stop session": {"down", "down"}}[name]
+				for _, move := range moves {
+					r.keys <- Key{Name: move}
+				}
+			} else {
+				r.selectCommand(t, name)
+			}
 			r.keys <- Key{Name: "enter"}
 			switch name {
 			case "/detach":
@@ -280,26 +296,20 @@ func TestRunCommandMenuEnterExecutesCompleteCandidate(t *testing.T) {
 						return false
 					}
 				})
-			case "/stop", "/stop idle":
-				waitFor(t, func() bool { r.fake.mu.Lock(); defer r.fake.mu.Unlock(); return len(r.fake.inputs) == 1 })
+			case "/stop sub", "/stop main", "/stop main+sub", "/stop session":
+				want := map[string][]inbox.ControlMode{"/stop sub": {inbox.CancelChildren}, "/stop main": {inbox.InterruptAgent}, "/stop main+sub": {inbox.InterruptAgent, inbox.CancelChildren}, "/stop session": {inbox.StopHard}}[name]
+				waitFor(t, func() bool { r.fake.mu.Lock(); defer r.fake.mu.Unlock(); return len(r.fake.inputs) == len(want) })
 				r.fake.mu.Lock()
-				input := r.fake.inputs[0]
+				inputs := slices.Clone(r.fake.inputs)
 				r.fake.mu.Unlock()
-				var control inbox.ControlMessage
-				want := inbox.StopHard
-				if name == "/stop idle" {
-					want = inbox.StopWhenIdle
-				}
-				if input.Kind != inbox.InputControl || json.Unmarshal(input.Payload, &control) != nil || control.Mode != want {
-					t.Fatalf("wrong stop command: %+v", input)
-				}
-			case "/child-history", "/child-next":
-				waitFor(t, func() bool { return len(commands) == 1 })
-				if got := <-commands; got != name {
-					t.Fatalf("child dispatch %q != %q", got, name)
+				for i, input := range inputs {
+					var control inbox.ControlMessage
+					if input.Kind != inbox.InputControl || json.Unmarshal(input.Payload, &control) != nil || control.Mode != want[i] {
+						t.Fatalf("wrong stop command %d: %+v, want %s", i, input, want[i])
+					}
 				}
 			default:
-				want := map[string]string{"/help": "Type / to search commands", "/retry": "no uncertain input to retry", "/credentials": "no stored credentials", "/methods": "openai/api_key", "/resume": "session resumed"}[name]
+				want := map[string]string{"/help": "Type / to search commands", "/resume": "session resumed"}[name]
 				waitFor(t, func() bool { return strings.Contains(r.out.text(), want) })
 			}
 			if !strings.HasPrefix(name, "/stop") {
@@ -313,69 +323,72 @@ func TestRunCommandMenuEnterExecutesCompleteCandidate(t *testing.T) {
 	}
 }
 
-func TestRunCommandMenuEnterInsertsRequiredArgumentPrefix(t *testing.T) {
-	for _, name := range []string{"/login", "/logout", "/child", "/child-send"} {
-		t.Run(name, func(t *testing.T) {
-			r := startCommandUXRun(t, [2]int{80, 24}, func(_ context.Context, _ string) (string, bool) {
-				t.Error("argument command executed before arguments were entered")
-				return "unexpected command", true
-			})
-			r.selectCommand(t, name)
-			r.keys <- Key{Name: "enter"}
-			waitFor(t, func() bool {
-				return strings.Contains(strings.Split(r.out.text(), "\n")[22], "cmd › "+name) && r.out.cursorX() == 9+len(name)+1
-			})
-			usage := map[string]string{"/login": "/login PROVIDER ID", "/logout": "/logout PROVIDER ID", "/child": "(this session)", "/child-send": "/child-send TEXT"}[name]
-			if !strings.Contains(r.out.text(), usage) {
-				t.Fatal("argument usage/ID candidates missing")
-			}
-			r.fake.mu.Lock()
-			defer r.fake.mu.Unlock()
-			if len(r.fake.inputs) != 0 || r.fake.logins != 0 || strings.Contains(r.out.text(), "private: API key") {
-				t.Fatal("prefix entry performed an action")
-			}
-		})
+// Commands that agents use, or that /stop and the Split view replace, stay
+// out of the menu but still run when typed.
+func TestAgentCommandsStayTypableOutsideTheMenu(t *testing.T) {
+	commands := make(chan string, 4)
+	r := startCommandUXRun(t, [2]int{80, 40}, func(_ context.Context, line string) (string, bool) {
+		commands <- line
+		return "child command handled", true
+	})
+	r.keys <- Key{Text: "/"}
+	waitFor(t, func() bool { return strings.Contains(r.out.text(), "/model") })
+	for _, hidden := range []string{"/login", "/logout", "/credentials", "/methods", "/children", "/child-", "/retry", "/child "} {
+		if strings.Contains(r.out.text(), hidden) {
+			t.Fatalf("the menu lists %s", hidden)
+		}
+	}
+	r.keys <- Key{Name: "backspace"}
+	r.keys <- Key{Text: "/child-history"}
+	r.keys <- Key{Name: "enter"}
+	waitFor(t, func() bool { return len(commands) == 1 })
+	if got := <-commands; got != "/child-history" {
+		t.Fatalf("typed command dispatched as %q", got)
+	}
+	waitFor(t, func() bool { return strings.Contains(r.out.text(), "child command handled") })
+	r.keys <- Key{Text: "/stop idle"}
+	r.keys <- Key{Name: "enter"}
+	waitFor(t, func() bool { r.fake.mu.Lock(); defer r.fake.mu.Unlock(); return len(r.fake.inputs) == 1 })
+	var control inbox.ControlMessage
+	r.fake.mu.Lock()
+	input := r.fake.inputs[0]
+	r.fake.mu.Unlock()
+	if json.Unmarshal(input.Payload, &control) != nil || control.Mode != inbox.StopWhenIdle {
+		t.Fatalf("typed /stop idle sent %+v", input)
 	}
 }
 
 func TestRunCommandMenuFilteredNavigationResetAndSelectedTab(t *testing.T) {
 	r := startCommandUXRun(t, [2]int{44, 14}, nil)
-	r.keys <- Key{Text: "/ch"}
-	waitFor(t, func() bool { return strings.Contains(selectedMenuRow(strings.Split(r.out.text(), "\n")), "/children") })
+	r.keys <- Key{Text: "/"}
+	waitFor(t, func() bool { return strings.Contains(selectedMenuRow(strings.Split(r.out.text(), "\n")), "/stop") })
 	for range 7 {
 		r.keys <- Key{Name: "down"}
 	}
 	waitFor(t, func() bool {
-		return strings.Contains(selectedMenuRow(strings.Split(r.out.text(), "\n")), "/child-retry")
+		return strings.Contains(selectedMenuRow(strings.Split(r.out.text(), "\n")), "/export")
 	})
-	if strings.Contains(r.out.text(), "/login") {
-		t.Fatal("filtered menu included login")
-	}
 	r.keys <- Key{Name: "up"}
 	waitFor(t, func() bool {
-		return strings.Contains(selectedMenuRow(strings.Split(r.out.text(), "\n")), "/child-resume")
+		return strings.Contains(selectedMenuRow(strings.Split(r.out.text(), "\n")), "/view")
 	})
-	r.keys <- Key{Text: "ild-r"}
+	r.keys <- Key{Text: "e"}
 	waitFor(t, func() bool {
-		return strings.Contains(selectedMenuRow(strings.Split(r.out.text(), "\n")), "/child-resume") && !strings.Contains(r.out.text(), "/child-send")
+		return strings.Contains(selectedMenuRow(strings.Split(r.out.text(), "\n")), "/export") && !strings.Contains(r.out.text(), "/stop")
 	})
-	r.keys <- Key{Name: "down"}
 	r.keys <- Key{Name: "tab"}
 	waitFor(t, func() bool {
-		return strings.Contains(strings.Split(r.out.text(), "\n")[12], "/child-retry") && r.out.cursorX() == 2+len("/child-retry")
+		return strings.Contains(strings.Split(r.out.text(), "\n")[12], "/export") && r.out.cursorX() == 2+len("/export")
 	})
 }
 
 func TestRunCommandMenuTabCompletesArrowSelectedCandidate(t *testing.T) {
-	for _, name := range []string{"/login", "/child-send", "/help"} {
+	for _, name := range []string{"/view", "/copy", "/help"} {
 		t.Run(name, func(t *testing.T) {
 			r := startCommandUXRun(t, [2]int{80, 24}, nil)
 			r.selectCommand(t, name)
 			r.keys <- Key{Name: "tab"}
 			value := name
-			if name != "/help" {
-				value += " "
-			}
 			waitFor(t, func() bool {
 				return strings.Contains(strings.Split(r.out.text(), "\n")[22], "cmd › "+name) && r.out.cursorX() == 9+len(value)
 			})
@@ -437,5 +450,58 @@ func TestRunCommandMenuArrowsPreserveNormalPastedAndPrivateInput(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The first view is Split; a command with choices lists them after it is
+// chosen, and the choice runs as that full command.
+func TestSplitFirstAndChoicesAfterTheCommand(t *testing.T) {
+	f := conversationFixture("FIRST VIEW RESPONSE")
+	keys, out, done := make(chan Key, 16), &screenObserver{}, make(chan error, 1)
+	go func() {
+		done <- Run(t.Context(), Config{Client: f, ID: "s", Keys: keys, Output: out, Theme: &Theme{Plain: true}, Size: func() (int, int) { return 160, 30 }})
+	}()
+	defer func() {
+		keys <- Key{Name: "detach"}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}()
+	waitFor(t, func() bool {
+		header := strings.Split(out.text(), "\n")[0]
+		return strings.Contains(out.text(), "FIRST VIEW RESPONSE") && strings.Contains(header, "Split")
+	})
+	keys <- Key{Text: "/vi"}
+	waitFor(t, func() bool { return strings.Contains(selectedMenuRow(strings.Split(out.text(), "\n")), "/view") })
+	if strings.Contains(out.text(), "/view split") || strings.Contains(out.text(), "/view chat") {
+		t.Fatal("the menu lists a command's choices")
+	}
+	for range 3 {
+		keys <- Key{Name: "backspace"}
+	}
+	keys <- Key{Text: "/copy"}
+	keys <- Key{Name: "enter"}
+	waitFor(t, func() bool {
+		return strings.Contains(out.text(), "Copy to the clipboard") && strings.Contains(out.text(), "Latest response")
+	})
+	keys <- Key{Name: "enter"}
+	waitFor(t, func() bool {
+		return strings.Contains(out.text(), "copied") && strings.Contains(out.text(), "to the clipboard")
+	})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.inputs) != 0 {
+		t.Fatal("a chosen command became chat input")
+	}
+}
+
+func TestNarrowTerminalShowsChatForSplit(t *testing.T) {
+	s, u := idleSnapshot(), plainUI()
+	u.View = ViewSplit
+	if f := RenderFrame(s, u, 100, 30); f.View != ViewChat {
+		t.Fatal("Split shown below 120 columns", f.View)
+	}
+	if f := RenderFrame(s, u, 140, 30); f.View != ViewSplit {
+		t.Fatal("Split not shown at 140 columns", f.View)
 	}
 }

@@ -15,6 +15,8 @@ type Picker struct {
 	PermissionOperation string
 	PermissionChallenge string // UI attachment memory only; never public history
 	Instructions        []string
+	Footer              []string // secondary notes below the options
+	Commands            []string // a command picker's full command per option
 	Kind, Title, Hint   string
 	Options             []string
 	Selection, Offset   int
@@ -49,12 +51,23 @@ func providerPicker(providers []modelcatalog.Provider, current *sessionstore.Run
 		p.Revision = current.Revision
 	}
 	for i, b := range providers {
-		p.Options = append(p.Options, SafeText(b.Name)+" · "+SafeText(b.Availability))
+		label := SafeText(b.Name) + " · " + SafeText(b.Availability)
+		hint := b.Reason.Hint()
+		if hint != "" {
+			label += " · " + hint
+		}
+		p.Options = append(p.Options, label)
 		if current != nil && b.ID == current.Provider {
 			p.Selection = i
 		}
 	}
 	return p
+}
+
+// commandPicker lists a command's choices; choosing one runs that full
+// command, as if typed.
+func commandPicker(title string, options, commands []string) *Picker {
+	return &Picker{Kind: "command", Title: title, Options: options, Commands: commands}
 }
 
 func analyzePicker(view string) *Picker {
@@ -151,6 +164,10 @@ func (p *Picker) effort(current *sessionstore.RuntimeSelection) *Picker {
 		n.Options = []string{"No effort parameter (not supported by this model)"}
 		return n
 	}
+	if m.EffortUnknown {
+		n.Options = []string{"No effort parameter (capability unverified)"}
+		return n
+	}
 	if m.UnsupportedEfforts {
 		n.Hint = "catalog efforts unsupported by this harness are omitted"
 	}
@@ -174,6 +191,9 @@ func (p *Picker) effort(current *sessionstore.RuntimeSelection) *Picker {
 }
 
 func (p *Picker) selectedEffort() llm.ReasoningEffort {
+	if p.Model.EffortUnknown {
+		return ""
+	}
 	if p.Model.SupportsEffort != nil && !*p.Model.SupportsEffort {
 		return ""
 	}
@@ -216,6 +236,13 @@ func pickerRows(p *Picker, u UIState, l layout, budget int) ([]line, int) {
 	}
 	if end < len(p.Options) && len(rows) < budget {
 		rows = append(rows, l.gutter("", "", textLine(u.Theme.symbol("↓", "v")+" more", meta)))
+	}
+	for _, note := range p.Footer {
+		for _, wrapped := range wrapLine(textLine(note, meta), l.text, true, 0) {
+			if len(rows) < budget {
+				rows = append(rows, l.gutter("", "", wrapped))
+			}
+		}
 	}
 	return rows, start
 }

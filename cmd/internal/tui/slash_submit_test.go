@@ -14,11 +14,13 @@ import (
 const multilineChildCommand = "/children start worker openai-codex gpt-6.1-sol medium -- Reply with exactly: Codex child smoke OK.\nThen call Finish alone with status completed and that summary, with empty\nchangedFiles/tests/blockers."
 
 func TestSubmittedCommandUsesExactRegistryNamesAndPreservesPayload(t *testing.T) {
+	// The menu lists the commands; every registered name, choices included,
+	// routes as a command.
 	options := candidates(idleSnapshot(), UIState{Input: "/"})
-	if len(options) != len(commandCatalog) {
+	if len(options) != len(menuCatalog()) {
 		t.Fatal("completion and submit use different registries")
 	}
-	for _, candidate := range options {
+	for _, candidate := range commandCatalog {
 		input := " \t\n\u3000" + candidate.Name + "\n日本語 payload\n👩🏽‍💻 é\n"
 		got, ok := submittedCommand(input)
 		if !ok || got != candidate.Name+"\n日本語 payload\n👩🏽‍💻 é\n" {
@@ -124,7 +126,7 @@ func TestRunPastedLocalCommandsNeverBecomePublicConversation(t *testing.T) {
 			before := f.view.History
 			keys, out, done := make(chan Key, 16), &screenObserver{}, make(chan error, 1)
 			go func() {
-				done <- Run(t.Context(), Config{Client: f, ID: "s", Keys: keys, Output: out, Theme: &Theme{Plain: true}, Size: func() (int, int) { return 120, 24 }, ExportDirectory: filepath.Join(t.TempDir(), "exports")})
+				done <- Run(t.Context(), Config{Client: f, ID: "s", Keys: keys, Output: out, Theme: &Theme{Plain: true}, InitialView: ViewChat, Size: func() (int, int) { return 120, 24 }, ExportDirectory: filepath.Join(t.TempDir(), "exports")})
 			}()
 			defer func() {
 				keys <- Key{Name: "detach"}

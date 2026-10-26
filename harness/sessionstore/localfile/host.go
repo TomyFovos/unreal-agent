@@ -45,6 +45,9 @@ func (s *Store) Upgrade(ctx context.Context, id session.ID) error {
 	if err := validateSessionID(id); err != nil {
 		return err
 	}
+	if err := s.invalidateRestoreView(id); err != nil {
+		return err
+	}
 	if _, _, err := s.readState(ctx, id); err != nil {
 		return err
 	}

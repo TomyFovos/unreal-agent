@@ -13,7 +13,7 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
-	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openaicodex"
 	"github.com/unreallabsai/unreal-agent/harness/llm/responsesapi"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
@@ -41,10 +41,13 @@ type Selection struct {
 	Source      string               `json:"source"`
 }
 type BuildConfig struct {
-	Selection  Selection
-	Resolver   credential.Resolver
-	HTTPClient *http.Client
-	ClaudeCode claudecode.Config
+	Selection   Selection
+	Resolver    credential.Resolver
+	HTTPClient  *http.Client
+	ClaudeAgent claudeagent.Config
+	// CodexRequestEffort resolves a selected Codex effort, such as ultra,
+	// to the one the backend accepts.
+	CodexRequestEffort func(ctx context.Context, model string, selected llm.ReasoningEffort) llm.ReasoningEffort
 }
 type Factory func(BuildConfig, credential.Material) (Client, error)
 type Descriptor struct {
@@ -61,6 +64,8 @@ type Descriptor struct {
 	// ToolCapability is an explicit runtime opt-in, independent of model names.
 	// Static capabilities remain the backwards-compatible default.
 	ToolCapability func(BuildConfig) bool
+	// FullToolBatch is a transport requirement, not a permission grant.
+	FullToolBatch bool
 }
 type Registry struct{ entries map[string]Descriptor }
 
@@ -224,7 +229,7 @@ func (r *Registry) Build(c BuildConfig) (Client, Selection, error) {
 	}
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	c.HTTPClient = &hc
-	a := &adapter{config: c, factory: r.entries[s.Provider].New, externalAuth: r.entries[s.Provider].ExternalAuth}
+	a := &adapter{config: c, factory: r.entries[s.Provider].New, externalAuth: r.entries[s.Provider].ExternalAuth, fullToolBatch: r.entries[s.Provider].FullToolBatch}
 	if r.entries[s.Provider].LocalProcess {
 		a.processes = &processRequests{cancels: make(map[*context.CancelFunc]context.CancelFunc)}
 	}
@@ -232,11 +237,18 @@ func (r *Registry) Build(c BuildConfig) (Client, Selection, error) {
 }
 
 type adapter struct {
-	config       BuildConfig
-	factory      Factory
-	externalAuth bool
-	processes    *processRequests
+	config        BuildConfig
+	factory       Factory
+	externalAuth  bool
+	processes     *processRequests
+	fullToolBatch bool
 }
+
+func (a *adapter) RequiresFullToolBatch() bool { return a.fullToolBatch }
+
+// NoAutomaticReplay is false for every provider: an unanswered model request is
+// retried on resume like the Codex route, never held for new user input (U7).
+func (a *adapter) NoAutomaticReplay() bool { return false }
 
 func (a *adapter) Close() error {
 	if a.processes != nil {
@@ -309,13 +321,14 @@ func normalize(err error) error {
 		return context.DeadlineExceeded
 	}
 	var ce *credential.Error
-	var cli *claudecode.Error
+	var agent *claudeagent.Error
 	var proxy *openaicodex.SandboxProxyError
 	if errors.As(err, &proxy) {
 		return &Error{Code: "proxy_unavailable"}
 	}
-	if errors.As(err, &cli) {
-		return cli
+	// Claude Code's own short reason, such as a usage limit, reaches the user (U18).
+	if errors.As(err, &agent) {
+		return agent
 	}
 	if errors.As(err, &ce) {
 		return ce
@@ -343,6 +356,15 @@ func normalize(err error) error {
 			code = "rate_limited"
 		}
 		return &Error{Code: code, Status: diagnostic.Status, Diagnostic: safe}
+	}
+	// Keep host identity/recovery failures typed without retaining an arbitrary
+	// provider wrapper (which can contain request or credential material). Existing
+	// permission, cancellation, authentication and HTTP classifications take priority.
+	if errors.Is(err, llm.ErrToolIdentityConflict) {
+		return llm.ErrToolIdentityConflict
+	}
+	if errors.Is(err, llm.ErrToolRecoveryRequired) {
+		return llm.ErrToolRecoveryRequired
 	}
 	return &Error{Code: "request_failed", Status: diagnostic.Status, Diagnostic: safe}
 }

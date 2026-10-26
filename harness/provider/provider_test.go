@@ -13,7 +13,7 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
-	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 )
 
 func fixtureSelection(id, endpoint string) Selection {
@@ -33,15 +33,15 @@ func fixtureSelection(id, endpoint string) Selection {
 }
 
 func TestRuntimeToolCapabilityIsExplicitAndPreservesCodex(t *testing.T) {
-	r, err := New(Defaults(map[string][]Model{"claude-code": {{ID: "configured"}}, "openai-codex": {{ID: "configured"}}})...)
+	r, err := New(Defaults(map[string][]Model{claudeagent.ProviderID: {{ID: "configured"}}, "openai-codex": {{ID: "configured"}}})...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	claude := BuildConfig{Selection: Selection{Provider: "claude-code"}}
+	claude := BuildConfig{Selection: Selection{Provider: claudeagent.ProviderID}}
 	if r.SupportsTools(claude.Selection) || r.SupportsRuntimeTools(claude) {
-		t.Fatal("text-only default was silently enabled")
+		t.Fatal("tools without a Claude Code executable")
 	}
-	claude.ClaudeCode.ToolBridge = claudecode.ToolBridgeConfig{Enabled: true}
+	claude.ClaudeAgent.Binary = "/usr/bin/claude"
 	if !r.SupportsRuntimeTools(claude) || r.SupportsTools(claude.Selection) {
 		t.Fatal("opt-in mutated the registered default capability")
 	}

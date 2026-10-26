@@ -91,7 +91,7 @@ func TestStoreLoadsGoldenLog(t *testing.T) {
 				Operations: []operation.Operation{{
 					ID: "operation-1", Type: "test", Version: 1, Status: operation.StatusReady,
 					State:       jsontext.Value(`{"step":1}`),
-					Idempotency: jsontext.Value(`{"key":"one"}`),
+					Idempotence: &operation.IdempotencyMetadata{Idempotency: jsontext.Value(`{"key":"one"}`)},
 				}},
 			},
 		},
@@ -99,7 +99,7 @@ func TestStoreLoadsGoldenLog(t *testing.T) {
 	want.Operations = []operation.Operation{{
 		ID: "operation-1", Type: "test", Version: 1, Status: operation.StatusAwaiting,
 		State:       jsontext.Value(`{"step":2}`),
-		Idempotency: jsontext.Value(`{"key":"one"}`),
+		Idempotence: &operation.IdempotencyMetadata{Idempotency: jsontext.Value(`{"key":"one"}`)},
 	}}
 	if !reflect.DeepEqual(got.Snapshot, want.Snapshot) ||
 		!reflect.DeepEqual(got.Items, want.Items) ||

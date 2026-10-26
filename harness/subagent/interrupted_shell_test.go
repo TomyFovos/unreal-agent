@@ -35,7 +35,8 @@ func TestInterruptedShellChildHelper(t *testing.T) {
 	if os.Getenv("UNREAL_SHELL_CHILD") == "" {
 		return
 	}
-	err := sub.Serve(context.Background(), os.Stdin, os.Stdout, func(ctx context.Context, c sub.ChildConfig, send sub.Sender) (*host.Session, io.Closer, error) {
+	err := sub.Serve(context.Background(), os.Stdin, os.Stdout, func(ctx context.Context, c sub.ChildConfig, link sub.ChildLink) (*host.Session, io.Closer, error) {
+		send := link.Send
 		if err := os.MkdirAll(filepath.Join(c.Workspace, "shell-captures"), 0700); err != nil {
 			return nil, nil, err
 		}

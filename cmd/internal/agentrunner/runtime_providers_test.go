@@ -6,7 +6,7 @@ import (
 	"errors"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
-	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/profile"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
@@ -18,14 +18,14 @@ type unavailableRuntimeClient struct{}
 
 func (unavailableRuntimeClient) Close() error { return nil }
 func (unavailableRuntimeClient) Respond(context.Context, llm.Request, llm.RequestOptions) (llm.Response, error) {
-	return llm.Response{}, &claudecode.Error{Code: "external_reauth_required"}
+	return llm.Response{}, &claudeagent.Error{Code: "external_reauth_required"}
 }
 func TestMultiProviderBindingCapabilitiesAndTypedFailure(t *testing.T) {
 	a := provider.Selection{Version: 1, Provider: "openai-codex", Model: provider.Model{ID: "shared"}, Auth: credential.Reference{Provider: "openai-codex", Method: credential.OAuth, ID: "external-codex"}, MaxAttempts: 1, Source: "test"}
-	b := provider.Selection{Version: 1, Provider: "claude-code", Model: provider.Model{ID: "shared"}, Auth: credential.Reference{Provider: "claude-code", Method: credential.OAuth, ID: "external-claude-code"}, MaxAttempts: 1, Source: "test"}
-	descriptors := provider.Defaults(map[string][]provider.Model{"openai-codex": {a.Model}, "claude-code": {b.Model}})
+	b := provider.Selection{Version: 1, Provider: claudeagent.ProviderID, Model: provider.Model{ID: "shared"}, Auth: credential.Reference{Provider: claudeagent.ProviderID, Method: credential.OAuth, ID: "external-claude-code"}, MaxAttempts: 1, Source: "test"}
+	descriptors := provider.Defaults(map[string][]provider.Model{"openai-codex": {a.Model}, claudeagent.ProviderID: {b.Model}})
 	for i := range descriptors {
-		if descriptors[i].ID == "claude-code" {
+		if descriptors[i].ID == claudeagent.ProviderID {
 			descriptors[i].New = func(provider.BuildConfig, credential.Material) (provider.Client, error) {
 				return unavailableRuntimeClient{}, nil
 			}
@@ -37,7 +37,7 @@ func TestMultiProviderBindingCapabilitiesAndTypedFailure(t *testing.T) {
 	}
 	cfg := RuntimeConfig{Identity: RuntimeIdentity{Version: 1, Provider: a, Profile: profile.Default(), ReasoningEffort: "medium", Workspace: t.TempDir()}, Providers: registry, SessionDirectory: filepath.Join(t.TempDir(), "sessions"), Credentials: credential.ResolverFunc(func(context.Context, credential.Reference) (credential.Material, error) {
 		return credential.Material{Token: credential.NewSecret("secret-not-binding")}, nil
-	}), Backends: map[string]ProviderRuntime{"claude-code": {Provider: b, ReasoningEffort: "medium", ClaudeCode: &claudecode.Config{ManagedPolicyMode: claudecode.ManagedPolicyTrust}}}}
+	}), Backends: map[string]ProviderRuntime{claudeagent.ProviderID: {Provider: b, ReasoningEffort: "medium", Claude: &claudeagent.Config{Binary: "/usr/bin/claude"}}}}
 	factory, identity, e := NewRuntimeFactory(cfg)
 	if e != nil {
 		t.Fatal(e)
@@ -52,7 +52,7 @@ func TestMultiProviderBindingCapabilitiesAndTypedFailure(t *testing.T) {
 	if len(before.Request.Tools) == 0 {
 		t.Fatal("Codex registry lost")
 	}
-	choice := sessionstore.RuntimeSelection{Version: 1, Provider: "claude-code", Model: "shared", Effort: "medium"}
+	choice := sessionstore.RuntimeSelection{Version: 1, Provider: claudeagent.ProviderID, Model: "shared", Effort: "medium"}
 	if runtime.ValidateSelection(choice) == nil {
 		t.Fatal("unbound provider change accepted")
 	}
@@ -64,11 +64,8 @@ func TestMultiProviderBindingCapabilitiesAndTypedFailure(t *testing.T) {
 		t.Fatal(e)
 	}
 	text, _ := runtime.Builder.Build()
-	if len(text.Request.Tools) != 0 || len(runtime.Tools.StaticDefinitions()) != 0 {
-		t.Fatal("Claude capability did not switch")
-	}
 	_, e = runtime.LLM.Respond(t.Context(), text.Request, llm.RequestOptions{})
-	var failure *claudecode.Error
+	var failure *claudeagent.Error
 	if !errors.As(e, &failure) || failure.Code != "external_reauth_required" {
 		t.Fatal("typed provider failure lost", e)
 	}

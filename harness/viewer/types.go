@@ -125,6 +125,8 @@ type ControlRequest struct {
 	ChildID          session.ID
 	InputID          inbox.ID
 	Text             string
+	Request          string `json:",omitzero"`
+	Allow            bool   `json:",omitzero"`
 }
 type Controls interface {
 	SteerChild(context.Context, ControlRequest) (host.Receipt, error)

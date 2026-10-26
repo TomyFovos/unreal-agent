@@ -53,6 +53,33 @@ func newSessionHead(id session.ID, createdAt time.Time) sessionHead {
 	}
 }
 
+// appendOperations grows by element count so Operation layout changes do not
+// introduce extra slice growth steps through allocator size-class rounding.
+func (head *sessionHead) appendOperations(values ...operation.Operation) {
+	required := len(head.Operations) + len(values)
+	if required > cap(head.Operations) {
+		capacity := cap(head.Operations)
+		if capacity == 0 {
+			capacity = 1
+		}
+		for capacity < required {
+			growth := capacity
+			if capacity >= 1024 {
+				growth = capacity / 2
+			}
+			if growth > int(^uint(0)>>1)-capacity {
+				capacity = required
+				break
+			}
+			capacity += growth
+		}
+		operations := make([]operation.Operation, len(head.Operations), capacity)
+		copy(operations, head.Operations)
+		head.Operations = operations
+	}
+	head.Operations = append(head.Operations, values...)
+}
+
 func (head *sessionHead) appendInput(
 	input inbox.Input,
 	recordedAt time.Time,
@@ -79,7 +106,7 @@ func (head *sessionHead) appendInput(
 				return sessionstore.Item{}, fmt.Errorf("operation intent ID already exists")
 			}
 			head.operationPositions[op.ID] = len(head.Operations)
-			head.Operations = append(head.Operations, op)
+			head.appendOperations(op)
 		}
 	}
 	return head.appendItem(sessionstore.ItemInput, input, recordedAt), nil
@@ -191,7 +218,7 @@ func (head *sessionHead) appendToolCallStatus(
 	head.toolCallStatuses[key] = struct{}{}
 	for _, value := range operations {
 		head.operationPositions[value.ID] = len(head.Operations)
-		head.Operations = append(head.Operations, value)
+		head.appendOperations(value)
 	}
 	return head.appendItem(sessionstore.ItemToolCallStatus, status, recordedAt), nil
 }
@@ -421,7 +448,25 @@ func (state *storedState) inheritItem(item sessionstore.Item) {
 		state.respondedTurns[response.TurnID] = struct{}{}
 	case sessionstore.ItemToolCallStatus:
 		status := item.Data.(sessionstore.ToolCallStatus)
-		// TODO: Preserve status snapshots in forked history without making inherited operations dispatchable.
+		// Preserve bounded terminal receipt facts only as inspection data.
+		// Owned Operations remain empty; the fork marker resets all ownership.
+		// Missing/oversized/nonterminal evidence continues to fail closed.
+		budget := 32 << 20
+		var facts []sessionstore.HistoricalOperation
+		if inherited := status.InheritedFacts(); inherited != nil {
+			facts = make([]sessionstore.HistoricalOperation, len(inherited))
+			copy(facts, inherited)
+		}
+		for _, fact := range facts {
+			budget -= len(operation.Operation(fact).State)
+		}
+		for _, op := range status.Operations {
+			if terminalOperationStatus(op.Status) && len(facts) < 128 && len(op.State) <= budget {
+				budget -= len(op.State)
+				facts = append(facts, sessionstore.HistoricalOperation(op))
+			}
+		}
+		status = sessionstore.WithInheritedFacts(status, facts)
 		status.Operations = nil
 		item.Data = status
 		state.toolCallStatuses[toolCallStatusKey{
@@ -465,7 +510,7 @@ func validateOperation(value operation.Operation) error {
 	if value.State != nil && !value.State.IsValid() {
 		return fmt.Errorf("operation %q state is not valid JSON", value.ID)
 	}
-	if value.Idempotency != nil && !value.Idempotency.IsValid() {
+	if value.Idempotency() != nil && !value.Idempotency().IsValid() {
 		return fmt.Errorf("operation %q idempotency data is not valid JSON", value.ID)
 	}
 	return nil

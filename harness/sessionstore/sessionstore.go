@@ -53,11 +53,16 @@ type ModelResponse struct {
 	Response llm.Response
 }
 
+// HistoricalOperation is inspection-only evidence projected from canonical
+// parent terminal receipts. It is never a child-owned executable Operation.
+type HistoricalOperation operation.Operation
+
 type ToolCallStatus struct {
-	TurnID     session.TurnID
-	CallID     string
-	Status     tool.CallStatus
-	Operations []operation.Operation `json:",omitempty"`
+	TurnID      session.TurnID
+	CallID      string
+	Status      tool.CallStatus
+	Operations  []operation.Operation    `json:",omitempty"`
+	Inheritance *InheritedOperationFacts `json:",embed"`
 }
 
 type Snapshot struct {

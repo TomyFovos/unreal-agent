@@ -552,13 +552,13 @@ func rule(u UIState, l layout, overflow int, label string) line {
 		value = "commands"
 	case u.View.effective(l.width+1) == ViewOrchestration:
 		value = fmt.Sprintf("Orchestration: line %d; PgUp/PgDn scroll", u.OrchestrationScroll+1)
-	case u.View == ViewSplit && l.width < 119:
-		value = "Chat; Split returns at 120 columns"
 	case u.Scroll > 0 || u.Transcript != nil:
 		value = fmt.Sprintf("scrollback: %d lines below; PgDn returns", u.Scroll)
 		if u.Transcript != nil && u.Transcript.Newer {
 			value = fmt.Sprintf("scrollback: %d lines below in page; PgDn continues", u.Scroll)
 		}
+	case u.View == ViewSplit && l.width < 119:
+		value = "Chat; Split returns at 120 columns"
 	case u.Viewer.Selected != "" && u.Viewer.Selected != u.Viewer.ParentID:
 		value = "focus " + string(u.Viewer.Selected)
 	}

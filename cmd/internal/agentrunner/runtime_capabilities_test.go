@@ -9,15 +9,13 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
-	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
-	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/profile"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
 )
 
 func TestRuntimeFactoryProviderToolCapabilities(t *testing.T) {
-	for _, name := range []string{"claude-code", "text-only", "openai-codex", "openai", "ollama", "openrouter", "fireworks"} {
+	for _, name := range []string{"text-only", "openai-codex", "openai", "ollama", "openrouter", "fireworks"} {
 		t.Run(name, func(t *testing.T) {
 			model := provider.Model{ID: "configured-model"}
 			var descriptor provider.Descriptor
@@ -41,10 +39,6 @@ func TestRuntimeFactoryProviderToolCapabilities(t *testing.T) {
 				identity.Provider.Auth.Provider = name
 				identity.Provider.Auth.ID = "test"
 			}
-			if name == "claude-code" {
-				identity.Provider.Auth.ID = "external-claude-code"
-				identity.ClaudeCode = &claudecode.Config{ManagedPolicyMode: claudecode.ManagedPolicyTrust, Models: []modelcatalog.Model{{ID: model.ID, Name: "Configured model", Efforts: []llm.ReasoningEffort{"medium"}, DefaultEffort: "medium"}}}
-			}
 			factory, _, err := NewRuntimeFactory(RuntimeConfig{Identity: identity, Providers: registry, SessionDirectory: filepath.Join(t.TempDir(), "sessions"), Credentials: credential.ResolverFunc(func(context.Context, credential.Reference) (credential.Material, error) {
 				return credential.Material{}, nil
 			})})
@@ -66,7 +60,7 @@ func TestRuntimeFactoryProviderToolCapabilities(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if name == "claude-code" || name == "text-only" {
+			if name == "text-only" {
 				if len(built.Request.Tools) != 0 || len(runtime.Tools.StaticDefinitions()) != 0 {
 					t.Fatal("text-only runtime advertised tool schemas")
 				}

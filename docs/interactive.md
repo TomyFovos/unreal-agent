@@ -399,8 +399,7 @@ indexed snapshots and bounded display receipts, not full canonical history.
 With many children, observation may lag a polling round. Safe target linkage
 may be unknown if its display cache is unavailable; raw state is never used as
 a fallback. `/analyze` remains analytical detail; `/export` remains public
-conversation Markdown export. Orchestration has no export of its own. Opt-in
-[Claude Tool Bridge](claude-tool-bridge.md) Operations use this same projection.
+conversation Markdown export. Orchestration has no export of its own.
 
 日本語: `/view` で Chat / Orchestration / Split を選択できます。
 Orchestration は親・子それぞれの provider/model/effort、短い依頼名、状態、
@@ -565,16 +564,7 @@ ExternalCodex keeps the cache-only behavior above. The CLI may return a bundled
 catalog, so availability of an entry is not proof of model entitlement. See
 [Codex model catalog](codex-model-catalog.md) for limits and failure behavior.
 
-For `claude-code`, `/model` discovers selectable models/efforts through the
-installed CLI's isolated `initialize`/`list_models` control metadata, without
-inference. Claude applies organization model restrictions. A one-minute Host
-cache avoids a subprocess on every open; `/model refresh` forces an update.
-The picker shows `discovered catalog`. Optional `Runtime.ClaudeCode.Models`
-entries remain the explicit fallback when discovery is unavailable; without
-them only the current selection is shown. A successful organization catalog is
-not expanded with configured/current models. Alias values are canonical choices;
-resolved IDs are catalog metadata, and completed responses retain their actual
-observed model. See [Claude model discovery](claude-code.md#model-picker-and-analysis).
+The picker shows the catalog Claude Code reports for the signed-in account.
 
 Other providers retain their existing authentication and inference support; catalog
 discovery/model switching beyond their current selection is not implemented.
@@ -658,26 +648,8 @@ statistics are persisted in Session state.
 
 ## Private authentication
 
-The installed Claude subscription backend uses provider `claude-code` and the
-external reference `claude-code` / `oauth` / `external-claude-code`. Authentication
-belongs to the CLI; `/login` does not import Claude credentials. This backend is
-text-only by default, discovers the CLI's model/effort catalog with optional explicit fallback, and reuses `/model` canonical
-selections and `/analyze` usage/statistics. See [Claude Code backend](claude-code.md)
-for the invocation, permissions, isolated smoke config and managed-policy
-diagnostics investigation. `Runtime.ClaudeCode.managedPolicyMode` defaults to
-`reject`, preserving fail-closed preflight for existing policy sources, unknown
-evidence and Team/Enterprise remote policy delivery. A doctor's no-policy
-snapshot cannot bind the next `-p` process. Explicit `trust` instead permits
-Team/Enterprise by accepting organization-managed policy as an external trusted
-administrative boundary; it does not certify that policy safe. Claude built-in
-tools remain disabled. `Runtime.ClaudeCode.ToolBridge.Enabled=true` explicitly
-enables only [Unreal-owned tools](claude-tool-bridge.md) through SDK MCP; it grants
-no permissions and does not alter existing text-only configs. `/analyze` Overview
-reports this safe capability metadata. Organization-managed
-hooks, env, telemetry, helpers and policy refresh may act outside Unreal
-Operations. Parent credentials, billing/routing overrides and OTel settings
-are still isolated; trusted managed OpenTelemetry is applied by Claude itself.
-The read-only `/analyze` Overview and exports show the nonsecret policy mode.
+Claude runs through the signed-in Claude Code CLI as provider `claude`; see
+[Claude route](claude-route.md) for authentication, approvals and models.
 
 `managedPolicyMode=trust` は、ユーザーが組織管理者 policy を外部の信頼境界として
 明示的に信頼する設定です。Unreal Agent が安全性を検証した意味ではありません。

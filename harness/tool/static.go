@@ -27,13 +27,15 @@ func (translator unavailableTranslator) errorMessage() string {
 	return fmt.Sprintf("static tool %q is not configured", translator.name)
 }
 
+// StaticNames lists every built-in tool, including the claude_code record,
+// which no model is offered: it only records calls Claude Code ran (U21).
 func StaticNames() []string {
 	definitions := staticDefinitions()
-	names := make([]string, 0, len(definitions))
+	names := make([]string, 0, len(definitions)+1)
 	for _, definition := range definitions {
 		names = append(names, definition.Tool.Name)
 	}
-	return names
+	return append(names, ClaudeCodeName)
 }
 
 func staticDefinitions() []Definition {
@@ -41,7 +43,7 @@ func staticDefinitions() []Definition {
 		{Tool: llm.Tool{
 			Type:        llm.ToolFunction,
 			Name:        BashName,
-			Description: "Execute a shell command in background. Independent commands may be issued as parallel tool calls in one turn. Command child processes are killed when the shell exits.",
+			Description: ShellCommandDescription("/bin/sh"),
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -85,6 +87,16 @@ func staticDefinitions() []Definition {
 			},
 		}},
 	}, append(nativeDefinitions(), astDefinitions()...)...)
+}
+
+// ShellCommandDescription describes the configured interpreter, not the tool
+// identifier. Bash is the historical registry name; normal Hosts use POSIX sh.
+func ShellCommandDescription(shell string) string {
+	description := fmt.Sprintf("Run %s -c in background. Independent calls may run in parallel; children are killed on shell exit.", shell)
+	if shell == "/bin/sh" {
+		description += " Use POSIX sh syntax ([ ... ], no Bash [[ ... ]] or arrays)."
+	}
+	return description
 }
 
 func maxOutputLengthSchema() map[string]any {

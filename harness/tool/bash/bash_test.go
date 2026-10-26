@@ -16,6 +16,27 @@ type recordingContext struct {
 	specs []operation.Spec
 }
 
+func TestShellDescriptionMatchesInterpreterWithoutChangingCommand(t *testing.T) {
+	for _, shell := range []string{"/bin/sh", "/bin/bash"} {
+		translator := bash.New(bash.Config{Shell: shell, Directory: t.TempDir(), BaseDirectory: t.TempDir()})
+		registry := tool.NewRegistry(tool.StaticTranslators{Bash: translator}, tool.BashName)
+		definitions := registry.StaticDefinitions()
+		if len(definitions) != 1 || !strings.Contains(definitions[0].Tool.Description, shell+" -c") || (shell == "/bin/sh" && !strings.Contains(definitions[0].Tool.Description, "POSIX sh")) {
+			t.Fatal("advertised interpreter differs from configured interpreter")
+		}
+		ctx := &recordingContext{}
+		command := "[[ x = x ]]"
+		status := translator.Translate(ctx, llm.ToolCall{Name: "Bash", CallID: "syntax-check", Arguments: `{"command":"[[ x = x ]]"}`})
+		if status.Error != "" || len(ctx.specs) != 1 {
+			t.Fatal("command was rejected or resubmitted")
+		}
+		var state operation.ShellState
+		if json.Unmarshal(ctx.specs[0].State, &state) != nil || state.Input.Shell != shell || state.Input.Command != command {
+			t.Fatal("shell or command was rewritten")
+		}
+	}
+}
+
 func (ctx *recordingContext) Submit(spec operation.Spec) operation.ID {
 	ctx.specs = append(ctx.specs, spec)
 	return operation.ID("operation-1")

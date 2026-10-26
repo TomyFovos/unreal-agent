@@ -7,9 +7,19 @@ side-effecting built-ins and foreign MCP stay disabled.
 
 | Mode | Execution |
 | --- | --- |
-| Read Only | Initial mode. Configured read/grep/glob inspect the workspace; privileged Operations receive typed permission denial. |
-| Ask for Approval | Each privileged Operation waits for Allow Once or Deny, initially selected. The dialog identifies Session, Operation, tool and scope. |
+| Read Only | Initial mode. Configured read/grep/glob inspect the workspace, and shell commands that only read run (below); other privileged Operations receive typed permission denial. |
+| Ask for Approval | Each privileged Operation waits for Allow once (initially selected) or Deny. The dialog shows the command or file first, then the Session and request. |
 | Full Access | Selecting the mode prepares a separate warning dialog. Explicit confirmation grants this Session access up to the reviewed operator ceiling. |
+
+Shell commands that only read run in every mode without approval, as Codex
+runs its known-safe commands, for Unreal's Bash, children and Claude Code
+alike. Each command in the line must be one of a fixed set of read-only
+programs (git status/log/diff/show/branch listing and a few other git reads,
+ls, cat, grep, rg, find, sed -n, head, tail, wc and similar), without an
+option that writes, deletes or runs another program, joined only by |, &&, ||
+or ;. Expansions, substitutions, subshells, assignments and redirections other
+than to /dev/null or 2>&1 make it an ordinary command
+(`harness/permission/readonly_command.go`).
 
 Paste and chat cannot approve. Approval requires at least 80x24 so warnings can
 be reviewed. Tiny can deny and return to Read Only. Escape dismisses a pending
@@ -88,11 +98,14 @@ against a compromised OS account. Already-approved ambient Bash can access
 same-user resources; no protection against this is claimed without an OS sandbox.
 Provider output and ordinary chat have no permission approval dispatch path.
 
-Children retain runtime/template validation, Project Instructions and policy
-intersection. Allow Once child starts require read-only templates; they cannot
-delegate write permissions to later child Operations. Full Access parents may
-start existing bounded writable templates, never a stronger child. Existing
-unrestricted-child prohibitions remain. Parent revocation cancels child starts.
+Children are workers (U11) and follow their parent's mode, also when it changes
+while they run. A template's Policy is the child's ceiling and its Baseline what
+Read Only and Ask allow without approval; the operator maximum bounds both. In
+Ask, a child's privileged request goes to its parent agent, never to the human
+(U17): the parent's model answers it (SubagentApprove, or
+`unreal-agent subagent approve` from Claude's Bash) and the child waits until it
+does. Starting, steering and answering children needs no approval itself, and a
+mode change does not stop a running child. A child gets the Host's environment.
 LSP/DAP or custom remote handlers without operation-scoped execution fail closed
 under these modes; legacy configuration behavior remains compatible.
 

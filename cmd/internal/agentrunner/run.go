@@ -657,9 +657,9 @@ func validateRequest(parsed Request) ([]RequestMessage, error) {
 	}
 	if parsed.ThinkingLevel != "" {
 		switch parsed.ThinkingLevel {
-		case "low", "medium", "high", "xhigh", "max":
+		case "low", "medium", "high", "xhigh", "max", "ultra":
 		default:
-			return nil, errors.New("thinking_level must be one of: low, medium, high, xhigh, max")
+			return nil, errors.New("thinking_level must be one of: low, medium, high, xhigh, max, ultra")
 		}
 	}
 	for _, name := range append(parsed.ExtraAllowedTools, parsed.DisallowedTools...) {
@@ -703,6 +703,8 @@ func reasoningEffort(level string) llm.ReasoningEffort {
 		return llm.ReasoningEffortXHigh
 	case "max":
 		return llm.ReasoningEffortMax
+	case "ultra":
+		return llm.ReasoningEffortUltra
 	default:
 		return llm.ReasoningEffortHigh
 	}

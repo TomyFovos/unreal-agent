@@ -434,7 +434,7 @@ func TestValidateOperation(t *testing.T) {
 			name: "invalid idempotency",
 			value: operation.Operation{
 				ID: "operation-1", Type: "test", Version: 1, Status: operation.StatusReady,
-				Idempotency: jsontext.Value(`{`),
+				Idempotence: &operation.IdempotencyMetadata{Idempotency: jsontext.Value(`{`)},
 			},
 			want: "idempotency data is not valid JSON",
 		},

@@ -3,6 +3,7 @@ package coordinator
 import (
 	"cmp"
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -30,20 +31,24 @@ const (
 const toolCallRunGracePeriod = time.Second
 
 type coordinator struct {
-	dependencies    Dependencies
-	state           loopState
-	stop            stopState
-	cancelModel     context.CancelFunc
-	pendingCancels  map[operation.ID]string
-	bridgeRequests  chan bridgeRequest
-	bridge          *bridgeRound
-	bridgeActive    bool
-	modelOrigin     session.TurnID
-	modelRevision   uint64
-	modelInputs     int
-	deferredContext []sessionstore.Item
-	actionScope     string
-	structuredCalls map[string]*canonicalBridgeCall
+	dependencies       Dependencies
+	state              loopState
+	stop               stopState
+	cancelModel        context.CancelFunc
+	pendingCancels     map[operation.ID]string
+	bridgeRequests     chan bridgeRequest
+	bridge             *bridgeRound
+	bridgeActive       bool
+	modelOrigin        session.TurnID
+	modelRevision      uint64
+	modelInputs        int
+	deferredContext    []sessionstore.Item
+	actionScope        string
+	structuredCalls    map[string]*canonicalBridgeCall
+	toolIdentities     map[string]toolIdentity
+	toolAdmissionErr   error
+	conversation       *conversationState
+	preparationsClosed bool
 }
 
 type stopState struct {
@@ -52,18 +57,31 @@ type stopState struct {
 }
 
 type loopState struct {
-	currentTurnID     session.TurnID
-	currentTurnType   session.TurnType
-	toolCalls         map[toolCallKey]toolCallState
-	operations        map[operation.ID]operation.Operation
-	availableInputs   int
-	deliveredInputs   int
+	currentTurnID   session.TurnID
+	currentTurnType session.TurnType
+	toolCalls       map[toolCallKey]toolCallState
+	operations      map[operation.ID]operation.Operation
+	availableInputs int
+	deliveredInputs int
+	// quietInputs counts inputs since the latest regular turn began that the
+	// next model call carries but that do not call the model themselves: a
+	// child's ready notice repeats the handle its start already returned.
+	quietInputs       int
 	currentTurnInputs int
 	callModel         bool
 	grace             <-chan time.Time
 	graceToolCalls    map[toolCallKey]struct{}
 	instructionsBound bool
 	selectionBoundary bool
+	externalInputs    int
+	replayTurn        session.TurnID
+	replayExternals   int
+	replayNotified    bool
+
+	// interrupted holds the model after /stop main until the user's next
+	// input: externalInputs then exceeds interruptExternals.
+	interrupted        bool
+	interruptExternals int
 }
 
 type toolCallState struct {
@@ -191,7 +209,7 @@ func (current *coordinator) Run(ctx context.Context) error {
 	if err := current.dispatchOperationsToManager(ctx); err != nil {
 		return err
 	}
-	if toolCallStatusesRequireModelResponse(statuses) || current.pendingInputs() > 0 {
+	if toolCallStatusesRequireModelResponse(statuses) || current.wakingInputs() > 0 || current.nativeConversation() && current.conversation != nil && current.state.callModel {
 		err = current.requestModelResponse(modelContext, modelResponses)
 		if err != nil {
 			return err
@@ -219,6 +237,7 @@ func (current *coordinator) Run(ctx context.Context) error {
 		} else if heartbeat == nil && current.dependencies.ToolHeartbeatInterval > 0 {
 			heartbeat = time.After(current.dependencies.ToolHeartbeatInterval)
 		}
+		var prepared *operation.PreparedOperation
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -238,6 +257,12 @@ func (current *coordinator) Run(ctx context.Context) error {
 			if err := current.processOperations(ctx, []operation.Operation{received}); err != nil {
 				return err
 			}
+		case received, open := <-current.preparationRequests():
+			if !open {
+				current.preparationsClosed = true
+				continue
+			}
+			prepared = &received
 
 		case <-heartbeat:
 			if err := current.postHeartbeat(ctx); err != nil {
@@ -262,7 +287,7 @@ func (current *coordinator) Run(ctx context.Context) error {
 			}
 		}
 
-		callModel, err := current.processEvents(ctx)
+		callModel, err := current.processEventsWithPreparation(ctx, prepared)
 		if err != nil {
 			return err
 		}
@@ -294,21 +319,19 @@ func (current *coordinator) Run(ctx context.Context) error {
 }
 
 func (current *coordinator) processEvents(ctx context.Context) (bool, error) {
-	inputs, err := slurpChannel(ctx, current.dependencies.Inbox.Output())
-	if err != nil {
-		return false, fmt.Errorf("slurp inbox: %w", err)
-	}
-	if err := current.processInputs(ctx, inputs); err != nil {
-		return false, err
-	}
-	updates, err := slurpChannel(ctx, current.dependencies.Operations.Updates())
-	if err != nil {
-		return false, fmt.Errorf("slurp operation updates: %w", err)
-	}
-	if err := current.processOperations(ctx, updates); err != nil {
+	return current.processEventsWithPreparation(ctx, nil)
+}
+
+func (current *coordinator) processEventsWithPreparation(ctx context.Context, prepared *operation.PreparedOperation) (bool, error) {
+	if err := current.collectEvents(ctx, prepared); err != nil {
 		return false, err
 	}
 
+	if current.nativeConversation() && current.conversation != nil && current.conversation.needsEpoch {
+		if err := current.appendConversationEpoch(ctx, "quarantine"); err != nil {
+			return false, err
+		}
+	}
 	if _, err := current.reconcileToolCalls(ctx); err != nil {
 		return false, err
 	}
@@ -318,7 +341,57 @@ func (current *coordinator) processEvents(ctx context.Context) (bool, error) {
 	if current.cancelModel != nil && current.bridgeActive {
 		return false, nil
 	}
-	return current.state.callModel || (current.pendingInputs() > 0 && current.cancelModel == nil && len(current.state.graceToolCalls) == 0), nil
+	if llm.RequiresToolBatch(current.dependencies.LLM) && current.modelToolCalls() != 0 {
+		return false, nil
+	}
+	if current.held() {
+		return false, nil
+	}
+	current.state.interrupted = false
+	return current.state.callModel || (current.wakingInputs() > 0 && current.cancelModel == nil && len(current.state.graceToolCalls) == 0), nil
+}
+
+// held reports whether /stop main keeps the model waiting for the user.
+func (current *coordinator) held() bool {
+	return current.state.interrupted && current.state.externalInputs == current.state.interruptExternals
+}
+
+// interruptAgent ends the agent's current work (/stop main): its model call
+// stops and its own operations are canceled, while child agents run on. The
+// model is called again for the user's next input, with what arrived since.
+func (current *coordinator) interruptAgent(ctx context.Context, reason string) error {
+	current.interruptModel()
+	current.state.interrupted, current.state.interruptExternals = true, current.state.externalInputs
+	for id, op := range current.state.operations {
+		if operationIsTerminal(op.Status) || current.quarantined(id) || subagentOperation(op) {
+			continue
+		}
+		if err := current.cancelOperation(ctx, id, reason); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cancelChildren cancels every child agent this Session started (/stop sub).
+func (current *coordinator) cancelChildren(ctx context.Context, reason string) error {
+	for id, op := range current.state.operations {
+		if operationIsTerminal(op.Status) || current.quarantined(id) || !subagentOperation(op) {
+			continue
+		}
+		if err := current.cancelOperation(ctx, id, reason); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func subagentOperation(op operation.Operation) bool {
+	if op.Type != operation.TypeRemoteJob {
+		return false
+	}
+	state, err := operation.DecodeRemoteJobState(op)
+	return err == nil && state.Plan.Type == "subagent"
 }
 
 func (current *coordinator) processInputs(ctx context.Context, inputs []inbox.Input) error {
@@ -337,6 +410,9 @@ func (current *coordinator) processOperations(ctx context.Context, updates []ope
 func (current *coordinator) processModelResponse(ctx context.Context, modelResponse modelResponseResult) error {
 	current.interruptModel()
 	if modelResponse.err != nil {
+		if recovered, err := current.recoverConversation(ctx, modelResponse.err); recovered {
+			return err
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -387,13 +463,13 @@ func (current *coordinator) handleStop(ctx context.Context) (bool, error) {
 }
 
 func (current *coordinator) isIdle() bool {
-	return current.cancelModel == nil && current.pendingInputs() == 0 &&
-		len(current.state.toolCalls) == 0 && !current.hasPendingOperations()
+	return current.cancelModel == nil && current.wakingInputs() == 0 &&
+		current.modelToolCalls() == 0 && !current.hasPendingOperations()
 }
 
 func (current *coordinator) isWaitingForOnlyToolCalls() bool {
 	return current.cancelModel == nil && current.stop.request.Mode != inbox.StopHard &&
-		current.pendingInputs() == 0 && len(current.state.toolCalls) != 0
+		current.wakingInputs() == 0 && len(current.state.toolCalls) != 0
 }
 
 func (current *coordinator) postHeartbeat(ctx context.Context) error {
@@ -436,12 +512,44 @@ func (current *coordinator) acceptStop(request inbox.ControlMessage) {
 }
 
 func (current *coordinator) pendingInputs() int {
+	if current.modelReplayHeld() {
+		return 0
+	}
 	return current.state.availableInputs - current.state.deliveredInputs
+}
+
+// wakingInputs are the pending inputs that call the model.
+func (current *coordinator) wakingInputs() int {
+	if current.held() {
+		return 0
+	}
+	return max(current.pendingInputs()-current.state.quietInputs, 0)
+}
+
+// quietPeer reports whether a peer input only repeats what its parent
+// already knows: a child's ready notice.
+func quietPeer(input inbox.Input) bool {
+	peer, err := input.DecodePeerMessage()
+	return err == nil && peer.Kind == "ready"
+}
+
+func (current *coordinator) modelReplayHeld() bool {
+	return current.state.replayTurn != "" && current.state.externalInputs <= current.state.replayExternals
+}
+func (current *coordinator) notifyModelReplayHold() {
+	if !current.modelReplayHeld() {
+		return
+	}
+	current.state.callModel = false
+	if !current.state.replayNotified && current.dependencies.ModelReplayHeld != nil {
+		current.dependencies.ModelReplayHeld(current.state.replayTurn)
+	}
+	current.state.replayNotified = true
 }
 
 func (current *coordinator) hasPendingOperations() bool {
 	for _, value := range current.state.operations {
-		if !operationIsTerminal(value.Status) {
+		if !operationIsTerminal(value.Status) && !current.quarantined(value.ID) {
 			return true
 		}
 	}
@@ -452,7 +560,7 @@ func (current *coordinator) cancelOperations(ctx context.Context) error {
 	// Commit the whole stop decision before effects. On any storage error no
 	// cancellation effect is delivered and recovery can finish the intent.
 	for id, value := range current.state.operations {
-		if operationIsTerminal(value.Status) || value.Status == operation.StatusCanceling {
+		if operationIsTerminal(value.Status) || value.Status == operation.StatusCanceling || current.quarantined(value.ID) {
 			continue
 		}
 		value.Status = operation.StatusCanceling
@@ -463,7 +571,7 @@ func (current *coordinator) cancelOperations(ctx context.Context) error {
 	}
 	var result error
 	for id, value := range current.state.operations {
-		if operationIsTerminal(value.Status) {
+		if operationIsTerminal(value.Status) || current.quarantined(value.ID) {
 			continue
 		}
 		if err := current.dependencies.Operations.Cancel(id, current.stop.request.Reason); err != nil {
@@ -480,7 +588,23 @@ func (current *coordinator) requestModelResponse(
 	if current.finished() {
 		return nil
 	}
-	boundary := current.state.selectionBoundary && current.cancelModel == nil && len(current.state.toolCalls) == 0 && !current.hasPendingOperations()
+	if current.modelReplayHeld() {
+		current.notifyModelReplayHold()
+		return nil
+	}
+	// Reconciliation may discover an uncertain terminal result after the event
+	// phase. Persist its projection boundary before applying the batch barrier.
+	if current.nativeConversation() && current.conversation != nil && current.conversation.needsEpoch {
+		if err := current.appendConversationEpoch(ctx, "quarantine"); err != nil {
+			return err
+		}
+	}
+	// Startup/resume can request a generation before processEvents. Apply the
+	// same transport barrier here, before context/Turn creation or network I/O.
+	if llm.RequiresToolBatch(current.dependencies.LLM) && current.modelToolCalls() != 0 {
+		return nil
+	}
+	boundary := current.state.selectionBoundary && current.cancelModel == nil && current.modelToolCalls() == 0 && !current.hasPendingOperations()
 	current.interruptModel()
 	var runtimeRevision uint64
 	if current.dependencies.BeforeTurn != nil {
@@ -490,12 +614,28 @@ func (current *coordinator) requestModelResponse(
 			return err
 		}
 	}
+	if err := current.activateNativeConversation(); err != nil {
+		return err
+	}
+	if current.nativeConversation() && current.conversation != nil && current.conversation.needsEpoch {
+		if err := current.appendConversationEpoch(ctx, "quarantine"); err != nil {
+			return err
+		}
+	}
 	if err := current.flushDeferredContext(); err != nil {
 		return err
 	}
 	built, err := current.dependencies.ContextBuilder.Build()
 	if err != nil {
-		return fmt.Errorf("build model request: %w", err)
+		if recovered, recoveryErr := current.recoverConversation(ctx, err); recovered {
+			if recoveryErr != nil {
+				return recoveryErr
+			}
+			built, err = current.dependencies.ContextBuilder.Build()
+		}
+		if err != nil {
+			return fmt.Errorf("build model request: %w", err)
+		}
 	}
 	if built.Report.Context != nil && current.dependencies.ContextBuilt != nil {
 		current.dependencies.ContextBuilt(*built.Report.Context)
@@ -505,6 +645,10 @@ func (current *coordinator) requestModelResponse(
 		PreviousTurnID:  current.state.currentTurnID,
 		Type:            session.TurnRegular,
 		RuntimeRevision: runtimeRevision,
+	}
+	if llm.RequiresExplicitReplay(current.dependencies.LLM) {
+		turn.NoAutomaticReplay = true
+		turn.InputWatermark = current.state.availableInputs
 	}
 	item, err := current.addItemToLocalState(sessionstore.Item{
 		Kind: sessionstore.ItemTurn,
@@ -528,12 +672,14 @@ func (current *coordinator) requestModelResponse(
 	actionScope := current.actionScope
 	go func() {
 		response, err := current.dependencies.LLM.Respond(requestContext, built.Request, llm.RequestOptions{
-			CacheKey:       string(current.dependencies.SessionID),
-			Tools:          current.toolRendezvous(requestContext, turn.ID),
-			BeginTools:     current.beginToolRendezvous(requestContext, turn.ID),
-			InputBudget:    inputBudget,
-			RefreshContext: current.refreshToolContext(requestContext, turn.ID),
-			ActionScope:    actionScope,
+			CacheKey:                string(current.dependencies.SessionID),
+			Identity:                llm.RequestIdentity{SessionID: string(current.dependencies.SessionID), TurnID: string(turn.ID), RuntimeRevision: turn.RuntimeRevision},
+			Tools:                   current.toolRendezvous(requestContext, turn.ID),
+			BeginTools:              current.beginToolRendezvous(requestContext, turn.ID),
+			InputBudget:             inputBudget,
+			RefreshContext:          current.refreshToolContext(requestContext, turn.ID),
+			RefreshProjectedContext: current.refreshProjectedToolContext(requestContext, turn.ID),
+			ActionScope:             actionScope,
 		})
 		select {
 		case results <- modelResponseResult{
@@ -574,6 +720,10 @@ func (current *coordinator) handleInboxInput(ctx context.Context, input inbox.In
 			return current.cancelOperation(ctx, operation.ID(request.Parameters.(inbox.CancelRequest).OperationID), request.Reason)
 		case inbox.UpdateSettings:
 			return nil
+		case inbox.InterruptAgent:
+			return current.interruptAgent(ctx, request.Reason)
+		case inbox.CancelChildren:
+			return current.cancelChildren(ctx, request.Reason)
 		case inbox.StopHard, inbox.StopWhenIdle:
 			current.acceptStop(request)
 		}
@@ -587,7 +737,7 @@ func (current *coordinator) handleInboxInputs(ctx context.Context, inputs []inbo
 		if err := current.handleInboxInput(ctx, input); err != nil {
 			return err
 		}
-		if input.Kind == inbox.InputExternal || input.Kind == inbox.InputPeer {
+		if input.Kind == inbox.InputExternal || input.Kind == inbox.InputPeer && !quietPeer(input) {
 			current.state.callModel = true
 		}
 	}
@@ -621,15 +771,24 @@ func slurpChannel[T any](
 func (current *coordinator) handleModelResponse(
 	ctx context.Context,
 	response sessionstore.ModelResponse,
-) ([]sessionstore.ToolCallStatus, error) {
-	item, err := current.addItemToLocalState(sessionstore.Item{
-		Kind: sessionstore.ItemModelResponse,
-		Data: response,
-	})
+) ([]scheduledToolCall, error) {
+	accepted, err := current.checkToolAdmission(response.Response)
 	if err != nil {
 		return nil, err
 	}
+	item := sessionstore.Item{
+		Kind: sessionstore.ItemModelResponse,
+		Data: response,
+	}
 	if err := current.storeItemInSessionStore(ctx, item); err != nil {
+		// Append errors can mean an unknown Write/Sync outcome. This owner
+		// must not retry from memory; a fresh owner rebuilds canonical facts.
+		current.toolAdmissionErr = llm.ErrToolRecoveryRequired
+		return nil, err
+	}
+	current.rememberToolAdmission(response.TurnID, accepted)
+	if _, err := current.addItemToLocalState(item); err != nil {
+		current.toolAdmissionErr = llm.ErrToolRecoveryRequired
 		return nil, err
 	}
 	if current.state.currentTurnType == session.TurnCompaction && response.TurnID == current.state.currentTurnID {
@@ -648,6 +807,13 @@ func (current *coordinator) handleOperationUpdate(
 	update operation.Operation,
 ) error {
 	if prior, ok := current.state.operations[update.ID]; ok {
+		if prior.RequiresPreparation() && !operation.SameExecutionMetadata(prior, update) {
+			// A revoked lease may finish while this owner is committing its
+			// preparation checkpoint. Such a worker still reports its older
+			// metadata; it cannot erase already durable owner evidence.
+			canonical := operation.CloneExecutionMetadata(prior)
+			update.Execution, update.Idempotence = canonical.Execution, canonical.Idempotence
+		}
 		// The owner serializes outcomes. A committed terminal is immutable; an
 		// accepted cancellation cannot be overwritten by a late worker completion.
 		if operationIsTerminal(prior.Status) {
@@ -670,16 +836,34 @@ func (current *coordinator) handleOperationUpdate(
 		}
 	}
 	current.addOperationToLocalState(update)
-	return current.storeOperationInSessionStore(ctx, update)
+	if err := current.storeOperationInSessionStore(ctx, update); err != nil {
+		return err
+	}
+	current.queueUncertainty(update)
+	return current.conversationLimitError()
 }
 
-func (current *coordinator) restore(ctx context.Context) error {
+func (current *coordinator) restore(ctx context.Context) (err error) {
+	current.toolIdentities, current.toolAdmissionErr = nil, nil
+	defer func() {
+		if err != nil {
+			current.toolAdmissionErr = llm.ErrToolRecoveryRequired
+		}
+	}()
 	current.pendingCancels = map[operation.ID]string{}
 	if err := current.loadHistory(ctx); err != nil {
 		return err
 	}
 	for _, value := range current.dependencies.Restored.Operations {
-		if permission.ControllerFromContext(ctx) != nil && !operationIsTerminal(value.Status) {
+		// Operation checkpoints follow the original ToolCallStatus proposal in
+		// canonical history. Install the latest durable basis before deriving
+		// uncertainty; the proposal may intentionally have no preparation yet.
+		current.addOperationToLocalState(value)
+		current.observeUncertainty(value, true)
+		if err := current.conversationLimitError(); err != nil {
+			return err
+		}
+		if permission.ControllerFromContext(ctx) != nil && !operationIsTerminal(value.Status) && !current.quarantined(value.ID) {
 			// A durable pending/granted annotation is evidence, never authority.
 			// Also covers the crash gap before the first admission checkpoint.
 			// Do not execute uncertain effects even if a fresh UI grants Full Access.
@@ -707,13 +891,34 @@ func (current *coordinator) restore(ctx context.Context) error {
 		}
 		_ = reason
 	}
+	if current.nativeConversation() && current.conversation != nil && current.conversation.needsEpoch {
+		if err := current.appendConversationEpoch(ctx, "quarantine"); err != nil {
+			return err
+		}
+	}
+	current.notifyModelReplayHold()
 	return nil
 }
 
-func (current *coordinator) loadHistory(ctx context.Context) error {
+func (current *coordinator) loadHistory(ctx context.Context) (result error) {
+	var history interface {
+		Items(context.Context, session.ID, sessionstore.Sequence, int) (sessionstore.Page, error)
+	} = current.dependencies.Sessions
+	if store, ok := current.dependencies.Sessions.(sessionstore.HistoryViewStore); ok {
+		view, err := store.OpenHistoryView(ctx, current.dependencies.SessionID)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if closeErr := view.Close(); closeErr != nil {
+				result = errors.Join(result, closeErr)
+			}
+		}()
+		history = view
+	}
 	after := sessionstore.BeforeFirst
 	for {
-		page, err := current.dependencies.Sessions.Items(
+		page, err := history.Items(
 			ctx,
 			current.dependencies.SessionID,
 			after,
@@ -723,21 +928,30 @@ func (current *coordinator) loadHistory(ctx context.Context) error {
 			return fmt.Errorf("load session history after %d: %w", after, err)
 		}
 		for _, item := range page.Items {
+			if item.Sequence != after+1 {
+				return llm.ErrToolRecoveryRequired
+			}
 			if err := current.restoreItem(item); err != nil {
 				return fmt.Errorf("load session item %d: %w", item.Sequence, err)
 			}
+			after = item.Sequence
+		}
+		if page.NextAfter != after {
+			return llm.ErrToolRecoveryRequired
 		}
 		if !page.More {
 			return nil
 		}
-		if page.NextAfter <= after {
+		if len(page.Items) == 0 {
 			return fmt.Errorf("load session history did not advance after %d", after)
 		}
-		after = page.NextAfter
 	}
 }
 
 func (current *coordinator) restoreItem(item sessionstore.Item) error {
+	if err := current.restoreToolAdmission(item); err != nil {
+		return err
+	}
 	status, ok := item.Data.(sessionstore.ToolCallStatus)
 	if item.Kind == sessionstore.ItemToolCallStatus && ok && toolCallRequiresTranslator(status) {
 		call, exists := current.state.toolCalls[toolCallKey{turnID: status.TurnID, callID: status.CallID}]
@@ -775,6 +989,17 @@ func (current *coordinator) addItemToLocalState(
 		if err := r.Validate(); err != nil {
 			return sessionstore.Item{}, err
 		}
+		// A mixed-provider Session must retain Native uncertainty protections
+		// after switching/restarting under another provider. Pristine legacy
+		// Sessions allocate no recovery state.
+		if r.Kind == "configuration" {
+			if s := sessionstore.SelectionFromConfiguration(r.Configuration); s != nil && s.Provider == "claude-native" {
+				current.conversationState()
+			}
+		}
+		if r.Kind == sessionstore.HostRuntimeApplied && r.Selection != nil && r.Selection.Provider == "claude-native" {
+			current.conversationState()
+		}
 		if b, ok := current.dependencies.ContextBuilder.(interface{ SetHistoryProvider(string) }); ok {
 			if r.Kind == "configuration" {
 				if s := sessionstore.SelectionFromConfiguration(r.Configuration); s != nil {
@@ -787,6 +1012,18 @@ func (current *coordinator) addItemToLocalState(
 		}
 		// The creation-time snapshot is replayed, never rediscovered, so resume,
 		// restart, and fork keep the revision the session started with.
+		if r.Kind == sessionstore.HostConversationEpoch {
+			if err := current.applyConversationEpoch(*r.Conversation); err != nil {
+				return sessionstore.Item{}, err
+			}
+		}
+		if r.Kind == sessionstore.HostModelRequestFailure {
+			if r.ModelRequestFailure == nil || r.ModelRequestFailure.TurnID != current.state.replayTurn {
+				return sessionstore.Item{}, errors.New("model failure does not match pending request")
+			}
+			current.state.replayTurn = ""
+			current.state.replayNotified = false
+		}
 		if r.Kind == sessionstore.HostProjectInstructions {
 			if current.state.instructionsBound {
 				return sessionstore.Item{}, fmt.Errorf("duplicate project instructions record")
@@ -802,6 +1039,48 @@ func (current *coordinator) addItemToLocalState(
 				"fork data is %T, want sessionstore.Fork",
 				item.Data,
 			)
+		}
+		// A child inherits restrictions, never parent execution authority. Fork
+		// does not isolate its filesystem, so known unknown effects remain held.
+		current.drainUncertainty()
+		if current.nativeConversation() || current.conversation != nil {
+			// Forked history can retain WaitingFor identities while deliberately
+			// stripping parent Operation bodies. Missing evidence is not proof
+			// that an already-started parent effect was harmless or completed.
+			budget := 32 << 20
+			for _, call := range current.state.toolCalls {
+				for id := range call.operations {
+					op, exists := current.state.operations[id]
+					if exists && len(op.State) <= budget {
+						budget -= len(op.State)
+						if !operationUncertain(op) {
+							continue
+						}
+					}
+					current.markUncertain(id)
+					if err := current.conversationLimitError(); err != nil {
+						return sessionstore.Item{}, err
+					}
+				}
+			}
+		}
+		if err := current.conversationLimitError(); err != nil {
+			return sessionstore.Item{}, err
+		}
+		inherited := map[operation.ID]bool(nil)
+		inheritedEffects := map[operation.ID]jsontext.Value(nil)
+		if current.conversation != nil && len(current.conversation.quarantined) != 0 {
+			inherited = current.conversation.quarantined
+			inheritedEffects = current.conversation.effects
+		}
+		current.conversation = nil
+		if len(inherited) != 0 {
+			state := current.conversationState()
+			state.quarantined, state.needsEpoch = inherited, true
+			state.effects = inheritedEffects
+		}
+		if b, ok := current.dependencies.ContextBuilder.(interface{ ResetConversationProjection() }); ok {
+			b.ResetConversationProjection()
 		}
 		// FIXME: Forks leave inherited calls without results and retain pending-input accounting.
 		clear(current.state.toolCalls)
@@ -836,6 +1115,7 @@ func (current *coordinator) addItemToLocalState(
 				}
 			}
 			current.state.availableInputs++
+			current.state.externalInputs++
 			current.actionScope = string(input.ID)
 		}
 		if input.Kind == inbox.InputPeer {
@@ -849,6 +1129,9 @@ func (current *coordinator) addItemToLocalState(
 				}
 			}
 			current.state.availableInputs++
+			if quietPeer(input) {
+				current.state.quietInputs++
+			}
 			current.actionScope = string(input.ID)
 		}
 		if input.Kind == inbox.InputControl {
@@ -860,6 +1143,12 @@ func (current *coordinator) addItemToLocalState(
 				op, err := sessionstore.DecodeOperationIntent(input)
 				if err != nil {
 					return sessionstore.Item{}, err
+				}
+				// Inherited restrictions have no child-owned Operation for the
+				// Store's ownership check. Reject retyping before either local
+				// state or canonical input can replace the original evidence.
+				if current.conversation != nil && (current.conversation.quarantined[op.ID] || current.conversation.pending[op.ID]) {
+					return sessionstore.Item{}, llm.ErrToolIdentityConflict
 				}
 				current.addOperationToLocalState(op)
 			}
@@ -889,6 +1178,17 @@ func (current *coordinator) addItemToLocalState(
 			current.state.selectionBoundary = false
 		}
 		current.state.currentTurnInputs = current.state.availableInputs
+		if turn.Type == session.TurnRegular && turn.ToolContinuation == "" {
+			current.state.quietInputs = 0 // this request carries every input so far
+		}
+		if turn.NoAutomaticReplay {
+			if turn.ToolContinuation != "" || turn.InputWatermark < 0 || turn.InputWatermark != current.state.availableInputs {
+				return sessionstore.Item{}, errors.New("invalid non-replay request input watermark")
+			}
+			current.state.replayTurn = turn.ID
+			current.state.replayExternals = current.state.externalInputs
+			current.state.replayNotified = false
+		}
 		if turn.ToolContinuation != "" {
 			if turn.InputWatermark < 0 || turn.InputWatermark > current.state.availableInputs {
 				return sessionstore.Item{}, errors.New("invalid tool continuation input watermark")
@@ -908,10 +1208,17 @@ func (current *coordinator) addItemToLocalState(
 		if current.state.currentTurnType == session.TurnCompaction && response.TurnID == current.state.currentTurnID {
 			return item, nil
 		}
+		if current.conversation != nil {
+			current.conversation.attempts = 0
+		}
 		// The complete output includes messages, reasoning, and tool calls.
 		current.dependencies.ContextBuilder.AddModelResponse(response.Response)
 		if response.TurnID == current.state.currentTurnID {
 			current.state.deliveredInputs = current.state.currentTurnInputs
+			if response.TurnID == current.state.replayTurn {
+				current.state.replayTurn = ""
+				current.state.replayNotified = false
+			}
 			current.state.selectionBoundary = true
 			for _, out := range response.Response.Output {
 				if out.Type == llm.ItemToolCall {
@@ -929,8 +1236,38 @@ func (current *coordinator) addItemToLocalState(
 				item.Data,
 			)
 		}
+		if len(status.InheritedFacts()) > 0 {
+			// Used only while replaying the inherited prefix. No dispatch takes
+			// place during restore, and ItemFork clears every parent Operation.
+			// Inspection still uses the strict typed uncertainty classifier.
+			if len(status.InheritedFacts()) > 128 {
+				return sessionstore.Item{}, llm.ErrToolRecoveryRequired
+			}
+			budget := 32 << 20
+			for _, fact := range status.InheritedFacts() {
+				op := operation.Operation(fact)
+				budget -= len(op.State)
+				if budget < 0 || !operationIsTerminal(op.Status) {
+					return sessionstore.Item{}, llm.ErrToolRecoveryRequired
+				}
+				current.addOperationToLocalState(op)
+				// Terminal inherited calls can be retired before ItemFork. Their
+				// inspection-only facts must still reach the bounded uncertainty
+				// classifier before parent execution ownership is cleared.
+				current.queueUncertainty(op)
+				if err := current.conversationLimitError(); err != nil {
+					return sessionstore.Item{}, err
+				}
+			}
+		}
 		for _, value := range status.Operations {
 			current.addOperationToLocalState(value)
+			// Retired wire calls still carry canonical execution facts. Preserve
+			// unexamined terminal IDs even when no ToolResult is projected.
+			current.queueUncertainty(value)
+			if err := current.conversationLimitError(); err != nil {
+				return sessionstore.Item{}, err
+			}
 		}
 		current.addToolCallOperationsToLocalState(status)
 		if err := current.addToolResultToLocalState(status); err != nil {
@@ -955,7 +1292,7 @@ func (current *coordinator) addToolCallsToLocalState(response sessionstore.Model
 				current.structuredCalls = map[string]*canonicalBridgeCall{}
 			}
 			if current.structuredCalls[call.CallID] == nil {
-				current.structuredCalls[call.CallID] = &canonicalBridgeCall{call: call}
+				current.structuredCalls[call.CallID] = &canonicalBridgeCall{identity: current.toolIdentities[call.CallID].digest}
 			}
 		}
 		current.state.toolCalls[toolCallKey{
@@ -995,6 +1332,9 @@ func (current *coordinator) finishToolCall(
 ) {
 	key := toolCallKey{turnID: turnID, callID: callID}
 	delete(current.state.toolCalls, key)
+	if current.conversation != nil {
+		delete(current.conversation.retired, key)
+	}
 	delete(current.state.graceToolCalls, key)
 	if len(current.state.graceToolCalls) == 0 {
 		current.clearToolGrace()
@@ -1022,6 +1362,12 @@ func (current *coordinator) toolCallOperationsAreTerminal(
 func (current *coordinator) addToolResultToLocalState(
 	status sessionstore.ToolCallStatus,
 ) error {
+	if current.retiredCall(toolCallKey{turnID: status.TurnID, callID: status.CallID}) {
+		if current.toolCallOperationsAreTerminal(status.TurnID, status.CallID) {
+			current.finishToolCall(status.TurnID, status.CallID)
+		}
+		return nil
+	}
 	call, exists := current.state.toolCalls[toolCallKey{
 		turnID: status.TurnID,
 		callID: status.CallID,
@@ -1035,7 +1381,9 @@ func (current *coordinator) addToolResultToLocalState(
 	}
 	if !exists {
 		if !toolCallRequiresTranslator(status) {
-			current.dependencies.ContextBuilder.AddToolResult(status.CallID, []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: status.Status.Error}}, false)
+			if err := current.projectToolResult(status, llm.ToolResult{CallID: status.CallID, Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: status.Status.Error}}}, nil, false); err != nil {
+				return err
+			}
 			current.rememberBridgeResult(status, llm.ToolResult{CallID: status.CallID, Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: status.Status.Error}}}, nil)
 			current.finishToolCall(status.TurnID, status.CallID)
 		}
@@ -1058,11 +1406,9 @@ func (current *coordinator) addToolResultToLocalState(
 		return fmt.Errorf("add tool call %q result to context: %w", status.CallID, err)
 	}
 	running := !current.toolCallOperationsAreTerminal(status.TurnID, status.CallID)
-	current.dependencies.ContextBuilder.AddToolResult(
-		status.CallID,
-		result.Output,
-		running,
-	)
+	if err := current.projectToolResult(status, result, translator, running); err != nil {
+		return err
+	}
 	if !running {
 		current.rememberBridgeResult(status, result, translator)
 		current.finishToolCall(status.TurnID, status.CallID)
@@ -1079,17 +1425,17 @@ func (current *coordinator) addOperationToLocalState(
 
 func (current *coordinator) scheduleToolCalls(
 	ctx context.Context,
-) ([]sessionstore.ToolCallStatus, error) {
-	statuses := make([]sessionstore.ToolCallStatus, 0)
+) ([]scheduledToolCall, error) {
+	statuses := make([]scheduledToolCall, 0)
 	for key, call := range current.state.toolCalls {
-		if call.status != nil {
+		if call.status != nil || current.retiredCall(key) {
 			continue
 		}
 		status, err := current.scheduleToolCall(ctx, key, call.toolCall)
 		if err != nil {
 			return nil, err
 		}
-		statuses = append(statuses, status)
+		statuses = append(statuses, toolCallHandoff(status))
 	}
 	return statuses, nil
 }
@@ -1108,6 +1454,18 @@ func (current *coordinator) scheduleToolCall(
 		status = translator.Translate(toolContext, call)
 	} else {
 		status = tool.ErrorStatus(fmt.Sprintf("tool %q is not available", call.Name), 0)
+	}
+	if status.Error == "" {
+		for index, value := range toolContext.operations {
+			value.ToolName = call.Name
+			prepared, denial := current.prepareRecoveryOperation(ctx, value)
+			if denial != nil {
+				status = tool.CallStatus{Error: denial.Error(), Denial: denial}
+				toolContext.operations = nil
+				break
+			}
+			toolContext.operations[index] = prepared
+		}
 	}
 	operations := make([]operation.Operation, 0, len(toolContext.operations))
 	for _, value := range toolContext.operations {
@@ -1135,23 +1493,25 @@ func (current *coordinator) scheduleToolCall(
 
 func (current *toolCallContext) Submit(spec operation.Spec) operation.ID {
 	id := operation.ID(uuid.New().String())
-	current.operations = append(current.operations, operation.Operation{
+	current.operations = append(current.operations, operation.WithIdempotency(operation.WithDependencies(operation.Operation{
 		MaxOutputLength: spec.MaxOutputLength,
 		ID:              id,
 		Type:            spec.Type,
 		Version:         spec.Version,
 		Status:          operation.StatusReady,
 		State:           spec.State,
-		Idempotency:     spec.Idempotency,
-	})
+	}, spec.DependencyIDs()), spec.Idempotency))
 	return id
 }
 
 func (current *coordinator) reconcileToolCalls(
 	ctx context.Context,
-) ([]sessionstore.ToolCallStatus, error) {
-	completed := make([]sessionstore.ToolCallStatus, 0)
+) ([]scheduledToolCall, error) {
+	completed := make([]scheduledToolCall, 0)
 	for key := range current.state.toolCalls {
+		if current.retiredCall(key) && current.state.toolCalls[key].status == nil {
+			continue
+		}
 		if !current.toolCallOperationsAreTerminal(key.turnID, key.callID) {
 			continue
 		}
@@ -1180,19 +1540,10 @@ func (current *coordinator) reconcileToolCalls(
 			return nil, err
 		}
 		if _, exists := current.state.toolCalls[key]; !exists {
-			completed = append(completed, status)
+			completed = append(completed, toolCallHandoff(status))
 		}
 	}
 	return completed, nil
-}
-
-func toolCallStatusesRequireModelResponse(statuses []sessionstore.ToolCallStatus) bool {
-	for _, status := range statuses {
-		if status.Status.Error != "" || len(status.Status.WaitingFor) == 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func (current *coordinator) storeItemInSessionStore(
@@ -1260,6 +1611,25 @@ func (current *coordinator) storeOperationInSessionStore(
 	if b, ok := current.dependencies.ContextBuilder.(interface{ ObserveOperation(operation.Operation) }); ok {
 		b.ObserveOperation(value)
 	}
+	if operationIsTerminal(value.Status) {
+		if backend, ok := current.dependencies.Operations.(operation.CanonicalOperationAcknowledger); ok {
+			// The optional backend receives detached evidence, not mutable owner
+			// state. The default local path does not allocate or perform IPC here.
+			evidence := operation.CloneExecutionMetadata(value)
+			evidence.State = value.State.Clone()
+			if value.Permission != nil {
+				decision := *value.Permission
+				evidence.Permission = &decision
+			}
+			if value.Denial != nil {
+				denial := *value.Denial
+				evidence.Denial = &denial
+			}
+			if err := backend.AcknowledgeCanonicalOperation(ctx, evidence); err != nil {
+				return fmt.Errorf("acknowledge saved operation: %w", err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -1275,6 +1645,27 @@ func (current *coordinator) dispatchOperationsToManager(ctx context.Context) err
 func (current *coordinator) dispatchOperationToManager(ctx context.Context, value operation.Operation) error {
 	if latest, ok := current.state.operations[value.ID]; ok {
 		value = latest
+	}
+	if current.quarantined(value.ID) {
+		return nil
+	}
+	if !operationIsTerminal(value.Status) {
+		prepared, denial := current.prepareRecoveryOperation(ctx, value)
+		if denial != nil {
+			denied := operation.PermissionFailure(value, denial)
+			denied.Permission = &permission.Decision{State: "denied"}
+			if c := permission.ControllerFromContext(ctx); c != nil {
+				denied.Permission.Mode = c.Snapshot().Mode
+			}
+			return current.handleOperationUpdate(ctx, denied)
+		}
+		if !operation.SameExecutionMetadata(value, prepared) {
+			if err := current.storeOperationInSessionStore(ctx, prepared); err != nil {
+				return err
+			}
+			current.addOperationToLocalState(prepared)
+		}
+		value = prepared
 	}
 	if _, requested := current.pendingCancels[value.ID]; requested && !operationIsTerminal(value.Status) && value.Status != operation.StatusCanceling {
 		value.Status = operation.StatusCanceling
@@ -1294,7 +1685,7 @@ func (current *coordinator) dispatchOperationToManager(ctx context.Context, valu
 		return nil
 	}
 	value.State = value.State.Clone()
-	value.Idempotency = value.Idempotency.Clone()
+	value = operation.CloneExecutionMetadata(value)
 	if err := current.dependencies.Operations.Add(value); err != nil {
 		return fmt.Errorf("dispatch operation %q: %w", value.ID, err)
 	}

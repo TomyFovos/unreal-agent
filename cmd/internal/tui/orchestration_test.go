@@ -349,3 +349,25 @@ func TestOrchestrationScrollReachesEveryNodeAndSplitFollowsActivePath(t *testing
 		t.Fatal("Split lost active path or parent", frameText(f))
 	}
 }
+
+// Orchestration and Split show what each running child does now, so following
+// a child needs no /child command.
+func TestOrchestrationShowsWhatEachRunningChildDoes(t *testing.T) {
+	s, u := orchestrationFixture()
+	u.Viewer.Rows[1].Activity = "running the parser tests"
+	o := BuildOrchestration(s, u.Viewer, u.Now, 128)
+	if a := topologyNode(t, o, "agent:child-a"); a.Activity != "running the parser tests" {
+		t.Fatalf("child-a = %+v", a)
+	}
+	var lines []string
+	for _, r := range topologyRows(o, 100, Theme{Plain: true}) {
+		lines = append(lines, r.content.plain())
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), "now: running the parser tests") {
+		t.Fatalf("rows = %q", lines)
+	}
+	u.Viewer.Rows[1].Activity = "api_key=synthetic-token"
+	if a := topologyNode(t, BuildOrchestration(s, u.Viewer, u.Now, 128), "agent:child-a"); strings.Contains(a.Activity, "synthetic-token") {
+		t.Fatal("activity exposed a secret")
+	}
+}

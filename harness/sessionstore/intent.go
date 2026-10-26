@@ -23,5 +23,5 @@ func DecodeOperationIntent(input inbox.Input) (operation.Operation, error) {
 	if spec.Type == "" || spec.Version == 0 || !spec.State.IsValid() {
 		return operation.Operation{}, fmt.Errorf("invalid operation spec")
 	}
-	return operation.Operation{ID: operation.ID(intent.OperationID), ToolName: intent.ToolName, Type: spec.Type, Version: spec.Version, Status: operation.StatusReady, State: spec.State, Idempotency: spec.Idempotency, MaxOutputLength: spec.MaxOutputLength}, nil
+	return operation.WithIdempotency(operation.Operation{ID: operation.ID(intent.OperationID), ToolName: intent.ToolName, Type: spec.Type, Version: spec.Version, Status: operation.StatusReady, State: spec.State, MaxOutputLength: spec.MaxOutputLength}, spec.Idempotency), nil
 }

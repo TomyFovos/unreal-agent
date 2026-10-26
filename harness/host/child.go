@@ -81,6 +81,15 @@ func SessionFromContext(ctx context.Context) (*Session, bool) {
 func (s *Session) WithExecutionPolicy(ctx context.Context) context.Context {
 	return permission.WithPolicy(ctx, permission.FromContext(s.ctx))
 }
+
+// WithCapabilityPolicy bounds ctx by what this Session may ever do: the
+// operator maximum when permission modes are on, else its fixed policy.
+func (s *Session) WithCapabilityPolicy(ctx context.Context) context.Context {
+	if c := permission.ControllerFromContext(s.ctx); c != nil {
+		return permission.WithPolicy(ctx, permission.FromContext(c.MaximumContext(s.ctx)))
+	}
+	return s.WithExecutionPolicy(ctx)
+}
 func (s *Session) Finish() *sessionstore.FinishRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()

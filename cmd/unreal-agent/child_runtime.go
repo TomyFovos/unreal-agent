@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/harness/host"
@@ -10,14 +11,16 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
-	"os/exec"
-	"path/filepath"
 )
 
 func childRuntimeResolver(c agentrunner.RuntimeConfig) subagent.RuntimeResolver {
 	return func(ctx context.Context, owner *host.Session, template subagent.Template, requested *subagent.RuntimeRequest) (subagent.Template, error) {
-		ctx = owner.WithExecutionPolicy(ctx)
+		// The child follows the Session's mode; only its maximum bounds the start.
+		ctx = owner.WithCapabilityPolicy(ctx)
 		fail := func(code string) (subagent.Template, error) { return template, &subagent.RuntimeError{Code: code} }
+		if requested == nil {
+			requested = template.Default
+		}
 		if e := permission.FromContext(ctx).CheckTool("SubagentStart"); e != nil {
 			return fail("permission_denied")
 		}
@@ -73,20 +76,7 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig) subagent.RuntimeResolver 
 		// replace a pinned version with the alias (or break stable-ID retries).
 		identity.Provider.Model.ID = choice.Model
 		identity.ReasoningEffort = choice.Effort
-		identity.ClaudeCode = backend.ClaudeCode
-		if identity.ClaudeCode != nil {
-			copy := *identity.ClaudeCode
-			name := copy.Binary
-			if name == "" {
-				name = "claude"
-			}
-			path, e := exec.LookPath(name)
-			if e != nil {
-				return fail("provider_unavailable")
-			}
-			copy.Binary, _ = filepath.Abs(path)
-			identity.ClaudeCode = &copy
-		}
+		identity.Claude = backend.Claude
 		registry, e := c.Providers.WithModel(identity.Provider)
 		if e != nil {
 			return fail("invalid_model")
@@ -97,10 +87,6 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig) subagent.RuntimeResolver 
 		}
 		template.Runtime = raw
 		check := subagent.ChildConfig{Version: 1, ParentID: "validation", OperationID: "validation", ChildID: subagent.ChildID("validation", "validation"), ReadyID: "ready:validation", Task: "validation", SessionDirectory: c.SessionDirectory, Workspace: template.Workspace, Runtime: raw, Policy: template.Policy}
-		if choice.Provider == "claude-code" {
-			check.TextOnly = !sessionstore.ToolBridgeEnabledFromConfiguration(raw)
-			check.ProviderProcess = true
-		}
 		if check.Validate() != nil {
 			return fail("incompatible_capability")
 		}
@@ -136,22 +122,7 @@ func childTemplateValidator(c agentrunner.RuntimeConfig) func(subagent.Template,
 		if !bytes.Equal(expected, actual) {
 			return fail()
 		}
-		cfg := backend.ClaudeCode
-		if cfg != nil {
-			copy := *cfg
-			name := copy.Binary
-			if name == "" {
-				name = "claude"
-			}
-			path, e := exec.LookPath(name)
-			if e != nil {
-				return fail()
-			}
-			copy.Binary, _ = filepath.Abs(path)
-			cfg = &copy
-		}
 		a.Provider = registered
-		a.ClaudeCode = cfg
 		a.ReasoningEffort = b.ReasoningEffort
 		// The same factory normalization used at creation fills catalog display
 		// names and resolved operator defaults. It performs no auth/inference and
@@ -162,9 +133,11 @@ func childTemplateValidator(c agentrunner.RuntimeConfig) func(subagent.Template,
 			return fail()
 		}
 		base.Runtime = chosen.Runtime
+		// Stored plans come back canonicalized, nested worker runtimes too.
 		old, _ := json.Marshal(base)
 		now, _ := json.Marshal(chosen)
-		if !bytes.Equal(old, now) {
+		was, is := jsontext.Value(old), jsontext.Value(now)
+		if was.Canonicalize() != nil || is.Canonicalize() != nil || !bytes.Equal(was, is) {
 			return fail()
 		}
 		return nil

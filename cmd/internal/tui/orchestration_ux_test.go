@@ -30,7 +30,7 @@ func TestOrchestrationRunPickerDirectCommandsAndComposerEditing(t *testing.T) {
 	out := &screenObserver{}
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(t.Context(), Config{Client: f, ID: "s", Keys: keys, Output: out, Theme: &Theme{Plain: true}, Size: func() (int, int) { return 120, 24 }, Command: func(context.Context, string) (string, bool) {
+		done <- Run(t.Context(), Config{Client: f, ID: "s", Keys: keys, Output: out, Theme: &Theme{Plain: true}, InitialView: ViewChat, Size: func() (int, int) { return 120, 24 }, Command: func(context.Context, string) (string, bool) {
 			t.Error("/view delegated to a Host command")
 			return "", false
 		}})
@@ -267,6 +267,10 @@ func TestOrchestrationRunLiveUpdatesPickerRuntimeSwitchReconnectAndExport(t *tes
 		return strings.Contains(out.text(), "parent s  running") && strings.Contains(out.text(), "r8")
 	})
 	viewCommand(keys, "/export")
+	waitFor(t, func() bool { return strings.Contains(out.text(), "Export as Markdown") })
+	keys <- Key{Name: "down"}
+	keys <- Key{Name: "down"}
+	keys <- Key{Name: "enter"}
 	waitFor(t, func() bool { return strings.Contains(out.text(), "Export response") })
 	keys <- Key{Name: "enter"}
 	paths := exportFiles(t, exports, 1)
@@ -286,11 +290,12 @@ func TestOrchestrationRunLiveUpdatesPickerRuntimeSwitchReconnectAndExport(t *tes
 func TestOrchestrationViewCommandDiscoveryPastedAndPrivateSafety(t *testing.T) {
 	s, u := idleSnapshot(), plainUI()
 	u.Input = "/vi"
+	// The menu lists /view alone; its views appear after choosing it.
 	options := candidates(s, u)
-	if len(options) != 4 {
-		t.Fatal("view command variants absent", options)
+	if len(options) != 1 || options[0].Name != "/view" {
+		t.Fatal("view choices listed in the command menu", options)
 	}
-	if !strings.Contains(strings.Join(helpSheet(u.Theme, false).Lines, "\n"), "/view orchestration") {
+	if !strings.Contains(strings.Join(helpSheet(u.Theme, false).Lines, "\n"), "/view: Chat, Orchestration or Split") {
 		t.Fatal("help not updated")
 	}
 	var editor Editor
@@ -299,17 +304,12 @@ func TestOrchestrationViewCommandDiscoveryPastedAndPrivateSafety(t *testing.T) {
 	complete.reset()
 	complete.apply(&editor, s, &u)
 	if editor.Text() != "/view" {
-		t.Fatal("view common-prefix completion", editor.Text())
-	}
-	complete.move(&editor, s, &u, 2)
-	complete.apply(&editor, s, &u)
-	if editor.Text() != "/view orchestration" {
-		t.Fatal("arrow selection + Tab completion", editor.Text())
+		t.Fatal("view completion", editor.Text())
 	}
 	f := conversationFixture("paste safety response")
 	keys, out, done := make(chan Key, 32), &screenObserver{}, make(chan error, 1)
 	go func() {
-		done <- Run(t.Context(), Config{Client: f, ID: "s", Keys: keys, Output: out, Theme: &Theme{Plain: true}})
+		done <- Run(t.Context(), Config{Client: f, ID: "s", Keys: keys, Output: out, Theme: &Theme{Plain: true}, InitialView: ViewChat})
 	}()
 	defer func() {
 		keys <- Key{Name: "detach"}

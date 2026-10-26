@@ -42,16 +42,17 @@ type modelReply struct {
 	Capabilities map[string]modelcatalog.Capabilities `json:",omitzero"`
 }
 type modelUI struct {
-	binding    *launcherHostBinding
-	owner      *host.Host
-	cache      string
-	claude     modelcatalog.Catalog
-	claudeRead func(context.Context, bool) (modelcatalog.Catalog, error)
-	codexRead  func(context.Context, bool) (modelcatalog.Catalog, error)
-	next       http.Handler
-	runtime    agentrunner.RuntimeConfig
-	templates  map[string]subagent.Template
-	policy     *permission.Policy
+	supported []modelcatalog.Provider
+	binding   *launcherHostBinding
+	owner     *host.Host
+	cache     string
+	// claudeAgent reads the Claude route's catalog (U21).
+	claudeAgent *claudeCatalog
+	codexRead   func(context.Context, bool) (modelcatalog.Catalog, error)
+	next        http.Handler
+	runtime     agentrunner.RuntimeConfig
+	templates   map[string]subagent.Template
+	policy      *permission.Policy
 }
 
 func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -91,7 +92,10 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if len(h.runtime.Backends) == 0 {
 					resolve = nil
 				}
-				receipt, e := subagent.StartChild(permission.WithPolicy(r.Context(), h.policy), s, q.Generation, q.InputID, q.Template, q.Task, h.templates, q.ChildRuntime, resolve)
+				// The resolver bounds the start by the Session's own capability;
+				// the gateway's read-only baseline would only narrow that, and the
+				// child then follows the Session's mode itself.
+				receipt, e := subagent.StartChild(r.Context(), s, q.Generation, q.InputID, q.Template, q.Task, h.templates, q.ChildRuntime, resolve)
 				if e != nil {
 					out.Error = "child_start_failed"
 					var re *subagent.RuntimeError
@@ -118,6 +122,26 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				id = q.Selection.Provider
 				if id == "" && active != nil {
 					id = active.Provider
+				}
+			}
+			if len(h.supported) > 0 {
+				available := false
+				if peek.Action == "model.catalog" && q.Refresh {
+					// A registered, authenticated backend can refresh missing model
+					// metadata. This never registers a backend or changes trust/auth.
+					_, registered := h.runtime.ProviderRuntime(id)
+					available = registered == nil && h.runtime.CheckProvider(r.Context(), id) == nil
+				} else {
+					for _, p := range h.providers(r.Context()) {
+						if p.ID == id && p.Availability == "available" {
+							available = true
+						}
+					}
+				}
+				if !available {
+					out.Error = "provider_unavailable"
+					h.writeReply(w, out)
+					return
 				}
 			}
 			c, e := h.catalog(r.Context(), id, q.Refresh && peek.Action == "model.catalog")

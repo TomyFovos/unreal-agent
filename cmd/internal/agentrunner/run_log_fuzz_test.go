@@ -62,7 +62,10 @@ func FuzzRunLogMatchesExecution(f *testing.F) {
 					case 0:
 						call.Name = "UnknownTool"
 					case 1:
-						call.Arguments = `{`
+						// Malformed JSON now fails before canonical admission (covered
+						// by the Coordinator admission tests). This log/codec oracle
+						// needs a schema-invalid call that produces a typed tool error.
+						call.Arguments = `{"name":true}`
 					default:
 						validCalls[call.CallID] = true
 					}

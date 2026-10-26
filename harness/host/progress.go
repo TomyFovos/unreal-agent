@@ -28,6 +28,37 @@ type progressAdapter struct {
 	now     func() time.Time
 }
 
+func (a *progressAdapter) RequiresFullToolBatch() bool          { return llm.RequiresToolBatch(a.next) }
+func (a *progressAdapter) ConversationRecoveryProvider() string { return llm.RecoveryProvider(a.next) }
+func (a *progressAdapter) NoAutomaticReplay() bool              { return llm.RequiresExplicitReplay(a.next) }
+
+func (s *Session) modelReplayHeld(turn session.TurnID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.progress = &Progress{TurnID: turn, Mode: "model_send_unknown", Text: "Previous Native request outcome is unknown. Enter a new instruction to continue.", Done: true}
+	s.broadcast(Event{Kind: "progress", Progress: s.progress})
+}
+
+// ModelBusy reports whether a model call of this Session is in flight, and
+// a channel that closes when that changes.
+func (s *Session) ModelBusy() (bool, <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.respondingChanged == nil {
+		s.respondingChanged = make(chan struct{})
+	}
+	return s.responding > 0, s.respondingChanged
+}
+
+// respondingLocked records a model call starting or ending.
+func (s *Session) respondingLocked(delta int) {
+	s.responding += delta
+	if s.respondingChanged != nil {
+		close(s.respondingChanged)
+	}
+	s.respondingChanged = make(chan struct{})
+}
+
 func (s *Session) withProgress(next llm.Adapter) llm.Adapter {
 	return &progressAdapter{session: s, next: next}
 }
@@ -54,6 +85,8 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 	epoch := s.progressEpoch
 	turn := s.currentTurn()
 	origin := turn
+	s.respondingLocked(1)
+	defer func() { s.mu.Lock(); s.respondingLocked(-1); s.mu.Unlock() }()
 	s.progress = &Progress{TurnID: turn, Epoch: epoch, Mode: "completed_response"}
 	s.broadcast(Event{Kind: "progress", Progress: s.progress})
 	s.mu.Unlock()

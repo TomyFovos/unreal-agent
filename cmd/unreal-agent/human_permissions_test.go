@@ -15,10 +15,8 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
-	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
-	"github.com/unreallabsai/unreal-agent/internal/testclaude"
 )
 
 func humanModeConfiguration(cfg serveConfiguration) serveConfiguration {
@@ -45,53 +43,42 @@ func setGatewayHumanMode(t *testing.T, w permission.ControlConnection, mode perm
 }
 
 func TestHumanProviderPermissionsUseCanonicalOperationsForBothAdapters(t *testing.T) {
-	for _, provider := range []string{"claude", "codex"} {
+	for _, provider := range []string{"codex"} {
 		for _, mode := range []string{"readonly", "ask-allow", "ask-deny", "full"} {
 			t.Run(provider+"/"+mode, func(t *testing.T) {
 				allow := mode == "ask-allow" || mode == "full"
 				args := `{"path":"human.txt","content":"human-approved\n","expected":{"exists":false}}`
 				var cfg serveConfiguration
-				var f *testclaude.Fixture
 				var auth string
 				var calls atomic.Int32
 				var receipt atomic.Bool
-				if provider == "claude" {
-					f = testclaude.New(t)
-					cfg = bridgeServeConfiguration(t, f)
-					cfg.Runtime.ClaudeCode.ToolBridge.Mode = claudecode.BridgeModeStructured
-					contains := "permission denied"
-					if allow {
-						contains = "applied"
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var req multiWire
+					if err := json.UnmarshalRead(r.Body, &req); err != nil {
+						t.Error(err)
+						return
 					}
-					f.Set(t, testclaude.Config{Subscription: "team", BridgeManagedPermissionsOnly: true, BridgeSteps: []testclaude.BridgeStep{{Name: "write", Arguments: args, Error: !allow, Contains: contains, Duplicate: true}}})
-				} else {
-					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						var req multiWire
-						if err := json.UnmarshalRead(r.Body, &req); err != nil {
-							t.Error(err)
-							return
+					var outputs []any
+					if calls.Add(1) == 1 {
+						outputs = []any{map[string]any{"type": "function_call", "id": "human-call", "call_id": "human-call", "name": "write", "arguments": args}}
+					} else {
+						input, _ := json.Marshal(req.Input)
+						contains := "permission denied"
+						if allow {
+							contains = "applied"
 						}
-						var outputs []any
-						if calls.Add(1) == 1 {
-							outputs = []any{map[string]any{"type": "function_call", "id": "human-call", "call_id": "human-call", "name": "write", "arguments": args}}
-						} else {
-							input, _ := json.Marshal(req.Input)
-							contains := "permission denied"
-							if allow {
-								contains = "applied"
-							}
-							receipt.Store(strings.Contains(string(input), contains))
-							outputs = []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "Bridge fixture completed"}}}}
-						}
-						event, _ := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]any{"id": "human-response", "status": "completed", "output": outputs}})
-						w.Header().Set("Content-Type", "text/event-stream")
-						fmt.Fprintf(w, "data: %s\n\n", event)
-					}))
-					t.Cleanup(server.Close)
-					cfg = codexServeConfiguration(t.TempDir(), server.URL)
-					auth = filepath.Join(t.TempDir(), "auth.json")
-					writeCodexAuth(t, auth, "human-fixture-secret", "human-fixture-account")
-				}
+						receipt.Store(strings.Contains(string(input), contains))
+						outputs = []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "Bridge fixture completed"}}}}
+					}
+					event, _ := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]any{"id": "human-response", "status": "completed", "output": outputs}})
+					w.Header().Set("Content-Type", "text/event-stream")
+					fmt.Fprintf(w, "data: %s\n\n", event)
+				}))
+				t.Cleanup(server.Close)
+				cfg = codexServeConfiguration(t.TempDir(), server.URL)
+				auth = filepath.Join(t.TempDir(), "auth.json")
+				writeCodexAuth(t, auth, "human-fixture-secret", "human-fixture-account")
+
 				cfg = humanModeConfiguration(cfg)
 				var c *gateway.Client
 				if auth != "" {
@@ -148,13 +135,7 @@ func TestHumanProviderPermissionsUseCanonicalOperationsForBothAdapters(t *testin
 				if allow && (err != nil || string(content) != "human-approved\n") || !allow && !os.IsNotExist(err) {
 					t.Fatal("unexpected effect", err)
 				}
-				if f != nil {
-					for _, call := range f.Calls(t) {
-						cliArgument(t, call, "--tools", "")
-						cliArgument(t, call, "--allowedTools", "StructuredOutput")
-						cliArgument(t, call, "--mcp-config", `{"mcpServers":{}}`)
-					}
-				} else if calls.Load() != 2 || !receipt.Load() {
+				if calls.Load() != 2 || !receipt.Load() {
 					t.Fatal("Codex did not receive canonical permission receipt")
 				}
 				encoded, _ := json.Marshal(end.History)

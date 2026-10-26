@@ -15,8 +15,6 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
-	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudecode"
-	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 )
@@ -27,8 +25,10 @@ type launchOptions struct {
 	timeout                                                 time.Duration
 	help                                                    bool
 	normal                                                  bool
-	bootstrapDocker, bootstrapAudited, bootstrapTrust       bool
+	bootstrapDocker                                         bool
+	bootstrapAuto                                           bool
 	bootstrapClaude                                         string
+	bootstrapCodexDisabled, bootstrapClaudeDisabled         bool
 }
 
 // Dependency hooks are local composition, not Host or gateway state.
@@ -121,9 +121,10 @@ func parseLaunchOptions(args []string, output io.Writer, getenv func(string) str
 	flags.StringVar(&o.socket, "socket", "", "private socket (default XDG_RUNTIME_DIR/unreal-agent/host.sock or STATE/run/host.sock)")
 	flags.StringVar(&o.credentials, "credential-directory", "", "optional managed API-key store")
 	flags.StringVar(&o.codexFile, "codex-auth-file", "", "external Codex auth file; uses existing Codex discovery by default")
+	flags.BoolVar(&o.bootstrapCodexDisabled, "bootstrap-codex-disabled", false, "first-run discovery: operator declines Codex")
+	flags.BoolVar(&o.bootstrapClaudeDisabled, "bootstrap-claude-disabled", false, "first-run discovery: operator declines Claude")
 	flags.BoolVar(&o.bootstrapDocker, "bootstrap-codex-docker-oauth", false, "first-run discovery: explicitly use Docker Sandbox OAuth and validated forward proxy")
-	flags.BoolVar(&o.bootstrapAudited, "bootstrap-claude-policy-audited", false, "first-run discovery: operator attests Claude managed policy audit")
-	flags.BoolVar(&o.bootstrapTrust, "bootstrap-claude-managed-trust", false, "first-run discovery: explicit managed policy trust (requires audit)")
+	flags.BoolVar(&o.bootstrapAuto, "bootstrap-codex-auto", false, "first-run discovery: validate native Codex routing; never fall back from an intended Docker source")
 	flags.StringVar(&o.bootstrapClaude, "bootstrap-claude-binary", "", "first-run discovery: optional external Claude executable")
 	flags.DurationVar(&o.timeout, "startup-timeout", o.timeout, "maximum wait for gateway readiness")
 	flags.BoolVar(&o.help, "help", false, "show usage")
@@ -177,8 +178,8 @@ func parseLaunchOptions(args []string, output io.Writer, getenv func(string) str
 	if o.timeout <= 0 {
 		return o, errors.New("startup-timeout must be positive")
 	}
-	if o.bootstrapTrust != o.bootstrapAudited {
-		return o, errors.New("Claude managed trust requires both explicit audit and trust; no configuration changed")
+	if err := validateBootstrapChoices(o); err != nil {
+		return o, err
 	}
 	home := getenv("HOME")
 	if home == "" {
@@ -332,11 +333,6 @@ func (l launcher) ensureHost(ctx context.Context, client *gateway.Client, o laun
 						return fmt.Errorf("Codex credentials at %s must be an existing private regular file; use codex login and private permissions: %w", codexPath, &credential.Error{Code: "external_reauth_required"})
 					}
 				}
-				if config.Runtime.Provider.Provider == "claude-code" && !o.normal && config.Launcher == nil && len(config.Providers) == 0 {
-					if err = preflightClaudeLauncher(ctx, config); err != nil {
-						return err
-					}
-				}
 				if err = makePrivateDirectory(o.state); err != nil {
 					return err
 				}
@@ -431,22 +427,6 @@ func launcherSessionError(id session.ID, cause error) error {
 type launchError struct {
 	message string
 	cause   error
-}
-
-func preflightClaudeLauncher(ctx context.Context, config serveConfiguration) error {
-	if config.Runtime.ClaudeCode == nil {
-		return errors.New("claude-code requires Runtime.ClaudeCode executable/catalog configuration")
-	}
-	policy, err := permission.New(config.Permissions)
-	if err != nil {
-		return err
-	}
-	defer policy.Close()
-	cli, err := claudecode.NewClient(*config.Runtime.ClaudeCode)
-	if err != nil {
-		return err
-	}
-	return cli.Probe(permission.WithPolicy(ctx, policy))
 }
 
 func (e *launchError) Error() string { return e.message }

@@ -175,3 +175,85 @@ func TestHumanModesConfigAndUnrestrictedBaselineCannotBypassReadonly(t *testing.
 	assertDenied(t, FromContext(ctx).CheckProcess(), Denied)
 	assertDenied(t, FromContext(ctx).CheckPath(filepath.Join(t.TempDir(), "x"), true), Denied)
 }
+
+// A child's controller follows its parent's mode and takes its parent's
+// answers, without a human lease (U17).
+func TestChildControllerFollowsParentAndTakesAnswers(t *testing.T) {
+	c, ctx, _ := humanController(t, Unrestricted(), time.Hour)
+	if err := c.Follow(Ask); err != nil || c.Snapshot().Mode != Ask {
+		t.Fatal("follow ask", err)
+	}
+	result := c.Request(ctx, Request{ID: "op", Tool: "Bash", Privileged: true})
+	if len(c.Snapshot().Pending) != 1 {
+		t.Fatal("request not pending")
+	}
+	if err := c.Answer("op", true); err != nil {
+		t.Fatal(err)
+	}
+	if p := getPermit(t, result); p.Denial != nil || p.Decision.State != "allow_once" {
+		t.Fatal("answer did not allow", p.Decision)
+	}
+	if c.Answer("op", true) == nil || c.Answer("missing", false) == nil {
+		t.Fatal("answered a request that is not pending")
+	}
+	denied := c.Request(ctx, Request{ID: "op2", Tool: "Bash", Privileged: true})
+	if err := c.Follow(FullAccess); err != nil {
+		t.Fatal(err)
+	}
+	if p := getPermit(t, denied); p.Denial == nil || p.Decision.State != "revoked" {
+		t.Fatal("a mode change must end a waiting request", p.Decision)
+	}
+	if p := getPermit(t, c.Request(ctx, Request{ID: "op3", Tool: "Bash", Privileged: true})); p.Denial != nil {
+		t.Fatal("full access denied", p.Decision)
+	}
+}
+
+// Orchestration holds the maximum in every mode and outlives mode changes.
+func TestOrchestrationPermitHoldsMaximumAndSurvivesModeChanges(t *testing.T) {
+	c, ctx, key := humanController(t, Unrestricted(), time.Hour)
+	permit := getPermit(t, c.Request(ctx, Request{ID: "child", Tool: "SubagentStart", Orchestration: true}))
+	if permit.Denial != nil {
+		t.Fatal(permit.Decision)
+	}
+	defer permit.Release()
+	if err := FromContext(permit.Context).CheckProcess(); err != nil {
+		t.Fatal("orchestration must hold the maximum in Read Only", err)
+	}
+	humanMode(t, c, key, Ask)
+	humanMode(t, c, key, FullAccess)
+	if permit.Context.Err() != nil {
+		t.Fatal("a mode change revoked orchestration")
+	}
+	ordinary := getPermit(t, c.Request(ctx, Request{ID: "read", Tool: "read"}))
+	defer ordinary.Release()
+	humanMode(t, c, key, ReadOnly)
+	if ordinary.Context.Err() == nil {
+		t.Fatal("ordinary Full Access work survived a mode change")
+	}
+}
+
+// A read-only command runs in Read Only with the maximum's process
+// permission, and a mode change does not revoke it.
+func TestHumanReadOnlyCommandRunsInEveryMode(t *testing.T) {
+	c, ctx, key := humanController(t, Unrestricted(), time.Second)
+	for _, mode := range []Mode{ReadOnly, Ask, FullAccess} {
+		if c.Snapshot().Mode != mode {
+			humanMode(t, c, key, mode)
+		}
+		p := getPermit(t, c.Request(ctx, Request{ID: "git-" + string(mode), Tool: "Bash", ReadOnlyCommand: true, Scope: "$ git log"}))
+		if p.Denial != nil || p.Context == nil {
+			t.Fatalf("%s: %+v", mode, p)
+		}
+		if err := FromContext(p.Context).CheckProcess(); err != nil {
+			t.Fatalf("%s: the command cannot start: %v", mode, err)
+		}
+		if mode == ReadOnly {
+			humanMode(t, c, key, Ask)
+			if p.Context.Err() != nil {
+				t.Fatal("a mode change revoked a read-only command")
+			}
+			humanMode(t, c, key, ReadOnly)
+		}
+		p.Release()
+	}
+}

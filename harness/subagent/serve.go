@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	"golang.org/x/sys/unix"
 	"io"
@@ -55,6 +56,9 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 	if hello.Sender != string(config.ParentID) || hello.Target != string(config.ChildID) {
 		return fmt.Errorf("handshake identity mismatch")
 	}
+	if hello.Mode != "" && !hello.Mode.Valid() {
+		return fmt.Errorf("invalid parent permission mode")
+	}
 	if factory == nil {
 		return fmt.Errorf("child factory is required")
 	}
@@ -82,6 +86,7 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 		return nil
 	}
 	var child *host.Session
+	var control *permission.Controller // nil for a child with a fixed policy
 	ready := make(chan struct{})
 	ep.receive = func(ctx context.Context, in inbox.Input) (host.Receipt, error) {
 		select {
@@ -98,12 +103,41 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 		}
 		return child.SubmitPeer(ctx, child.Generation, string(config.ParentID), string(config.OperationID), in)
 	}
+	// The parent's mode and answers apply to this child's controller.
+	parentControl := func(f frame) error {
+		if f.Connection != ep.connection || f.Sender != ep.remote || f.Target != ep.local {
+			return fmt.Errorf("stale or mismatched peer channel")
+		}
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		}
+		switch {
+		case f.Kind == "mode" && f.Mode.Valid():
+			if control != nil {
+				_ = control.Follow(f.Mode) // a stopping child refuses; nothing to apply
+			}
+			return nil
+		case f.Kind == "decide" && f.Approval != nil:
+			// A request that ended meanwhile reports approval_done instead.
+			if control != nil {
+				_ = control.Answer(f.Approval.ID, f.Approval.Allow)
+			}
+			return nil
+		}
+		return fmt.Errorf("invalid parent control frame")
+	}
 	readDone := make(chan error, 1)
 	workers.Go(func() {
 		for {
 			f, err := readFrame(input)
 			if err == nil {
-				err = ep.accept(f)
+				if f.Kind == "mode" || f.Kind == "decide" {
+					err = parentControl(f)
+				} else {
+					err = ep.accept(f)
+				}
 			}
 			if err != nil {
 				readDone <- err
@@ -115,7 +149,7 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 	deadline := time.NewTimer(10 * time.Second)
 	defer deadline.Stop()
 	for {
-		child, closer, err = factory(ctx, config, ep.send)
+		child, closer, err = factory(ctx, config, ChildLink{Send: ep.send, Mode: hello.Mode})
 		if !errors.Is(err, localfile.ErrWriterOwned) {
 			break
 		}
@@ -140,10 +174,17 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 	if child == nil || child.ID != config.ChildID {
 		return fmt.Errorf("child factory identity mismatch")
 	}
+	if hello.Mode != "" {
+		// A child runtime without modes keeps its fixed policy.
+		control, _ = child.PermissionControl(child.Generation)
+	}
 	close(ready)
 	welcome := ep.envelope("welcome")
 	if err = ep.write(ctx, welcome); err != nil {
 		return err
+	}
+	if control != nil {
+		workers.Go(func() { forwardApprovals(ctx, ep, control) })
 	}
 	// Ready has stable identity in canonical ChildConfig and is retryable after
 	// either side loses an ACK. Final completion never travels as a Peer input.
@@ -184,6 +225,42 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 				return ep.write(ctx, f)
 			}
 			return child.Wait(ctx)
+		}
+	}
+}
+
+// forwardApprovals tells the parent which of this child's requests wait for
+// its decision (U17), and which ended.
+func forwardApprovals(ctx context.Context, ep *endpoint, control *permission.Controller) {
+	sent := map[string]bool{}
+	for {
+		snapshot, changed := control.Watch()
+		waiting := map[string]bool{}
+		for _, p := range snapshot.Pending {
+			waiting[p.ID] = true
+			if !sent[p.ID] {
+				f := ep.envelope("approval")
+				f.Approval = &Approval{ID: p.ID, Tool: p.Tool, Scope: p.Scope}
+				if ep.write(ctx, f) != nil {
+					return
+				}
+				sent[p.ID] = true
+			}
+		}
+		for id := range sent {
+			if !waiting[id] {
+				f := ep.envelope("approval_done")
+				f.Approval = &Approval{ID: id}
+				if ep.write(ctx, f) != nil {
+					return
+				}
+				delete(sent, id)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
 		}
 	}
 }

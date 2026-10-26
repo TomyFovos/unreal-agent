@@ -335,6 +335,12 @@ type BuildInput struct {
 	RequiredGroups map[string]bool
 	// Cost includes renderer framing and any same-provider transient replay.
 	Cost func(Unit, string, bool) int64
+	// BaseCost measures the exact provider rendering of instructions plus state,
+	// excluding TransportReserve. It is pure, pinned and request-local.
+	BaseCost func(llm.Item, State) (int64, error)
+	// MeasureSelected checks the complete provider projection, including the
+	// reserve. Marginal estimates cannot model every cross-item JSON boundary.
+	MeasureSelected func(llm.Item, State, []Selected) (int64, error)
 }
 
 func (e *Engine) Build(in BuildInput) (Package, Diagnostics, error) {
@@ -416,6 +422,15 @@ func (e *Engine) Build(in BuildInput) (Package, Diagnostics, error) {
 	slices.SortFunc(dependencies, func(a, b Unit) int { return cmp.Compare(a.ID, b.ID) })
 	state = budgetState(state, instructions, available-mandatory)
 	base := Estimate(instructions) + Estimate(StateItem(state))
+	if in.BaseCost != nil {
+		base, err = in.BaseCost(instructions, state)
+		if err != nil {
+			return Package{}, Diagnostics{}, err
+		}
+		if base < 0 {
+			return Package{}, Diagnostics{}, &Error{"invalid_projection_cost"}
+		}
+	}
 	if base+mandatory > available {
 		return Package{}, Diagnostics{}, &Error{"required_context_exceeds_budget"}
 	}
@@ -544,6 +559,42 @@ func (e *Engine) Build(in BuildInput) (Package, Diagnostics, error) {
 		}
 		return cmp.Compare(a.Unit.ID, b.Unit.ID)
 	})
+	if in.MeasureSelected != nil {
+		// Remove optional history as complete groups. Never demote an unreceived
+		// receipt, current request, running/final dependency or required unit.
+		for {
+			actual, err := in.MeasureSelected(instructions, state, selected)
+			if err != nil {
+				return Package{}, Diagnostics{}, err
+			}
+			if actual <= budget.Input {
+				break
+			}
+			index := -1
+			for i, candidate := range selected {
+				if candidate.Unit.Required || in.RequiredGroups[candidate.Unit.Group] {
+					continue
+				}
+				groupRequired := false
+				for _, member := range selected {
+					if candidate.Unit.Group != "" && member.Unit.Group == candidate.Unit.Group && member.Unit.Required {
+						groupRequired = true
+					}
+				}
+				if !groupRequired {
+					index = i
+					break
+				}
+			}
+			if index < 0 {
+				return Package{}, Diagnostics{}, &Error{"required_context_exceeds_budget"}
+			}
+			removed := selected[index].Unit
+			selected = slices.DeleteFunc(selected, func(s Selected) bool {
+				return s.Unit.ID == removed.ID || removed.Group != "" && s.Unit.Group == removed.Group
+			})
+		}
+	}
 	p := Package{Version: Version, Runtime: state.Runtime, Instructions: instructions, State: state, Checkpoint: cloneCheckpoint(e.checkpoint), Selected: selected, Budget: budget, EstimatedTokens: base}
 	d := Diagnostics{Version: Version, Provider: state.Runtime.Provider, Model: state.Runtime.Model, Effort: state.Runtime.Effort, RuntimeRevision: state.Runtime.Revision, ThroughSequence: e.through, CheckpointBoundary: e.checkpoint.ThroughSequence, CheckpointVersion: Version, CanonicalUnits: len(e.units), Excluded: e.excluded, Budget: budget, RetrievalMicros: elapsed, Measurement: "estimated", Cache: e.cache}
 	for _, s := range selected {
@@ -564,7 +615,7 @@ func (e *Engine) Build(in BuildInput) (Package, Diagnostics, error) {
 		item := p.Selected[i].Unit.Item
 		if p.Selected[i].ReferenceOnly {
 			if v, ok := item.Data.(llm.ToolResult); ok {
-				item.Data = llm.ToolResult{CallID: v.CallID}
+				item.Data = llm.ToolResult{CallID: v.CallID, State: v.State}
 			}
 		}
 		p.Selected[i].Unit.Item = clonePublicItem(item)

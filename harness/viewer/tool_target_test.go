@@ -25,6 +25,10 @@ func TestSafeToolTargetSharedDisplayWhitelist(t *testing.T) {
 		{"Bash", `{"command":"env PRIVATE_ENV=value-never-shown go test ./..."}`, ""},
 		{"read", `{"path":"api_key=synthetic-private"}`, ""},
 		{"read", `not-json`, ""},
+		{"claude_code", `{"tool":"Edit","input":{"file_path":"/w/sample.txt","old_string":"private-old","new_string":"private-new"}}`, "Edit /w/sample.txt"},
+		{"claude_code", `{"tool":"Bash","input":{"command":"go test ./...\nprivate second","description":"Run tests"}}`, "Bash go test ./..."},
+		{"claude_code", `{"tool":"Bash","input":{"command":"PRIVATE_ENV=value-never-shown go test ./..."}}`, "Bash"},
+		{"claude_code", `{"tool":"WebFetch","input":{"url":"https://example.test/docs"}}`, "WebFetch https://example.test/docs"},
 	} {
 		t.Run(tt.name+tt.want, func(t *testing.T) {
 			if got := SafeToolTarget(llm.ToolCall{Name: tt.name, Arguments: tt.args}); got != tt.want {

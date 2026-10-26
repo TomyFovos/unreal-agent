@@ -9,6 +9,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 )
 
@@ -72,6 +73,11 @@ func StartChild(ctx context.Context, owner *host.Session, generation string, inp
 	if e != nil {
 		return host.Receipt{}, e
 	}
-	sum := sha256.Sum256([]byte(string(owner.ID) + "\x00" + string(input)))
-	return owner.SubmitOperation(ctx, generation, input, operation.ID("child-start-"+hex.EncodeToString(sum[:16])), "SubagentStart", spec)
+	return owner.SubmitOperation(ctx, generation, input, StartOperationID(owner.ID, input), "SubagentStart", spec)
+}
+
+// StartOperationID is the handle StartChild gives a child started with input.
+func StartOperationID(parent session.ID, input inbox.ID) operation.ID {
+	sum := sha256.Sum256([]byte(string(parent) + "\x00" + string(input)))
+	return operation.ID("child-start-" + hex.EncodeToString(sum[:16]))
 }

@@ -26,6 +26,10 @@ func New(config Config) tool.Translator {
 	return &translator{config: config}
 }
 
+func (translator *translator) ShellDescription() string {
+	return tool.ShellCommandDescription(translator.config.Shell)
+}
+
 func (translator *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallStatus {
 	command, limit, err := validateArguments(call.Arguments)
 	if err != nil {
