@@ -103,9 +103,11 @@ func (c *CodexCLI) discover(ctx context.Context) Catalog {
 		return fail("codex_cli_start_failed")
 	}
 	defer os.RemoveAll(directory)
+	// The CLI's app-server can take about ten seconds to start in a sandbox
+	// (seen on japan-harness-60g), and only answers model/list after that.
 	timeout := c.Timeout
-	if timeout <= 0 || timeout > 15*time.Second {
-		timeout = 10 * time.Second
+	if timeout <= 0 || timeout > 60*time.Second {
+		timeout = 30 * time.Second
 	}
 	processCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
