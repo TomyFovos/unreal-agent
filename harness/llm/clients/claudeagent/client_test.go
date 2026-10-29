@@ -194,7 +194,10 @@ func TestFullAccessEditRunsAndIsRecorded(t *testing.T) {
 		t.Fatalf("final usage = %+v", u)
 	}
 	for _, g := range []*llm.GenerationStatistics{first.Generation, response.Generation} {
-		if g == nil || !g.Valid() || g.DurationMicros < 15000 || g.DurationMicros > 2000000 {
+		// Pipe buffering and scheduling can compress or extend the interval
+		// this process observes. Exact timing and excluded waits are checked
+		// with a controlled clock in TestGenerationTimingExcludesToolAndApprovalWaits.
+		if g == nil || !g.Valid() {
 			t.Fatalf("generation statistics = %+v", g)
 		}
 	}

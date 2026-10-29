@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json/v2"
 	"fmt"
 	"io"
@@ -153,6 +154,7 @@ type gptHost struct {
 	binary, directory string
 	gpt               *fakeGPT
 	claude            *testclaude.Fixture
+	stop              func()
 }
 
 func startGPTHost(t *testing.T, leadRuns bool) *gptHost {
@@ -183,8 +185,8 @@ func startGPTHost(t *testing.T, leadRuns bool) *gptHost {
 	cfg.Providers = map[string]agentrunner.ProviderRuntime{"openai-codex": {Provider: codex.Provider, ReasoningEffort: codex.ReasoningEffort}}
 	cfg.Permissions.NetworkOrigins = []string{server.URL}
 	directory := privateCLIDirectory(t)
-	c, _ := startMultiChildCLI(t, binary, cfg, directory, 4*time.Minute)
-	return &gptHost{client: c, binary: binary, directory: directory, gpt: gpt, claude: f}
+	c, stop := startMultiChildCLI(t, binary, cfg, directory, 4*time.Minute)
+	return &gptHost{client: c, binary: binary, directory: directory, gpt: gpt, claude: f, stop: stop}
 }
 
 // designer opens the Session in Ask, holding the human's control lease.
@@ -313,12 +315,22 @@ func TestClaudeDrivesGPTThroughBash(t *testing.T) {
 	h.claude.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentSteps: steps, AgentFinal: "designer reviewed the report", AgentOnce: true})
 	view := h.designer(t)
 	submitInteractive(t, h.client, view, "delegate", "Have GPT implement the feature.")
+	// This is a full lead/worker run through several race-instrumented CLI
+	// processes, including their exit waits and subagent wait's polling. Its
+	// completion is already observed through a subscription, but cannot fit
+	// the single-interaction helper's 5 s budget. Match the command's 120 s
+	// wait plus time for Claude Code and the Host to record the final answer.
+	ctx, cancel := context.WithTimeout(t.Context(), 130*time.Second)
+	defer cancel()
 	var history string
-	inspectInteractive(t, h.client, "designer", func(v host.View) bool {
+	_, err := waitSubscribedView(ctx, h.client, "designer", func(v host.View) bool {
 		data, _ := json.Marshal(v.History.Items)
 		history = string(data)
 		return strings.Contains(history, "designer reviewed the report")
 	})
+	if err != nil {
+		t.Fatal("Claude did not finish the delegated run", err)
+	}
 	if !strings.Contains(history, "summary: lead done") || !strings.Contains(history, "lead (gpt-6.1-sol ultra)") {
 		v, _ := h.client.Inspect(t.Context(), "designer", 0, 1)
 		for _, op := range v.Operations {
@@ -326,10 +338,24 @@ func TestClaudeDrivesGPTThroughBash(t *testing.T) {
 		}
 		t.Fatal("Claude did not get the lead's report\n", history[max(0, len(history)-3000):])
 	}
+	h.check(t)
+	h.gpt.mu.Lock()
+	sawEmailInstruction := h.gpt.sawEmailInstruction
+	h.gpt.mu.Unlock()
+	if !sawEmailInstruction {
+		t.Fatal("the child did not start with the email instruction intact")
+	}
+	// Drain the Session and reap the Host before counting turns. A fixed
+	// sleep cannot prove that the children's ready notices were processed.
+	if _, err := h.client.Stop(ctx, "designer", view.Generation, inbox.StopWhenIdle, "test complete"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := waitSubscribedView(ctx, h.client, "designer", func(v host.View) bool { return !v.Running }); err != nil {
+		t.Fatal("designer did not drain", err)
+	}
+	h.stop()
 	calls := h.claude.Calls(t)
-	// The children's ready notices do not start more Claude turns.
-	time.Sleep(2 * time.Second)
-	if calls = h.claude.Calls(t); len(calls) != 1 {
+	if len(calls) != 1 {
 		t.Fatalf("Claude Code ran %d turns, want 1; last input %.1500s", len(calls), calls[len(calls)-1].Input)
 	}
 	if !slices.Contains(calls[0].Environment, "UNREAL_AGENT_SESSION=designer") || !slices.Contains(calls[0].Environment, "UNREAL_AGENT_SOCKET="+filepath.Join(h.directory, "host.sock")) {
@@ -337,11 +363,5 @@ func TestClaudeDrivesGPTThroughBash(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(calls[0].Arguments, " "), h.binary+" subagent start --template lead") {
 		t.Fatal("Claude's prompt does not name the command")
-	}
-	h.check(t)
-	h.gpt.mu.Lock()
-	defer h.gpt.mu.Unlock()
-	if !h.gpt.sawEmailInstruction {
-		t.Fatal("the child did not start with the email instruction intact")
 	}
 }

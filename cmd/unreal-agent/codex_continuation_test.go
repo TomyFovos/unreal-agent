@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json/v2"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
@@ -23,6 +25,8 @@ import (
 	files "github.com/unreallabsai/unreal-agent/harness/native"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/session"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/internal/testcodex"
 )
 
@@ -198,14 +202,7 @@ func TestDockerOAuthMultiToolContinuationFailureAndResume(t *testing.T) {
 			if _, err = s.Submit(t.Context(), s.Generation, input); err != nil {
 				t.Fatal(err)
 			}
-			var before host.View
-			waitInteractive(t, func() bool {
-				before, err = s.Inspect(0, 4096)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return !before.Running || responseCount(before) == len(steps)+1
-			})
+			before := waitContinuationResponses(t, s, len(steps)+1)
 			if failure != "none" {
 				stage, reason, status := "stream_error", "server_error", 200
 				if failure == "http-502" {
@@ -275,14 +272,10 @@ func TestDockerOAuthMultiToolContinuationFailureAndResume(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var after host.View
-			waitInteractive(t, func() bool {
-				after, err = s.Inspect(0, 4096)
-				if err != nil || after.Failure != "" {
-					t.Fatal("resume failed", err, after.Failure)
-				}
-				return responseCount(after) == len(steps)+1
-			})
+			after := waitContinuationResponses(t, s, len(steps)+1)
+			if after.Failure != "" || responseCount(after) != len(steps)+1 {
+				t.Fatal("resume failed", after.Failure, responseCount(after))
+			}
 			// The selected mode survives resume (U20); completed work is
 			// never replayed.
 			if after.Permissions.Mode != permission.FullAccess || len(after.Operations) != len(ops) {
@@ -325,4 +318,38 @@ func TestDockerOAuthMultiToolContinuationFailureAndResume(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Each response advances the chain through a real tool execution and another
+// model request. Observe those commits instead of repeatedly cloning the entire
+// Session every millisecond under one 5 s deadline for all seven requests.
+// A stalled response still fails within the original interaction budget.
+func waitContinuationResponses(t *testing.T, s *host.Session, count int) host.View {
+	t.Helper()
+	var view host.View
+	for n := 1; n <= count; n++ {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		var err error
+		view, err = waitSubscribedView(ctx, continuationObserver{s}, s.ID, func(v host.View) bool {
+			return !v.Running || responseCount(v) >= n
+		})
+		cancel()
+		if err != nil {
+			t.Fatalf("continuation response %d/%d: %v", n, count, err)
+		}
+		if !view.Running {
+			break
+		}
+	}
+	return view
+}
+
+type continuationObserver struct{ session *host.Session }
+
+func (o continuationObserver) Inspect(_ context.Context, _ session.ID, after sessionstore.Sequence, limit int) (host.View, error) {
+	return o.session.Inspect(after, limit)
+}
+
+func (o continuationObserver) Subscribe(_ context.Context, _ session.ID, after sessionstore.Sequence, limit, capacity int) (host.Subscription, error) {
+	return o.session.Subscribe(after, limit, capacity)
 }

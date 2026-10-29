@@ -178,6 +178,11 @@ func (c *CodexCLI) discover(ctx context.Context) Catalog {
 	}
 	defer output.Close()
 	if cmd.Start() != nil {
+		// Cancellation can arrive during discovery setup, after Catalog's
+		// initial context check but before exec starts the process.
+		if ctx.Err() != nil {
+			return fail("codex_cli_canceled")
+		}
 		return fail("codex_cli_start_failed")
 	}
 	result, err := readCodexCatalog(output, input)

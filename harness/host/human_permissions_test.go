@@ -143,7 +143,9 @@ func TestHumanHostPendingApprovalRecoveryDoesNotExecuteOrDuplicate(t *testing.T)
 	result := waitOperation(t, r, "one-op", func(o operation.Operation) bool {
 		return o.Status == operation.StatusCanceled || o.Status == operation.StatusFailed
 	})
-	if result.Status != operation.StatusCanceled || result.Permission == nil || result.Permission.State != "pending" {
+	// Closing the Host may cancel the pending request before it stops, or
+	// resume may cancel it; either way no approval was granted.
+	if result.Status != operation.StatusCanceled || result.Permission == nil || result.Permission.State != "pending" && result.Permission.State != "canceled" {
 		t.Fatal("resume reused approval", result)
 	}
 	replayed, err := r.SubmitOperation(timeout(t), r.Generation, "one-input", "one-op", "Bash", spec)

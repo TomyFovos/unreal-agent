@@ -193,7 +193,7 @@ func TestCodexCLIProcessCacheRefreshEnvironmentAndCleanup(t *testing.T) {
 }
 
 func TestCodexCLIProcessMissingCrashCancellationTimeout(t *testing.T) {
-	for _, mode := range []string{"missing", "crash", "hang", "malformed", "canceled"} {
+	for _, mode := range []string{"missing", "crash", "hang", "malformed", "canceled", "canceled-before-start"} {
 		t.Run(mode, func(t *testing.T) {
 			home := t.TempDir()
 			binary := testcodex.Install(t, home, []any{mode})
@@ -201,6 +201,7 @@ func TestCodexCLIProcessMissingCrashCancellationTimeout(t *testing.T) {
 				binary += ".absent"
 			}
 			ctx := t.Context()
+			validate := func(context.Context) error { return nil }
 			if mode == "hang" {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
@@ -211,14 +212,22 @@ func TestCodexCLIProcessMissingCrashCancellationTimeout(t *testing.T) {
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
+			if mode == "canceled-before-start" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				defer cancel()
+				// Expire the request after Catalog's initial check, before
+				// exec.Cmd.Start, without depending on scheduler timing.
+				validate = func(context.Context) error { cancel(); return nil }
+			}
 			cli := &CodexCLI{Home: home, CachePath: filepath.Join(home, "catalog-cache.json"), Binary: binary, Getenv: func(key string) string {
 				if key == "HOME" {
 					return home
 				}
 				return os.Getenv(key)
-			}, Validate: func(context.Context) error { return nil }}
+			}, Validate: validate}
 			c := cli.Catalog(ctx, false)
-			want := map[string]string{"missing": "codex_cli_missing", "crash": "codex_cli_protocol_invalid", "hang": "codex_cli_canceled", "malformed": "codex_cli_protocol_invalid", "canceled": "codex_cli_canceled"}[mode]
+			want := map[string]string{"missing": "codex_cli_missing", "crash": "codex_cli_protocol_invalid", "hang": "codex_cli_canceled", "malformed": "codex_cli_protocol_invalid", "canceled": "codex_cli_canceled", "canceled-before-start": "codex_cli_canceled"}[mode]
 			if c.Available || len(c.Models) != 0 || c.ProblemCode != want {
 				t.Fatal("wrong safe failure", c.ProblemCode, want)
 			}
