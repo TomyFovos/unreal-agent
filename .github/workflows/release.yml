@@ -37,6 +37,9 @@ jobs:
         run: python3 -m unittest discover -p 'test_*.py'
       - name: Install GoReleaser 2.18.2
         shell: bash
+        # GoReleaser 2.18.2 needs a newer Go than go.mod pins; let go fetch it.
+        env:
+          GOTOOLCHAIN: auto
         run: |
           GOBIN="$RUNNER_TEMP/goreleaser-bin" go install -ldflags='-X main.version=2.18.2' \
             github.com/goreleaser/goreleaser/v2@v2.18.2

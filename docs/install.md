@@ -27,7 +27,7 @@ Unreal 内の `/login` で手順を確認できます。API キーの登録は�
 Linux で直接取得する場合（`<版>` は Release のタグに付いた短いリビジョンです）:
 
 ```bash
-v=v1.0.0; r=<版>
+v=v1.0.1; r=<版>
 cd /tmp
 curl -fLO "https://github.com/TomyFovos/unreal-agent/releases/download/$v/unreal-agent-linux-amd64-$r.tar.gz"
 curl -fLO "https://github.com/TomyFovos/unreal-agent/releases/download/$v/unreal-agent-linux-amd64-$r.tar.gz.sha256"
