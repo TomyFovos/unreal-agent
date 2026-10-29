@@ -30,6 +30,7 @@ func Lines(r Report, view string, ascii bool) []string {
 	}
 	switch strings.ToLower(view) {
 	case "overview":
+		out = append(out, cacheLines(r)...)
 		out = append(out, "Session     "+string(r.Session))
 		if r.Selection != nil {
 			out = append(out, "Provider    "+r.Selection.Provider, "Model       "+r.Selection.Name, "Effort      "+r.Selection.Effort)
@@ -41,7 +42,7 @@ func Lines(r Report, view string, ascii bool) []string {
 		if r.ManagedPolicyMode != "" {
 			mode := "blocked (text-only)"
 			if r.ToolBridgeEnabled {
-				mode = "blocked; Unreal SDK MCP bridge enabled"
+				mode = "blocked; Unreal tools available"
 				if r.ToolBridgeMode == "structured" {
 					mode = "side-effecting tools blocked; StructuredOutput serializer only"
 				}
@@ -64,9 +65,12 @@ func Lines(r Report, view string, ascii bool) []string {
 		}
 		out = append(out, "Elapsed     "+elapsed, "Tokens")
 		out = append(out, usageLines(r.Usage)...)
+		out = append(out, compactionLines(r)...)
 		out = append(out, fmt.Sprintf("Tools       %d calls · %d completed · %d failed · %d canceled", r.Tools.Calls, r.Tools.Completed, r.Tools.Failed, r.Tools.Canceled), fmt.Sprintf("Agents      %d discovered · %d observed", r.AgentCounts.Discovered, r.AgentCounts.Observed), fmt.Sprintf("            %d success · %d failed · %d canceled · %d finish unknown", r.AgentCounts.Success, r.AgentCounts.Failed, r.AgentCounts.Canceled, r.AgentCounts.UnknownFinish))
 	case "usage":
+		out = append(out, cacheLines(r)...)
 		out = append(out, usageLines(r.Usage)...)
+		out = append(out, compactionLines(r)...)
 	case "turns":
 		out = append(out, "TURN PROVIDER / MODEL / EFFORT · INPUT CACHED REASON OUTPUT")
 		for _, t := range r.Turns {
@@ -122,14 +126,12 @@ func Lines(r Report, view string, ascii bool) []string {
 			}
 		}
 	case "context":
+		out = append(out, cacheLines(r)...)
+		out = append(out, compactionLines(r)...)
 		if d := r.ContextPackage; d != nil {
-			if d.TransportReserve > 0 {
-				out = append(out, fmt.Sprintf("Transport / current receipt reserve  %d (estimated)", d.TransportReserve))
-			}
 			out = append(out, "Context Engine v1 · estimated (not actual usage)", "Provider / model  "+viewer.SafeText(d.Provider)+" / "+viewer.SafeText(d.Model), fmt.Sprintf("Runtime revision  %d", d.RuntimeRevision))
-			out = append(out, fmt.Sprintf("Canonical context units  %d", d.CanonicalUnits), fmt.Sprintf("Recent raw selected      %d", d.Recent), fmt.Sprintf("Retrieved                %d", d.Retrieved), fmt.Sprintf("Referenced / omitted     %d / %d", d.Referenced, d.Omitted), fmt.Sprintf("Security exclusions      %d", d.Excluded))
-			out = append(out, fmt.Sprintf("Retrieval candidates / selected  %d / %d", d.Retrieval.Candidates, d.Retrieval.Selected), fmt.Sprintf("Skipped recent/duplicate/budget/ineligible  %d / %d / %d / %d", d.Retrieval.SkippedRecent, d.Retrieval.SkippedDuplicate, d.Retrieval.SkippedBudget, d.Retrieval.SkippedIneligible))
-			out = append(out, fmt.Sprintf("Checkpoint               v%d through sequence %d", d.CheckpointVersion, d.CheckpointBoundary), fmt.Sprintf("Request source boundary  %d", d.ThroughSequence), fmt.Sprintf("Estimated input tokens   %d / %d · %.1f%%", d.EstimatedInputTokens, d.Budget.Input, d.Utilization), fmt.Sprintf("Window                   %d (%s)", d.Budget.Window, d.Budget.WindowSource), fmt.Sprintf("Reserves response/schema/protocol  %d / %d / %d", d.Budget.ResponseReserve, d.Budget.SchemaReserve, d.Budget.ProtocolReserve), fmt.Sprintf("Retrieval latency        %d us", d.RetrievalMicros), "Derived cache            "+d.Cache)
+			out = append(out, fmt.Sprintf("Canonical context units  %d", d.CanonicalUnits), fmt.Sprintf("History in view          %d", d.Recent), fmt.Sprintf("Outside view             %d", d.Omitted), fmt.Sprintf("Security exclusions      %d", d.Excluded), fmt.Sprintf("Request source boundary  %d", d.ThroughSequence), fmt.Sprintf("Estimated input tokens   %d / %d · %.1f%%", d.EstimatedInputTokens, d.Budget.Input, d.Utilization), fmt.Sprintf("Window                   %d (%s)", d.Budget.Window, d.Budget.WindowSource), "Derived view             "+d.Cache)
+
 		} else {
 			out = append(out, "Context package unknown (no prepared request observed)")
 		}
@@ -197,4 +199,17 @@ func usageLines(u viewer.Usage) []string {
 		out = append(out, "usage unknown")
 	}
 	return out
+}
+
+func cacheLines(r Report) []string {
+	latest := r.LatestUsage
+	return []string{"Latest " + viewer.CacheLabel(latest), "Session " + viewer.CacheLabel(r.Usage)}
+}
+
+func compactionLines(r Report) []string {
+	average := "unknown"
+	if r.InputTokenResponses > 0 {
+		average = fmt.Sprintf("%.1f (%d reported calls)", r.AverageInputTokens, r.InputTokenResponses)
+	}
+	return []string{"Average input tokens / call  " + average, fmt.Sprintf("Pruned tool results  %d · estimated tokens removed %d · epochs %d", r.Pruning.Results, r.Pruning.Tokens, r.Pruning.Epochs)}
 }

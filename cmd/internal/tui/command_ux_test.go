@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 )
 
@@ -158,16 +157,14 @@ func TestCommandMenuFilteredNavigationTabAndInputGuards(t *testing.T) {
 	if e.Text() != commandPrefix(options[len(options)-1]) {
 		t.Fatal("repeated Tab cycling regressed")
 	}
-	for _, mode := range []string{"normal", "pasted", "private", "sheet"} {
+	for _, mode := range []string{"normal", "pasted", "sheet"} {
 		t.Run(mode, func(t *testing.T) {
 			u := plainUI()
 			var e Editor
-			value := "/methods"
+			value := "/login"
 			switch mode {
 			case "normal":
 				value = "ordinary input"
-			case "private":
-				u.Private = &credential.Reference{Provider: "openai", ID: "key"}
 			case "sheet":
 				u.Sheet = helpSheet(u.Theme, false)
 			}
@@ -185,7 +182,8 @@ func TestCommandMenuArrowDecoderFragmentedAndPasteSafe(t *testing.T) {
 	for _, b := range []byte("\x1b[A\x1b[B\x1b[200~/methods\x1b[A\x1b[B\x1b[201~") {
 		keys = append(keys, d.Feed([]byte{b})...)
 	}
-	if len(keys) != 2+len("/methods") || keys[0].Name != "up" || keys[1].Name != "down" {
+	// The paste arrives as one key, its arrows as text.
+	if len(keys) != 3 || keys[0].Name != "up" || keys[1].Name != "down" || keys[2].Text != "/methods" {
 		t.Fatal(keys)
 	}
 	for _, key := range keys[2:] {
@@ -247,7 +245,7 @@ func startCommandUXRun(t *testing.T, size [2]int, command func(context.Context, 
 	})
 	waitFor(t, func() bool {
 		header := strings.Split(r.out.text(), "\n")[0]
-		return strings.Contains(header, "⇄") && strings.Contains(header, "running")
+		return strings.Contains(header, "入力待ち") && !strings.Contains(header, "⇄")
 	})
 	return r
 }
@@ -333,7 +331,7 @@ func TestAgentCommandsStayTypableOutsideTheMenu(t *testing.T) {
 	})
 	r.keys <- Key{Text: "/"}
 	waitFor(t, func() bool { return strings.Contains(r.out.text(), "/model") })
-	for _, hidden := range []string{"/login", "/logout", "/credentials", "/methods", "/children", "/child-", "/retry", "/child "} {
+	for _, hidden := range []string{"/logout", "/credentials", "/methods", "/children", "/child-", "/retry", "/child "} {
 		if strings.Contains(r.out.text(), hidden) {
 			t.Fatalf("the menu lists %s", hidden)
 		}
@@ -362,7 +360,7 @@ func TestRunCommandMenuFilteredNavigationResetAndSelectedTab(t *testing.T) {
 	r := startCommandUXRun(t, [2]int{44, 14}, nil)
 	r.keys <- Key{Text: "/"}
 	waitFor(t, func() bool { return strings.Contains(selectedMenuRow(strings.Split(r.out.text(), "\n")), "/stop") })
-	for range 7 {
+	for range 8 {
 		r.keys <- Key{Name: "down"}
 	}
 	waitFor(t, func() bool {
@@ -378,7 +376,7 @@ func TestRunCommandMenuFilteredNavigationResetAndSelectedTab(t *testing.T) {
 	})
 	r.keys <- Key{Name: "tab"}
 	waitFor(t, func() bool {
-		return strings.Contains(strings.Split(r.out.text(), "\n")[12], "/export") && r.out.cursorX() == 2+len("/export")
+		return strings.Contains(strings.Split(r.out.text(), "\n")[12], "/export") && r.out.cursorX() == 10+len("/export")
 	})
 }
 
@@ -390,7 +388,7 @@ func TestRunCommandMenuTabCompletesArrowSelectedCandidate(t *testing.T) {
 			r.keys <- Key{Name: "tab"}
 			value := name
 			waitFor(t, func() bool {
-				return strings.Contains(strings.Split(r.out.text(), "\n")[22], "cmd › "+name) && r.out.cursorX() == 9+len(value)
+				return strings.Contains(strings.Split(r.out.text(), "\n")[22], "[ cmd ] › "+name) && r.out.cursorX() == 10+len(value)
 			})
 			r.fake.mu.Lock()
 			defer r.fake.mu.Unlock()
@@ -401,16 +399,11 @@ func TestRunCommandMenuTabCompletesArrowSelectedCandidate(t *testing.T) {
 	}
 }
 
-func TestRunCommandMenuArrowsPreserveNormalPastedAndPrivateInput(t *testing.T) {
-	for _, mode := range []string{"normal", "pasted", "private"} {
+func TestRunCommandMenuArrowsPreserveNormalAndPastedInput(t *testing.T) {
+	for _, mode := range []string{"normal", "pasted"} {
 		t.Run(mode, func(t *testing.T) {
 			r := startCommandUXRun(t, [2]int{80, 24}, nil)
-			if mode == "private" {
-				r.keys <- Key{Text: "/login openai key"}
-				r.keys <- Key{Name: "enter"}
-				waitFor(t, func() bool { return strings.Contains(r.out.text(), "private: API key") })
-			}
-			value := "/methods"
+			value := "/login"
 			if mode == "normal" {
 				value = "ordinary input"
 			}
@@ -418,21 +411,18 @@ func TestRunCommandMenuArrowsPreserveNormalPastedAndPrivateInput(t *testing.T) {
 			r.keys <- Key{Name: "down"}
 			r.keys <- Key{Name: "up"}
 			r.keys <- Key{Name: "tab"}
-			waitFor(t, func() bool { return r.out.cursorX() == 9+len(value) })
-			if selectedMenuRow(strings.Split(r.out.text(), "\n")) != "" {
+			offset := 2
+			waitFor(t, func() bool { return r.out.cursorX() == offset+len(value) })
+			rows := strings.Split(r.out.text(), "\n")
+			// The prompt also starts with › now; inspect the region above
+			// the composer/statistics rows for an actual selected menu item.
+			if selectedMenuRow(rows[:22]) != "" {
 				t.Fatal("non-command input opened a menu")
 			}
 			r.keys <- Key{Name: "enter"}
-			if mode == "private" {
-				waitFor(t, func() bool { r.fake.mu.Lock(); defer r.fake.mu.Unlock(); return r.fake.logins == 1 })
-				r.fake.mu.Lock()
-				defer r.fake.mu.Unlock()
-				if r.fake.login != value || len(r.fake.inputs) != 0 || strings.Contains(r.out.rawText(), value) {
-					t.Fatal("private input altered, disclosed, or sent to the session")
-				}
-			} else if mode == "pasted" {
+			if mode == "pasted" {
 				waitFor(t, func() bool {
-					return strings.Contains(r.out.text(), "auth") && strings.Contains(r.out.text(), "openai/")
+					return strings.Contains(r.out.text(), "ログイン") && strings.Contains(r.out.text(), "codex login")
 				})
 				r.fake.mu.Lock()
 				defer r.fake.mu.Unlock()
@@ -469,7 +459,7 @@ func TestSplitFirstAndChoicesAfterTheCommand(t *testing.T) {
 	}()
 	waitFor(t, func() bool {
 		header := strings.Split(out.text(), "\n")[0]
-		return strings.Contains(out.text(), "FIRST VIEW RESPONSE") && strings.Contains(header, "Split")
+		return strings.Contains(out.text(), "FIRST VIEW RESPONSE") && strings.Contains(header, "入力待ち") && !strings.Contains(header, "Split") && strings.Contains(out.text(), "Chat") && strings.Contains(out.text(), "◆ メイン")
 	})
 	keys <- Key{Text: "/vi"}
 	waitFor(t, func() bool { return strings.Contains(selectedMenuRow(strings.Split(out.text(), "\n")), "/view") })
@@ -482,11 +472,11 @@ func TestSplitFirstAndChoicesAfterTheCommand(t *testing.T) {
 	keys <- Key{Text: "/copy"}
 	keys <- Key{Name: "enter"}
 	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "Copy to the clipboard") && strings.Contains(out.text(), "Latest response")
+		return strings.Contains(out.text(), "Copy to the clipboard") && strings.Contains(out.text(), "すべて") && strings.Contains(out.text(), "Agent  FIRST VIEW RESPONSE")
 	})
 	keys <- Key{Name: "enter"}
 	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "copied") && strings.Contains(out.text(), "to the clipboard")
+		return strings.Contains(out.text(), "クリップボードに") && strings.Contains(out.text(), "文字コピーしました")
 	})
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -503,5 +493,53 @@ func TestNarrowTerminalShowsChatForSplit(t *testing.T) {
 	}
 	if f := RenderFrame(s, u, 140, 30); f.View != ViewSplit {
 		t.Fatal("Split not shown at 140 columns", f.View)
+	}
+}
+
+// A long paste arrives as one key and shows as a marker in the composer, as
+// in Claude Code; submitting sends the whole text.
+func TestLongPasteShowsAMarkerAndSubmitsTheText(t *testing.T) {
+	var d Decoder
+	prompt := strings.Repeat("一行目の指示です。\n", 40)
+	keys := d.Feed([]byte("\x1b[200~" + prompt + "\x1b[201~"))
+	if len(keys) != 1 || !keys[0].Paste {
+		t.Fatalf("paste became %d keys", len(keys))
+	}
+	var e Editor
+	e.Apply(Key{Text: "前置き "})
+	e.Apply(keys[0])
+	e.Apply(Key{Text: " 以上"})
+	if e.Text() != "前置き [Pasted text #1 +40 lines] 以上" {
+		t.Fatalf("composer shows %q", e.Text())
+	}
+	if e.Expanded() != "前置き "+prompt+" 以上" {
+		t.Fatal("submitted text lost the paste")
+	}
+	var short Editor
+	short.Apply(Key{Text: "one line", Paste: true})
+	if short.Text() != "one line" {
+		t.Fatal("a short paste became a marker")
+	}
+}
+
+// Ctrl+Enter, Shift+Enter, Alt+Enter and Ctrl+J start a new line; Enter
+// sends. A trailing backslash before Enter also starts a new line.
+func TestNewlineKeys(t *testing.T) {
+	var d Decoder
+	for _, raw := range []string{"\n", "\x1b\r", "\x1b[13;5u", "\x1b[13;2u", "\x1b[27;5;13~", "\x1b[27;2;13~"} {
+		keys := d.Feed([]byte(raw))
+		if len(keys) != 1 || keys[0].Name != "newline" || keys[0].Text != "\n" {
+			t.Fatalf("%q decoded as %+v", raw, keys)
+		}
+	}
+	if keys := d.Feed([]byte("\r")); len(keys) != 1 || keys[0].Name != "enter" {
+		t.Fatalf("Enter decoded as %+v", keys)
+	}
+	var e Editor
+	e.Apply(Key{Text: "一行目"})
+	e.Apply(Key{Name: "newline", Text: "\n"})
+	e.Apply(Key{Text: "二行目\\"})
+	if e.Text() != "一行目\n二行目\\" || !e.continuesLine() {
+		t.Fatalf("composer %q", e.Text())
 	}
 }

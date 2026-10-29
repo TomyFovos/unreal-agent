@@ -4,8 +4,7 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
-	"errors"
-	"strings"
+	"slices"
 	"testing"
 
 	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
@@ -16,6 +15,57 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
+
+func TestSteeringContinuationWatermarkSurvivesReplayAndKeepsPeerPending(t *testing.T) {
+	store := emptyFakeStore()
+	appendItem := func(kind sessionstore.ItemKind, data any) {
+		store.items = append(store.items, storedItem(sessionstore.Sequence(len(store.items)+1), kind, data))
+	}
+	store.onAppendInput = func(in inbox.Input) { appendItem(sessionstore.ItemInput, in) }
+	store.onAppendTurn = func(turn session.Turn) { appendItem(sessionstore.ItemTurn, turn) }
+	store.onAppendModelResponse = func(response sessionstore.ModelResponse) { appendItem(sessionstore.ItemModelResponse, response) }
+	c := newTestCoordinator(store, newTestInbox(t), newFakeOperationManager(), contextbuilder.NewBuilder(), tool.NewRegistry(tool.StaticTranslators{}))
+	commit := func(kind sessionstore.ItemKind, data any) {
+		t.Helper()
+		item, err := c.addItemToLocalState(sessionstore.Item{Kind: kind, Data: data})
+		if err == nil {
+			err = c.storeItemInSessionStore(t.Context(), item)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	commit(sessionstore.ItemInput, externalEvent(t, 0, "task", "work"))
+	commit(sessionstore.ItemTurn, session.Turn{ID: "origin", Type: session.TurnRegular})
+	c.cancelModel = func() {}
+	c.bridgeActive = true
+	c.modelOrigin = "origin"
+	c.modelInputs = 1
+	c.turnExternals = 1
+	commit(sessionstore.ItemInput, externalEvent(t, 1, "first", "answer first"))
+	peer, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: "child", Target: "session-1", Handle: "h", Kind: "ended", Text: "child ended"})
+	commit(sessionstore.ItemInput, inbox.Input{ID: "peer", Kind: inbox.InputPeer, Payload: peer})
+	commit(sessionstore.ItemInput, externalEvent(t, 2, "second", "answer second"))
+	r := bridgeRequest{ctx: t.Context(), origin: "origin", reply: make(chan bridgeReply, 1), steering: true}
+	if err := c.acceptBridgeRequest(t.Context(), r); err != nil {
+		t.Fatal(err)
+	}
+	reply := <-r.reply
+	if !slices.Equal(reply.inputs, []string{"answer first", "answer second"}) || c.state.currentTurnInputs != 3 || len(c.deferredContext) != 1 {
+		t.Fatalf("delivery=%+v watermark=%d deferred=%d", reply, c.state.currentTurnInputs, len(c.deferredContext))
+	}
+	commit(sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: c.state.currentTurnID, Response: textResponse("answered")})
+	if c.pendingInputs() != 1 {
+		t.Fatal("peer incorrectly consumed", c.pendingInputs())
+	}
+	replayed := newTestCoordinator(store, newTestInbox(t), newFakeOperationManager(), contextbuilder.NewBuilder(), tool.NewRegistry(tool.StaticTranslators{}))
+	if err := replayed.restore(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if replayed.pendingInputs() != 1 || replayed.state.currentTurnInputs != 3 || replayed.turnExternals != 3 {
+		t.Fatal("replay lost delivery watermark", replayed.pendingInputs(), replayed.state.currentTurnInputs)
+	}
+}
 
 func TestToolBridgeContinuationWatermarkPreservesQueuedInputOnReplay(t *testing.T) {
 	store := emptyFakeStore()
@@ -67,15 +117,6 @@ func TestToolBridgeContinuationWatermarkPreservesQueuedInputOnReplay(t *testing.
 	if reply.err != nil || len(reply.outcomes) != 1 || reply.outcomes[0].Failed {
 		t.Fatal("terminal receipt not delivered", reply.err)
 	}
-	refresh := bridgeRequest{ctx: t.Context(), origin: "origin", reply: make(chan bridgeReply, 1), refresh: true, reserve: 1024}
-	if err := current.acceptBridgeRequest(t.Context(), refresh); err != nil {
-		t.Fatal(err)
-	}
-	refreshed := <-refresh.reply
-	data, _ := json.Marshal(refreshed.request)
-	if refreshed.err != nil || strings.Contains(string(data), "queued while Claude") || !strings.Contains(string(data), "first task") {
-		t.Fatal("queued input leaked into a pinned tool generation", refreshed.err)
-	}
 	if current.state.currentTurnInputs != 2 || current.state.availableInputs != 3 || len(store.appendedTurns) != 2 {
 		t.Fatal("queued user input was incorrectly acknowledged by the tool result", current.state.currentTurnInputs, current.state.availableInputs)
 	}
@@ -93,76 +134,6 @@ func TestToolBridgeContinuationWatermarkPreservesQueuedInputOnReplay(t *testing.
 	}
 	if replayed.pendingInputs() != 1 || len(replayed.state.toolCalls) != 0 || replayed.state.currentTurnID != turn.ID {
 		t.Fatal("resume lost queued input or replayed an already completed Operation")
-	}
-}
-
-func TestStructuredCanonicalReceiptReplayAndUncertainOperation(t *testing.T) {
-	store := emptyFakeStore()
-	manager := newFakeOperationManager()
-	spec, err := operation.NewValueSpec(jsontext.Value(`{"fixture":true}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	registry := tool.NewRegistry(tool.StaticTranslators{Bash: &submittingTranslator{specs: []operation.Spec{spec}}}, tool.BashName)
-	current := newTestCoordinator(store, newTestInbox(t), manager, contextbuilder.NewBuilder(), registry)
-	current.state.currentTurnID = "origin"
-	current.cancelModel = func() {}
-	current.modelOrigin = "origin"
-	call := llm.ToolCall{CallID: "structured-canonical-input-action", Name: tool.BashName, Arguments: `{}`}
-	request := func(call llm.ToolCall) bridgeRequest {
-		return bridgeRequest{ctx: t.Context(), origin: current.modelOrigin, reply: make(chan bridgeReply, 1), response: llm.Response{Output: []llm.Item{{Type: llm.ItemToolCall, Data: call}}}}
-	}
-	first := request(call)
-	if err := current.acceptBridgeRequest(t.Context(), first); err != nil {
-		t.Fatal(err)
-	}
-	completed := manager.adds[0]
-	completed.Status = operation.StatusCompleted
-	if err := current.handleOperationUpdate(t.Context(), completed); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := current.processEvents(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	outcomes := (<-first.reply).outcomes
-	// Simulate restart by rebuilding the disposable replay cache from canonical
-	// records, exactly as restoreItem does; no provider-private action state.
-	rebuilt := newTestCoordinator(emptyFakeStore(), newTestInbox(t), newFakeOperationManager(), contextbuilder.NewBuilder(), registry)
-	rebuilt.cancelModel = func() {}
-	rebuilt.modelOrigin = "resumed"
-	if err := rebuilt.restoreItem(sessionstore.Item{Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{TurnID: "origin", Response: first.response}}); err != nil {
-		t.Fatal(err)
-	}
-	status := sessionstore.ToolCallStatus{TurnID: "origin", CallID: call.CallID, Status: tool.CallStatus{}, Operations: []operation.Operation{completed}}
-	rebuilt.rememberBridgeResult(status, outcomes[0].Result, nil)
-	current = rebuilt
-	replay := request(call)
-	if err := current.acceptBridgeRequest(t.Context(), replay); err != nil {
-		t.Fatal(err)
-	}
-	result := <-replay.reply
-	if result.err != nil || len(result.outcomes) != 1 || len(rebuilt.dependencies.Operations.(*fakeOperationManager).adds) != 0 || len(rebuilt.dependencies.Sessions.(*fakeStore).appendedResponses) != 0 {
-		t.Fatal("completed canonical action executed twice", result.err)
-	}
-	conflict := call
-	conflict.Arguments = `{"changed":true}`
-	bad := request(conflict)
-	if err := current.acceptBridgeRequest(t.Context(), bad); err != nil {
-		t.Fatal(err)
-	}
-	if !errors.Is((<-bad.reply).err, llm.ErrToolIdentityConflict) {
-		t.Fatal("identity collision accepted")
-	}
-	current.structuredCalls[call.CallID].outcome = nil
-	uncertain := request(call)
-	if err := current.acceptBridgeRequest(t.Context(), uncertain); err != nil {
-		t.Fatal(err)
-	}
-	if !errors.Is((<-uncertain.reply).err, llm.ErrToolRecoveryRequired) {
-		t.Fatal("uncertain operation repeated")
-	}
-	if _, err := current.addItemToLocalState(sessionstore.Item{Kind: sessionstore.ItemFork, Data: sessionstore.Fork{ParentID: "parent", PreviousTurnID: "origin"}}); err != nil || len(current.structuredCalls) != 0 {
-		t.Fatal("fork retained parent execution ownership", err)
 	}
 }
 

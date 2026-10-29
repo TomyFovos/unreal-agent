@@ -67,29 +67,38 @@ type Errors struct {
 	Recent                             []Event
 }
 type Report struct {
-	Version           int
-	Session           session.ID
-	At, CreatedAt     time.Time
-	Partial, Resync   bool
-	Selection         *Selection `json:",omitzero"`
-	Pending           *Selection `json:",omitzero"`
-	ManagedPolicyMode string     `json:"managedPolicyMode,omitzero"`
-	ToolCapability    string     `json:",omitzero"`
-	ToolBridgeEnabled bool       `json:",omitzero"`
-	ToolBridgeMode    string     `json:",omitzero"`
-	ToolBridgeStatus  string     `json:",omitzero"` // live registration, not a permission grant
-	Elapsed           viewer.Duration
-	Usage             viewer.Usage
-	Turns             []Turn
-	Tools             Counts
-	ByTool            []Tool
-	Agents            []Agent
-	AgentCounts       AgentCounts
-	Context           []Turn
-	ContextPackage    *contextengine.Diagnostics `json:",omitzero"`
-	ContextWindow     int64                      `json:",omitzero"`
-	Timeline          []Event
-	Errors            Errors
+	AverageInputTokens  float64
+	InputTokenResponses int
+	Pruning             Pruning
+	LatestUsage         viewer.Usage
+	Version             int
+	Session             session.ID
+	At, CreatedAt       time.Time
+	Partial, Resync     bool
+	Selection           *Selection `json:",omitzero"`
+	Pending             *Selection `json:",omitzero"`
+	ManagedPolicyMode   string     `json:"managedPolicyMode,omitzero"`
+	ToolCapability      string     `json:",omitzero"`
+	ToolBridgeEnabled   bool       `json:",omitzero"`
+	ToolBridgeMode      string     `json:",omitzero"`
+	ToolBridgeStatus    string     `json:",omitzero"` // live registration, not a permission grant
+	Elapsed             viewer.Duration
+	Usage               viewer.Usage
+	Turns               []Turn
+	Tools               Counts
+	ByTool              []Tool
+	Agents              []Agent
+	AgentCounts         AgentCounts
+	Context             []Turn
+	ContextPackage      *contextengine.Diagnostics `json:",omitzero"`
+	ContextWindow       int64                      `json:",omitzero"`
+	Timeline            []Event
+	Errors              Errors
+}
+
+type Pruning struct {
+	Results, Epochs int
+	Tokens          int64 // estimated net tokens removed, as recorded at each prune boundary
 }
 
 // JSON duration values are nanoseconds. Explicit encoding keeps the projection
@@ -105,21 +114,25 @@ type call struct {
 	status     *sessionstore.ToolCallStatus
 }
 type Accumulator struct {
-	id                session.ID
-	created           time.Time
-	usage             viewer.Usage
-	turns             []Turn
-	turnIndex         map[session.TurnID]int
-	active, pending   *sessionstore.RuntimeSelection
-	managedPolicyMode string
-	toolBridgeEnabled bool
-	toolBridgeMode    string
-	calls             map[string]*call
-	operations        map[operation.ID]operation.Operation
-	events, errors    []Event
-	providerErrors    int
-	crashes           int
-	partial           bool
+	inputTokens         int64
+	inputTokenResponses int
+	pruning             Pruning
+	id                  session.ID
+	created             time.Time
+	usage               viewer.Usage
+	latestUsage         viewer.Usage
+	turns               []Turn
+	turnIndex           map[session.TurnID]int
+	active, pending     *sessionstore.RuntimeSelection
+	managedPolicyMode   string
+	toolBridgeEnabled   bool
+	toolBridgeMode      string
+	calls               map[string]*call
+	operations          map[operation.ID]operation.Operation
+	events, errors      []Event
+	providerErrors      int
+	crashes             int
+	partial             bool
 }
 
 func New(id session.ID) *Accumulator {
@@ -137,6 +150,23 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 	switch v := item.Data.(type) {
 	case sessionstore.HostRecord:
 		switch v.Kind {
+		case sessionstore.HostContext:
+			if v.Context != nil && v.Context.Kind == "prune" {
+				a.pruning.Epochs++
+				a.pruning.Results += len(v.Context.Projections)
+				if v.Context.UnitID != "" {
+					a.pruning.Results++
+				}
+				a.pruning.Tokens += v.Context.PrunedTokens
+				e.Kind = "context prune"
+			}
+			if v.Context != nil && v.Context.Usage != nil {
+				a.observeInputTokens(*v.Context.Usage)
+				viewer.AddUsage(&a.usage, *v.Context.Usage)
+				a.latestUsage = viewer.Usage{}
+				viewer.AddUsage(&a.latestUsage, *v.Context.Usage)
+				e.Kind = "context compaction"
+			}
 		case "configuration":
 			if a.active == nil {
 				a.active = sessionstore.SelectionFromConfiguration(v.Configuration)
@@ -197,10 +227,6 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 			}
 		}
 	case session.Turn:
-		if len(a.turns) >= 4096 {
-			a.partial = true
-			break
-		}
 		t := Turn{ID: v.ID, Number: len(a.turns) + 1, At: item.RecordedAt}
 		if a.active != nil && a.active.Revision == v.RuntimeRevision {
 			t.Selection = summarize(a.active)
@@ -210,7 +236,10 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 		a.turnIndex[v.ID] = len(a.turns)
 		a.turns = append(a.turns, t)
 	case sessionstore.ModelResponse:
+		a.observeInputTokens(v.Response.Usage)
 		viewer.AddUsage(&a.usage, v.Response.Usage)
+		a.latestUsage = viewer.Usage{}
+		viewer.AddUsage(&a.latestUsage, v.Response.Usage)
 		if index, ok := a.turnIndex[v.TurnID]; ok {
 			viewer.AddUsage(&a.turns[index].Usage, v.Response.Usage)
 			a.turns[index].ObservedModel = viewer.SafeText(v.Response.Model)
@@ -224,10 +253,6 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 		}
 		for _, out := range v.Response.Output {
 			if tc, ok := out.Data.(llm.ToolCall); ok {
-				if len(a.calls) >= 65536 {
-					a.partial = true
-					continue
-				}
 				key := string(v.TurnID) + "\x00" + tc.CallID
 				a.calls[key] = &call{name: viewer.SafeText(tc.Name), start: item.RecordedAt}
 				a.addEvent(Event{At: item.RecordedAt, Kind: "tool call", Name: viewer.SafeText(tc.Name)})
@@ -255,22 +280,21 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 		a.addEvent(e)
 	}
 }
+
+func (a *Accumulator) observeInputTokens(usage llm.Usage) {
+	if reported := llm.ReportedTokens(usage); reported.InputKnown {
+		a.inputTokens += reported.Input
+		a.inputTokenResponses++
+	}
+}
 func (a *Accumulator) addEvent(e Event) {
 	if e.At.IsZero() {
 		return
 	}
 	a.events = append(a.events, e)
-	if len(a.events) > 512 {
-		a.events = a.events[len(a.events)-512:]
-		a.partial = true
-	}
 }
 func (a *Accumulator) addError(e Event) {
 	a.errors = append(a.errors, e)
-	if len(a.errors) > 128 {
-		a.errors = a.errors[len(a.errors)-128:]
-		a.partial = true
-	}
 }
 func terminalCall(c *call, ops map[operation.ID]operation.Operation) string {
 	if c.status == nil {
@@ -319,7 +343,11 @@ func count(c *Counts, status string, d viewer.Duration) {
 	}
 }
 func (a *Accumulator) Snapshot(now time.Time, _ bool, resync bool, rows []viewer.Row, ops []operation.Operation) Report {
-	r := Report{Version: 1, Session: a.id, At: now, CreatedAt: a.created, Partial: a.partial || resync, Resync: resync, Selection: summarize(a.active), Pending: summarize(a.pending), Usage: a.usage, Turns: append([]Turn(nil), a.turns...), Timeline: append([]Event(nil), a.events...), Errors: Errors{Provider: a.providerErrors, Crashes: a.crashes, Recent: append([]Event(nil), a.errors...)}}
+	r := Report{LatestUsage: a.latestUsage, Version: 1, Session: a.id, At: now, CreatedAt: a.created, Partial: a.partial || resync, Resync: resync, Selection: summarize(a.active), Pending: summarize(a.pending), Usage: a.usage, Turns: append([]Turn(nil), a.turns...), Timeline: append([]Event(nil), a.events...), Errors: Errors{Provider: a.providerErrors, Crashes: a.crashes, Recent: append([]Event(nil), a.errors...)}}
+	r.Pruning, r.InputTokenResponses = a.pruning, a.inputTokenResponses
+	if a.inputTokenResponses > 0 {
+		r.AverageInputTokens = float64(a.inputTokens) / float64(a.inputTokenResponses)
+	}
 	r.ToolCapability = "unknown"
 	if a.active != nil {
 		for _, d := range provider.Defaults(nil) {
@@ -335,7 +363,7 @@ func (a *Accumulator) Snapshot(now time.Time, _ bool, resync bool, rows []viewer
 	r.ToolBridgeEnabled = a.toolBridgeEnabled
 	r.ToolBridgeMode = a.toolBridgeMode
 	if r.ToolBridgeEnabled {
-		r.ToolCapability = "Unreal tools via SDK MCP"
+		r.ToolCapability = "Tools available"
 		if r.ToolBridgeMode == "structured" {
 			r.ToolCapability = "Unreal tools via structured actions"
 		}
@@ -420,10 +448,6 @@ func (a *Accumulator) Snapshot(now time.Time, _ bool, resync bool, rows []viewer
 		}
 	}
 	sort.SliceStable(r.Timeline, func(i, j int) bool { return r.Timeline[i].At.Before(r.Timeline[j].At) })
-	if len(r.Timeline) > 512 {
-		r.Timeline = r.Timeline[len(r.Timeline)-512:]
-		r.Partial = true
-	}
 	// Calls are keyed by ID, so map iteration cannot define recency. Sort the
 	// observed timestamps before bounding the recent view; retain exact counts.
 	sort.Slice(r.Errors.Recent, func(i, j int) bool {
@@ -436,10 +460,6 @@ func (a *Accumulator) Snapshot(now time.Time, _ bool, resync bool, rows []viewer
 		}
 		return x.Name < y.Name
 	})
-	if len(r.Errors.Recent) > 128 {
-		r.Errors.Recent = r.Errors.Recent[len(r.Errors.Recent)-128:]
-		r.Partial = true
-	}
 	r.Errors.CrashesKnown = !r.Partial
 	r.Usage.Partial = r.Usage.Partial || r.Partial
 	return r

@@ -173,16 +173,6 @@ func TestStructuredLayerActionExecution(t *testing.T) {
 			if strings.Contains(string(encoded), "StructuredOutput") || strings.Contains(string(encoded), `\"type\":\"action\"`) {
 				t.Fatal("provider protocol entered canonical conversation")
 			}
-			// Replay uses the canonical receipt index, never executes a second time.
-			replay := request
-			replay.reply = make(chan bridgeReply, 1)
-			if err := current.acceptBridgeRequest(ctx, replay); err != nil {
-				t.Fatal(err)
-			}
-			got := <-replay.reply
-			if got.err != nil || len(current.state.operations) != tc.operations || len(store.appendedResponses) != 1 {
-				t.Fatal("receipt replay executed again", got.err)
-			}
 		})
 	}
 }

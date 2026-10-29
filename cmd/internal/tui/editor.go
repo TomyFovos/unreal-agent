@@ -15,13 +15,46 @@ type Key struct {
 	MouseX, MouseY int
 }
 type Editor struct {
-	data   []byte
-	cursor int
-	Pasted bool
+	data     []byte
+	cursor   int
+	Pasted   bool
+	Selected bool
+	// pastes holds long pasted texts; the composer shows a short marker for
+	// each, as Claude Code and Codex do, and Expanded restores them.
+	pastes []string
 }
 
-func (e *Editor) Clear()       { clear(e.data); e.data = nil; e.cursor = 0; e.Pasted = false }
+func (e *Editor) Clear() {
+	clear(e.data)
+	e.data, e.cursor, e.Pasted, e.pastes, e.Selected = nil, 0, false, nil, false
+}
 func (e *Editor) Text() string { return string(e.data) }
+
+// continuesLine reports a backslash just before the cursor at the end of the
+// text: Enter then starts a new line, as in Claude Code.
+func (e *Editor) continuesLine() bool {
+	return e.cursor == len(e.data) && len(e.data) > 0 && e.data[len(e.data)-1] == '\\'
+}
+
+// Expanded is the text to submit: each paste marker still in the composer
+// becomes the text it stands for.
+func (e *Editor) Expanded() string {
+	text := string(e.data)
+	for i, p := range e.pastes {
+		text = strings.Replace(text, pasteMarker(i+1, p), p, 1)
+	}
+	return text
+}
+
+// A paste of several lines or about a screen of text is shown as a marker.
+func longPaste(text string) bool {
+	return strings.Count(text, "\n") >= 2 || len(text) > 800
+}
+
+func pasteMarker(n int, text string) string {
+	lines := strings.Count(strings.TrimRight(text, "\n"), "\n") + 1
+	return "[Pasted text #" + strconv.Itoa(n) + " +" + strconv.Itoa(lines) + " lines]"
+}
 func (e *Editor) Display(secret bool) string {
 	if secret {
 		return "API key> " + strings.Repeat("*", min(64, uniseg.GraphemeClusterCount(string(e.data))))
@@ -30,6 +63,23 @@ func (e *Editor) Display(secret bool) string {
 }
 func (e *Editor) replace(text string) { e.Clear(); e.Apply(Key{Text: text}) }
 func (e *Editor) Apply(k Key) {
+	if k.Name == "selectall" && !k.Paste {
+		e.Selected = len(e.data) > 0
+		return
+	}
+	if e.Selected {
+		switch k.Name {
+		case "backspace", "delete":
+			e.Clear()
+			return
+		case "left", "right", "up", "down", "home", "end", "escape", "historyhome", "historyend", "pageup", "pagedown":
+			e.Selected = false
+		default:
+			if k.Text != "" || k.Paste {
+				e.Clear()
+			}
+		}
+	}
 	boundaries := []int{0}
 	g := uniseg.NewGraphemes(string(e.data))
 	for g.Next() {
@@ -55,6 +105,13 @@ func (e *Editor) Apply(k Key) {
 		e.cursor = 0
 	case "end":
 		e.cursor = len(e.data)
+	case "delete":
+		if e.cursor < len(e.data) {
+			copy(e.data[e.cursor:], e.data[next:])
+			n := len(e.data) - (next - e.cursor)
+			clear(e.data[n:])
+			e.data = e.data[:n]
+		}
 	case "backspace":
 		if e.cursor > 0 {
 			copy(e.data[previous:], e.data[e.cursor:])
@@ -65,8 +122,9 @@ func (e *Editor) Apply(k Key) {
 		}
 	default:
 		text := SafeText(k.Text)
-		if len(e.data)+len(text) > 65536 {
-			return
+		if k.Paste && longPaste(text) {
+			e.pastes = append(e.pastes, text)
+			text = pasteMarker(len(e.pastes), text)
 		}
 		e.Pasted = e.Pasted || k.Paste
 		old := len(e.data)
@@ -81,6 +139,9 @@ func (e *Editor) Apply(k Key) {
 type Decoder struct {
 	pending []byte
 	paste   bool
+	// pasted collects one bracketed paste, which becomes a single key: one
+	// key per character made a long paste slow to appear.
+	pasted strings.Builder
 }
 
 // FlushEscape is called only after an idle read deadline. Split CSI/paste
@@ -115,6 +176,9 @@ func (d *Decoder) Feed(data []byte) []Key {
 				continue
 			}
 			if d.pending[1] != '[' {
+				if (d.pending[1] == '\r' || d.pending[1] == '\n') && !d.paste {
+					keys = append(keys, Key{Name: "newline", Text: "\n"}) // Alt+Enter
+				}
 				d.pending = d.pending[2:]
 				continue
 			}
@@ -137,12 +201,18 @@ func (d *Decoder) Feed(data []byte) []Key {
 			}
 			if sequence == "\x1b[201~" {
 				d.paste = false
+				if d.pasted.Len() > 0 {
+					keys = append(keys, Key{Text: d.pasted.String(), Paste: true})
+					d.pasted.Reset()
+				}
 				continue
 			}
 			if !d.paste {
 				if key, ok := mouseWheel(sequence); ok {
 					keys = append(keys, key)
-				} else if name := map[string]string{"\x1b[A": "up", "\x1b[B": "down", "\x1b[D": "left", "\x1b[C": "right", "\x1b[H": "home", "\x1b[F": "end", "\x1b[1~": "home", "\x1b[4~": "end", "\x1b[7~": "home", "\x1b[8~": "end", "\x1b[5~": "pageup", "\x1b[6~": "pagedown", "\x1b[1;5H": "historyhome", "\x1b[1;5F": "historyend", "\x1b[7;5~": "historyhome", "\x1b[8;5~": "historyend"}[sequence]; name != "" {
+				} else if newlineSequence(sequence) {
+					keys = append(keys, Key{Name: "newline", Text: "\n"})
+				} else if name := map[string]string{"\x1b[3~": "delete", "\x1b[A": "up", "\x1b[B": "down", "\x1b[D": "left", "\x1b[C": "right", "\x1b[H": "home", "\x1b[F": "end", "\x1b[1~": "home", "\x1b[4~": "end", "\x1b[7~": "home", "\x1b[8~": "end", "\x1b[5~": "pageup", "\x1b[6~": "pagedown", "\x1b[1;5H": "historyhome", "\x1b[1;5F": "historyend", "\x1b[7;5~": "historyhome", "\x1b[8;5~": "historyend"}[sequence]; name != "" {
 					keys = append(keys, Key{Name: name})
 				}
 			}
@@ -154,17 +224,30 @@ func (d *Decoder) Feed(data []byte) []Key {
 		r, n := utf8.DecodeRune(d.pending)
 		d.pending = d.pending[n:]
 		if d.paste {
-			keys = append(keys, Key{Text: string(r), Paste: true})
+			d.pasted.WriteRune(r)
 			continue
 		}
-		name := map[rune]string{3: "cancel", 4: "detach", 9: "tab", 13: "enter", 10: "enter", 127: "backspace", 8: "backspace"}[r]
-		if name != "" {
+		name := map[rune]string{1: "selectall", 3: "cancel", 4: "detach", 9: "tab", 13: "enter", 127: "backspace", 8: "backspace"}[r]
+		if r == 10 { // Ctrl+J, and Ctrl+Enter in many terminals
+			keys = append(keys, Key{Name: "newline", Text: "\n"})
+		} else if name != "" {
 			keys = append(keys, Key{Name: name})
 		} else if r >= 32 {
 			keys = append(keys, Key{Text: string(r)})
 		}
 	}
 	return keys
+}
+
+// newlineSequence is Enter with Ctrl, Shift or Alt in the kitty keyboard
+// protocol (CSI 13;mod u) or xterm's modifyOtherKeys (CSI 27;mod;13 ~).
+func newlineSequence(sequence string) bool {
+	for _, mod := range []string{"2", "3", "5", "6"} {
+		if sequence == "\x1b[13;"+mod+"u" || sequence == "\x1b[27;"+mod+";13~" {
+			return true
+		}
+	}
+	return false
 }
 
 // Only wheel presses have meaning. Mouse clicks/releases/motion, malformed

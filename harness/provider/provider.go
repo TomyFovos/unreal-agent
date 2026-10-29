@@ -5,9 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
-	"reflect"
 	"slices"
 	"strings"
 
@@ -32,13 +32,14 @@ type Model struct {
 // Selection is an immutable-by-copy non-secret resume contract. Catalog must
 // explicitly declare models at composition; no model-name guessing/fallback.
 type Selection struct {
-	Version     int                  `json:"version"`
-	Provider    string               `json:"provider"`
-	Model       Model                `json:"model"`
-	Endpoint    string               `json:"endpoint"`
-	Auth        credential.Reference `json:"auth"`
-	MaxAttempts int                  `json:"max_attempts"`
-	Source      string               `json:"source"`
+	Version           int                  `json:"version"`
+	Provider          string               `json:"provider"`
+	Model             Model                `json:"model"`
+	Endpoint          string               `json:"endpoint"`
+	Auth              credential.Reference `json:"auth"`
+	MaxAttempts       int                  `json:"max_attempts"`
+	MaxStreamAttempts int                  `json:"max_stream_attempts,omitzero"`
+	Source            string               `json:"source"`
 }
 type BuildConfig struct {
 	Selection   Selection
@@ -66,6 +67,8 @@ type Descriptor struct {
 	ToolCapability func(BuildConfig) bool
 	// FullToolBatch is a transport requirement, not a permission grant.
 	FullToolBatch bool
+	// IdleMaintenance opts this provider into owner-scheduled idle work.
+	IdleMaintenance bool
 }
 type Registry struct{ entries map[string]Descriptor }
 
@@ -135,11 +138,8 @@ func (r *Registry) Resolve(s Selection) (Selection, error) {
 	if s.Version != 1 {
 		return Selection{}, &Error{Code: "unsupported_configuration_version"}
 	}
-	if s.MaxAttempts < 1 || s.MaxAttempts > 10 {
+	if s.MaxAttempts < 1 {
 		return Selection{}, &Error{Code: "invalid_retry_limit"}
-	}
-	if strings.TrimSpace(s.Source) == "" {
-		return Selection{}, &Error{Code: "selection_source_required"}
 	}
 	modelIndex := slices.IndexFunc(d.Models, func(m Model) bool { return m.ID == s.Model.ID })
 	if modelIndex < 0 {
@@ -188,12 +188,6 @@ func (r *Registry) Resolve(s Selection) (Selection, error) {
 	s.Endpoint = strings.TrimRight(s.Endpoint, "/")
 	return s, nil
 }
-func ValidateResume(recorded, requested Selection) error {
-	if !reflect.DeepEqual(recorded, requested) {
-		return &Error{Code: "incompatible_resume_configuration"}
-	}
-	return nil
-}
 func (r *Registry) RequiresResolver(s Selection) bool {
 	return s.Auth.Method != credential.None && !r.entries[s.Provider].ExternalAuth
 }
@@ -229,7 +223,7 @@ func (r *Registry) Build(c BuildConfig) (Client, Selection, error) {
 	}
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	c.HTTPClient = &hc
-	a := &adapter{config: c, factory: r.entries[s.Provider].New, externalAuth: r.entries[s.Provider].ExternalAuth, fullToolBatch: r.entries[s.Provider].FullToolBatch}
+	a := &adapter{config: c, factory: r.entries[s.Provider].New, externalAuth: r.entries[s.Provider].ExternalAuth, fullToolBatch: r.entries[s.Provider].FullToolBatch, idleMaintenance: r.entries[s.Provider].IdleMaintenance}
 	if r.entries[s.Provider].LocalProcess {
 		a.processes = &processRequests{cancels: make(map[*context.CancelFunc]context.CancelFunc)}
 	}
@@ -237,18 +231,15 @@ func (r *Registry) Build(c BuildConfig) (Client, Selection, error) {
 }
 
 type adapter struct {
-	config        BuildConfig
-	factory       Factory
-	externalAuth  bool
-	processes     *processRequests
-	fullToolBatch bool
+	config          BuildConfig
+	factory         Factory
+	externalAuth    bool
+	processes       *processRequests
+	fullToolBatch   bool
+	idleMaintenance bool
 }
 
 func (a *adapter) RequiresFullToolBatch() bool { return a.fullToolBatch }
-
-// NoAutomaticReplay is false for every provider: an unanswered model request is
-// retried on resume like the Codex route, never held for new user input (U7).
-func (a *adapter) NoAutomaticReplay() bool { return false }
 
 func (a *adapter) Close() error {
 	if a.processes != nil {
@@ -265,21 +256,7 @@ func (a *adapter) Respond(ctx context.Context, req llm.Request, opt llm.RequestO
 		defer release()
 		ctx = requestCtx
 	}
-	if err := ctx.Err(); err != nil {
-		return llm.Response{}, err
-	}
-	if req.Model.ID != a.config.Selection.Model.ID {
-		return llm.Response{}, &Error{Code: "model_selection_mismatch"}
-	}
-	var material credential.Material
-	if a.config.Selection.Auth.Method != credential.None && !a.externalAuth {
-		var err error
-		material, err = a.config.Resolver.Resolve(ctx, a.config.Selection.Auth)
-		if err != nil {
-			return llm.Response{}, normalize(err)
-		}
-	}
-	client, err := a.factory(a.config, material)
+	client, err := a.requestClient(ctx, req)
 	if err != nil {
 		return llm.Response{}, normalize(err)
 	}
@@ -290,10 +267,55 @@ func (a *adapter) Respond(ctx context.Context, req llm.Request, opt llm.RequestO
 	}
 	// Provider failure messages may echo credential/header/request data. Keep codes
 	// from a closed vocabulary at the public adapter boundary.
-	if response.Failure != nil {
+	if llm.IsContextOverflow(nil, response) {
+		response.Failure = &llm.Failure{Code: "context_length_exceeded", Message: "context window exceeded"}
+	} else if response.Failure != nil {
 		response.Failure = &llm.Failure{Code: "provider_failure", Message: "provider reported a failure"}
 	}
 	return response, nil
+}
+
+func (a *adapter) requestClient(ctx context.Context, req llm.Request) (Client, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if req.Model.ID != a.config.Selection.Model.ID {
+		return nil, &Error{Code: "model_selection_mismatch"}
+	}
+	var material credential.Material
+	if a.config.Selection.Auth.Method != credential.None && !a.externalAuth {
+		var err error
+		material, err = a.config.Resolver.Resolve(ctx, a.config.Selection.Auth)
+		if err != nil {
+			return nil, normalize(err)
+		}
+	}
+	return a.factory(a.config, material)
+}
+
+func (a *adapter) Idle(ctx context.Context, req llm.Request, opt llm.RequestOptions) {
+	if !a.idleMaintenance {
+		return
+	}
+	if a.processes != nil {
+		requestCtx, release, err := a.processes.begin(ctx)
+		if err != nil {
+			return
+		}
+		defer release()
+		ctx = requestCtx
+	}
+	client, err := a.requestClient(ctx, req)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("provider idle maintenance", "provider", a.config.Selection.Provider, "error", normalize(err))
+		}
+		return
+	}
+	defer client.Close()
+	if idle, ok := client.(llm.IdleAdapter); ok {
+		idle.Idle(ctx, req, opt)
+	}
 }
 
 type Error struct {
@@ -367,4 +389,8 @@ func normalize(err error) error {
 		return llm.ErrToolRecoveryRequired
 	}
 	return &Error{Code: "request_failed", Status: diagnostic.Status, Diagnostic: safe}
+}
+
+func (e *Error) ContextOverflow() bool {
+	return e.Diagnostic != nil && (e.Diagnostic.Reason == "context_length_exceeded" || e.Diagnostic.Reason == "context_window_exceeded")
 }

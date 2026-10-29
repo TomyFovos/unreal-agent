@@ -28,23 +28,27 @@ func registeredProviders(initial agentrunner.RuntimeIdentity, extra map[string]a
 }
 
 func (h modelUI) catalog(ctx context.Context, id string, refresh bool) (modelcatalog.Catalog, error) {
+	if b, ok := h.runtime.Discovered.Lookup(id); ok && b.Catalog != nil {
+		return b.Catalog(ctx, refresh)
+	}
 	if id == claudeagent.ProviderID && h.claudeAgent != nil {
 		return h.claudeAgent.read(ctx, refresh)
 	}
-	if id == "openai-codex" && h.cache != "" {
-		if h.codexRead != nil {
-			return h.codexRead(ctx, refresh)
-		}
-		return modelcatalog.ReadCodexCache(h.cache), nil
+	if id == "openai-codex" && h.codexRead != nil {
+		return h.codexRead(ctx, refresh)
 	}
 	return modelcatalog.Catalog{Problem: "catalog unavailable"}, nil
 }
 func (h modelUI) providers(ctx context.Context) []modelcatalog.Provider {
+	supported := h.runtime.Discovered.Statuses()
+	if supported == nil {
+		supported = h.supported
+	}
 	ids := []string{h.runtime.Identity.Provider.Provider}
 	for id := range h.runtime.Backends {
 		ids = append(ids, id)
 	}
-	for _, p := range h.supported {
+	for _, p := range supported {
 		found := false
 		for _, id := range ids {
 			if id == p.ID {
@@ -59,7 +63,7 @@ func (h modelUI) providers(ctx context.Context) []modelcatalog.Provider {
 	var out []modelcatalog.Provider
 	for _, id := range ids {
 		if _, err := h.runtime.ProviderRuntime(id); err != nil {
-			for _, p := range h.supported {
+			for _, p := range supported {
 				if p.ID == id {
 					out = append(out, p)
 				}
@@ -72,7 +76,7 @@ func (h modelUI) providers(ctx context.Context) []modelcatalog.Provider {
 			e = catalogErr
 		}
 		reason := modelcatalog.AvailabilityReason("")
-		if e == nil && len(h.supported) > 0 && !c.Available {
+		if e == nil && len(supported) > 0 && !c.Available {
 			reason = modelcatalog.CatalogUnavailable
 			e = errors.New("catalog unavailable")
 		}

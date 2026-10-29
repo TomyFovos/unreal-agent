@@ -21,6 +21,7 @@ func TestCoordinatorResumesUnavailableTool(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				run := newStopTestRun(t, 1)
+				run.live = false
 				wantError := `tool "ViewImage" is not available`
 				switch stage {
 				case "untranslated":
@@ -158,6 +159,7 @@ func TestCoordinatorResumesSavedTerminalOperation(t *testing.T) {
 		t.Run(string(terminal), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				run := newStopTestRun(t, 1)
+				run.live = false
 				directory := t.TempDir()
 				store, err := localfile.New(directory)
 				if err != nil {

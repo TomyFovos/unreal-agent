@@ -3,7 +3,6 @@ package subagent
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json/v2"
 	"errors"
@@ -13,10 +12,9 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"io"
+	"math"
 	"sync"
 )
-
-const MaxFrame = 256 * 1024
 
 type frame struct {
 	Version    uint32
@@ -42,7 +40,7 @@ func encodeFrame(f frame) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > MaxFrame {
+	if uint64(len(data)) > math.MaxUint32 {
 		return nil, fmt.Errorf("subagent frame too large")
 	}
 	out := make([]byte, len(data)+4)
@@ -56,7 +54,7 @@ func readFrame(r io.Reader) (frame, error) {
 		return frame{}, err
 	}
 	size := binary.BigEndian.Uint32(header[:])
-	if size == 0 || size > MaxFrame {
+	if size == 0 {
 		return frame{}, fmt.Errorf("invalid subagent frame length")
 	}
 	data := make([]byte, size)
@@ -81,7 +79,7 @@ func (d *frameDecoder) push(chunk []byte) ([]frame, error) {
 	var frames []frame
 	for len(d.data) >= 4 {
 		size := int(binary.BigEndian.Uint32(d.data))
-		if size == 0 || size > MaxFrame {
+		if size == 0 {
 			return nil, fmt.Errorf("invalid frame length")
 		}
 		if len(d.data) < size+4 {
@@ -108,40 +106,20 @@ type endpoint struct {
 	receive                   func(context.Context, inbox.Input) (host.Receipt, error)
 	mu                        sync.Mutex
 	pending                   map[inbox.ID]chan reply
-	sent                      map[inbox.ID][32]byte
 }
 
 func (e *endpoint) send(ctx context.Context, input inbox.Input) (host.Receipt, error) {
 	if err := input.Validate(); err != nil {
 		return host.Receipt{}, err
 	}
-	payload := input.Payload.Clone()
-	if len(payload) > 0 {
-		if err := payload.Canonicalize(); err != nil {
-			return host.Receipt{}, err
-		}
-	}
-	digest := sha256.Sum256(append([]byte(string(input.Kind)+"\\x00"), payload...))
 	ch := make(chan reply, 1)
 	e.mu.Lock()
-	if e.sent == nil {
-		e.sent = map[inbox.ID][32]byte{}
-	}
-	if previous, ok := e.sent[input.ID]; ok && previous != digest {
-		e.mu.Unlock()
-		return host.Receipt{}, host.ErrConflict
-	}
-	e.sent[input.ID] = digest
 	if e.pending == nil {
 		e.pending = map[inbox.ID]chan reply{}
 	}
 	if _, ok := e.pending[input.ID]; ok {
 		e.mu.Unlock()
 		return host.Receipt{}, fmt.Errorf("input already in flight")
-	}
-	if len(e.pending) >= 32 {
-		e.mu.Unlock()
-		return host.Receipt{}, fmt.Errorf("peer backpressure limit")
 	}
 	e.pending[input.ID] = ch
 	e.mu.Unlock()

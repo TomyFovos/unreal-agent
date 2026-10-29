@@ -234,51 +234,83 @@ func TestInterruptedChildShellRecoveryDoesNotReplaySideEffect(t *testing.T) {
 			restoreLog(t, dir, childID, prefix)
 			h, owner, _ := shellParent(t, dir, host.Resume)
 			defer h.Close()
-			awaitBoundary(t, func() bool {
-				v, err := sub.ReadChild(t.Context(), dir, childID, 0, 256)
-				if err != nil {
-					return false
-				}
-				for _, op := range v.View.Operations {
-					if op.ID == shell.ID {
-						st, e := operation.DecodeShellState(op)
-						if e != nil {
-							t.Fatal(e)
-						}
-						if op.Status == operation.StatusAwaiting {
-							return false
-						}
-						want := "interrupted before an exit status"
-						if stage == "start_not_recorded" {
-							want = "outcome is unknown"
-						}
-						if op.Status != operation.StatusFailed || st.Result != nil || !strings.Contains(st.TerminalError, want) || v.Finish != nil {
-							t.Fatal("invented shell completion", op.Status, st, v.Finish)
-						}
-						return true
-					}
-				}
-				return false
-			})
-			// A post-recovery Inbox barrier proves the child can continue while
-			// retaining its interrupted tool result, without issuing Bash again.
-			req := sub.ControlRequest{ParentID: owner.ID, ParentGeneration: owner.Generation, OperationID: "start", ChildID: childID, InputID: "recovery-barrier", Text: "continue"}
-			if _, err := sub.SteerChild(t.Context(), owner, req); err != nil {
+			if start := awaitChild(t, owner, true); start.ID != "start" || start.Status != operation.StatusCanceled {
+				t.Fatal("unknown child start was resumed", start)
+			}
+			if !bytes.Equal(readLog(t, dir, childID), prefix) {
+				t.Fatal("parent automatically reopened its old child")
+			}
+			storedChild, err := sub.ReadChild(t.Context(), dir, childID, 0, 256)
+			if err != nil || storedChild.Configuration == nil {
+				t.Fatal(storedChild, err)
+			}
+			configuration, err := json.Marshal(storedChild.Configuration)
+			if err != nil {
 				t.Fatal(err)
 			}
-			awaitBoundary(t, func() bool {
-				v, e := owner.Inspect(0, 256)
-				if e != nil {
-					t.Fatal(e)
+			// Explicitly resume the child's own Session. Its interrupted shell must be
+			// reported to the model without starting that shell or repeating its effect.
+			requests := make(chan llm.Request, 4)
+			model := adapter(func(_ context.Context, r llm.Request, _ llm.RequestOptions) (llm.Response, error) {
+				requests <- r
+				return llm.Response{}, nil
+			})
+			childHost, err := host.New(t.Context(), host.Config{Directory: dir, Build: func(ctx context.Context, _ session.ID) (host.Runtime, error) {
+				registry := tool.NewRegistry(tool.StaticTranslators{Bash: bash.New(bash.Config{Shell: "/bin/sh", Directory: dir, BaseDirectory: filepath.Join(dir, "shell-captures")})}, "Bash")
+				builder := contextbuilder.NewBuilder()
+				for _, definition := range registry.StaticDefinitions() {
+					builder.AddTool(definition.Tool)
 				}
-				for _, op := range v.Operations {
-					p, e := sub.DecodePlan(op)
-					if e == nil && p.Action == "send" && op.Status == operation.StatusCompleted {
+				return host.Runtime{Builder: builder, LLM: model, Tools: registry, Operations: operation.NewLocalOperationManager(ctx)}, nil
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer childHost.Close()
+			child, err := childHost.Resume(t.Context(), host.Options{ID: childID, Lifecycle: "child", Configuration: configuration, Policy: permission.Unrestricted()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertUnknown := func() {
+				t.Helper()
+				var request llm.Request
+				awaitBoundary(t, func() bool {
+					select {
+					case request = <-requests:
 						return true
+					default:
+						return false
+					}
+				})
+				results := 0
+				for _, item := range request.Input {
+					if result, ok := item.Data.(llm.ToolResult); ok {
+						for _, output := range result.Output {
+							if output.Value == "中断されたため結果は不明。必要なら状態を確かめてから続けること" {
+								results++
+							}
+						}
 					}
 				}
-				return false
-			})
+				if results != 1 {
+					t.Fatal("model did not receive exactly one unknown shell result", request)
+				}
+			}
+			assertUnknown()
+			view, err := child.Inspect(0, 256)
+			if err != nil || len(view.Operations) != 1 {
+				t.Fatal(view, err)
+			}
+			restored := view.Operations[0]
+			st, err := operation.DecodeShellState(restored)
+			if err != nil || restored.ID != shell.ID || restored.Status != operation.StatusCanceled || st.Result != nil {
+				t.Fatal("invented shell completion", restored, err)
+			}
+			payload, _ := json.Marshal("continue")
+			if _, err = child.Submit(t.Context(), child.Generation, inbox.Input{ID: "recovery-barrier", Kind: inbox.InputExternal, Payload: payload}); err != nil {
+				t.Fatal(err)
+			}
+			assertUnknown()
 			data, err := os.ReadFile(filepath.Join(dir, "effect"))
 			if err != nil || !bytes.Equal(data, []byte("effect\n")) {
 				t.Fatal("shell side effect replayed", string(data), err)

@@ -45,8 +45,8 @@ func TestModelSelectionGatewayExternalCredentialsAndResume(t *testing.T) {
 	writeCodexAuth(t, auth, "model-token-sensitive", "model-account-sensitive")
 	cache := filepath.Join(dir, "models_cache.json")
 	// This fixture tests selection/resume, so leave room for the real tool
-	// schemas, required instructions and the compaction response reserve.
-	cacheData := []byte(`{"identity":{"account_id":"cache-account-sensitive"},"models":[{"slug":"model-b","display_name":"Model B","visibility":"list","supported_reasoning_levels":[{"effort":"high"}],"default_reasoning_level":"high","context_window":32768}]}`)
+	// schemas, required instructions and the 64k compaction safety margin.
+	cacheData := []byte(`{"identity":{"account_id":"cache-account-sensitive"},"models":[{"slug":"model-b","display_name":"Model B","visibility":"list","supported_reasoning_levels":[{"effort":"high"}],"default_reasoning_level":"high","context_window":272000}]}`)
 	if err := os.WriteFile(cache, cacheData, 0600); err != nil {
 		t.Fatal(err)
 	}

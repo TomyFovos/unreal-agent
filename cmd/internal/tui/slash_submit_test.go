@@ -112,9 +112,9 @@ func TestRunRegisteredSubmitUsesDispatcherAndNeverChat(t *testing.T) {
 
 func TestRunPastedLocalCommandsNeverBecomePublicConversation(t *testing.T) {
 	for _, tc := range []struct{ input, visible string }{
-		{"/view orchestration", "Unreal Host validates"},
-		{" \t\n/view orchestration\n", "Unreal Host validates"},
-		{"/view split", "Unreal Host validates"},
+		{"/view orchestration", "◆ メイン"},
+		{" \t\n/view orchestration\n", "◆ メイン"},
+		{"/view split", "◆ メイン"},
 		{"/view invalid\nargument", "usage: /view"},
 		{"/export all", "exported to"},
 		{"/model", "catalog unavailable"},

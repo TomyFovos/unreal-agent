@@ -42,6 +42,9 @@ func (c RuntimeConfig) CheckProvider(ctx context.Context, id string) error {
 	if e != nil {
 		return e
 	}
+	if b, ok := c.Discovered.Lookup(id); ok && b.Check != nil {
+		return b.Check(ctx)
+	}
 	if check := c.Health[id]; check != nil {
 		return check(ctx)
 	}
@@ -55,6 +58,9 @@ func (c RuntimeConfig) CheckProvider(ctx context.Context, id string) error {
 }
 
 func (c RuntimeConfig) ProviderRuntime(id string) (ProviderRuntime, error) {
+	if b, ok := c.Discovered.Lookup(id); ok {
+		return b.Runtime, nil
+	}
 	if id == c.Identity.Provider.Provider {
 		return ProviderRuntime{Provider: c.Identity.Provider, ReasoningEffort: c.Identity.ReasoningEffort, Claude: c.Identity.Claude}, nil
 	}
@@ -84,6 +90,9 @@ func (c RuntimeConfig) BindSelection(s sessionstore.RuntimeSelection) (sessionst
 	return s, nil
 }
 func (c RuntimeConfig) Catalog(ctx context.Context, id string) (modelcatalog.Catalog, error) {
+	if b, ok := c.Discovered.Lookup(id); ok && b.Catalog != nil {
+		return b.Catalog(ctx, false)
+	}
 	if read := c.Catalogs[id]; read != nil {
 		return read(ctx)
 	}

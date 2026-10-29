@@ -16,6 +16,7 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
+	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openaicodex"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
@@ -41,27 +42,29 @@ type normalLauncherConfig struct {
 }
 
 type normalRuntimeError struct {
-	Code      string
-	Providers []modelcatalog.Provider
+	Code        string
+	Provider    string
+	Diagnostics []string
+	Providers   []modelcatalog.Provider
 }
 
 func (e *normalRuntimeError) Error() string {
 	if len(e.Providers) > 0 {
-		text := "no external provider is available"
+		text := "利用できる接続先がありません。"
 		for _, p := range e.Providers {
-			text += "; " + p.ID + ": " + string(p.Reason) + " (" + p.Reason.Hint() + ")"
+			text += "\n" + modelcatalog.ProviderName(p.ID) + ": " + p.Reason.ProviderHint(p.ID)
 		}
-		return text
+		return text + "\n済んだら unreal を起動してください。"
 	}
 	switch e.Code {
 	case "providers_unavailable":
-		return "no external provider is available; sign in with codex login, or run claude and /login"
+		return "利用できる接続先がありません。Codex: codex login。Claude: claude を起動して /login。ログイン後に unreal を起動してください。"
 	case "initial_provider_unavailable":
-		return "configured initial provider is unavailable; no automatic provider fallback"
+		return modelcatalog.ProviderName(e.Provider) + " を利用できません。" + modelcatalog.AuthRequired.ProviderHint(e.Provider) + "。ログイン後に unreal を起動してください。"
 	case "catalog_unavailable":
-		return "initial model catalog is unavailable; refresh the external CLI catalog or configure an explicit runtime/model"
+		return "モデル一覧を読み取れません。CLI の起動・ログイン状態を確認してから unreal を起動してください。"
 	default:
-		return "normal runtime: " + e.Code
+		return "起動設定を読み込めませんでした。設定を確認してから unreal を起動してください。"
 	}
 }
 
@@ -100,7 +103,7 @@ func discoverCodexSource(ctx context.Context, option string, getenv func(string)
 	if err != nil {
 		return agentrunner.ProviderRuntime{}, err
 	}
-	return agentrunner.ProviderRuntime{Provider: provider.Selection{Version: 1, Provider: "openai-codex", Model: provider.Model{ID: model.ID}, Endpoint: openaicodex.BaseURL, Auth: ref, MaxAttempts: 2, Source: "external CLI catalog / local bootstrap"}, ReasoningEffort: model.DefaultEffort}, nil
+	return agentrunner.ProviderRuntime{Provider: provider.Selection{Version: 1, Provider: "openai-codex", Model: provider.Model{ID: model.ID}, Endpoint: openaicodex.BaseURL, Auth: ref, MaxAttempts: openaicodex.DefaultMaxAttempts, MaxStreamAttempts: openaicodex.DefaultMaxStreamAttempts, Source: "external CLI catalog / local bootstrap"}, ReasoningEffort: model.DefaultEffort}, nil
 }
 
 func discoverCodexAuto(ctx context.Context, option string, getenv func(string) string) (agentrunner.ProviderRuntime, error) {
@@ -150,6 +153,7 @@ func registerNormalProviders(ctx context.Context, config serveConfiguration, cod
 	}
 	config.Providers = cloneBackends(config.Providers)
 	config.providerStatuses = nil
+	config.providerDiagnostics = nil
 
 	if !discover {
 		return config, nil
@@ -184,7 +188,12 @@ func registerNormalProviders(ctx context.Context, config serveConfiguration, cod
 			config.Providers[id] = p
 			config.providerStatuses = append(config.providerStatuses, modelcatalog.Provider{ID: id, Name: modelcatalog.ProviderName(id), Availability: "available"})
 		} else {
-			config.providerStatuses = append(config.providerStatuses, unavailableProvider(id, providerFailureReason(err, id == "openai-codex" && config.Launcher != nil && config.Launcher.CodexDockerSandboxOAuth)))
+			config.providerDiagnostics = append(config.providerDiagnostics, id+": "+gateway.SafeReason(err.Error()))
+			reason := providerFailureReason(err, id == "openai-codex" && config.Launcher != nil && config.Launcher.CodexDockerSandboxOAuth)
+			if id == "openai-codex" && !codexCLIExists(getenv) && (reason == modelcatalog.AuthRequired || reason == modelcatalog.CatalogUnavailable) {
+				reason = modelcatalog.CLIMissing
+			}
+			config.providerStatuses = append(config.providerStatuses, unavailableProvider(id, reason))
 		}
 	}
 	return config, nil
@@ -227,10 +236,10 @@ func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProvid
 	if len(ids) == 0 {
 		for _, status := range config.providerStatuses {
 			if status.Reason == modelcatalog.CatalogUnavailable {
-				return config, &normalRuntimeError{Code: "catalog_unavailable", Providers: config.providerStatuses}
+				return config, &normalRuntimeError{Code: "catalog_unavailable", Providers: config.providerStatuses, Diagnostics: config.providerDiagnostics}
 			}
 		}
-		return config, &normalRuntimeError{Code: "providers_unavailable", Providers: config.providerStatuses}
+		return config, &normalRuntimeError{Code: "providers_unavailable", Providers: config.providerStatuses, Diagnostics: config.providerDiagnostics}
 	}
 	id := getenv("UNREAL_HARNESS_LLM_PROVIDER")
 	if id == "" {
@@ -245,7 +254,7 @@ func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProvid
 	}
 	p, ok := config.Providers[id]
 	if !ok {
-		return config, &normalRuntimeError{Code: "initial_provider_unavailable"}
+		return config, &normalRuntimeError{Code: "initial_provider_unavailable", Provider: id}
 	}
 	if requested := getenv("UNREAL_HARNESS_LLM_MODEL"); requested != "" {
 		var catalog modelcatalog.Catalog
@@ -344,4 +353,58 @@ func resolveLauncherConfig(ctx context.Context, o launchOptions, choose initialP
 		return readServeConfiguration(o.config)
 	}
 	return config, err
+}
+
+// normalRediscovery repeats the same explicit discovery policy as startup.
+// Published registrations are shared with existing runtime factories; executing
+// clients keep their own configuration until the next turn boundary.
+func normalRediscovery(config serveConfiguration, codexFile string, live *agentrunner.DiscoveredBackends, getenv func(string) string, diagnostics io.Writer) func(context.Context) error {
+	return func(ctx context.Context) error {
+		fresh := config
+		fresh.Providers = nil
+		fresh.Runtime.Provider.Provider = ""
+		fresh, err := registerNormalProviders(ctx, fresh, codexFile, getenv)
+		if err != nil {
+			return err
+		}
+		if diagnostics != nil {
+			for _, diagnostic := range fresh.providerDiagnostics {
+				fmt.Fprintln(diagnostics, diagnostic)
+			}
+		}
+		for id, runtime := range fresh.Providers {
+			if id == config.Runtime.Provider.Provider || config.Providers[id].Provider.Provider != "" {
+				continue
+			}
+			if _, exists := live.Lookup(id); exists {
+				continue
+			}
+			b := agentrunner.DiscoveredBackend{Runtime: runtime}
+			if id == claudeagent.ProviderID {
+				catalog := &claudeCatalog{binary: runtime.Claude.Binary}
+				b.Catalog, b.Check = catalog.read, catalog.check
+			} else if id == "openai-codex" {
+				path, err := externalCodexAuthFile(codexFile, getenv)
+				if err != nil {
+					return err
+				}
+				b.Catalog = codexCatalogReader(path, isDockerSandboxCodex(runtime.Provider.Auth), getenv)
+			}
+			live.Register(b)
+		}
+		live.SetStatuses(fresh.providerStatuses)
+		return nil
+	}
+}
+
+func codexCLIExists(getenv func(string) string) bool {
+	for _, dir := range filepath.SplitList(getenv("PATH")) {
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		if info, err := os.Stat(filepath.Join(dir, "codex")); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
+			return true
+		}
+	}
+	return false
 }

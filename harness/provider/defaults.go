@@ -18,7 +18,7 @@ func Defaults(catalog map[string][]Model) []Descriptor {
 	caps := []string{"tools", "images", "reasoning"}
 	return []Descriptor{
 		// Claude Code runs its own tools; Unreal approves and records them (U21).
-		{ID: claudeagent.ProviderID, AuthMethods: []credential.Method{credential.OAuth}, Capabilities: []string{"reasoning"}, Models: catalog[claudeagent.ProviderID], LocalProcess: true, ExternalAuth: true, ToolCapability: func(c BuildConfig) bool { return c.ClaudeAgent.Binary != "" }, New: func(c BuildConfig, _ credential.Material) (Client, error) {
+		{ID: claudeagent.ProviderID, AuthMethods: []credential.Method{credential.OAuth}, Capabilities: []string{"reasoning"}, Models: catalog[claudeagent.ProviderID], LocalProcess: true, ExternalAuth: true, IdleMaintenance: true, ToolCapability: func(c BuildConfig) bool { return c.ClaudeAgent.Binary != "" }, New: func(c BuildConfig, _ credential.Material) (Client, error) {
 			return claudeagent.NewClient(c.ClaudeAgent)
 		}},
 		{ID: "openai", Endpoint: "https://api.openai.com/v1", AuthMethods: []credential.Method{credential.APIKey}, Capabilities: caps, Models: catalog["openai"], New: func(c BuildConfig, m credential.Material) (Client, error) {
@@ -38,12 +38,19 @@ func Defaults(catalog map[string][]Model) []Descriptor {
 				if m.Owner != credential.DockerSandboxProxy || m.Token.Reveal() != "" || m.AccountID != "" || m.RefreshToken.Reveal() != "" || !m.ExpiresAt.IsZero() || c.Selection.Endpoint != openaicodex.BaseURL {
 					return nil, &credential.Error{Code: "invalid_docker_sandbox_material"}
 				}
-				return openaicodex.NewClient(openaicodex.Config{DockerSandboxOAuth: true, BaseURL: c.Selection.Endpoint, MaxAttempts: &c.Selection.MaxAttempts, HTTPClient: c.HTTPClient, RequestEffort: c.CodexRequestEffort})
+				return openaicodex.NewClient(openaicodex.Config{DockerSandboxOAuth: true, BaseURL: c.Selection.Endpoint, MaxAttempts: &c.Selection.MaxAttempts, MaxStreamAttempts: codexStreamAttempts(c.Selection), HTTPClient: c.HTTPClient, RequestEffort: c.CodexRequestEffort})
 			}
 			if m.Owner == credential.DockerSandboxProxy {
 				return nil, &credential.Error{Code: "invalid_material"}
 			}
-			return openaicodex.NewClient(openaicodex.Config{AccessToken: m.Token.Reveal(), AccountID: m.AccountID, BaseURL: c.Selection.Endpoint, MaxAttempts: &c.Selection.MaxAttempts, HTTPClient: c.HTTPClient, RequestEffort: c.CodexRequestEffort})
+			return openaicodex.NewClient(openaicodex.Config{AccessToken: m.Token.Reveal(), AccountID: m.AccountID, BaseURL: c.Selection.Endpoint, MaxAttempts: &c.Selection.MaxAttempts, MaxStreamAttempts: codexStreamAttempts(c.Selection), HTTPClient: c.HTTPClient, RequestEffort: c.CodexRequestEffort})
 		}},
 	}
+}
+
+func codexStreamAttempts(s Selection) *int {
+	if s.MaxStreamAttempts == 0 {
+		return nil
+	}
+	return &s.MaxStreamAttempts
 }

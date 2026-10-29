@@ -50,8 +50,8 @@ func TestSavedOperationCheckpointMatchesJSONCloneOracle(t *testing.T) {
 	metadata := []operation.Operation{
 		{},
 		{Execution: &operation.ExecutionMetadata{}, Idempotence: &operation.IdempotencyMetadata{}},
-		{Execution: &operation.ExecutionMetadata{Dependencies: []operation.ID{}, RecoveryBasis: []operation.UncertainEffect{}}},
-		{Execution: &operation.ExecutionMetadata{PreparationRequired: true, ExecutionBasis: jsontext.Value(` {"x":1.00,"s":"\u0041"} `), RecoveryBasis: []operation.UncertainEffect{{ID: "prior", Basis: jsontext.Value(` {"n":2e0} `)}}, Dependencies: []operation.ID{"prior"}}, Idempotence: &operation.IdempotencyMetadata{Idempotency: jsontext.Value(` {"k":3.0} `)}, Permission: &permission.Decision{Mode: "default", State: "granted"}, Denial: &permission.Error{Code: "denied", Capability: "synthetic", Reason: "test"}},
+		{Execution: &operation.ExecutionMetadata{Dependencies: []operation.ID{}}},
+		{Execution: &operation.ExecutionMetadata{Dependencies: []operation.ID{"prior"}}, Idempotence: &operation.IdempotencyMetadata{Idempotency: jsontext.Value(` {"k":3.0} `)}, Permission: &permission.Decision{Mode: "default", State: "granted"}, Denial: &permission.Error{Code: "denied", Capability: "synthetic", Reason: "test"}},
 	}
 	for i, raw := range states {
 		for j, meta := range metadata {
@@ -136,7 +136,7 @@ func TestSavedOperationCheckpointDetachesIncomingMetadataAndBytes(t *testing.T) 
 	previous := clone(savedCheckpointFixture(jsontext.Value(`{"owned":true}`)))
 	value := previous
 	value.State = previous.State.Clone()
-	value.Execution = &operation.ExecutionMetadata{PreparationRequired: true, ExecutionBasis: jsontext.Value(`{"basis":1}`), Dependencies: []operation.ID{"prior"}, RecoveryBasis: []operation.UncertainEffect{{ID: "prior", Basis: jsontext.Value(`{"effect":2}`)}}}
+	value.Execution = &operation.ExecutionMetadata{Dependencies: []operation.ID{"prior"}}
 	value.Idempotence = &operation.IdempotencyMetadata{Idempotency: jsontext.Value(`{"key":3}`)}
 	value.Permission = &permission.Decision{Mode: "default", State: "granted"}
 	value.Denial = &permission.Error{Code: "denied", Capability: "synthetic", Reason: "test"}
@@ -146,8 +146,6 @@ func TestSavedOperationCheckpointDetachesIncomingMetadataAndBytes(t *testing.T) 
 		t.Fatal("metadata-only checkpoint did not reuse its private owner State")
 	}
 	value.State[0] = '['
-	value.Execution.ExecutionBasis[0] = '['
-	value.Execution.RecoveryBasis[0].Basis[0] = '['
 	value.Execution.Dependencies[0] = "changed"
 	value.Idempotence.Idempotency[0] = '['
 	value.Permission.State = "changed"
@@ -199,7 +197,7 @@ func TestSavedOperationCheckpointKeepsFullWireAndPublicDetachment(t *testing.T) 
 	previous := s.operations[initial.ID]
 	checkpoint := previous
 	checkpoint.State = previous.State.Clone()
-	checkpoint.Execution = &operation.ExecutionMetadata{PreparationRequired: true, ExecutionBasis: jsontext.Value(` {"proof":1.0} `)}
+	checkpoint.Execution = &operation.ExecutionMetadata{}
 	if err = w.SaveOperation(t.Context(), id, checkpoint); err != nil {
 		t.Fatal(err)
 	}
@@ -220,12 +218,10 @@ func TestSavedOperationCheckpointKeepsFullWireAndPublicDetachment(t *testing.T) 
 		t.Fatal("full canonical wire changed", err)
 	}
 	checkpoint.State[0] = '['
-	checkpoint.Execution.ExecutionBasis[0] = '['
 	for i := 0; i < 2; i++ {
 		event := <-events
 		event.Operation.State[0] = '['
 		if event.Operation.Execution != nil {
-			event.Operation.Execution.ExecutionBasis[0] = '['
 		}
 	}
 	view, err := s.Inspect(0, 1)
@@ -233,8 +229,7 @@ func TestSavedOperationCheckpointKeepsFullWireAndPublicDetachment(t *testing.T) 
 		t.Fatal("public view unavailable", err)
 	}
 	view.Operations[0].State[0] = '['
-	view.Operations[0].Execution.ExecutionBasis[0] = '['
-	if !bytes.Equal(s.operations[owned.ID].State, owned.State) || !bytes.Equal(s.operations[owned.ID].ExecutionBasis(), owned.ExecutionBasis()) || !s.operations[owned.ID].State.IsValid() || !s.operations[owned.ID].ExecutionBasis().IsValid() {
+	if !bytes.Equal(s.operations[owned.ID].State, owned.State) || !s.operations[owned.ID].State.IsValid() {
 		t.Fatal("public event/view or incoming worker changed private checkpoint")
 	}
 	resumed, err := store.Resume(t.Context(), id)
@@ -280,13 +275,9 @@ func TestSavedOperationCheckpointStillRejectsInvalidStateBeforePrivateReuse(t *t
 		value.State = raw
 		invalid = append(invalid, value)
 	}
-	for _, field := range []string{"basis", "idempotency"} {
+	for range 1 {
 		value := previous
-		if field == "basis" {
-			value.Execution = &operation.ExecutionMetadata{ExecutionBasis: jsontext.Value(`{"x":1,"x":2}`)}
-		} else {
-			value.Idempotence = &operation.IdempotencyMetadata{Idempotency: jsontext.Value(`"\xff"`)}
-		}
+		value.Idempotence = &operation.IdempotencyMetadata{Idempotency: jsontext.Value(`"\xff"`)}
 		invalid = append(invalid, value)
 	}
 	// Invalid metadata must fail at the unchanged complete canonical Save,
@@ -334,7 +325,7 @@ func TestSavedOperationChangedStateMatchesJSONCloneAndPanicOracle(t *testing.T) 
 	for i, raw := range states {
 		t.Run(fmt.Sprintf("state%d", i), func(t *testing.T) {
 			value := savedCheckpointFixture(raw)
-			value.Execution = &operation.ExecutionMetadata{PreparationRequired: true, ExecutionBasis: jsontext.Value(` {"basis":1.00} `), Dependencies: []operation.ID{"prior"}}
+			value.Execution = &operation.ExecutionMetadata{Dependencies: []operation.ID{"prior"}}
 			value.Idempotence = &operation.IdempotencyMetadata{Idempotency: jsontext.Value(` {"key":"\u0041"} `)}
 			want, wantFailure := savedCheckpointCloneOutcome(value, previous, false)
 			got, gotFailure := savedCheckpointCloneOutcome(value, previous, true)
@@ -348,7 +339,7 @@ func TestSavedOperationChangedStateMatchesJSONCloneAndPanicOracle(t *testing.T) 
 func TestSavedOperationChangedStateDetachesIncomingAndPublicBytes(t *testing.T) {
 	previous := clone(savedCheckpointFixture(jsontext.Value(`{"prior":true}`)))
 	value := savedCheckpointFixture(jsontext.Value(`{"handle":"new independent result","nested":{"n":9007199254740993}}`))
-	value.Execution = &operation.ExecutionMetadata{ExecutionBasis: jsontext.Value(`{"basis":1}`), Dependencies: []operation.ID{"prior"}, RecoveryBasis: []operation.UncertainEffect{{ID: "prior", Basis: jsontext.Value(`{"effect":2}`)}}}
+	value.Execution = &operation.ExecutionMetadata{Dependencies: []operation.ID{"prior"}}
 	value.Idempotence = &operation.IdempotencyMetadata{Idempotency: jsontext.Value(`{"key":3}`)}
 	value.Permission = &permission.Decision{Mode: "default", State: "granted"}
 	value.Denial = &permission.Error{Code: "denied", Capability: "synthetic", Reason: "test"}
@@ -359,11 +350,10 @@ func TestSavedOperationChangedStateDetachesIncomingAndPublicBytes(t *testing.T) 
 	}
 	public := clone(Event{Kind: "operation", Operation: &got})
 	value.State[0], previous.State[0] = '[', '['
-	value.Execution.ExecutionBasis[0], value.Execution.RecoveryBasis[0].Basis[0] = '[', '['
 	value.Execution.Dependencies[0] = "changed"
 	value.Idempotence.Idempotency[0] = '['
 	value.Permission.State, value.Denial.Reason = "changed", "changed"
-	public.Operation.State[0], public.Operation.Execution.ExecutionBasis[0] = '[', '['
+	public.Operation.State[0] = '['
 	if !reflect.DeepEqual(got, want) {
 		t.Fatal("incoming, previous, metadata or public bytes aliased changed checkpoint")
 	}
@@ -394,7 +384,7 @@ func TestSavedOperationChangedStateKeepsFullWireAndPublicDetachment(t *testing.T
 	changed := initial
 	changed.Status = operation.StatusCompleted
 	changed.State = jsontext.Value(`{"handle":"changed terminal result","revision":9007199254740993}`)
-	changed.Execution = &operation.ExecutionMetadata{PreparationRequired: true, ExecutionBasis: jsontext.Value(` {"basis":1.0} `), Dependencies: []operation.ID{"prior"}, RecoveryBasis: []operation.UncertainEffect{{ID: "prior", Basis: jsontext.Value(`{"effect":2}`)}}}
+	changed.Execution = &operation.ExecutionMetadata{Dependencies: []operation.ID{"prior"}}
 	changed.Idempotence = &operation.IdempotencyMetadata{Idempotency: jsontext.Value(` {"key":"\u0041"} `)}
 	want := clone(changed)
 	if err = w.SaveOperation(t.Context(), id, changed); err != nil {
@@ -425,8 +415,6 @@ func TestSavedOperationChangedStateKeepsFullWireAndPublicDetachment(t *testing.T
 	}
 	for _, exposed := range []*operation.Operation{&changed, public.Operation, &view.Operations[0]} {
 		exposed.State[0] = '['
-		exposed.Execution.ExecutionBasis[0] = '['
-		exposed.Execution.RecoveryBasis[0].Basis[0] = '['
 		exposed.Execution.Dependencies[0] = "changed"
 		exposed.Idempotence.Idempotency[0] = '['
 	}
@@ -442,15 +430,13 @@ func TestSavedOperationChangedStateKeepsFullWireAndPublicDetachment(t *testing.T
 func TestSavedOperationCheckpointMetadataErrorsKeepCompleteClonePanic(t *testing.T) {
 	previous := clone(savedCheckpointFixture(jsontext.Value(`{"prior":true}`)))
 	for _, equal := range []bool{false, true} {
-		for _, field := range []string{"basis", "idempotency", "permission", "denial"} {
+		for _, field := range []string{"idempotency", "permission", "denial"} {
 			t.Run(fmt.Sprintf("equal%v/%s", equal, field), func(t *testing.T) {
 				value := savedCheckpointFixture(jsontext.Value(`{"changed":"` + strings.Repeat("x", 256) + `"}`))
 				if equal {
 					value.State = previous.State.Clone()
 				}
 				switch field {
-				case "basis":
-					value.Execution = &operation.ExecutionMetadata{ExecutionBasis: jsontext.Value(`{"x":1,"x":2}`)}
 				case "idempotency":
 					// This flat field follows State, so omitting State changes the
 					// JSON error offset unless the full clone is replayed.

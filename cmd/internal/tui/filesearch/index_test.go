@@ -3,7 +3,6 @@ package filesearch
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -46,8 +45,8 @@ func TestScanIgnoreHierarchyProtectedPathsAndNoFileContentIndex(t *testing.T) {
 	for name, content := range files {
 		fixtureFile(t, root, name, content)
 	}
-	result, err := Scan(context.Background(), root, DefaultLimits())
-	if err != nil || result.Limited || result.Incomplete {
+	result, err := Scan(context.Background(), root)
+	if err != nil {
 		t.Fatalf("scan: %+v %v", result, err)
 	}
 	var visible []string
@@ -67,57 +66,14 @@ func TestScanIgnoreHierarchyProtectedPathsAndNoFileContentIndex(t *testing.T) {
 	}
 }
 
-func TestScanRejectsSymlinksAndWorkspaceEscape(t *testing.T) {
-	root, outside := t.TempDir(), t.TempDir()
-	fixtureFile(t, root, "real.go", "safe")
-	fixtureFile(t, outside, "outside-secret.txt", "private")
-	for name, target := range map[string]string{"outside.txt": filepath.Join(outside, "outside-secret.txt"), "outside-dir": outside, "inside.go": "real.go", "inside-dir": "."} {
-		if err := os.Symlink(target, filepath.Join(root, name)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	result, err := Scan(context.Background(), root, DefaultLimits())
-	if err != nil || !reflect.DeepEqual(paths(result.Index), []string{"real.go"}) {
-		t.Fatal(result, err)
-	}
-	for _, name := range []string{"../outside-secret.txt", "/etc/passwd", "outside.txt", "outside-dir/outside-secret.txt", "inside.go", "inside-dir/real.go", "a/../real.go", ".git/config", "missing"} {
-		if Eligible(root, name) {
-			t.Fatalf("unsafe eligible: %q", name)
-		}
-	}
-	if !Eligible(root, "real.go") {
-		t.Fatal("regular file unavailable")
-	}
-	linkRoot := filepath.Join(t.TempDir(), "linked-workspace")
-	if err := os.Symlink(root, linkRoot); err != nil {
-		t.Fatal(err)
-	}
-	for _, bad := range []string{".", "", linkRoot, filepath.Join(root, "real.go")} {
-		if _, err := Scan(context.Background(), bad, DefaultLimits()); !errors.Is(err, ErrWorkspace) {
-			t.Fatalf("workspace %q: %v", bad, err)
-		}
-	}
-	if err := os.Remove(filepath.Join(root, "real.go")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(outside, "outside-secret.txt"), filepath.Join(root, "real.go")); err != nil {
-		t.Fatal(err)
-	}
-	if Eligible(root, "real.go") {
-		t.Fatal("cached candidate became outside symlink")
-	}
-}
-
 func TestScanIgnoreMetadataFailsClosedAndWorktreeGitFile(t *testing.T) {
-	for _, scenario := range []string{"malformed", "oversized", "symlink", "nested"} {
+	for _, scenario := range []string{"malformed", "symlink", "nested"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
 			fixtureFile(t, root, "hidden.txt", "private")
 			switch scenario {
 			case "malformed":
 				fixtureFile(t, root, ".gitignore", "[broken\n")
-			case "oversized":
-				fixtureFile(t, root, ".gitignore", strings.Repeat("x", 65537))
 			case "symlink":
 				outside := t.TempDir()
 				fixtureFile(t, outside, "ignore", "hidden.txt")
@@ -128,74 +84,29 @@ func TestScanIgnoreMetadataFailsClosedAndWorktreeGitFile(t *testing.T) {
 				fixtureFile(t, root, "nested/.gitignore", "[broken")
 				fixtureFile(t, root, "nested/secret.txt", "private")
 			}
-			result, err := Scan(context.Background(), root, DefaultLimits())
-			if err != nil || !result.Incomplete {
-				t.Fatal(result, err)
-			}
-			want := []string(nil)
-			if scenario == "nested" {
-				want = []string{"hidden.txt"}
-			}
-			if !reflect.DeepEqual(paths(result.Index), want) {
-				t.Fatalf("fail-closed: %v", result.Index.files)
+			result, err := Scan(context.Background(), root)
+			if err == nil || !strings.Contains(err.Error(), ".gitignore") || len(result.Index.files) != 0 {
+				t.Fatalf("ignore failure needs its filename and no partial success: %+v %v", result, err)
 			}
 		})
 	}
 	root := t.TempDir()
 	fixtureFile(t, root, ".git", "gitdir: /private/other/worktree")
 	fixtureFile(t, root, "kept", "data")
-	result, err := Scan(context.Background(), root, DefaultLimits())
-	if err != nil || result.Incomplete || !reflect.DeepEqual(paths(result.Index), []string{"kept"}) {
+	result, err := Scan(context.Background(), root)
+	if err != nil || !reflect.DeepEqual(paths(result.Index), []string{"kept"}) {
 		t.Fatal(result, err)
 	}
 }
 
-func TestScanFileEntryDepthPathAndIgnoreLimits(t *testing.T) {
+func TestScanKeepsDeepFilesAndLargeIgnoreRules(t *testing.T) {
 	root := t.TempDir()
-	for i := 0; i < 40; i++ {
-		fixtureFile(t, root, fmt.Sprintf("file-%03d", i), "data")
-	}
-	for _, test := range []struct {
-		name   string
-		modify func(*Limits)
-		check  func(Result) bool
-	}{
-		{"files", func(l *Limits) { l.Files = 3 }, func(r Result) bool { return len(r.Index.files) == 3 }},
-		{"entries", func(l *Limits) { l.Entries = 7 }, func(r Result) bool { return r.Entries == 7 && len(r.Index.files) <= 7 }},
-		{"path", func(l *Limits) { l.PathBytes = 2 }, func(r Result) bool { return len(r.Index.files) == 0 }},
-		{"duration", func(l *Limits) { l.Duration = time.Nanosecond }, func(r Result) bool { return len(r.Index.files) == 0 }},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			l := DefaultLimits()
-			test.modify(&l)
-			r, err := Scan(context.Background(), root, l)
-			if err != nil || !r.Limited || !test.check(r) {
-				t.Fatal(r, err)
-			}
-		})
-	}
-	deep := t.TempDir()
-	fixtureFile(t, deep, "a/b/c/d/file", "data")
-	l := DefaultLimits()
-	l.Depth = 1
-	r, err := Scan(context.Background(), deep, l)
-	if err != nil || !r.Limited || len(r.Index.files) != 0 {
+	deep := strings.Repeat("d/", 40) + "kept"
+	fixtureFile(t, root, deep, "data")
+	fixtureFile(t, root, ".gitignore", strings.Repeat("missing\n", 10000)+"../outside\n")
+	r, err := Scan(t.Context(), root)
+	if err != nil || !reflect.DeepEqual(r.Index.files, []string{".gitignore", deep}) {
 		t.Fatal(r, err)
-	}
-	for _, field := range []string{"bytes", "rules"} {
-		root := t.TempDir()
-		fixtureFile(t, root, ".gitignore", "a\nb\nc\n")
-		fixtureFile(t, root, "d", "data")
-		l := DefaultLimits()
-		if field == "bytes" {
-			l.IgnoreTotalBytes = 2
-		} else {
-			l.IgnoreRules = 2
-		}
-		r, err := Scan(context.Background(), root, l)
-		if err != nil || !r.Limited || len(r.Index.files) != 0 {
-			t.Fatal(field, r, err)
-		}
 	}
 }
 
@@ -204,13 +115,13 @@ func TestScanAndSearchCancellationDiscardPartialResults(t *testing.T) {
 	fixtureFile(t, root, "one", "data")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	r, err := Scan(ctx, root, DefaultLimits())
+	r, err := Scan(ctx, root)
 	if !errors.Is(err, context.Canceled) || len(r.Index.files) != 0 {
 		t.Fatal(r, err)
 	}
 	ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	r, err = Scan(ctx, root, DefaultLimits())
+	r, err = Scan(ctx, root)
 	if !errors.Is(err, context.DeadlineExceeded) || len(r.Index.files) != 0 {
 		t.Fatal(r, err)
 	}
@@ -226,7 +137,7 @@ func TestSafeNamesRejectTerminalControlsAndBidiPreserveGraphemes(t *testing.T) {
 	for _, name := range []string{"猫👩🏽‍💻é.md", "space file", "quote\"file", "back\\slash", "unsafe\x1b[31m", "unsafe\nfile", "unsafe\u202efile"} {
 		fixtureFile(t, root, name, "data")
 	}
-	r, err := Scan(context.Background(), root, DefaultLimits())
+	r, err := Scan(context.Background(), root)
 	if err != nil || len(r.Index.files) != 4 {
 		t.Fatal(r, err)
 	}
@@ -241,7 +152,7 @@ func TestSafePathRejectsInvalidUTF8WithoutFilesystemSupport(t *testing.T) {
 	// APFS refuses these names before Scan can see them. The pure path boundary
 	// must still reject invalid bytes on every OS, including when no file exists.
 	for _, name := range []string{string([]byte{0xff}), "dir/" + string([]byte{0xc3, 0x28}), "file" + string([]byte{0xe2, 0x82})} {
-		if SafePath(name) || Eligible(t.TempDir(), name) {
+		if SafePath(name) {
 			t.Fatal("invalid UTF-8 accepted as a file candidate")
 		}
 	}
@@ -265,5 +176,21 @@ func TestIgnoreGlobsEscapesAnchorsAndNegation(t *testing.T) {
 		if err != nil || ignored(rules, test.name, test.dir) != test.want {
 			t.Fatalf("%q %q: %v", test.pattern, test.name, err)
 		}
+	}
+}
+
+func TestScanExcludesSymlinksAndOutsideFiles(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	fixtureFile(t, root, "real.go", "source")
+	fixtureFile(t, outside, "outside.go", "private")
+	if err := os.Symlink(outside, filepath.Join(root, "linked-dir")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "outside.go"), filepath.Join(root, "linked.go")); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Scan(t.Context(), root)
+	if err != nil || !reflect.DeepEqual(paths(result.Index), []string{"real.go"}) {
+		t.Fatal(result, err)
 	}
 }

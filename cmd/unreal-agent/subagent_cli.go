@@ -147,15 +147,15 @@ func parseAll(flags *flag.FlagSet, args []string) ([]string, error) {
 
 func textArgument(value string, stdin io.Reader) (string, error) {
 	if value == "" {
-		data, err := io.ReadAll(io.LimitReader(stdin, 32<<10+1))
+		data, err := io.ReadAll(stdin)
 		if err != nil {
 			return "", err
 		}
 		value = string(data)
 	}
 	value = strings.TrimSpace(value)
-	if value == "" || len(value) > 32<<10 {
-		return "", errors.New("the text is empty or longer than 32 KiB")
+	if value == "" {
+		return "", errors.New("the text is empty")
 	}
 	return value, nil
 }
@@ -254,7 +254,7 @@ func (c subagentCLI) start(ctx context.Context, template, task string) error {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	fmt.Fprintf(c.out, "Started %s as %s.\nWait for it: %s subagent wait %s\n", template, handle, c.name, handle)
+	fmt.Fprintf(c.out, "Started %s as %s.\nEnd your turn; completion will be sent as a message. Report: %s subagent show %s\n", template, handle, c.name, handle)
 	return nil
 }
 
@@ -316,7 +316,7 @@ func (c subagentCLI) wait(ctx context.Context, handles []string, timeout time.Du
 				child.report(c.out, c.name, false)
 			}
 			if !ready {
-				fmt.Fprintf(c.out, "Still running. Run %s subagent wait again to keep waiting.\n", c.name)
+				fmt.Fprintln(c.out, "Still running. End your turn; completion will be sent as a message.")
 			}
 			return nil
 		}
@@ -439,9 +439,25 @@ func claudeSubagents(templates map[string]subagent.Template, socket string) (cla
 	if binary, err = filepath.Abs(binary); err != nil {
 		return claudeagent.SubagentCLI{}, err
 	}
+	if home, err := os.UserHomeDir(); err == nil {
+		binary = subagentCLIPath(binary, home)
+	}
 	if socket, err = filepath.Abs(socket); err != nil {
 		return claudeagent.SubagentCLI{}, err
 	}
 	names := slices.Sorted(maps.Keys(templates))
 	return claudeagent.SubagentCLI{Binary: binary, Socket: socket, Templates: names}, nil
+}
+
+func subagentCLIPath(binary, home string) string {
+	// Only kit installations use the kit's launcher. A source build must keep
+	// its own CLI rather than pick up an unrelated installed executable.
+	root := filepath.Join(home, ".local", "opt", "unreal-agent-pilot") + string(filepath.Separator)
+	if strings.HasPrefix(binary, root) {
+		stable := filepath.Join(home, ".local", "bin", "unreal-agent")
+		if info, err := os.Stat(stable); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
+			return stable
+		}
+	}
+	return binary
 }

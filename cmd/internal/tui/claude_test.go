@@ -71,7 +71,7 @@ func TestClaudeTrustedPolicyAnalysisKeepsLiveDockResponsive(t *testing.T) {
 	}
 }
 
-func TestClaudeClosedInitReasonVisibleInBoundedFailure(t *testing.T) {
+func TestClaudeClosedInitFailureBandUsesFirstLine(t *testing.T) {
 	m := NewModel("team")
 	failure := `call model for turn "00000000-0000-0000-0000-000000000000": init_plugins_loaded(count=1): claude-code is text-only: tools unsupported (Claude stream initialization violated isolation)`
 	if err := m.apply(host.View{Generation: "g", Failure: failure}); err != nil {
@@ -81,7 +81,24 @@ func TestClaudeClosedInitReasonVisibleInBoundedFailure(t *testing.T) {
 		for _, theme := range []Theme{{}, {NoColor: true}, {Plain: true}, {ASCII: true}} {
 			f := RenderFrame(m.Snapshot(), UIState{Theme: theme}, size[0], size[1])
 			text := sgrRE.ReplaceAllString(strings.Join(f.Lines, ""), "")
-			if !strings.Contains(text, "init_plugins_loaded") || len(f.Lines) != size[1] || f.CursorY != size[1]-2 {
+			want := "✗ この接続先ではツールを使えません。/model で切り替えて /resume してください。"
+			if theme.ASCII {
+				want = "x この接続先ではツールを使えません。/model で切り替えて /resume してください。"
+			}
+			brackets := 0
+			if theme.Plain || theme.NoColor {
+				brackets = 2
+			}
+			want = tail(want, size[0]-1-brackets, theme)
+			if brackets > 0 {
+				want = "[" + want + "]"
+			}
+			bandAt := size[1] - 5
+			if size[1] < 16 {
+				bandAt++
+			}
+			band := sgrRE.ReplaceAllString(f.Lines[bandAt], "")
+			if band != want || !strings.Contains(text, "この接続先ではツールを使えません") || strings.Contains(text, failure) || len(f.Lines) != size[1] || f.CursorY != size[1]-2 {
 				t.Fatal("bounded failure hid the closed reason or moved composer", size)
 			}
 		}

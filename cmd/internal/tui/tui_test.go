@@ -66,15 +66,12 @@ func TestUnicodeEditingFragmentedPasteResizeAndTerminalEscapes(t *testing.T) {
 		}
 	}
 	for _, size := range [][2]int{{1, 4}, {4, 4}, {80, 24}, {2000, 900}} {
-		frame := Render(Snapshot{ID: "test", Lines: []string{raw}}, e.Display(false), "status", size[0], size[1], "")
-		if len(strings.Split(frame, "\r\n")) > max(4, min(size[1], 200)) {
+		frame := RenderFrame(Snapshot{ID: "test", Entries: []Entry{{Role: "agent", Text: SafeText(raw)}}}, UIState{Theme: Theme{Plain: true}, Input: e.Display(false), Cursor: len(e.Display(false)), Notification: Notification{Text: "status"}}, size[0], size[1])
+		if len(frame.Lines) > max(4, min(size[1], 200)) {
 			t.Fatal("frame exceeds terminal height")
 		}
-		if !utf8.ValidString(frame) {
+		if !utf8.ValidString(frameText(frame)) {
 			t.Fatal("invalid rendering")
-		}
-		if !strings.HasPrefix(frame, "\x1b[H") || strings.Contains(frame, "\x1b[2J") {
-			t.Fatal("frame must address home without clearing the screen")
 		}
 	}
 }
@@ -96,7 +93,7 @@ func TestProjectionNoDuplicatePagesAndLatestOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := m.Snapshot()
-	if len(s.Lines) != 1 || s.Generation != "two" || s.Operations[0].Status != operation.StatusCompleted {
+	if len(s.Entries) != 1 || s.Generation != "two" || s.Operations[0].Status != operation.StatusCompleted {
 		t.Fatalf("bad rebuild %+v", s)
 	}
 	if m.progress(host.Event{Generation: "one", Revision: 2, Progress: &host.Progress{Text: "stale"}}) {
@@ -184,26 +181,17 @@ func waitFor(t *testing.T, f func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 }
-func TestPrivateAuthCancelAndSubmitRetryUseSeparateChannels(t *testing.T) {
+func TestSubmitRetryAndControlUseSeparateChannels(t *testing.T) {
 	f := newFake()
 	f.failSubmit = true
 	keys := make(chan Key, 64)
 	out := &screenObserver{}
 	done := make(chan error, 1)
 	go func() { done <- Run(t.Context(), Config{Client: f, ID: "s", Keys: keys, Output: out}) }()
-	waitFor(t, func() bool { return strings.Contains(out.text(), "connected") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "入力待ち") })
 	command := func(s string) { keys <- Key{Text: s}; keys <- Key{Name: "enter"} }
-	command("/login openai key")
-	waitFor(t, func() bool { return strings.Contains(out.text(), "private: API key for openai/key") })
-	keys <- Key{Text: "canceled-secret"}
-	keys <- Key{Name: "cancel"}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "key entry canceled") })
-	command("/login openai key")
-	keys <- Key{Text: "private-value"}
-	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "API key stored") })
 	command("hello")
-	waitFor(t, func() bool { return strings.Contains(out.text(), "same input ID") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "重複して送信されません") })
 	command("/retry")
 	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.inputs) == 2 })
 	waitFor(t, func() bool {
@@ -211,7 +199,7 @@ func TestPrivateAuthCancelAndSubmitRetryUseSeparateChannels(t *testing.T) {
 		// Old output may still contain an earlier idle keybar; require the
 		// current screen to leave both the command menu and pending request.
 		value := out.text()
-		return strings.Contains(value, "you › Ask, or type / for commands") && strings.Contains(value, "^C stop session") && !strings.Contains(value, "^C cancel waiting")
+		return strings.Contains(value, "› Ask, or type / for commands") && strings.Contains(value, "^C stop session") && !strings.Contains(value, "^C cancel waiting")
 	})
 	if strings.Contains(out.rawText(), "input committed") {
 		t.Fatal("ACK must not become a display notification")
@@ -224,9 +212,6 @@ func TestPrivateAuthCancelAndSubmitRetryUseSeparateChannels(t *testing.T) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.logins != 1 || f.login != "private-value" {
-		t.Fatal("private login handling")
-	}
 	if f.inputs[0].ID != f.inputs[1].ID || f.inputs[0].Kind != inbox.InputExternal || f.inputs[2].Kind != inbox.InputControl {
 		t.Fatal("retry/control routing")
 	}
@@ -317,38 +302,13 @@ func FuzzDecoderAndWrap(f *testing.F) {
 
 var _ io.Writer = (*capture)(nil)
 
-func TestPanelUpdatesWithoutParentEvents(t *testing.T) {
-	f := newFake()
-	out := &capture{}
-	keys := make(chan Key, 1)
-	updates := make(chan struct{}, 1)
-	var phase atomic.Int32
-	done := make(chan error, 1)
-	go func() {
-		done <- Run(t.Context(), Config{Client: f, ID: "s", Keys: keys, Output: out, Updates: updates, Panel: func(int, int) string {
-			if phase.Load() == 0 {
-				return "child initial"
-			}
-			return "child updated"
-		}})
-	}()
-	waitFor(t, func() bool { return strings.Contains(out.String(), "child initial") })
-	phase.Store(1)
-	updates <- struct{}{}
-	waitFor(t, func() bool { return strings.Contains(out.String(), "child updated") })
-	keys <- Key{Name: "detach"}
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-}
-
 func BenchmarkRenderUnicodeProgress(b *testing.B) {
 	snapshot := Snapshot{ID: "bench", Status: "connected", Progress: &host.Progress{Mode: "streaming", Text: strings.Repeat("日本語 progress 👩🏽‍💻 ", 500)}}
 	for range 128 {
-		snapshot.Lines = append(snapshot.Lines, "agent> Unicode workspace response")
+		snapshot.Entries = append(snapshot.Entries, Entry{Role: "agent", Text: "Unicode workspace response"})
 	}
 	b.ReportAllocs()
 	for b.Loop() {
-		_ = Render(snapshot, "> prompt", "connected", 100, 30, "")
+		_ = RenderFrame(snapshot, UIState{Theme: Theme{Plain: true}, Input: "prompt", Cursor: len("prompt")}, 100, 30)
 	}
 }

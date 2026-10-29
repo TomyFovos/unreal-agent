@@ -1,4 +1,5 @@
-// Package contextbuilder defines I/O-pure, in-memory model request construction.
+// Package contextbuilder derives model requests from canonical history.
+// The Coordinator supplies persistence and inference for view compaction.
 package contextbuilder
 
 import (

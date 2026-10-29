@@ -3,11 +3,8 @@ package responsesapi
 import (
 	"encoding/json/v2"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,20 +19,10 @@ import (
 
 // Actual canonical replay -> Builder -> Engine -> JSON-v2 wire. Synthetic only.
 type repairHistory struct {
-	t   *testing.T
-	b   contextbuilder.Builder
-	seq sessionstore.Sequence
-}
-
-func TestContinuationRepairInvalidProjectionSendsNoHTTP(t *testing.T) {
-	var received atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { received.Add(1) }))
-	defer server.Close()
-	a := newTestAdapter(t, server.URL)
-	_, err := a.Respond(t.Context(), llm.Request{Input: []llm.Item{repairCall("missing")}}, llm.RequestOptions{})
-	if err == nil || received.Load() != 0 || strings.Contains(err.Error(), "source.go") {
-		t.Fatal("invalid continuation escaped pre-send validation")
-	}
+	t      *testing.T
+	b      contextbuilder.Builder
+	seq    sessionstore.Sequence
+	engine *contextengine.Engine
 }
 
 func FuzzContinuationRepairWirePairs(f *testing.F) {
@@ -70,7 +57,8 @@ func FuzzContinuationRepairWirePairs(f *testing.F) {
 func newRepairHistory(t *testing.T, config contextengine.Config) *repairHistory {
 	t.Helper()
 	b := contextbuilder.NewBuilder()
-	if _, err := contextbuilder.EnableCompaction(b, config, contextengine.Constraints{}); err != nil {
+	engine, err := contextbuilder.EnableCompaction(b, config, contextengine.Constraints{})
+	if err != nil {
 		t.Fatal(err)
 	}
 	b.(interface{ SetRuntimeProvider(string) }).SetRuntimeProvider("openai-codex")
@@ -78,7 +66,7 @@ func newRepairHistory(t *testing.T, config contextengine.Config) *repairHistory 
 	b.(interface {
 		SetContextRuntime(sessionstore.RuntimeSelection, bool)
 	}).SetContextRuntime(sessionstore.RuntimeSelection{Provider: "openai-codex", Model: "synthetic-model", ContextWindow: 272000}, true)
-	return &repairHistory{t: t, b: b}
+	return &repairHistory{t: t, b: b, engine: engine}
 }
 func (h *repairHistory) item(kind sessionstore.ItemKind, data any, apply func()) {
 	h.seq++
@@ -97,6 +85,9 @@ func (h *repairHistory) user(id, text string) {
 	})
 }
 func (h *repairHistory) request(turn string) (contextbuilder.Result, []map[string]any, error) {
+	if err := prepareAppendHistory(h, nil, false, nil); err != nil {
+		return contextbuilder.Result{}, nil, err
+	}
 	built, err := h.b.Build()
 	if err != nil {
 		return built, nil, err

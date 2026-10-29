@@ -1,11 +1,26 @@
 # Unreal Agent 共通開発キット
 
-asp/devloreの両方で同じarchive、同じセットアップを使います。Linux amd64、
-glibc @MIN_GLIBC@以上、Python 3・Bash・Gitが必要です。CGO/tree-sitter/ASTと
-4 binaryを含むローカルsnapshot（@REVISION@）。正式Releaseではありません。
-認証情報を同梱せず、外部Codex/Claude CLIが認証を所有します。
+**Codex か Claude のどちらか一方が使えれば始められます。** 同じ `/model` で
+接続先・モデル・effort を選べます。API キーは使いません。
 
-Windowsの転送手段は未確認です。`sbx`が使える場合、同じ2ファイルを転送します。
+asp/devlore の両方で同じキットを使います。Linux amd64、glibc @MIN_GLIBC@ 以上、
+Python 3・Bash・Git が必要です。ローカル snapshot（@REVISION@）です。
+認証情報は同梱しません。
+
+## 使う接続先の準備
+
+- **Codex:** 公式の Codex CLI をインストールし、Bash で `codex login` を実行します。
+  Docker Sandboxes のログインをすでに使っている場合は、その接続も利用できます。
+- **Claude:** 公式の Claude Code をインストールし、Bash で `claude` を起動します。
+  Claude Code の中で `/login` を実行し、Claude サブスクでログインします。
+
+Unreal の `/login` はこの手順を案内します。あとからログインした側は
+`/model refresh`、または `/model` でその接続先を選ぶと再検出します。
+Unreal を開き直す必要はありません。
+
+## インストール
+
+Windows PowerShell から Sandbox に転送する場合（`sbx` が使える環境）:
 
 ```powershell
 sbx cp .\@ARCHIVE@ asp:/tmp/@ARCHIVE@
@@ -14,7 +29,7 @@ sbx cp .\@ARCHIVE@ devlore:/tmp/@ARCHIVE@
 sbx cp .\@ARCHIVE@.sha256 devlore:/tmp/@ARCHIVE@.sha256
 ```
 
-各SandboxのBashで同じ手順を実行します。
+各 Sandbox の Bash で実行します。
 
 ```bash
 cd /tmp
@@ -26,90 +41,51 @@ cd "$kit/@KIT_ROOT@" &&
 bash development.sh --configure-providers --replace-pilot-launcher
 ```
 
-Claudeは、このSandboxにインストールしてClaudeサブスクでログイン済みの公式
-Claude Codeで動きます（API key・MCP・Modは使いません）。事前に確認します。
+「インストール完了」の後に、接続先ごとの利用状態が表示されます。
+使えない側にはログイン方法やインストールの案内が出ます。
+両方未ログインなら、どちらかにログインしてから起動してください。
 
-```bash
-claude --version && claude auth status
-```
+## 起動と操作
 
-未ログインなら`claude`を起動して`/login`してください。Claude Codeはtool
-（Read/Edit/Bash等）を自分で実行しますが、承認が必要な操作は毎回Unrealに
-問い合わせ、`/permissions`のmode（Read Only/Ask/Full Access）で決まります。
-組織の許可リストのコマンドとworkspace内の読み取りはClaude Code自身が許可します。
-組織ルールでClaude Codeが拒否したコマンド（git push等）は、Unrealが自分の
-シェルでUnrealのmodeに従って実行し、結果をClaudeに返します。
-セットアップに質問と起動前のEnter待ちはありません。
-
-CodexはGo native resolverが初回だけ決定的に発見します。Docker OAuthは既存
-source/TOML routing/OAuth mode/固定HTTPS forward proxyをすべて検証できた場合
-だけ選びます。Sandbox名、hostname、proxy文字列だけでは選びません。
-意図したDocker sourceの不一致や曖昧なroutingは当該Providerだけunavailableに
-し、別credentialへfallbackしません。External方式も既存認証とcatalogを検証
-します。ClaudeはClaude CLIのサブスクのログインとモデル一覧をnativeで確認します。
-
-設定時のnative preflightは認証確認とcatalog取得だけです。推論、thread、
-tool、Operationは実行しません。CLIのinstall/login、credentialのコピーや
-設定変更は行いません。両方が未利用ならSession起動は拒否し、両方の不足理由を
-表示します。API key、別auth route、別providerへの自動fallbackはありません。
-
-既存の明示ルートは保持します。特別なルート変更には
-`--docker-sandbox-oauth` / `--external-codex` / `--codex-auto`、意図した無効化には
-`--disable-codex` / `--disable-claude`を任意指定できます。旧Claude経路の
-`--trust-managed-policy` / `--reject-managed-policy` / `--policy-audited`は互換の
-ため受け付けますが、Claude Code経路には影響しません。
-別HOMEのlauncher bindingのコピーは拒否します。native standaloneの初期値は
-`reject`のままです。利用不可のProviderを一覧から隠しません。
-
-既知の旧wrapperだけをchecksumと所有権で確認し、private backup付きで置換
-します。無関係な`unreal`は上書きしません。新しいBashを開き、`type -a unreal`、
-必要なら`"$HOME/.local/bin/unreal"`を使います。現在のshellのalias/functionは
-installerでは消せません。
+新しい Bash を開き、作業フォルダで実行します。
 
 ```bash
 cd ~/workspace/your-existing-project
 unreal development
-# Ctrl+Dでdetach後、同じrepoから再接続
+# Ctrl+D で画面を離れた後も、同じコマンドで再接続できます
 unreal development
 ```
 
-Git worktree rootをworkspaceとし、repo/instanceごとにconfig/state/socketを
-分離します。両方利用可能なら初回だけ既存のinitial provider chooserを使います。
-`/model`には対応する2社と利用状態を表示し、利用可能なProvider→Model→Effortを
-選びます。未利用側にはCLI/login、trust、proxy、catalog等の固定された不足理由を
-表示し、Host側でも選択を拒否します。モデル名やeffortを導入時に指定する必要は
-ありません。非共通の明示`DiscoverProviders=false`設定は維持されます。
+`unreal` が別のコマンドに隠れる場合は `type -a unreal` で確認し、
+`"$HOME/.local/bin/unreal"` を使ってください。
 
-通常の初期権限はRead Only。`/permissions`で人間がAsk/Full Accessを明示承認
-します。Full AccessはOS sandboxではなくambient権限です。Git公開の承認は別です。
-ClaudeのtoolはClaude Codeが実行し、承認はUnrealのmode、記録はUnrealのSession
-（claude_code receipt）です。
+- `/model`: 接続先 → モデル → effort を選びます。両方使える初回は Claude、
+  一方だけなら使える側で始まります。使えない側も状態と準備手順を表示します。
+- `/permissions`: Read Only（読むだけ）、Ask（書き込みと実行の前に確認）、
+  Full Access（確認なし）を選びます。Full Access は OS の隔離ではありません。
+- `/view`: Chat / Orchestration / Split を選びます。初期は Split です。
+- `/copy`、`/export`: 会話をコピー・Markdown 出力します。
+- `/stop`、`/resume`: 作業の停止対象を選ぶ・止まった会話を再開します。
+- `/analyze`: 詳しい診断情報を確認します。
 
-## 既存workspaceへの更新
+Claude Code の操作も Unreal の権限に従います。Claude Code が自分では実行しない
+コマンドは、Unreal の通常の Bash 要求として同じ権限で扱います。
+接続先が使えなくなった場合はログインし直すか、停止中でも `/model` で
+別の接続先を選び、`/resume` で再開できます。自動で別の接続先には切り替えません。
 
-セットアップで保存した希望設定と、workspaceに適用済みの設定/buildを区別します。
-変更後、そのworkspaceで次に`unreal NAME`を実行すると、旧Host/履歴を保持し
-**別instanceで新規Sessionを開始する**ことを短く説明します。人間が`y`で確認した
-場合だけ新しいconfig/state/socketへ切り替え、以後は同じ通常コマンドで再接続
-します。名前だけ変えてもprovider設定は更新されません。同じ承認済み設定の
-再実行・再インストールでは質問せずinstanceを増やしません。実際のprofile変更
-への非対話起動や確認拒否では旧利用先を保持します。可用性の変化とschema v1/v2
-からv3への同一意味の移行だけでは新instanceを作りません。
+## 既存 workspace への更新
 
-旧runtime.jsonとSession security identityは書き換えません。Runtime/Providers内の
-Claude設定がLauncherより優先していた場合も、古い設定へ書き戻さず新規bootstrapで
-一貫した値を作ります。現在のconfigのhash/有効設定が変わった場合も検出します。
+同じインストール手順で更新します。その workspace で次に `unreal NAME` を実行すると、
+更新を検出してバックグラウンド処理（Host）を再起動し、**会話と設定を引き継ぎます**。
+別の Session を作る必要はありません。既存の会話・認証情報は削除しません。
 
-`unreal --workspace-info`で現在と旧config/state/socketを確認できます。
-旧履歴へは`unreal --instance default NAME`、または表示された旧instance名で
-明示再接続します。build identityが違う場合は保存した旧kitのbinaryを使い、
-異版Hostを自動停止しません。`--instance`や`--config`の明示指定は自動bindingの
-対象外です。既存Host/Session/認証/Gate環境を削除・移行しません。
+workspace ごとに設定と会話を保存します。`--instance` や `--config` を明示した場合は
+その利用先を使います。`unreal --workspace-info` で保存場所、`unreal --readme` でこの説明、
+`bash doctor.sh` で実行ファイルと動作環境を確認できます。
 
-configは`~/.config/unreal-agent-common/repos/r-*/native/unreal-agent/runtime.json`、
-stateは`~/.local/state/unreal-agent-common/r-*/`。private 0700/0600とatomic
-publish/lockを維持します。`unreal --readme`でこの説明、`bash doctor.sh`で4 binary・
-CGO・arch/glibcを非推論検査します。認証の復帰は従来の`codex`/`claude`コマンドです。
+接続方法を明示する必要がある場合は `--docker-sandbox-oauth` / `--external-codex` /
+`--codex-auto`、接続先を無効にする場合は `--disable-codex` / `--disable-claude` を
+セットアップ時に指定できます。ログイン情報のコピーや CLI のログイン操作は行いません。
 
 ## 新規合成workspaceでの受入
 

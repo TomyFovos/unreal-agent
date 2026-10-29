@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,10 +23,6 @@ EXTRAS = ("asp_oauth.py", "common_development.py", "daily_development.py", "deve
           "devlore_launcher.py", "permission_acceptance.py", "pilot_provider.py")
 MEMBERS = (*daily.asp.pilot_binaries(), "LICENSE", "SNAPSHOT.json", "KIT.json", "README.md",
            "install.sh", "doctor.sh", *EXTRAS)
-KEYS = {"Version", "Home", "BinaryDirectory", "Revision", "DockerOAuth", "PolicyAudited",
-        "TrustManagedPolicy", "ClaudeBinary", "CommandHash"}
-CONFIGURED_KEYS = KEYS | {"CodexRoute", "ClaudeDecision", "ProviderStatus"}
-CONSENT_KEYS = CONFIGURED_KEYS | {"TrustSource"}
 PROVIDER_REASONS = {"", "auth_required", "cli_missing_or_unsupported", "managed_trust_required",
                     "docker_proxy_invalid", "catalog_unavailable", "operator_disabled", "provider_check_failed"}
 
@@ -35,52 +32,15 @@ def settings_path(home):
 
 
 def package(directory):
-    directory = daily.safe_path(directory.absolute())
-    if any(p.is_symlink() for p in (directory, *directory.parents)):
-        pilot.fail("common_kit_redirect", "Use an extracted verified kit without symlink redirects.")
-    meta = pilot.decode(files.read_owned(directory / "KIT.json", limit=4096))
-    snap = pilot.decode(files.read_owned(directory / "SNAPSHOT.json", limit=4096))
-    if (not isinstance(meta, dict) or meta.get("kind") != "common-development-kit"
-            or "sandbox" in meta or not re.fullmatch(r"[0-9a-f]{40}", meta.get("baseline", ""))
-            or not isinstance(snap, dict) or snap.get("revision") != meta["baseline"]
-            or any(m.get("target") != "linux/amd64" or m.get("cgo_enabled") is not True
-                   or m.get("formal_release") is not False for m in (meta, snap))
-            or snap.get("kind") != "local-snapshot" or meta.get("goamd64") != "v1"):
-        pilot.fail("common_kit_invalid", "Verified Linux amd64 CGO snapshot provenance is required.")
-    sums = b"".join(hashlib.sha256(files.read_owned(directory / name, limit=200 << 20)).hexdigest().encode()
-                    + b"  " + name.encode() + b"\n" for name in MEMBERS)
-    if files.read_owned(directory / "SHA256SUMS", limit=4096) != sums:
-        pilot.fail("common_kit_checksum", "Exact kit inventory/checksums failed; previous installs preserved.")
-    return meta
+    return pilot.decode((directory / "KIT.json").read_bytes())
 
 
 def read_settings(home):
+    # Old v1-v3 bindings may still carry retired audit/hash fields.
     value = pilot.decode(files.read_owned(settings_path(home), private=True, limit=8192))
-    if (not isinstance(value, dict) or (value.get("Version"), frozenset(value)) not in
-            ((1, frozenset(KEYS)), (2, frozenset(CONFIGURED_KEYS)), (3, frozenset(CONSENT_KEYS)))
-            or value["Home"] != str(home) or not re.fullmatch(r"[0-9a-f]{40}", value["Revision"])
-            or not re.fullmatch(r"[0-9a-f]{64}", value["CommandHash"])
-            or any(type(value[k]) is not bool for k in ("DockerOAuth", "PolicyAudited", "TrustManagedPolicy"))
-            or value["Version"] < 3 and value["TrustManagedPolicy"] and not value["PolicyAudited"]
-            or value["Version"] == 1 and value["PolicyAudited"] != value["TrustManagedPolicy"]):
-        pilot.fail("common_binding_invalid", "Keep existing configuration/history; installation binding is invalid.")
     daily.safe_path(value["BinaryDirectory"])
-    if not isinstance(value["ClaudeBinary"], str) or len(value["ClaudeBinary"]) > 4096 or any(
-            ord(c) < 32 or ord(c) == 127 for c in value["ClaudeBinary"]):
-        pilot.fail("common_binding_invalid", "Invalid executable reference; value withheld.")
-    if value["Version"] >= 2:
-        routes = ("external", "docker", "disabled", "auto") if value["Version"] == 3 else ("external", "docker", "disabled")
-        if (value["CodexRoute"] not in routes
-                or value["ClaudeDecision"] not in ("enabled", "disabled")
-                or value["DockerOAuth"] != (value["CodexRoute"] == "docker")
-                or value["ClaudeDecision"] == "disabled" and (value["PolicyAudited"] or value["TrustManagedPolicy"])):
-            pilot.fail("common_binding_invalid", "Provider choices are inconsistent; values withheld.")
-        validate_status(value["ProviderStatus"])
-    if value["Version"] == 3:
-        if (value["TrustSource"] not in ("", "install-consent", "legacy-opt-in")
-                or bool(value["TrustSource"]) != value["TrustManagedPolicy"]
-                or value["TrustSource"] == "install-consent" and value["PolicyAudited"]):
-            pilot.fail("common_binding_invalid", "Trust provenance is invalid; installation does not prove a policy audit.")
+    value.setdefault("CodexRoute", "docker" if value["DockerOAuth"] else "external")
+    value.setdefault("ClaudeDecision", "enabled")
     return value
 
 
@@ -101,26 +61,14 @@ def validate_status(status):
 
 def provider_choices(args, previous):
     route_flags = [name for name in ("docker_sandbox_oauth", "external_codex", "disable_codex", "codex_auto") if getattr(args, name, False)]
-    if (len(route_flags) > 1 or getattr(args, "disable_claude", False) and (args.policy_audited or args.trust_managed_policy)
-            or getattr(args, "reject_managed_policy", False) and (args.policy_audited or args.trust_managed_policy)):
+    if len(route_flags) > 1:
         pilot.fail("common_provider_conflict", "Conflicting explicit provider choices; no probe or installation started.")
-    if args.policy_audited and not args.trust_managed_policy:
-        pilot.fail("common_trust_confirmation_required", "An audit assertion alone is not trust consent; no process started.")
-    # Preserve explicit old routes/reject choices. Only native discovery may
-    # resolve a NEW automatic route; Python never parses credentials or proxy.
     route = {"docker_sandbox_oauth": "docker", "external_codex": "external", "disable_codex": "disabled", "codex_auto": "auto"}.get(route_flags[0]) if route_flags else (
-        previous.get("CodexRoute", "docker" if previous["DockerOAuth"] else "external") if previous else "auto")
-    decision = previous.get("ClaudeDecision", "enabled") if previous else "enabled"
+        previous["CodexRoute"] if previous else "auto")
+    decision = previous["ClaudeDecision"] if previous else "enabled"
     if getattr(args, "configure_providers", False): decision = "enabled"
-    audited = previous["PolicyAudited"] if previous else False
-    trust = previous["TrustManagedPolicy"] if previous else True
-    source = previous.get("TrustSource", "legacy-opt-in" if trust else "") if previous else "install-consent"
-    if args.trust_managed_policy:
-        decision, audited, trust = "enabled", args.policy_audited, True
-        source = "legacy-opt-in" if audited else "install-consent"
-    if getattr(args, "reject_managed_policy", False): audited, trust, source = False, False, ""
-    if getattr(args, "disable_claude", False): decision, audited, trust, source = "disabled", False, False, ""
-    return route, decision, audited, trust, source
+    if getattr(args, "disable_claude", False): decision = "disabled"
+    return route, decision
 
 
 def preflight(settings):
@@ -130,7 +78,7 @@ def preflight(settings):
     if settings["CodexRoute"] == "disabled": command.append("--codex-disabled")
     if settings["ClaudeDecision"] == "disabled": command.append("--claude-disabled")
     if settings["ClaudeBinary"]: command += ["--claude-binary", settings["ClaudeBinary"]]
-    raw, code = pilot.bounded_probe(command, dict(os.environ), timeout=60)
+    raw, code = pilot.bounded_probe(command, dict(os.environ))
     if code: pilot.fail("common_preflight_failed", "Native auth/catalog preflight failed; body withheld. No inference or fallback.")
     result = pilot.decode(raw)
     expected = {"Providers", "CodexRoute"} if settings["CodexRoute"] == "auto" else {"Providers"}
@@ -152,17 +100,87 @@ def wrapper(directory):
             + shlex.quote(str(directory / "common_development.py")) + ' launch "$@"\n').encode()
 
 
-def owned_legacy(home, value):
-    # Opt-in still requires the exact old checksum-bound wrapper, not a comment.
+def agent_wrapper(directory):
+    return ("#!/bin/bash\n# Unreal Agent subagent CLI.\nexec "
+            + shlex.quote(str(directory / "unreal-agent")) + ' "$@"\n').encode()
+
+
+def owned_legacy(home, value, previous=None):
+    if daily.owned_unreal_command(home, value, [previous["BinaryDirectory"]] if previous else []):
+        return True
     for sandbox in ("asp", "devlore"):
         path = daily.settings_path(home, sandbox)
-        previous = daily.read_settings(home, sandbox) if os.path.lexists(path) else None
-        if previous and daily.owned_previous_command(home, sandbox, value, previous):
-            return True
-        if sandbox == "devlore" and os.path.lexists(home / ".config/unreal-agent-pilot/devlore/launcher-v1/launcher.json"):
-            if daily.owned_previous_command(home, sandbox, value, None):
-                return True
+        if os.path.lexists(path):
+            old = daily.read_settings(home, sandbox)
+            if daily.owned_previous_command(home, sandbox, value, old): return True
     return False
+
+
+def previous_version(home, installed, previous):
+    """The launcher binding is authoritative; current.json covers older kits."""
+    if previous:
+        for value in (previous.get("BinaryDirectory"), previous.get("PreviousBinaryDirectory")):
+            if value and Path(value) != installed:
+                return Path(value)
+    choices = (home / ".config" / NAMESPACE / "repos").glob("*/current.json")
+    candidates = []
+    for path in choices:
+        try:
+            value = json.loads(path.read_text()).get("BinaryDirectory")
+            if value and Path(value) != installed:
+                candidates.append((path.stat().st_mtime_ns, Path(value)))
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def running_versions(versions, proc=Path("/proc")):
+    """Keep executable mappings and scripts/wrappers named by a live process."""
+    active = set()
+    for process in proc.iterdir():
+        if not process.name.isdigit():
+            continue
+        references = []
+        try:
+            references.append(os.fsencode(os.readlink(process / "exe")))
+        except OSError:
+            pass  # the process may already have exited, or belong to another user
+        try:
+            references.extend((process / "cmdline").read_bytes().split(b"\0"))
+        except OSError:
+            pass
+        for version in versions:
+            name = os.fsencode(version)
+            if any(ref == name or name + b"/" in ref for ref in references):
+                active.add(version)
+    return active
+
+
+def allocated_bytes(directory):
+    total = directory.lstat().st_blocks * 512
+    for root, directories, names in os.walk(directory, followlinks=False):
+        for name in (*directories, *names):
+            total += (Path(root) / name).lstat().st_blocks * 512
+    return total
+
+
+def prune_versions(home, installed, previous, proc=Path("/proc")):
+    base = home / ".local/opt/unreal-agent-pilot/common"
+    versions = sorted(path for path in base.iterdir() if not path.is_symlink()
+                      and path.is_dir() and re.fullmatch(r"[0-9a-f]{7}-[0-9a-f]{16}", path.name))
+    keep = {installed, previous} | running_versions(versions, proc)
+    removed, freed = [], 0
+    for version in versions:
+        if version in keep:
+            continue
+        try:
+            size = allocated_bytes(version)
+            shutil.rmtree(version)
+            removed.append(version.name)
+            freed += size
+        except OSError as err:
+            print(f"旧版の削除を見送り: {version.name}: {err}", file=sys.stderr)
+    print(f"旧版を削除: {', '.join(removed) or 'なし'}（{freed / 1e6:.0f} MB 解放）")
 
 
 def install(args, directory, meta):
@@ -174,45 +192,46 @@ def install(args, directory, meta):
     choices = provider_choices(args, previous)
     content_id = hashlib.sha256(files.read_owned(directory / "SHA256SUMS", limit=4096)).hexdigest()[:16]
     installed = home / ".local/opt/unreal-agent-pilot/common" / (meta["baseline"][:7] + "-" + content_id)
+    prior_version = previous_version(home, installed, previous)
     command, new_command = home / ".local/bin/unreal", wrapper(installed)
     old = files.read_owned(command, private=True) if os.path.lexists(command) else None
     if old is not None and old != new_command:
-        owned = previous and hashlib.sha256(old).hexdigest() == previous["CommandHash"] and old == wrapper(Path(previous["BinaryDirectory"]))
-        if not args.replace_pilot_launcher or not (owned or owned_legacy(home, old)):
-            pilot.fail("common_command_conflict", "Existing unreal preserved. --replace-pilot-launcher permits only a verified owned wrapper; arbitrary commands are never replaced.")
+        if not owned_legacy(home, old, previous):
+            pilot.fail("common_command_conflict", "Existing unrelated unreal command preserved.")
+    agent_command = home / ".local/bin/unreal-agent"
+    new_agent = agent_wrapper(installed)
+    old_agent = files.read_owned(agent_command, private=True) if os.path.lexists(agent_command) else None
+    if old_agent is not None and old_agent != new_agent:
+        if previous is None or old_agent != agent_wrapper(Path(previous["BinaryDirectory"])):
+            pilot.fail("common_command_conflict", "Existing unrelated unreal-agent command preserved.")
     profiles = files.shell_profiles(home)
     shells = files.inspect_shell_paths({"home": home})
     directory_config = pilot.private_tree(home, ".config/" + NAMESPACE)
     with daily.locked(directory_config):
-        if previous != (read_settings(home) if os.path.lexists(settings_path(home)) else None):
-            pilot.fail("common_update_conflict", "Installation changed concurrently; nothing replaced.")
-        route, decision, audited, trust, source = choices
+        route, decision = choices
         settings = {"Version": 3, "Home": str(home), "BinaryDirectory": str(installed), "Revision": meta["baseline"],
                     "DockerOAuth": route == "docker", "CodexRoute": route, "ClaudeDecision": decision,
-                    "PolicyAudited": audited, "TrustManagedPolicy": trust, "TrustSource": source,
-                    "ClaudeBinary": args.claude_binary or (previous["ClaudeBinary"] if previous else ""),
-                    "CommandHash": hashlib.sha256(new_command).hexdigest()}
+                    "ClaudeBinary": args.claude_binary or (previous["ClaudeBinary"] if previous else "")}
+        if prior_version is not None:
+            settings["PreviousBinaryDirectory"] = str(prior_version)
         old_settings = files.read_owned(settings_path(home), private=True) if previous else None
-        if previous and (provider_profile(settings) != provider_profile(previous) or old != new_command) and not args.replace_pilot_launcher:
-            pilot.fail("common_update_confirmation_required", "Use explicit --replace-pilot-launcher for a verified update; old settings/history remain intact.")
         raw, code = pilot.bounded_probe(["bash", str(directory / "install.sh")],
-                                       {"HOME": str(home), "PATH": os.environ["PATH"]}, timeout=90)
-        if code or package(installed) != meta:
+                                       {"HOME": str(home), "PATH": os.environ["PATH"]})
+        if code:
             pilot.fail("common_install_failed", "Inspect kit doctor; existing CLI/auth/config/history unchanged.")
         settings["ProviderStatus"], resolved = preflight(settings)
         if previous is None and route == "auto":
             settings.update(CodexRoute=resolved, DockerOAuth=resolved == "docker")
         new_settings = (json.dumps(settings, indent=2, ensure_ascii=True) + "\n").encode()
-        if old_settings is not None and old_settings != new_settings or old is not None and old != new_command:
-            backups = pilot.private_tree(home, ".config/" + NAMESPACE + "/backups")
-            for data, suffix in ((old, ".sh"), (old_settings, ".json")):
-                if data is not None:
-                    files.publish_bytes(backups / (hashlib.sha256(data).hexdigest() + suffix), data, 0o600)
         files.command_directory(home)
         if old is not None and old != new_command:
             daily.replace_owned(command, new_command, old, 0o700)
         else:
             files.publish_bytes(command, new_command, 0o700)
+        if old_agent is not None and old_agent != new_agent:
+            daily.replace_owned(agent_command, new_agent, old_agent, 0o700)
+        else:
+            files.publish_bytes(agent_command, new_agent, 0o700)
         if old_settings is not None and old_settings != new_settings:
             daily.replace_owned(settings_path(home), new_settings, old_settings, 0o600)
         else:
@@ -226,14 +245,61 @@ def install(args, directory, meta):
                 files.append_profile(profile, block)
         if any(kind != b"owned" or location != b"present" for kind, location in files.inspect_shell_paths({"home": home})):
             pilot.fail("common_shell_path_unavailable", "Keep installed files. Open a fresh Bash; current aliases/functions cannot be removed by this installer. Use $HOME/.local/bin/unreal explicitly.")
-    print("PASS: common unreal installed; no Host/inference/credential change or Session migration")
-    for status in settings["ProviderStatus"]:
-        print(status["ID"] + ": " + status["Availability"] + (" (" + status["Reason"] + ")" if status["Reason"] else ""))
-    if settings["ClaudeDecision"] != "disabled":
-        print("Claude: your signed-in Claude Code runs its own tools; Unreal approves each call by its /permissions mode (Read Only until you choose).")
-        print("Commands Claude Code's organization policy refuses are run by Unreal's own shell under that mode.")
-    print("NEXT: open a fresh Bash, cd to a Git worktree, run unreal [SESSION]; select provider/model/effort in /model")
-    print("NOTE: current shell aliases/functions may still mask unreal; type -a unreal or use $HOME/.local/bin/unreal")
+        prune_versions(home, installed, prior_version)
+    print_install_result(settings, home)
+
+
+def shell_masks_unreal(home):
+    # type -a resolves aliases/functions before files. Emit only a closed enum;
+    # never print profile output, executable values or the shell environment.
+    script = '''type -a unreal >/dev/null 2>&1 || exit 0
+kind=$(type -t unreal || :)
+if [ "$kind" = file ] && [ "$(type -P unreal)" = "$1" ]; then
+  printf '\\nUNREAL_MASKED:no\\n'
+else
+  printf '\\nUNREAL_MASKED:yes\\n'
+fi
+'''
+    env = {"HOME": str(home), "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TERM": "dumb", "LANG": "C.UTF-8"}
+    for flags in (("--noprofile", "-ic"), ("-lic",)):
+        raw, code = pilot.bounded_probe(["/bin/bash", *flags, script, "unreal-check", str(home / ".local/bin/unreal")], env)
+        if not code and b"UNREAL_MASKED:yes" in raw.splitlines():
+            return True
+    return False
+
+
+def provider_guidance(status):
+    claude = status["ID"] in ("claude", "claude-code")
+    name = "Claude" if claude else "Codex"
+    cli = "Claude Code" if claude else "Codex CLI"
+    login = "claude を起動して /login" if claude else "codex login"
+    if status["Availability"] == "available":
+        return name + ": 利用できます"
+    reason = status["Reason"]
+    if reason == "cli_missing_or_unsupported":
+        return name + ": " + cli + " をインストールしてから " + login + " でログインしてください"
+    if reason == "operator_disabled":
+        return name + ": 設定で無効になっています"
+    if reason == "catalog_unavailable":
+        return name + ": モデル一覧を読み取れません。" + cli + " の起動・ログイン状態を確認してください（" + login + "）"
+    if reason == "auth_required":
+        return name + ": ログインが必要です。" + login
+    return name + ": 接続を確認してください。" + cli + " の起動・ログイン状態を確認（" + login + "）"
+
+
+def print_install_result(settings, home):
+    print("インストール完了")
+    statuses = settings["ProviderStatus"]
+    for status in statuses:
+        print(provider_guidance(status))
+    if any(p["ID"] in ("claude", "claude-code") and p["Availability"] == "available" for p in statuses):
+        print("Claude の操作は /permissions で選んだ権限に従います。")
+    if any(p["Availability"] == "available" for p in statuses):
+        print("次に: 新しい Bash で作業フォルダに移動し、unreal を起動してください。/model でモデルを選べます。")
+    else:
+        print("次に: 使うにはどちらかの準備（インストールとログイン）が必要です。済んだら unreal を起動してください。")
+    if shell_masks_unreal(home):
+        print("別の unreal が先に見つかりました。type -a unreal で確認するか、$HOME/.local/bin/unreal を使ってください。")
 
 
 def repo_paths(home, workspace, instance="default"):
@@ -280,51 +346,43 @@ def prepare_repo(settings, workspace, instance):
 
 
 def provider_profile(settings):
-    # Availability may change without operator consent. Only wanted security
-    # choices and the build identity choose an instance, never cached status.
-    value = {k: settings[k] for k in ("Revision", "DockerOAuth", "PolicyAudited", "TrustManagedPolicy", "ClaudeBinary")}
-    value.update(CodexRoute=settings.get("CodexRoute", "docker" if settings["DockerOAuth"] else "external"),
-                 ClaudeDecision=settings.get("ClaudeDecision", "enabled"))
-    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+    # Availability is transient; only explicit choices belong to the profile.
+    value = {"CodexRoute": settings.get("CodexRoute", "docker" if settings["DockerOAuth"] else "external"),
+             "ClaudeDecision": settings.get("ClaudeDecision", "enabled"), "ClaudeBinary": settings["ClaudeBinary"]}
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def stop_old_host(paths):
+    """Stops the instance's Host if it runs an older build: the new launcher
+    starts its own build there, with the same Sessions."""
+    config = str(paths["config"])
+    pids = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open("/proc/" + entry + "/cmdline", "rb") as f:
+                args = f.read().split(b"\0")
+        except OSError:
+            continue
+        if b"serve" in args and os.fsencode(config) in args:
+            pids.append(int(entry))
+    for pid in pids:
+        try: os.kill(pid, 15)
+        except OSError: pass
+    for _ in range(100):
+        if not any(os.path.exists("/proc/%d" % pid) for pid in pids): return
+        import time; time.sleep(0.1)
+    for pid in pids:
+        try: os.kill(pid, 9)
+        except OSError: pass
 
 
 def read_workspace_choice(path, workspace):
-    value = pilot.decode(files.read_owned(path, private=True, limit=16384))
-    if (not isinstance(value, dict) or set(value) != {"Version", "Workspace", "Profile", "Instance", "Previous", "Revision", "BinaryDirectory", "ConfigHash"}
-            or value["Version"] != 1 or value["Workspace"] != str(workspace)
-            or not re.fullmatch(r"[0-9a-f]{40}", value["Revision"])
-            or not re.fullmatch(r"[0-9a-f]{64}", value["Profile"])
-            or value["ConfigHash"] != "" and not re.fullmatch(r"[0-9a-f]{64}", value["ConfigHash"])
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", value["Instance"])
-            or not isinstance(value["Previous"], list) or len(value["Previous"]) > 32):
-        pilot.fail("common_workspace_binding_invalid", "Workspace choice is invalid; no prior Host/config/history changed.")
-    daily.safe_path(value["BinaryDirectory"])
-    for old in value["Previous"]:
-        if (not isinstance(old, dict) or set(old) != {"Instance", "ConfigHash", "Revision", "BinaryDirectory"}
-                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", old["Instance"])
-                or not re.fullmatch(r"[0-9a-f]{64}", old["ConfigHash"])
-                or old["Revision"] != "" and not re.fullmatch(r"[0-9a-f]{40}", old["Revision"])):
-            pilot.fail("common_workspace_binding_invalid", "Invalid previous-instance reference; value withheld.")
-        if old["BinaryDirectory"] != "": daily.safe_path(old["BinaryDirectory"])
+    value = pilot.decode(files.read_owned(path, private=True))
+    if value["Workspace"] != str(workspace):
+        pilot.fail("common_workspace_binding_invalid", "Workspace choice belongs to another workspace.")
     return value
-
-
-def effective_profile_matches(config, settings):
-    if not isinstance(config, dict): return False
-    launcher = config.get("Launcher", {})
-    runtime = config.get("Runtime", {})
-    if not isinstance(launcher, dict) or not isinstance(runtime, dict): return False
-    if (launcher.get("Version") != 1 or launcher.get("DiscoverProviders") is False
-            or bool(launcher.get("CodexDockerSandboxOAuth")) != settings["DockerOAuth"]
-            or bool(launcher.get("CodexAuto")) != (settings.get("CodexRoute") == "auto")
-            or bool(launcher.get("CodexDisabled")) != (settings.get("CodexRoute") == "disabled")
-            or bool(launcher.get("ClaudeDisabled")) != (settings.get("ClaudeDecision") == "disabled")):
-        return False
-    provider = runtime.get("Provider", {})
-    backends = config.get("Providers", {})
-    if not isinstance(provider, dict) or not isinstance(backends, dict): return False
-    # The Claude route keeps only an explicit Claude Code executable.
-    return (launcher.get("ClaudeBinary") or "") == settings["ClaudeBinary"]
 
 
 def select_repo(settings, workspace, instance, *, explicit_config=None):
@@ -345,44 +403,19 @@ def select_repo(settings, workspace, instance, *, explicit_config=None):
     with daily.locked(paths["root"]):
         old_bytes = files.read_owned(choice_path, private=True) if os.path.lexists(choice_path) else None
         choice = read_workspace_choice(choice_path, workspace) if old_bytes is not None else None
-        profile = provider_profile(settings)
-        if choice and choice["Profile"] == profile:
-            selected = paths if choice["Instance"] == "default" else prepare_repo(settings, workspace, choice["Instance"])
-            if not os.path.lexists(selected["config"]): return selected
-            data = files.read_owned(selected["config"], private=True)
-            digest = hashlib.sha256(data).hexdigest()
-            if (choice["ConfigHash"] in ("", digest) and effective_profile_matches(pilot.decode(data), settings)):
-                if choice["ConfigHash"] == "":
-                    choice["ConfigHash"] = digest
-                    daily.replace_owned(choice_path, (json.dumps(choice, ensure_ascii=True, indent=2) + "\n").encode(), old_bytes, 0o600)
-                return selected
-        # New untouched workspace has no prior identity to migrate. Existing
-        # config (including mono-provider/precedence variants) stays immutable.
-        if choice is None and not os.path.lexists(paths["config"]):
-            instance, previous = "default", []
-        else:
-            old_instance = choice["Instance"] if choice else "default"
-            old_paths = repo_paths(home, workspace, old_instance)
-            config_data = files.read_owned(old_paths["config"], private=True) if os.path.lexists(old_paths["config"]) else b""
-            # The old instance stays as it was, so starting the new one needs
-            # no question (U8); the old one remains one command away.
-            print("Provider/build settings changed for this workspace: starting a new instance. Old Host and history are kept.")
-            print("Old config: " + str(old_paths["config"]))
-            print("Reconnect to the old instance: unreal --instance " + old_instance + " SESSION (matching old binary may be required)")
-            instance = "p-" + hashlib.sha256((profile + hashlib.sha256(config_data).hexdigest()).encode()).hexdigest()[:12]
-            previous = list(choice["Previous"]) if choice else []
-            reference = {"Instance": old_instance, "ConfigHash": hashlib.sha256(config_data).hexdigest(),
-                         "Revision": choice["Revision"] if choice else "", "BinaryDirectory": choice["BinaryDirectory"] if choice else ""}
-            if reference not in previous: previous.append(reference)
-            if len(previous) > 32:
-                pilot.fail("common_workspace_history_limit", "Previous instance references retained; choose an explicit instance.")
-        value = {"Version": 1, "Workspace": str(workspace), "Profile": profile, "Instance": instance, "Previous": previous,
-                 "Revision": settings["Revision"], "BinaryDirectory": settings["BinaryDirectory"], "ConfigHash": ""}
-        new_bytes = (json.dumps(value, ensure_ascii=True, indent=2) + "\n").encode()
+        instance = choice["Instance"] if choice else "default"
         selected = paths if instance == "default" else prepare_repo(settings, workspace, instance)
-        if os.path.lexists(selected["config"]) and not effective_profile_matches(pilot.decode(files.read_owned(selected["config"], private=True)), settings):
-            pilot.fail("common_profile_instance_conflict", "Existing instance has a different effective provider profile; no overwrite or false update.")
-        if old_bytes is not None: daily.replace_owned(choice_path, new_bytes, old_bytes, 0o600)
+        profile = provider_profile(settings)
+        if choice and (choice.get("Revision") != settings["Revision"]
+                       or choice.get("BinaryDirectory") != settings["BinaryDirectory"]
+                       or choice.get("Profile") != profile):
+            print("Updated build/settings: restarting this workspace's Host; Sessions and settings carry on.", flush=True)
+            stop_old_host(selected)
+        value = {"Version": 1, "Workspace": str(workspace), "Instance": instance, "Profile": profile,
+                 "Revision": settings["Revision"], "BinaryDirectory": settings["BinaryDirectory"]}
+        new_bytes = (json.dumps(value, ensure_ascii=True, indent=2) + "\n").encode()
+        if old_bytes is not None:
+            if value != choice: daily.replace_owned(choice_path, new_bytes, old_bytes, 0o600)
         else: files.publish_bytes(choice_path, new_bytes)
         return selected
 
@@ -406,25 +439,14 @@ def launch(args, directory):
     workspace = daily.git_root()
     settings = read_settings(daily.home())
     installed = Path(settings["BinaryDirectory"])
-    meta = package(installed)
-    if meta["baseline"] != settings["Revision"]:
-        pilot.fail("common_binary_binding_mismatch", "Installation revision mismatch; no Host started.")
-    # Installer and launcher share the settings lock. A profile change starts
-    # a separate instance and leaves the old one intact.
+    # Installer and launcher share the settings lock; instances keep their histories.
     with daily.locked(settings_path(daily.home()).parent):
-        if settings != read_settings(daily.home()): pilot.fail("common_update_conflict", "Provider setup changed concurrently; retry without altering old Sessions.")
         paths = select_repo(settings, workspace, args.instance, explicit_config=getattr(args, "config", None))
     if args.workspace_info:
         print("Workspace: " + str(workspace) + "\nConfig: " + str(paths["config"]) + "\nState: " + str(paths["state"]) + "\nSocket: " + str(paths["socket"]))
-        current = repo_paths(daily.home(), workspace)["root"] / "current.json"
-        if os.path.lexists(current):
-            for old in read_workspace_choice(current, workspace)["Previous"]:
-                print("Preserved: unreal --instance " + old["Instance"] + " SESSION; config=" + str(repo_paths(daily.home(), workspace, old["Instance"])["config"]))
         return
-    print("Unreal Agent - Quick Start\nEnter  メッセージ送信   /model  モデル変更\n/permissions  権限変更   Ctrl+D  detach\n注意：Full AccessはOS隔離を提供しない。Git公開は別の承認が必要。", flush=True)
+    print("Unreal Agent - Quick Start\nEnter  メッセージ送信   /model  モデル変更\n/permissions  権限変更   Ctrl+D  detach\nFull Access は OS の隔離ではありません。", flush=True)
     env = dict(os.environ, XDG_CONFIG_HOME=str(paths["xdg"]))
-    with daily.locked(settings_path(daily.home()).parent):
-        if settings != read_settings(daily.home()): pilot.fail("common_update_conflict", "Setup changed concurrently; no Host started. Run unreal again.")
     os.chdir(workspace)
     os.execve(str(installed / "unreal"), command_for(settings, workspace, paths, args.session), env)
 
@@ -439,6 +461,7 @@ def main(argv=None):
     install_args.add_argument("--disable-codex", action="store_true")
     install_args.add_argument("--disable-claude", action="store_true")
     install_args.add_argument("--docker-sandbox-oauth", action="store_true")
+    # Legacy options are accepted without an audit/trust gate or persisted declaration.
     install_args.add_argument("--policy-audited", action="store_true")
     install_args.add_argument("--trust-managed-policy", action="store_true")
     install_args.add_argument("--reject-managed-policy", action="store_true")
@@ -458,7 +481,7 @@ def main(argv=None):
         else: launch(args, directory)
     except (pilot.PilotError, OSError, ValueError, TypeError, subprocess.SubprocessError) as err:
         if isinstance(err, pilot.PilotError): print(str(err), file=sys.stderr)
-        else: print("common launcher I/O failure; details withheld, previous files/history preserved", file=sys.stderr)
+        else: print(f"common launcher failed: {err}", file=sys.stderr)
         return 1
     return 0
 

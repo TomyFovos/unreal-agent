@@ -23,8 +23,7 @@ type Item struct {
 	ProviderID string
 	Type       ItemType
 	Data       any
-	// Derived portable receipt provenance has no canonical/JSON input path.
-	receiptProjection *receiptProjection `json:"-"`
+	Responses  *ItemEncoding `json:"-"`
 }
 
 type Message struct {
@@ -121,8 +120,6 @@ type Request struct {
 	Model Model
 	Input []Item
 	Tools []Tool
-	// Bound only after Builder selection/rendering, never serialized to a model.
-	receiptProjections *receiptProjectionBindings `json:"-"`
 }
 
 type StopReason string

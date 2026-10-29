@@ -13,7 +13,6 @@ import (
 type Picker struct {
 	PermissionRevision  uint64
 	PermissionOperation string
-	PermissionChallenge string // UI attachment memory only; never public history
 	Instructions        []string
 	Footer              []string // secondary notes below the options
 	Commands            []string // a command picker's full command per option
@@ -28,6 +27,8 @@ type Picker struct {
 	Responses           []ResponseChoice
 	Views               []ViewMode
 	ToolBridge          bool
+	Messages            []MessageChoice
+	Checked             map[int]bool
 }
 
 func responseExportPicker(choices []ResponseChoice) *Picker {
@@ -52,7 +53,10 @@ func providerPicker(providers []modelcatalog.Provider, current *sessionstore.Run
 	}
 	for i, b := range providers {
 		label := SafeText(b.Name) + " · " + SafeText(b.Availability)
-		hint := b.Reason.Hint()
+		hint := ""
+		if b.Reason != "" {
+			hint = b.Reason.ProviderHint(b.ID)
+		}
 		if hint != "" {
 			label += " · " + hint
 		}
@@ -232,7 +236,15 @@ func pickerRows(p *Picker, u UIState, l layout, budget int) ([]line, int) {
 			mark = u.Theme.symbol("›", "*")
 			st = selectionStyle
 		}
-		rows = append(rows, l.gutter("", mark, textLine(p.Options[i], st).clip(l.text)))
+		label := p.Options[i]
+		if p.Kind == "copy" {
+			check := "[ ] "
+			if p.Checked[i] {
+				check = "[x] "
+			}
+			label = check + label
+		}
+		rows = append(rows, l.gutter("", mark, textLine(label, st).clip(l.text)))
 	}
 	if end < len(p.Options) && len(rows) < budget {
 		rows = append(rows, l.gutter("", "", textLine(u.Theme.symbol("↓", "v")+" more", meta)))

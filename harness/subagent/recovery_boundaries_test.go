@@ -89,7 +89,7 @@ func boundaryParent(t *testing.T, dir string, mode host.Mode) (*host.Host, *host
 	return h, s, template
 }
 
-func TestChildFinishBeforeCommitRecovery(t *testing.T) {
+func TestChildFinishBeforeCommitIsNotReplayedOnParentResume(t *testing.T) {
 	dir := t.TempDir()
 	h, owner := parentAt(t, dir, "finish", host.Create)
 	completed := awaitChild(t, owner, true)
@@ -109,12 +109,15 @@ func TestChildFinishBeforeCommitRecovery(t *testing.T) {
 	restoreLog(t, dir, plan.ChildID, childLog)
 	_, resumed := parentAt(t, dir, "finish", host.Resume)
 	result := awaitChild(t, resumed, true)
-	if result.ID != completed.ID || result.Status != operation.StatusCompleted {
+	if result.ID != completed.ID || result.Status != operation.StatusCanceled {
 		t.Fatal(result)
 	}
 	view, err := sub.ReadChild(t.Context(), dir, plan.ChildID, 0, 256)
-	if err != nil || view.Finish == nil {
+	if err != nil || view.Finish != nil {
 		t.Fatal(view, err)
+	}
+	if !bytes.Equal(readLog(t, dir, plan.ChildID), childLog) {
+		t.Fatal("parent resumed unfinished child work")
 	}
 	finishes, turns := 0, 0
 	for _, item := range view.View.History.Items {
@@ -125,7 +128,7 @@ func TestChildFinishBeforeCommitRecovery(t *testing.T) {
 			finishes++
 		}
 	}
-	if finishes != 1 || turns != 1 || countInput(t, dir, owner.ID, inbox.ID("ready:"+string(completed.ID))) != 1 {
+	if finishes != 0 || turns != 1 || countInput(t, dir, owner.ID, inbox.ID("ready:"+string(completed.ID))) != 1 {
 		t.Fatal("Finish duplicated or model rerun", finishes, turns)
 	}
 }
@@ -182,7 +185,7 @@ func TestPersistedCancelChildRecoveryNeverRespawns(t *testing.T) {
 	}
 }
 
-func TestUnconfiguredChildWithCanonicalInputFailsClosed(t *testing.T) {
+func TestParentResumeDoesNotOpenUnconfiguredChild(t *testing.T) {
 	dir := t.TempDir()
 	h, owner, template := boundaryParent(t, dir, host.Create)
 	spec, _ := sub.NewSpec(sub.Plan{Version: 1, Action: "start", ParentID: owner.ID, Template: "default", Configuration: &template, Text: "wait"})
@@ -206,7 +209,7 @@ func TestUnconfiguredChildWithCanonicalInputFailsClosed(t *testing.T) {
 	before := readLog(t, dir, childID)
 	h, resumed, _ := boundaryParent(t, dir, host.Resume)
 	defer h.Close()
-	if result := awaitChild(t, resumed, true); result.Status != operation.StatusFailed {
+	if result := awaitChild(t, resumed, true); result.Status != operation.StatusCanceled {
 		t.Fatal(result)
 	}
 	if !bytes.Equal(readLog(t, dir, childID), before) {
@@ -272,7 +275,7 @@ func countInput(t *testing.T, dir string, id session.ID, input inbox.ID) int {
 	return n
 }
 
-func TestSubagentMessageCommittedPrefixRecovery(t *testing.T) {
+func TestSubagentMessageCommittedPrefixesAreNotReplayed(t *testing.T) {
 	dir := t.TempDir()
 	h, parent, template := boundaryParent(t, dir, host.Create)
 	spec, err := sub.NewSpec(sub.Plan{Version: 1, Action: "start", ParentID: parent.ID, Template: "default", Configuration: &template, Text: "wait"})
@@ -322,47 +325,83 @@ func TestSubagentMessageCommittedPrefixRecovery(t *testing.T) {
 			restoreLog(t, dir, childID, c.child)
 			h, owner, _ := boundaryParent(t, dir, host.Resume)
 			defer h.Close()
-			request.ParentGeneration = owner.Generation
-			first, err := sub.SteerChild(t.Context(), owner, request)
+			if result := awaitChild(t, owner, true); result.ID != op.ID || result.Status != operation.StatusCanceled {
+				t.Fatal(result)
+			}
+			if c.name != "intent_before_commit" {
+				// Recovery commits each Operation separately, in map order. The
+				// start becoming terminal does not mean the send has settled too.
+				awaitBoundary(t, func() bool {
+					view, err := owner.Inspect(0, 256)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, saved := range view.Operations {
+						if saved.ID == sendID {
+							return saved.Status == operation.StatusCanceled || saved.Status == operation.StatusCompleted || saved.Status == operation.StatusFailed
+						}
+					}
+					return false
+				})
+			}
+			view, err := owner.Inspect(0, 256)
 			if err != nil {
 				t.Fatal(err)
 			}
-			again, err := sub.SteerChild(t.Context(), owner, request)
-			if err != nil || first != again {
-				t.Fatal("retry receipt", first, again, err)
+			expectedIntent := 1
+			if c.name == "intent_before_commit" {
+				expectedIntent = 0
 			}
-			changed := request
-			changed.Text = "different payload"
-			if _, err = sub.SteerChild(t.Context(), owner, changed); !errors.Is(err, host.ErrConflict) {
-				t.Fatal("retry conflict", err)
-			}
-			awaitBoundary(t, func() bool {
-				v, e := owner.Inspect(0, 256)
-				if e != nil {
-					t.Fatal(e)
-				}
-				for _, o := range v.Operations {
-					if o.ID == sendID {
-						return o.Status == operation.StatusCompleted
+			found := false
+			for _, saved := range view.Operations {
+				if saved.ID == sendID {
+					found = true
+					if saved.Status != operation.StatusCanceled {
+						t.Fatal("unfinished send was replayed", saved)
 					}
 				}
-				return false
-			})
-			if countInput(t, dir, "parent", "message") != 1 || countInput(t, dir, childID, inbox.ID("send:"+string(sendID))) != 1 || countInput(t, dir, "parent", "ready:start") != 1 || countInput(t, dir, childID, "task:start") != 1 {
-				t.Fatal("canonical input lost or duplicated")
+			}
+			if found != (expectedIntent == 1) {
+				t.Fatal("send intent was invented or lost")
+			}
+			if expectedIntent == 1 {
+				request.ParentGeneration = owner.Generation
+				first, err := sub.SteerChild(t.Context(), owner, request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				again, err := sub.SteerChild(t.Context(), owner, request)
+				if err != nil || first != again {
+					t.Fatal("retry receipt", first, again, err)
+				}
+				changed := request
+				changed.Text = "different payload"
+				if _, err := sub.SteerChild(t.Context(), owner, changed); !errors.Is(err, host.ErrConflict) {
+					t.Fatal("retry conflict", err)
+				}
+			}
+			expectedDelivery := 0
+			if c.name == "append_after_commit_ack_before_or_after" {
+				expectedDelivery = 1
+			}
+			if countInput(t, dir, "parent", "message") != expectedIntent || countInput(t, dir, childID, inbox.ID("send:"+string(sendID))) != expectedDelivery || countInput(t, dir, "parent", "ready:start") != 1 || countInput(t, dir, childID, "task:start") != 1 {
+				t.Fatal("committed inputs changed")
+			}
+			if !bytes.Equal(readLog(t, dir, childID), c.child) {
+				t.Fatal("child reopened during parent recovery")
 			}
 			store, _ := localfile.New(dir)
-			if lock, e := store.AcquireWriter(childID); !errors.Is(e, localfile.ErrWriterOwned) {
-				if lock != nil {
-					lock.Close()
-				}
-				t.Fatal("child writer absent or duplicated", e)
+			lock, err := store.AcquireWriter(childID)
+			if err != nil {
+				t.Fatal("unknown start respawned its child", err)
 			}
+			lock.Close()
+
 		})
 	}
 }
 
-func TestChildToParentMessageCommittedPrefixRecovery(t *testing.T) {
+func TestChildToParentCommittedMessagesAreNotReplayed(t *testing.T) {
 	dir := t.TempDir()
 	h, owner := parentAt(t, dir, "boundary-messages", host.Create)
 	start := waitReady(t, owner)
@@ -405,18 +444,12 @@ func TestChildToParentMessageCommittedPrefixRecovery(t *testing.T) {
 			restoreLog(t, dir, plan.ChildID, intent)
 			h, resumed := parentAt(t, dir, "boundary-messages", host.Resume)
 			defer h.Close()
-			awaitBoundary(t, func() bool {
-				v, e := sub.ReadChild(t.Context(), dir, plan.ChildID, 0, 256)
-				if e != nil {
-					return false
-				}
-				for _, op := range v.View.Operations {
-					if op.ID == sendID {
-						return op.Status == operation.StatusCompleted
-					}
-				}
-				return false
-			})
+			if result := awaitChild(t, resumed, true); result.ID != start.ID || result.Status != operation.StatusCanceled {
+				t.Fatal(result)
+			}
+			if !bytes.Equal(readLog(t, dir, plan.ChildID), intent) {
+				t.Fatal("parent resume replayed a child's unacknowledged send")
+			}
 			v, err := resumed.Inspect(0, 256)
 			if err != nil {
 				t.Fatal(err)
@@ -436,14 +469,18 @@ func TestChildToParentMessageCommittedPrefixRecovery(t *testing.T) {
 					}
 				}
 			}
-			if messages != 1 {
+			expected := 0
+			if after {
+				expected = 1
+			}
+			if messages != expected {
 				t.Fatal("child-to-parent loss/duplicate", messages)
 			}
 		})
 	}
 }
 
-func TestSubagentSpawnCreateReadyCommittedPrefixRecovery(t *testing.T) {
+func TestSubagentSpawnCreateReadyPrefixesAreNotReplayed(t *testing.T) {
 	dir := t.TempDir()
 	h, parent, template := boundaryParent(t, dir, host.Create)
 	spec, err := sub.NewSpec(sub.Plan{Version: 1, Action: "start", ParentID: parent.ID, Template: "default", Configuration: &template, Text: "wait"})
@@ -455,6 +492,10 @@ func TestSubagentSpawnCreateReadyCommittedPrefixRecovery(t *testing.T) {
 	}
 	waitReady(t, parent)
 	childID := sub.ChildID(parent.ID, "start")
+	// Ready and the initial task are separate commits. Capture the requested
+	// task boundaries only after that task has actually reached canonical history.
+	awaitBoundary(t, func() bool { return countInput(t, dir, childID, "task:start") == 1 })
+
 	parentLog, childLog := readLog(t, dir, parent.ID), readLog(t, dir, childID)
 	h.Close()
 	beforeReady := logBoundary(t, parentLog, false, inputBoundary("ready:start"))
@@ -494,24 +535,26 @@ func TestSubagentSpawnCreateReadyCommittedPrefixRecovery(t *testing.T) {
 			if _, err = owner.SubmitOperation(t.Context(), owner.Generation, "spawn-intent", "start", "SubagentStart", changed); !errors.Is(err, host.ErrConflict) {
 				t.Fatal(err)
 			}
-			recovered := waitReady(t, owner)
+			recovered := awaitChild(t, owner, true)
 			plan, e := sub.DecodePlan(recovered)
-			if e != nil || plan.ChildID != childID {
-				t.Fatal("child identity changed", plan, e)
+			if e != nil || plan.ChildID != childID || recovered.ID != "start" || recovered.Status != operation.StatusCanceled {
+				t.Fatal("unknown start not closed", recovered, e)
 			}
-			// waitReady can see a historic receipt before the new child opens.
-			awaitBoundary(t, func() bool {
-				store, _ := localfile.New(dir)
-				lock, e := store.AcquireWriter(childID)
-				if lock != nil {
-					lock.Close()
+			if c.child == nil {
+				if _, e := os.Stat(filepath.Join(dir, string(childID)+".session.jsonl")); !os.IsNotExist(e) {
+					t.Fatal("child created by replay", e)
 				}
-				return errors.Is(e, localfile.ErrWriterOwned)
-			})
-			awaitBoundary(t, func() bool { return countInput(t, dir, childID, "task:start") == 1 })
-			if countInput(t, dir, "parent", "ready:start") != 1 || countInput(t, dir, "parent", "spawn-intent") != 1 {
-				t.Fatal("lost or duplicate intent/ready")
+			} else if !bytes.Equal(readLog(t, dir, childID), c.child) {
+				t.Fatal("existing child changed during parent recovery")
 			}
+			ready := 0
+			if c.name == "ready_append_after_ack_before_or_after" {
+				ready = 1
+			}
+			if countInput(t, dir, "parent", "ready:start") != ready || countInput(t, dir, "parent", "spawn-intent") != 1 {
+				t.Fatal("intent or ready was replayed")
+			}
+
 		})
 	}
 }

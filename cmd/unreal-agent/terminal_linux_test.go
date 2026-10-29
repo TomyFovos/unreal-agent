@@ -31,7 +31,7 @@ type terminalModel struct{}
 func (terminalModel) Respond(context.Context, llm.Request, llm.RequestOptions) (llm.Response, error) {
 	return llm.Response{Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "terminal-response 猫"}}}}, nil
 }
-func TestRealTerminalAttachResizePrivateAuthAndDetach(t *testing.T) {
+func TestRealTerminalAttachResizeLoginGuidanceAndDetach(t *testing.T) {
 	if socket := os.Getenv("UA_TUI_PTY_HELPER"); socket != "" {
 		if err := run(t.Context(), []string{"attach", "--socket", socket, "--session", "terminal"}, os.Stderr); err != nil {
 			t.Fatal(err)
@@ -63,7 +63,7 @@ func TestRealTerminalAttachResizePrivateAuthAndDetach(t *testing.T) {
 	defer cancel()
 	serverDone := make(chan error, 1)
 	go func() {
-		serverDone <- gateway.ListenAndServe(ctx, socket, gateway.Config{Host: owner, Policy: permission.Unrestricted(), Auth: authflow.New(credential.NewManager(store, nil))})
+		serverDone <- gateway.ListenAndServe(ctx, socket, gateway.Config{Host: owner, Policy: permission.Unrestricted(), Auth: authflow.New(credential.NewManager(store))})
 	}()
 	defer func() {
 		cancel()
@@ -103,7 +103,7 @@ func TestRealTerminalAttachResizePrivateAuthAndDetach(t *testing.T) {
 	if err = unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, &unix.Winsize{Row: 24, Col: 100}); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestRealTerminalAttachResizePrivateAuthAndDetach$")
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestRealTerminalAttachResizeLoginGuidanceAndDetach$")
 	cmd.Env = append(os.Environ(), "UA_TUI_PTY_HELPER="+socket)
 	cmd.Stdin = slave
 	cmd.Stdout = slave
@@ -141,16 +141,16 @@ func TestRealTerminalAttachResizePrivateAuthAndDetach(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
-	readUntil("connected")
+	readUntil("入力待ち")
 	send("こんにちは\r")
 	readUntil("terminal-response")
-	send("/login openai terminal\r")
-	readUntil("private: API key for openai/terminal")
-	send("never-display-this-key\r")
-	readUntil("API key stored")
-	if strings.Contains(output.String(), "never-display-this-key") {
-		t.Fatal("raw terminal echoed private key")
+	send("/login\r")
+	readUntil("codex login")
+	readUntil("claude を起動")
+	if strings.Contains(output.String(), "API key") {
+		t.Fatal("terminal requested an API key")
 	}
+
 	if err = unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, &unix.Winsize{Row: 8, Col: 16}); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestRealTerminalAttachResizePrivateAuthAndDetach(t *testing.T) {
 	default:
 	}
 	entries, err := client.ListCredentials(t.Context())
-	if err != nil || len(entries) != 1 {
+	if err != nil || len(entries) != 0 {
 		t.Fatal(entries, err)
 	}
 }

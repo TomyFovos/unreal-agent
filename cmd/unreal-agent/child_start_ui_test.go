@@ -37,6 +37,19 @@ func (c *childCommandClient) Subscribe(context.Context, session.ID, sessionstore
 func (c *childCommandClient) Inspect(context.Context, session.ID, sessionstore.Sequence, int) (host.View, error) {
 	return c.view, nil
 }
+func (c *childCommandClient) InspectBefore(_ context.Context, _ session.ID, before sessionstore.Sequence, limit int) (host.View, error) {
+	v := c.view
+	end := len(v.History.Items)
+	if before > 0 {
+		end = min(end, int(before-1))
+	}
+	start := max(0, end-limit)
+	v.History.Items = append([]host.HistoryItem(nil), v.History.Items[start:end]...)
+	v.History.NextAfter = sessionstore.Sequence(end)
+	v.History.More = end < len(c.view.History.Items)
+	v.History.Older = start > 0
+	return v, nil
+}
 func (c *childCommandClient) Submit(context.Context, session.ID, string, inbox.Input) (host.Receipt, error) {
 	c.submissions.Add(1)
 	return host.Receipt{}, errors.New("public input must not be submitted")

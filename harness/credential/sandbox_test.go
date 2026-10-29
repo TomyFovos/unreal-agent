@@ -7,7 +7,7 @@ func TestDockerSandboxOAuthCannotEnterManagedStore(t *testing.T) {
 	if err := ref.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManager(nil, nil) // A rejection must happen before any store access.
+	manager := NewManager(nil) // A rejection must happen before any store access.
 	if err := manager.Login(t.Context(), ref, Material{Owner: DockerSandboxProxy}); !IsCode(err, "unsupported_managed_source") {
 		t.Fatal(err)
 	}

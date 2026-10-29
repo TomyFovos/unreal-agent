@@ -13,8 +13,8 @@ import (
 )
 
 // TestLiveRefusedCommandReachesUnreal runs the signed-in claude CLI (skipped
-// unless UNREAL_LIVE_CLAUDE=1) and asks for a command the organization policy
-// refuses. Unreal must receive it as its own Bash call (U22). The rendezvous
+// unless UNREAL_LIVE_CLAUDE=1) and asks for a command Claude Code
+// declines. Unreal must receive it as its own Bash call (U22). The rendezvous
 // here answers with a canned result: nothing runs the refused command.
 func TestLiveRefusedCommandReachesUnreal(t *testing.T) {
 	if os.Getenv("UNREAL_LIVE_CLAUDE") != "1" {

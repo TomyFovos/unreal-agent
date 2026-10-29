@@ -58,11 +58,10 @@ type ModelResponse struct {
 type HistoricalOperation operation.Operation
 
 type ToolCallStatus struct {
-	TurnID      session.TurnID
-	CallID      string
-	Status      tool.CallStatus
-	Operations  []operation.Operation    `json:",omitempty"`
-	Inheritance *InheritedOperationFacts `json:",embed"`
+	TurnID     session.TurnID
+	CallID     string
+	Status     tool.CallStatus
+	Operations []operation.Operation `json:",omitempty"`
 }
 
 type Snapshot struct {

@@ -154,41 +154,40 @@ func TestControlsStableReceiptNoOptimisticStateAndConflict(t *testing.T) {
 	must(t, err)
 	again, err := c.Steer(t.Context(), "child", "request", "please inspect")
 	must(t, err)
-	if receipt != again || len(f.calls) != 1 {
-		t.Fatal("duplicate forwarded")
+	if receipt != again || len(f.calls) != 2 {
+		t.Fatal("retry was not forwarded with its stable ID")
 	}
 	got := f.calls[0]
 	if got.ParentID != "parent" || got.ParentGeneration != "parent-generation" || got.OperationID != "op-child" || got.ChildID != "child" || got.InputID != "request" {
 		t.Fatalf("%+v", got)
 	}
+	f.err = host.ErrConflict // Conflict returned by the owning Host.
 	if _, err = c.Cancel(t.Context(), "child", "request", "different"); !errors.Is(err, host.ErrConflict) {
 		t.Fatal(err)
 	}
+	f.err = nil
 	_, err = c.Cancel(t.Context(), "child", "cancel", "stop")
 	must(t, err)
 	if row(t, c.Model, "child").ParentOperationStatus != operation.StatusAwaiting {
 		t.Fatal("optimistically canceled")
 	}
 	c.Model.Disconnect("parent")
+	f.err = ErrUnavailable
 	if _, err = c.Steer(t.Context(), "child", "new", "text"); !errors.Is(err, ErrUnavailable) {
 		t.Fatal(err)
 	}
 }
-func TestDuplicateResumeAndRetryAfterFailure(t *testing.T) {
-	f := &fakeControls{entered: make(chan struct{}, 1), release: make(chan struct{})}
+func TestConcurrentResumeAndRetryAfterFailure(t *testing.T) {
+	f := &fakeControls{entered: make(chan struct{}, 2), release: make(chan struct{})}
 	c := controlClient(t, f)
-	done := make(chan error, 1)
+	done := make(chan error, 2)
 	go func() { done <- c.Resume(t.Context(), "child", "resume") }()
 	<-f.entered
-	if err := c.Resume(t.Context(), "child", "another"); !errors.Is(err, ErrControlPending) {
-		t.Fatal(err)
-	}
+	go func() { done <- c.Resume(t.Context(), "child", "another") }()
+	<-f.entered
 	close(f.release)
 	must(t, <-done)
-	must(t, c.Resume(t.Context(), "child", "resume"))
-	if len(f.calls) != 1 {
-		t.Fatal("resume duplicated")
-	}
+	must(t, <-done)
 	f.entered = nil
 	f.err = errors.New("transport disconnected")
 	if err := c.Resume(t.Context(), "child", "retry"); err == nil {
@@ -196,27 +195,22 @@ func TestDuplicateResumeAndRetryAfterFailure(t *testing.T) {
 	}
 	f.err = nil
 	must(t, c.Resume(t.Context(), "child", "retry"))
-	if len(f.calls) != 3 || f.calls[1].InputID != f.calls[2].InputID {
+	if len(f.calls) != 4 || f.calls[2].InputID != f.calls[3].InputID {
 		t.Fatal("retry identity lost")
 	}
 }
 
-func TestCommittedRetryAfterTerminalAndDisconnect(t *testing.T) {
+func TestTerminalAndDisconnectedChildControlsRemainUnavailable(t *testing.T) {
 	f := &fakeControls{}
 	c := controlClient(t, f)
-	want, err := c.Steer(t.Context(), "child", "request", "finish now")
+	_, err := c.Steer(t.Context(), "child", "request", "finish now")
 	must(t, err)
 	must(t, c.Model.Replace("parent", parentView(operation.StatusCompleted)))
 	c.Model.Disconnect("parent")
-	got, err := c.Steer(t.Context(), "child", "request", "finish now")
-	must(t, err)
-	if got != want || len(f.calls) != 1 {
-		t.Fatal("committed retry lost its receipt")
-	}
-	if _, err = c.Steer(t.Context(), "child", "request", "changed"); !errors.Is(err, host.ErrConflict) {
-		t.Fatal("changed retry was accepted", err)
-	}
 	if _, err = c.Steer(t.Context(), "child", "new", "finish now"); !errors.Is(err, ErrUnavailable) {
-		t.Fatal("new terminal control was accepted", err)
+		t.Fatal(err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatal("terminal child accepted new control")
 	}
 }

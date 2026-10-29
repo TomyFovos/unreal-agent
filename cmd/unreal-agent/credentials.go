@@ -85,3 +85,22 @@ func withExternalCodexCredentials(managed credential.Resolver, path string) cred
 		return managed.Resolve(ctx, ref)
 	})
 }
+
+// A Claude-only Host can register Codex after login. Resolve its external source
+// only when that registered route is requested; a missing/disabled Codex source
+// must not prevent the usable Claude route from starting.
+func withCodexDiscoveryCredentials(base credential.Resolver, option string, getenv func(string) string) credential.Resolver {
+	return credential.ResolverFunc(func(ctx context.Context, ref credential.Reference) (credential.Material, error) {
+		if isExternalCodex(ref) || isDockerSandboxCodex(ref) {
+			path, err := externalCodexAuthFile(option, getenv)
+			if err != nil {
+				return credential.Material{}, err
+			}
+			return withExternalCodexCredentials(nil, path).Resolve(ctx, ref)
+		}
+		if base == nil {
+			return credential.Material{}, &credential.Error{Code: "store_required"}
+		}
+		return base.Resolve(ctx, ref)
+	})
+}

@@ -77,7 +77,7 @@ func (w *serializedStore) SaveOperation(ctx context.Context, id session.ID, op o
 		return err
 	}
 	op = cloneSavedOperationCheckpoint(op, w.operations[op.ID])
-	w.operations[op.ID] = op
+	w.setOperation(op)
 	w.broadcast(Event{Kind: "operation", Operation: &op})
 	return nil
 }

@@ -55,7 +55,14 @@ func TestCoordinatorStopCancelsShellProcess(t *testing.T) {
 		ContextBuilder: contextbuilder.NewBuilder(), LLM: adapter, Tools: registry,
 		Operations: operation.NewLocalOperationManager(ctx),
 	})
-	if err := current.Run(ctx); err != nil {
+	c := current.(*coordinator)
+	if err := c.loadHistory(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range store.resume.Operations {
+		c.addOperationToLocalState(op)
+	}
+	if err := c.runLoop(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if processGroupID <= 1 {

@@ -130,14 +130,11 @@ func withMode(t *testing.T, mode permission.Mode) (context.Context, *permission.
 	revision := controller.Snapshot().Revision
 	switch mode {
 	case permission.Ask:
-		if err = controller.SetMode(key, revision, permission.Ask, ""); err != nil {
+		if err = controller.SetMode(key, revision, permission.Ask); err != nil {
 			t.Fatal(err)
 		}
 	case permission.FullAccess:
-		challenge, err := controller.PrepareFull(key, revision)
-		if err == nil {
-			err = controller.SetMode(key, revision, permission.FullAccess, challenge)
-		}
+		err = controller.SetMode(key, revision, permission.FullAccess)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -205,9 +202,35 @@ func TestFullAccessEditRunsAndIsRecorded(t *testing.T) {
 		t.Fatalf("progress = %q", h.progress.String())
 	}
 	args, _ := os.ReadFile(h.args)
-	for _, want := range []string{"--session-id", sessionUUID("", "session-1"), "--model\nopus", "--effort\nmax", "--permission-prompt-tool\nstdio", "Full Access"} {
+	for _, want := range []string{"--session-id", sessionUUID("", "session-1"), "--model\nopus", "--effort\nmax", "--permission-prompt-tool\nstdio", "--disallowedTools\nAgent\nMonitor\nAskUserQuestion", "Full Access"} {
 		if !strings.Contains(string(args), want) {
 			t.Fatalf("argv lacks %q:\n%s", want, args)
+		}
+	}
+}
+
+func TestMultipleStepsReportLastContextAndSummedUsage(t *testing.T) {
+	h := newHarness(t, "multiple_steps")
+	response, err := h.respond(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.responses) != 1 {
+		t.Fatalf("tool boundaries = %d, want 1", len(h.responses))
+	}
+	for i, tc := range []struct {
+		response                                llm.Response
+		input, cached, written, output, context int64
+	}{
+		{h.responses[0], 3330, 3000, 30, 50, 2220},
+		{response, 7140, 7000, 70, 90, 4080},
+	} {
+		u, g := tc.response.Usage, tc.response.Generation
+		if u.InputTokens != tc.input || u.CachedInputTokens != tc.cached || u.CacheWriteInputTokens != tc.written || u.OutputTokens != tc.output {
+			t.Fatalf("boundary %d: usage lost its sum: %+v", i, u)
+		}
+		if g == nil || !g.Valid() || g.Tokens.Input != tc.input || g.Tokens.Output != tc.output || !g.ContextKnown || g.ContextTokens != tc.context {
+			t.Fatalf("boundary %d: last context and summed tokens = %+v", i, g)
 		}
 	}
 }
@@ -496,5 +519,57 @@ func TestSubagentCommandReachesTheHostWithoutApproval(t *testing.T) {
 		if args := read(t, h.args); !strings.Contains(args, cli+" subagent start --template lead") {
 			t.Fatalf("%s: the prompt does not name the command", mode)
 		}
+	}
+}
+
+// Reading a file the user sent into ~/drop is allowed in every mode.
+func TestDroppedFilesAreReadableInReadOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	ctx, _, _ := withMode(t, permission.ReadOnly)
+	var a approver
+	if ok, reason := a.decide(ctx, "Read", jsontext.Value(`{"file_path":"`+filepath.Join(home, "drop", "spec.pdf")+`"}`), "t1"); !ok {
+		t.Fatalf("Read Only refused a dropped file: %s", reason)
+	}
+	if ok, _ := a.decide(ctx, "Read", jsontext.Value(`{"file_path":"`+filepath.Join(home, ".codex", "auth.json")+`"}`), "t2"); ok {
+		t.Fatal("Read Only allowed a file outside the drop directory")
+	}
+}
+
+func TestProjectInstructionsKeepLargeInput(t *testing.T) {
+	root := t.TempDir()
+	instructions := strings.Repeat("project instruction\n", 4000)
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte(instructions), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := projectInstructions(root); !strings.HasSuffix(got, instructions) {
+		t.Fatal("large project instructions lost")
+	}
+}
+
+func TestStartupReasonWaitsForStderrAfterStdoutCloses(t *testing.T) {
+	for _, scenario := range []string{"in_use_delayed", "login_delayed"} {
+		t.Run(scenario, func(t *testing.T) {
+			h := newHarness(t, scenario)
+			ctx, _, _ := withMode(t, permission.FullAccess)
+			response, err := h.respond(ctx, user("hello"))
+			if scenario == "login_delayed" {
+				var authentication *credential.Error
+				if !errors.As(err, &authentication) || authentication.Code != "external_reauth_required" {
+					t.Fatal("late login reason was lost", err)
+				}
+			} else if err != nil || len(response.Output) != 1 || response.Output[0].Data.(llm.Message).Text != "resumed:hello" {
+				t.Fatal("late in-use reason was lost", response, err)
+			}
+		})
+	}
+}
+
+func TestCatalogReasonWaitsForStderrAfterStdoutCloses(t *testing.T) {
+	h := newHarness(t, "login_delayed")
+	_, _, err := Discover(t.Context(), h.client.config.Binary, h.client.config.Environ)
+	var authentication *credential.Error
+	if !errors.As(err, &authentication) || authentication.Code != "external_reauth_required" {
+		t.Fatal("catalog lost late login reason", err)
 	}
 }

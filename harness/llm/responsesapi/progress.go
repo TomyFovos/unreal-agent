@@ -47,10 +47,6 @@ func emitTextProgress(ctx context.Context, payload []byte) {
 	}
 	if e.Type == "response.output_text.delta" {
 		attempt, _ := ctx.Value(attemptKey{}).(uint64)
-		// Bound the callback even if a provider emits an enormous SSE frame.
-		if len(e.Delta) > 64<<10 {
-			e.Delta = e.Delta[:64<<10]
-		}
 		emitProgress(ctx, llm.Progress{Attempt: attempt, Delta: e.Delta})
 	}
 }

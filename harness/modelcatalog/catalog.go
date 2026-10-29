@@ -5,7 +5,6 @@ package modelcatalog
 import (
 	"encoding/json/v2"
 	"errors"
-	"io"
 	"os"
 	"slices"
 	"sort"
@@ -87,24 +86,31 @@ const (
 	ProviderCheckFailed  AvailabilityReason = "provider_check_failed"
 )
 
-func (r AvailabilityReason) Hint() string {
+func (r AvailabilityReason) Hint() string { return r.ProviderHint("") }
+
+func (r AvailabilityReason) ProviderHint(id string) string {
+	login := "codex login"
+	cli := "Codex CLI"
+	if strings.HasPrefix(id, "claude") {
+		login, cli = "claude を起動して /login", "Claude Code"
+	}
 	switch r {
-	case AuthRequired:
-		return "sign in with the external CLI"
-	case CLIMissing:
-		return "install a supported external CLI"
-	case ManagedTrustRequired:
-		return "configure providers: audit policy and explicitly approve trust"
-	case ProxyInvalid:
-		return "verify the selected Docker OAuth source and HTTPS proxy"
-	case CatalogUnavailable:
-		return "refresh the external CLI model catalog"
-	case ProviderDisabled:
-		return "configure providers to enable this provider"
-	case ProviderCheckFailed:
-		return "run provider preflight; no fallback"
-	default:
+	case "":
 		return ""
+	case AuthRequired:
+		return login + " でログインしてください"
+	case CLIMissing:
+		return cli + " をインストールしてから " + login + " でログインしてください"
+	case CatalogUnavailable:
+		return cli + " のモデル一覧を読み取れません。CLI の起動・ログイン状態を確認してください"
+	case ProviderDisabled:
+		return "この接続先は設定で無効になっています"
+	case ProxyInvalid:
+		return "Codex の接続を確認してください。/model で別の接続先も選べます"
+	case ManagedTrustRequired:
+		return "接続先の利用設定を確認してください"
+	default:
+		return cli + " の起動・ログイン状態を確認してください"
 	}
 }
 
@@ -183,8 +189,6 @@ func ReadCodexCache(path string) Catalog {
 	fail := func(code string) Catalog {
 		return Catalog{Source: path, Problem: "catalog unavailable", ProblemCode: code}
 	}
-	// Reject nonregular sources before opening them (a FIFO must not block a
-	// picker), and recheck the descriptor before reading bounded metadata.
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return fail("codex_cache_missing")
@@ -192,22 +196,12 @@ func ReadCodexCache(path string) Catalog {
 	if err != nil || !info.Mode().IsRegular() {
 		return fail("codex_cache_unreadable")
 	}
-	before := info
-	f, err := os.Open(path)
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return fail("codex_cache_missing")
+	}
 	if err != nil {
 		return fail("codex_cache_unreadable")
-	}
-	defer f.Close()
-	info, err = f.Stat()
-	if err != nil || !os.SameFile(before, info) || !info.Mode().IsRegular() {
-		return fail("codex_cache_unreadable")
-	}
-	if info.Size() > 16<<20 {
-		return fail("codex_cache_oversized")
-	}
-	b, err := io.ReadAll(io.LimitReader(f, 16<<20+1))
-	if err != nil || len(b) > 16<<20 {
-		return fail("codex_cache_oversized")
 	}
 	var raw struct {
 		FetchedAt time.Time `json:"fetched_at"`
@@ -234,7 +228,7 @@ func ReadCodexCache(path string) Catalog {
 			continue
 		}
 		if !validID(m.ID) || seen[m.ID] {
-			return fail("codex_cache_invalid")
+			continue
 		}
 		seen[m.ID] = true
 		model := Model{ID: m.ID, Name: m.Name, DefaultEffort: m.Default, ContextWindow: max(0, m.Context)}
@@ -266,7 +260,7 @@ func ReadCodexCache(path string) Catalog {
 	return c
 }
 func validID(id string) bool {
-	if id == "" || len(id) > 128 || strings.ContainsAny(id, " \t\n\r") {
+	if id == "" || strings.ContainsAny(id, " \t\n\r") {
 		return false
 	}
 	for _, r := range id {

@@ -8,4 +8,6 @@ type Progress struct {
 	Reset   bool
 	Delta   string
 	Tokens  *TokenCounts
+	// Phase describes provider maintenance before generation, e.g. compacting.
+	Phase string `json:",omitzero"`
 }

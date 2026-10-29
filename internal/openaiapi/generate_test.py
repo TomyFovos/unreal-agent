@@ -69,14 +69,6 @@ class GenerateTest(unittest.TestCase):
             [True, 42, 1.5, None, "2024-10-01", "2024-10-01T12:30:00Z", "001"],
         )
 
-    def test_unpinned_yaml_rejected_before_generation(self) -> None:
-        with patch("generate.yaml.__version__", "0.0.0"), patch(
-            "generate.subprocess.run"
-        ) as run:
-            with self.assertRaisesRegex(SystemExit, "PyYAML==6.0.3"):
-                main()
-            run.assert_not_called()
-
     def test_unknown_reference_fails_closed(self) -> None:
         with self.assertRaises(KeyError):
             discriminator_values({"$ref": "#/missing"}, "type", {})

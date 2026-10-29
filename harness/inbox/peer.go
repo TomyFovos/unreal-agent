@@ -20,7 +20,7 @@ type PeerMessage struct {
 }
 
 func (p PeerMessage) Validate() error {
-	if p.Version != 1 || p.Sender == "" || p.Target == "" || p.Sender == p.Target || p.Handle == "" || (p.Kind != "message" && p.Kind != "ready") || len(p.Text) > 32768 {
+	if p.Version != 1 || p.Sender == "" || p.Target == "" || p.Sender == p.Target || p.Handle == "" || (p.Kind != "message" && p.Kind != "ready" && p.Kind != "ended") {
 		return fmt.Errorf("invalid peer message")
 	}
 	return nil

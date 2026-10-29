@@ -93,18 +93,6 @@ func (source DockerSandboxSource) Validate() error {
 	if !ok || proxy["base_url"] != BaseURL || proxy["experimental_bearer_token"] != SandboxAccessSentinel || proxy["requires_openai_auth"] != false {
 		return fail()
 	}
-	// Do not silently disregard an additional credential/header or alternate
-	// endpoint mechanism on this selected provider.
-	for key := range proxy {
-		switch key {
-		case "name", "base_url", "experimental_bearer_token", "requires_openai_auth", "wire_api", "request_max_retries", "stream_max_retries", "stream_idle_timeout_ms", "supports_websockets":
-		default:
-			return fail()
-		}
-	}
-	if wire, exists := proxy["wire_api"]; exists && wire != "responses" {
-		return fail()
-	}
 	return nil
 }
 

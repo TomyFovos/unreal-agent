@@ -1,9 +1,11 @@
 package agentrunner
 
 import (
+	"cmp"
 	"context"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -84,6 +86,7 @@ func TestRuntimeFactoryProviderToolCapabilities(t *testing.T) {
 				for i, definition := range definitions {
 					want[i] = definition.Tool
 				}
+				slices.SortFunc(want, func(a, b llm.Tool) int { return cmp.Compare(a.Name, b.Name) })
 				if len(want) == 0 || !reflect.DeepEqual(built.Request.Tools, want) {
 					t.Fatal("tool-capable provider lost or changed its existing catalog")
 				}

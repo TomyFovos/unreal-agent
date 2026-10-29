@@ -19,7 +19,6 @@ import (
 	files "github.com/unreallabsai/unreal-agent/harness/native"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
-	"github.com/unreallabsai/unreal-agent/internal/testclaude"
 )
 
 // Fake adapters traverse the real Host/Registry/Permission/Operation/receipt
@@ -41,13 +40,15 @@ func checkWorkspaceToolReceipts(t *testing.T, configure func(*testing.T, serveCo
 				}
 				return string(data)
 			}
-			steps := []testclaude.BridgeStep{
-				{Name: "write", Arguments: `{"path":"sample.txt","content":"before\n","expected":{"exists":false}}`, Contains: "applied", Duplicate: true},
+			steps := []struct {
+				Name, Arguments, Contains string
+			}{
+				{Name: "write", Arguments: `{"path":"sample.txt","content":"before\n","expected":{"exists":false}}`, Contains: "applied"},
 				{Name: "read", Arguments: `{"path":"sample.txt"}`, Contains: "before"},
 				{Name: "edit", Arguments: args(map[string]any{"path": "sample.txt", "expected": mutation.RevisionOf([]byte("before\n")), "old_text": "before", "new_text": "after"}), Contains: "applied"},
 				{Name: "read", Arguments: `{"path":"sample.txt"}`, Contains: "after"},
 				{Name: "Bash", Arguments: `{"command":"test \"$(cat sample.txt)\" = after && printf 'GATE_E_FILE_OK\\n'"}`, Contains: "GATE_E_FILE_OK"},
-				{Name: "write", Arguments: args(map[string]any{"path": outside, "content": "forbidden", "expected": mutation.Revision{}}), Contains: "workspace_boundary", Error: true},
+				{Name: "write", Arguments: args(map[string]any{"path": outside, "content": "forbidden", "expected": mutation.Revision{}}), Contains: "workspace_boundary"},
 			}
 			var cfg serveConfiguration
 			var auth string
@@ -112,7 +113,7 @@ func checkWorkspaceToolReceipts(t *testing.T, configure func(*testing.T, serveCo
 				return hasBridgeFinal(v)
 			})
 			if len(end.Operations) != len(steps) {
-				t.Fatalf("canonical Operation count %d, want %d (duplicate write must execute once)", len(end.Operations), len(steps))
+				t.Fatalf("canonical Operation count %d, want %d (one per tool call)", len(end.Operations), len(steps))
 			}
 			seen := map[operation.ID]bool{}
 			outsideFailures := 0

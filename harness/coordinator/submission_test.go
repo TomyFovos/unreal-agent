@@ -28,7 +28,7 @@ func TestCoordinatorSubmissionBoundarySurvivesRecovery(t *testing.T) {
 				restoreTestRun(t, run, faults)
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
-				go func() { run.done <- run.current.Run(ctx) }()
+				go func() { run.done <- run.run(ctx) }()
 				synctest.Wait()
 				run.update(t, 1, operation.StatusCompleted)
 				if len(run.calls) != 1 || run.current.state.currentTurnInputs != 1 {
@@ -247,7 +247,7 @@ func TestCoordinatorStartsNewToolWhileDeliveringPreviousCompletion(t *testing.T)
 		restoreTestRun(t, run, store)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
-		go func() { run.done <- run.current.Run(ctx) }()
+		go func() { run.done <- run.run(ctx) }()
 		synctest.Wait()
 		run.update(t, 1, operation.StatusCompleted)
 		first := run.calls[0].request

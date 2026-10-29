@@ -24,7 +24,7 @@ func TestCommonBootstrapUsesNormalDiscoveryAndExplicitTrust(t *testing.T) {
 		want                 int
 	}{
 		{"codex", true, false, false, 1}, {"claude", false, true, true, 1}, {"both", true, true, true, 2},
-		// The Claude Code route (U21) runs under the organization's own managed
+		// The Claude Code route (U21) runs under Claude Code's own
 		// settings; the old route's managed-trust flags are not needed for it.
 		{"no-auth", false, false, false, 0}, {"team-without-trust-flags", false, true, false, 1},
 	} {
@@ -112,22 +112,17 @@ func TestCommonBootstrapFlagsDoNotApproveOrOverwriteExistingConfig(t *testing.T)
 	}
 }
 
-func TestLauncherIdentityRequiresExactBuildAndProtocol(t *testing.T) {
-	binding := launcherHostBinding{Configuration: "/synthetic/runtime.json", Identity: ownLauncherIdentity()}
-	if binding.Identity.Build == "" {
-		t.Fatal("own build unverifiable")
-	}
+func TestLauncherBindingChecksConfigurationAndSessionPaths(t *testing.T) {
+	binding := launcherHostBinding{Configuration: "/synthetic/runtime.json", Sessions: "/synthetic/sessions"}
 	h := modelUI{binding: &binding}
-	for _, kind := range []string{"same", "old-no-identity", "other-build", "other-protocol", "same-path-only"} {
+	for _, kind := range []string{"same", "other-config", "other-sessions"} {
 		t.Run(kind, func(t *testing.T) {
 			copy := binding
-			switch kind {
-			case "old-no-identity", "same-path-only":
-				copy.Identity = launcherIdentity{}
-			case "other-build":
-				copy.Identity.Build = "different"
-			case "other-protocol":
-				copy.Identity.Protocol++
+			if kind == "other-config" {
+				copy.Configuration = "/other/runtime.json"
+			}
+			if kind == "other-sessions" {
+				copy.Sessions = "/other/sessions"
 			}
 			raw, _ := json.Marshal(modelRequest{Action: "launcher.check", HostBinding: &copy})
 			r := httptest.NewRequest(http.MethodPost, "http://localhost/control", bytes.NewReader(raw))
@@ -135,10 +130,10 @@ func TestLauncherIdentityRequiresExactBuildAndProtocol(t *testing.T) {
 			h.ServeHTTP(w, r)
 			var reply modelReply
 			if json.Unmarshal(w.Body.Bytes(), &reply) != nil {
-				t.Fatal("invalid safe reply")
+				t.Fatal("invalid reply")
 			}
 			if (reply.Error == "") != (kind == "same") {
-				t.Fatal("old Host accepted solely by path equality")
+				t.Fatal("Host destination binding lost")
 			}
 		})
 	}

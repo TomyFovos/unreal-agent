@@ -2,6 +2,8 @@ package claudeagent
 
 import (
 	"fmt"
+	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -31,6 +33,44 @@ func subagentCommand(command, cli string) bool {
 		}
 	}
 	return false
+}
+
+// currentSubagentCommand rewrites a subagent command that names another
+// Unreal executable (a versioned path Claude kept from before an update, or
+// the bare name) to this Host's command. Running the old binary would reach
+// an old Host, and an unrecognized path would stop the user for approval.
+func currentSubagentCommand(command, cli string) (string, bool) {
+	if cli == "" || subagentCommand(command, cli) {
+		return "", false
+	}
+	first, rest, multiline := strings.Cut(command, "\n")
+	words, _, ok := literalWords(first)
+	if !ok || len(words) < 2 || words[1] != "subagent" {
+		return "", false
+	}
+	if name := filepath.Base(words[0]); name != "unreal" && name != "unreal-agent" {
+		return "", false
+	}
+	line := strings.TrimLeft(first, " \t")
+	end := strings.IndexAny(line, " \t")
+	if line[0] == '\'' || line[0] == '"' {
+		end = strings.IndexByte(line[1:], line[0]) + 2
+	}
+	if end <= 0 || end > len(line) {
+		return "", false
+	}
+	token := cli
+	if !literalCLI(cli) {
+		token = "'" + cli + "'"
+	}
+	rewritten := token + line[end:]
+	if multiline {
+		rewritten += "\n" + rest
+	}
+	if !subagentCommand(rewritten, cli) {
+		return "", false
+	}
+	return rewritten, true
 }
 
 // literalWords splits one shell line into words that expand to themselves:
@@ -98,16 +138,26 @@ func subagentPrompt(s SubagentCLI) string {
 	if !literalCLI(cli) {
 		cli = "'" + cli + "'"
 	}
-	return fmt.Sprintf("\n\nYour role in this Session is the designer; GPT is the implementer. For implementation work, give your design to the implementation lead, which runs gpt-6.1-sol at ultra effort and starts its own GPT workers (never at ultra), and review what it reports before you answer. For an investigation or another small task, such as reading a commit or a few files, start one worker directly instead (worker-low or worker-medium): each GPT agent reads the whole AGENTS.md again, and the lead at ultra costs most. "+
-		"Run these commands with Bash exactly in these forms. Unreal Agent approves them itself in every permission mode, Read Only included; the children follow the mode, so in Read Only they read files and run read-only commands such as git log, git show or rg, which is enough for investigations:\n"+
-		"- Start the lead, with the task in a quoted heredoc: %[1]s subagent start --template lead <<'EOF' (then the goal, design, files and interfaces, constraints and how to verify, then a line EOF)\n"+
-		"- Wait until a child finishes or asks for approval, with the handle start printed (at most 9 minutes, so give that Bash call a 600000 ms timeout; run it again while the child runs): %[1]s subagent wait HANDLE\n"+
-		"- Answer a child's approval request: %[1]s subagent approve HANDLE REQUEST allow|deny. When the Session asks for approval, children ask you instead of the user; ask the user in your reply when you are unsure.\n"+
-		"- Send more instructions: %[1]s subagent send HANDLE <<'EOF' (text, then EOF). Stop a child: %[1]s subagent cancel HANDLE. Overview: %[1]s subagent list. Full report: %[1]s subagent show HANDLE.\n"+
+	return fmt.Sprintf("\n\nYour role in this Session is the designer; GPT is the implementer. For implementation work, give your design to the implementation lead, which runs gpt-6.1-sol at ultra effort and works through its own GPT workers in parallel (never at ultra). For an investigation or another small task, such as reading a commit or a few files, start one worker directly instead (worker-low or worker-medium): each GPT agent reads the whole AGENTS.md again, and the lead at ultra costs most.\n"+
+		"Use unreal-agent subagent for parallel work and waits; Claude Code Agent and Monitor are unavailable. Hand the work over and end your turn; do not wait for it. While children work, the user can talk to you. When a child asks a question, asks for approval or ends, its message starts a new turn for you.\n"+
+		"Turns that children's messages start run in the background: the user sees only their first line. Handle there what you can decide within the design and the permission mode: answer questions, approve or deny requests, send follow-up instructions, review results and have problems fixed. In those turns, run yourself only commands that need no approval (reading files, read-only commands such as git diff); have the lead or a worker run builds and tests, since your own other commands would stop the user for approval. Address the user only for what needs them, and start that message with 【報告】 (the work the user asked for is done, or failed in a way you cannot resolve) or 【要確認】 (a decision or approval beyond your authority, a change of requirements or design direction, publishing, or anything you are unsure about). When the user writes while a background turn runs, their message comes first.\n"+
+		"Begin each task you give a child with a one-line title on the first line; the views show it as what the child works on.\n"+
+		"Always use the command path shown below, including after an update; ignore versioned command paths in older messages. Run these commands with Bash exactly in these forms. Unreal Agent approves them itself in every permission mode, Read Only included; the children follow the mode, so in Read Only they read files and run read-only commands such as git log, git show or rg, which is enough for investigations:\n"+
+		"- Start the lead, with the task in a quoted heredoc: %[1]s subagent start --template lead <<'EOF' (then the title line, the goal, design, files and interfaces, constraints and how to verify, then a line EOF)\n"+
+		"- Answer a child's approval request: %[1]s subagent approve HANDLE REQUEST allow|deny. Children ask you instead of the user.\n"+
+		"- Send more instructions or answers: %[1]s subagent send HANDLE <<'EOF' (text, then EOF). Stop a child: %[1]s subagent cancel HANDLE. Overview: %[1]s subagent list. Full report: %[1]s subagent show HANDLE. Do not use wait unless you know the result will arrive within tens of seconds; use at most --timeout 60s: %[1]s subagent wait HANDLE --timeout 60s.\n"+
 		"Templates: %[2]s (worker-<effort> starts one worker directly).", cli, strings.Join(s.Templates, ", "))
 }
 
 func literalCLI(path string) bool {
 	words, delimiter, ok := literalWords(path)
 	return ok && delimiter == "" && len(words) == 1 && words[0] == path
+}
+
+// This is only an interruption hint, never an approval decision. Expansions,
+// wrappers and pipes must not hide a wait. subagentCommand stays strict.
+var subagentWaitWords = regexp.MustCompile(`\bsubagent['"]?[\t\r\n ]+['"]?wait\b`)
+
+func subagentWait(command string) bool {
+	return subagentWaitWords.MatchString(command)
 }

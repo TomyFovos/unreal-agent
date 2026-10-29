@@ -13,12 +13,9 @@ env:
 
 jobs:
   go:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    # The latest Ubuntu job took 5m08s; leave room for cold builds and Python tests.
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -32,6 +29,12 @@ jobs:
       - name: Check native parser compiler
         run: cc --version
       - run: make test check build
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Test distribution scripts
+        working-directory: scripts
+        run: python3 -m unittest discover -p 'test_*.py'
 
   fuzz:
     name: Fuzzing (${{ matrix.target }})

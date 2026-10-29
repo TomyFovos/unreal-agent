@@ -14,9 +14,12 @@ import (
 type HistoryItem sessionstore.Item
 
 type HistoryPage struct {
-	Items     []HistoryItem
-	NextAfter sessionstore.Sequence
-	More      bool
+	WorkPrefix *HistoryWork `json:",omitzero"`
+	Older      bool
+	Background bool // input mode immediately before this page
+	Items      []HistoryItem
+	NextAfter  sessionstore.Sequence
+	More       bool
 }
 
 // ProjectInstructionRecord preserves the history position and binding metadata

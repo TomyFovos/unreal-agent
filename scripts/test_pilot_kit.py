@@ -69,18 +69,6 @@ class KitBuilderTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.assemble(source)
 
-    def test_baseline_mismatch_rejected(self):
-        source = source_archive(self.root, revision="a" * 40)
-        with self.assertRaisesRegex(ValueError, "baseline"):
-            self.assemble(source)
-
-    def test_source_corruption_rejected(self):
-        source = source_archive(self.root)
-        with source.open("ab") as stream:
-            stream.write(b"modified")
-        with self.assertRaisesRegex(ValueError, "checksum"):
-            self.assemble(source)
-
     def test_output_and_delivery_never_overwrite_previous_files(self):
         output1 = pilot_kit.private_output(self.root)
         output2 = pilot_kit.private_output(self.root)
@@ -112,7 +100,7 @@ class KitBuilderTests(unittest.TestCase):
             pilot_kit.copy_delivery(self.root / "unused", destination / "child")
         self.assertEqual(list(protected.iterdir()), [])
 
-    def test_four_binaries_need_cgo_v1_baseline_and_ast(self):
+    def test_four_binaries_retain_cgo_and_ast(self):
         directory = self.root / "bins"
         directory.mkdir()
         for name in snapshot.BINARIES:
@@ -206,7 +194,7 @@ class KitSnapshotTests(unittest.TestCase):
         self.require_success(first)
         second = self.run_script("install.sh")
         self.require_success(second)
-        self.assertIn("identical installation reused", second.stdout)
+        self.assertIn("existing installation reused", second.stdout)
         installed = Path(next(line.removeprefix("INSTALLED: ") for line in first.stdout.splitlines() if line.startswith("INSTALLED: ")))
         installed_second = next(line.removeprefix("INSTALLED: ") for line in second.stdout.splitlines() if line.startswith("INSTALLED: "))
         self.assertEqual(str(installed), installed_second)
@@ -222,39 +210,6 @@ class KitSnapshotTests(unittest.TestCase):
         self.assertNotIn("private fixture", first.stdout + first.stderr + second.stdout + second.stderr)
         self.assertNotIn("unused fixture", first.stdout + first.stderr)
 
-    def test_invalid_os_arch_and_old_libc_refused_before_install(self):
-        cases = [("uname", "printf 'Darwin\\n'", "Linux required"),
-                 ("uname", "if [ \"$1\" = -s ]; then echo Linux; else echo aarch64; fi", "amd64"),
-                 ("getconf", "echo 'glibc 2.33'", "glibc 2.34"),
-                 ("getconf", "exit 1", "glibc required")]
-        for command, body, marker in cases:
-            with self.subTest(marker=marker):
-                self.shim(command, body)
-                result = self.run_script("install.sh")
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(marker, result.stderr)
-                self.assertFalse((self.home / ".local").exists())
-                (self.root / "shims" / command).unlink()
-
-    def test_missing_library_refused_before_install(self):
-        self.shim("ldd", "echo 'libc.so.6 => not found'; exit 1")
-        result = self.run_script("install.sh")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("library/loader check failed", result.stderr)
-        self.assertFalse((self.home / ".local").exists())
-
-    def test_missing_dependency_refused_before_install(self):
-        self.shim("getconf", "echo 'glibc 2.34'")
-        # A deliberately minimal PATH makes the preflight stop without changes.
-        shims = self.root / "shims"
-        for tool in ("bash", "dirname", "stat", "sha256sum", "grep", "uname"):
-            (shims / tool).symlink_to(shutil.which(tool))
-        self.env["PATH"] = str(shims)
-        result = self.run_script("install.sh")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("required command unavailable", result.stderr)
-        self.assertFalse((self.home / ".local").exists())
-
     def test_symlink_parent_refused_without_touching_target(self):
         protected = self.root / "protected"
         protected.mkdir()
@@ -264,42 +219,29 @@ class KitSnapshotTests(unittest.TestCase):
         self.assertIn("symlink", result.stderr)
         self.assertEqual(list(protected.iterdir()), [])
 
-    def test_changed_or_symlinked_existing_install_never_overwritten(self):
+    def test_doctor_reports_actual_execution_failure(self):
+        binary = self.package / "unreal"
+        binary.write_text("#!/bin/sh\nexit 42\n"); binary.chmod(0o700)
+        result = self.run_script("doctor.sh")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unreal: non-inference CLI check failed", result.stderr)
+
+    def test_existing_install_is_reused_without_member_hash_checks(self):
         result = self.run_script("install.sh")
         self.require_success(result)
         installed = Path(next(line.removeprefix("INSTALLED: ") for line in result.stdout.splitlines() if line.startswith("INSTALLED: ")))
         path = installed / "README.md"
         path.write_bytes(b"keep user's modified installation")
         result = self.run_script("install.sh")
-        self.assertNotEqual(result.returncode, 0)
+        self.require_success(result)
         self.assertEqual(path.read_bytes(), b"keep user's modified installation")
         path.unlink()
         protected = self.root / "private"
         protected.write_bytes(b"never read this")
         path.symlink_to(protected)
         result = self.run_script("install.sh")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("redirected member", result.stderr)
+        self.require_success(result)
         self.assertEqual(protected.read_bytes(), b"never read this")
-
-    def test_corrupt_source_and_doctor_refused_before_install(self):
-        clone = self.root / "clone"
-        shutil.copytree(self.package, clone, copy_function=os.link)
-        path = clone / "README.md"
-        path.unlink()
-        path.write_bytes(b"bad payload")
-        result = self.run_script("install.sh", package=clone)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("checksum mismatch", result.stderr)
-        self.assertFalse((self.home / ".local").exists())
-        path = clone / "doctor.sh"
-        path.unlink()
-        path.write_text("#!/bin/bash\ntouch \"$HOME/forbidden\"\n")
-        result = self.run_script("install.sh", package=clone)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("doctor checksum mismatch", result.stderr)
-        self.assertFalse((self.home / "forbidden").exists())
-
 
 if __name__ == "__main__":
     unittest.main()

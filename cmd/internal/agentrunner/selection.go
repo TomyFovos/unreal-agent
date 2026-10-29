@@ -22,23 +22,21 @@ func (a *selectedAdapter) RequiresFullToolBatch() bool {
 	defer a.mu.RUnlock()
 	return llm.RequiresToolBatch(a.client)
 }
-func (a *selectedAdapter) NoAutomaticReplay() bool {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return llm.RequiresExplicitReplay(a.client)
-}
-
-func (a *selectedAdapter) ConversationRecoveryProvider() string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return llm.RecoveryProvider(a.client)
-}
 
 func (a *selectedAdapter) Respond(ctx context.Context, r llm.Request, o llm.RequestOptions) (llm.Response, error) {
 	a.mu.RLock()
 	c := a.client
 	a.mu.RUnlock()
 	return c.Respond(ctx, r, o)
+}
+
+func (a *selectedAdapter) Idle(ctx context.Context, r llm.Request, o llm.RequestOptions) {
+	a.mu.RLock()
+	c := a.client
+	a.mu.RUnlock()
+	if idle, ok := c.(llm.IdleAdapter); ok {
+		idle.Idle(ctx, r, o)
+	}
 }
 func (a *selectedAdapter) Close() error { a.mu.RLock(); defer a.mu.RUnlock(); return a.client.Close() }
 func selectionClient(c RuntimeConfig, s sessionstore.RuntimeSelection, workspace string, results *observed.Results) (provider.Client, error) {
@@ -78,6 +76,7 @@ func selectionClient(c RuntimeConfig, s sessionstore.RuntimeSelection, workspace
 		build.ClaudeAgent.Results = results
 		build.ClaudeAgent.Subagents = c.ClaudeSubagents
 		build.ClaudeAgent.Namespace = c.SessionDirectory
+		build.ClaudeAgent.CompactThresholdTokens = c.Context.ClaudeCompactThresholdTokens
 	}
 	client, _, err := registry.Build(build)
 	return client, err

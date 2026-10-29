@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -23,7 +24,6 @@ import (
 // rather than silently pretending a shared/mounted filesystem is a secret store.
 type Local struct {
 	directory string
-	existing  *existingLocal
 }
 
 func OpenLocal(directory string) (*Local, error) {
@@ -62,9 +62,6 @@ func (s *Local) checkDirectory() error {
 	return owned(s.directory, true)
 }
 func (s *Local) WithCredential(ctx context.Context, ref Reference, fn func(Transaction) error) error {
-	if s.existing != nil {
-		return s.existing.withCredential(ctx, s, ref, fn)
-	}
 	if err := s.checkDirectory(); err != nil {
 		return err
 	}
@@ -122,12 +119,11 @@ func openPrivate(path string, flags int) (*os.File, error) {
 }
 
 type diskRecord struct {
-	Version      int                  `json:"version"`
-	Metadata     Metadata             `json:"metadata"`
-	Token        string               `json:"token"`
-	RefreshToken string               `json:"refresh_token,omitzero"`
-	AccountID    string               `json:"account_id,omitzero"`
-	NativeGrant  *NativeGrantEvidence `json:"native_grant,omitzero"`
+	Version      int      `json:"version"`
+	Metadata     Metadata `json:"metadata"`
+	Token        string   `json:"token"`
+	RefreshToken string   `json:"refresh_token,omitzero"`
+	AccountID    string   `json:"account_id,omitzero"`
 }
 type localTransaction struct {
 	store *Local
@@ -144,70 +140,29 @@ func (tx *localTransaction) Read() (Record, error) {
 	return readPrivateRecord(file, tx.ref)
 }
 
-// Shared by writable transactions and explicitly read-only existing stores.
-// Existing providers retain v1; only the dedicated Native owner opts into v2.
 func readPrivateRecord(reader io.Reader, ref Reference) (Record, error) {
 	raw, err := io.ReadAll(io.LimitReader(reader, 1<<20+1))
 	if err != nil || len(raw) > 1<<20 {
 		return Record{}, &Error{Code: "invalid_record"}
 	}
 	var d diskRecord
-	if json.Unmarshal(raw, &d, json.RejectUnknownMembers(true)) != nil || !validDiskVersion(d) || d.Metadata.Reference != ref || d.Metadata.Revision == 0 {
+	if json.Unmarshal(raw, &d, json.RejectUnknownMembers(true)) != nil || d.Version != 1 || d.Metadata.Reference != ref || d.Metadata.Revision == 0 {
 		return Record{}, &Error{Code: "invalid_record"}
 	}
 	material := Material{Token: NewSecret(d.Token), RefreshToken: NewSecret(d.RefreshToken), AccountID: d.AccountID, Owner: d.Metadata.Owner, ExpiresAt: d.Metadata.ExpiresAt}
-	if validateMaterial(ref, material) != nil && !validNativeTombstone(d) {
+	if validateMaterial(ref, material) != nil {
 		return Record{}, &Error{Code: "invalid_record"}
 	}
-	r := Record{Metadata: d.Metadata, Material: material, NativeGrant: d.NativeGrant}
-	if r.NativeGrant != nil && r.NativeGrant.MaterialHash != NativeMaterialBindingHash(ref, r) {
-		return Record{}, &Error{Code: "invalid_record"}
-	}
-	return r, nil
+	return Record{Metadata: d.Metadata, Material: material}, nil
 }
 
-func validNativeTombstone(d diskRecord) bool {
-	return d.Version == 2 && d.NativeGrant != nil && d.NativeGrant.Revoked && d.Token == "" && d.RefreshToken == "" && d.Metadata.ExpiresAt.IsZero() && !d.Metadata.RefreshPending && d.Metadata.Owner == Managed && d.AccountID == d.NativeGrant.AccountID
-}
-
-func validDiskVersion(d diskRecord) bool {
-	if d.Version == 1 {
-		return d.NativeGrant == nil
-	}
-	if d.Version != 2 || d.NativeGrant == nil || d.Metadata.Reference.Provider != "claude-native" || d.Metadata.Reference.Method != OAuth || d.Metadata.Owner != Managed {
-		return false
-	}
-	g := d.NativeGrant
-	if g.Revoked && !validNativeTombstone(d) {
-		return false
-	}
-	if g.Revision != d.Metadata.Revision || g.Generation == 0 || len(g.RouteDigest) != 64 || len(g.MaterialHash) != 64 || g.AccountID == "" || g.AccountID != d.AccountID || g.TeamID == "" || g.TokenKind != "OAUTH_BEARER" || (g.ScopeSource != "BOUND_TOKEN_RESPONSE" && g.ScopeSource != "INHERITED_VERIFIED_GRANT") || len(g.Scopes) == 0 || len(g.Scopes) > 16 {
-		return false
-	}
-	if _, err := hex.DecodeString(g.RouteDigest); err != nil {
-		return false
-	}
-	if _, err := hex.DecodeString(g.MaterialHash); err != nil {
-		return false
-	}
-	for i, scope := range g.Scopes {
-		if scope == "" || len(scope) > 128 || strings.ContainsAny(scope, " \r\n\x00\t") || slices.Contains(g.Scopes[:i], scope) {
-			return false
-		}
-	}
-	return true
-}
 func (tx *localTransaction) Write(r Record) error {
-	tombstone := r.NativeGrant != nil && r.NativeGrant.Revoked && r.Material.Token.Reveal() == "" && r.Material.RefreshToken.Reveal() == "" && r.Material.ExpiresAt.IsZero() && r.Material.Owner == Managed && !r.Metadata.RefreshPending
-	if r.Metadata.Reference != tx.ref || validateMaterial(tx.ref, r.Material) != nil && !tombstone {
+	if r.Metadata.Reference != tx.ref || validateMaterial(tx.ref, r.Material) != nil {
 		return &Error{Code: "invalid_record"}
 	}
 	revision := uint64(1)
 	old, err := tx.Read()
 	if err == nil {
-		if old.NativeGrant != nil && (r.NativeGrant == nil || r.NativeGrant.AccountID != old.NativeGrant.AccountID || r.NativeGrant.RouteDigest != old.NativeGrant.RouteDigest) {
-			return &Error{Code: "native_owner_required"}
-		}
 		if old.Metadata.Revision == ^uint64(0) {
 			return &Error{Code: "invalid_record"}
 		}
@@ -219,18 +174,6 @@ func (tx *localTransaction) Write(r Record) error {
 	r.Metadata.Owner = r.Material.Owner
 	r.Metadata.ExpiresAt = r.Material.ExpiresAt
 	d := diskRecord{Version: 1, Metadata: r.Metadata, Token: r.Material.Token.Reveal(), RefreshToken: r.Material.RefreshToken.Reveal(), AccountID: r.Material.AccountID}
-	if r.NativeGrant != nil {
-		g := *r.NativeGrant
-		g.Scopes = slices.Clone(g.Scopes)
-		g.Revision = revision
-		d.Version, d.NativeGrant = 2, &g
-	}
-	if !validDiskVersion(d) {
-		return &Error{Code: "invalid_record"}
-	}
-	if d.NativeGrant != nil && d.NativeGrant.MaterialHash != NativeMaterialBindingHash(tx.ref, r) {
-		return &Error{Code: "invalid_record"}
-	}
 	raw, err := json.Marshal(d)
 	if err != nil || len(raw) > 1<<20 {
 		return &Error{Code: "invalid_record"}
@@ -257,22 +200,11 @@ func (tx *localTransaction) Write(r Record) error {
 	return tx.syncDirectory()
 }
 func (tx *localTransaction) Remove() error {
-	if r, err := tx.Read(); err == nil && r.NativeGrant != nil {
-		return &Error{Code: "native_owner_required"}
-	} else if err != nil && !IsCode(err, "not_found") {
-		return err
-	}
-	// Refuse symlink/hardlink/permission surprises before unlinking an existing record.
-	f, err := openPrivate(tx.path, unix.O_RDONLY)
-	if IsCode(err, "not_found") {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	f.Close()
-	if err = os.Remove(tx.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return &Error{Code: "storage_unavailable"}
+	if err := os.Remove(tx.path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("remove credential: %w", err)
 	}
 	return tx.syncDirectory()
 }
@@ -288,9 +220,6 @@ func (tx *localTransaction) syncDirectory() error {
 	return nil
 }
 func (s *Local) List(ctx context.Context) ([]Metadata, error) {
-	if s.existing != nil {
-		return s.existing.list(ctx, s)
-	}
 	if err := s.checkDirectory(); err != nil {
 		return nil, err
 	}
@@ -316,7 +245,7 @@ func (s *Local) List(ctx context.Context) ([]Metadata, error) {
 		data, err := io.ReadAll(io.LimitReader(f, 1<<20+1))
 		f.Close()
 		var d diskRecord
-		if err != nil || len(data) > 1<<20 || json.Unmarshal(data, &d, json.RejectUnknownMembers(true)) != nil || !validDiskVersion(d) || d.Metadata.Reference.Validate() != nil || entry.Name() != s.key(d.Metadata.Reference)+".json" {
+		if err != nil || len(data) > 1<<20 || json.Unmarshal(data, &d, json.RejectUnknownMembers(true)) != nil || d.Version != 1 || d.Metadata.Reference.Validate() != nil || entry.Name() != s.key(d.Metadata.Reference)+".json" {
 			return nil, &Error{Code: "invalid_record"}
 		}
 		// Atomic replacement makes each entry coherent; listing is a metadata snapshot,

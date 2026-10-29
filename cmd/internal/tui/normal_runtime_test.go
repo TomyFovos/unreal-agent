@@ -87,7 +87,7 @@ func TestNormalSingleProviderPickerSkipsProviderStageAndShowsBlockedBridge(t *te
 			t.Error("normal TUI did not detach")
 		}
 	})
-	waitFor(t, func() bool { return strings.Contains(out.text(), "running") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "入力待ち") })
 	keys <- Key{Text: "/model"}
 	keys <- Key{Name: "enter"}
 	waitFor(t, func() bool {
@@ -134,7 +134,7 @@ func TestNormalMultiProviderPickerKeepsObservedBridgeStatusThroughEffortCancel(t
 			t.Error("normal TUI did not detach")
 		}
 	})
-	waitFor(t, func() bool { return strings.Contains(out.text(), "running") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "入力待ち") })
 	keys <- Key{Text: "/model"}
 	keys <- Key{Name: "enter"}
 	waitFor(t, func() bool {

@@ -15,6 +15,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
@@ -48,7 +49,7 @@ func TestOrchestrationRunPickerDirectCommandsAndComposerEditing(t *testing.T) {
 	waitFor(t, func() bool { return strings.Contains(out.text(), "› Orchestration") })
 	keys <- Key{Name: "enter"}
 	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "Unreal Host validates") && !strings.Contains(out.text(), "VIEW CHAT RESPONSE")
+		return strings.Contains(out.text(), "◆ メイン") && !strings.Contains(out.text(), "VIEW CHAT RESPONSE")
 	})
 	viewCommand(keys, "/view")
 	waitFor(t, func() bool { return strings.Contains(out.text(), "› Orchestration") })
@@ -56,17 +57,17 @@ func TestOrchestrationRunPickerDirectCommandsAndComposerEditing(t *testing.T) {
 	waitFor(t, func() bool { return strings.Contains(out.text(), "› Split") })
 	keys <- Key{Name: "enter"}
 	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "Unreal Host validates") && strings.Contains(out.text(), "VIEW CHAT RESPONSE")
+		return strings.Contains(out.text(), "◆ メイン") && strings.Contains(out.text(), "VIEW CHAT RESPONSE")
 	})
 	viewCommand(keys, "/view chat")
 	waitFor(t, func() bool {
-		return !strings.Contains(out.text(), "Unreal Host validates") && strings.Contains(out.text(), "VIEW CHAT RESPONSE")
+		return !strings.Contains(out.text(), "◆ メイン") && strings.Contains(out.text(), "VIEW CHAT RESPONSE")
 	})
 	viewCommand(keys, "/view orchestration")
-	waitFor(t, func() bool { return strings.Contains(out.text(), "Unreal Host validates") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "◆ メイン") })
 	viewCommand(keys, "/view split")
 	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "VIEW CHAT RESPONSE") && strings.Contains(out.text(), "Unreal Host validates")
+		return strings.Contains(out.text(), "VIEW CHAT RESPONSE") && strings.Contains(out.text(), "◆ メイン")
 	})
 	viewCommand(keys, "/view")
 	waitFor(t, func() bool { return strings.Contains(out.text(), "› Split") })
@@ -75,11 +76,11 @@ func TestOrchestrationRunPickerDirectCommandsAndComposerEditing(t *testing.T) {
 	keys <- Key{Text: "ab猫"}
 	keys <- Key{Name: "left"}
 	keys <- Key{Text: "x"}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "you › abx猫") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "› abx猫") })
 	keys <- Key{Name: "right"}
 	keys <- Key{Name: "backspace"}
 	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "you › abx") && !strings.Contains(out.text(), "abx猫")
+		return strings.Contains(out.text(), "› abx") && !strings.Contains(out.text(), "abx猫")
 	})
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -104,13 +105,13 @@ func TestOrchestrationRunResizePreservesSplitAndPickerAvailability(t *testing.T)
 	}()
 	waitFor(t, func() bool { return strings.Contains(out.text(), "RESIZE CHAT") })
 	viewCommand(keys, "/view split")
-	waitFor(t, func() bool { return strings.Contains(out.text(), "Unreal Host validates") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "◆ メイン") })
 	width.Store(80)
 	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "Split returns at 120 columns") && !strings.Contains(out.text(), "Unreal Host validates")
+		return strings.Contains(out.text(), "Split returns at 120 columns") && !strings.Contains(out.text(), "◆ メイン")
 	})
 	width.Store(120)
-	waitFor(t, func() bool { return strings.Contains(out.text(), "Unreal Host validates") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "◆ メイン") })
 	viewCommand(keys, "/view")
 	waitFor(t, func() bool { return strings.Contains(out.text(), "› Split") })
 	width.Store(60)
@@ -121,19 +122,19 @@ func TestOrchestrationRunResizePreservesSplitAndPickerAvailability(t *testing.T)
 	waitFor(t, func() bool { return !strings.Contains(out.text(), "› Chat") })
 	viewCommand(keys, "/view split")
 	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "Split requires 120 columns") && !strings.Contains(out.text(), "Unreal Host validates")
+		return strings.Contains(out.text(), "Split requires 120 columns") && !strings.Contains(out.text(), "◆ メイン")
 	})
 	viewCommand(keys, "/view invalid")
 	waitFor(t, func() bool { return strings.Contains(out.text(), "usage: /view") })
 	width.Store(120)
-	waitFor(t, func() bool { return strings.Contains(out.text(), "Unreal Host validates") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "◆ メイン") })
 }
 
 func TestOrchestrationRunScrollRegionsAndSheetsPreserveTranscriptPosition(t *testing.T) {
 	f := conversationFixture(strings.Repeat("conversation visual line\n", 90) + "CHAT TAIL")
 	panel := viewer.PanelSnapshot{ParentID: "s", Selected: "s", Rows: []viewer.Row{{ID: "s", Generation: "g"}}}
 	for i := range 40 {
-		panel.Rows[0].Operations = append(panel.Rows[0].Operations, viewer.OperationRow{ID: operation.ID(fmt.Sprint(i)), Tool: fmt.Sprintf("scroll-tool-%02d", i), Status: operation.StatusCompleted})
+		panel.Rows = append(panel.Rows, viewer.Row{ID: session.ID(fmt.Sprintf("child-%02d", i)), ParentID: "s", Label: fmt.Sprintf("scroll-task-%02d", i), ParentOperationStatus: operation.StatusReady})
 	}
 	keys, out, done := make(chan Key, 32), &screenObserver{}, make(chan error, 1)
 	go func() {
@@ -152,14 +153,14 @@ func TestOrchestrationRunScrollRegionsAndSheetsPreserveTranscriptPosition(t *tes
 	})
 	viewCommand(keys, "/view orchestration")
 	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "Orchestration: line 1") && strings.Contains(out.text(), "scroll-tool-00")
+		return strings.Contains(out.text(), "Orchestration: line 1") && strings.Contains(out.text(), "scroll-task-00")
 	})
 	keys <- Key{Name: "pagedown"}
 	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "Orchestration: line") && !strings.Contains(out.text(), "Orchestration: line 1;") && !strings.Contains(out.text(), "scroll-tool-00")
+		return strings.Contains(out.text(), "Orchestration: line") && !strings.Contains(out.text(), "Orchestration: line 1;") && !strings.Contains(out.text(), "scroll-task-00")
 	})
 	keys <- Key{Name: "pageup"}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "scroll-tool-00") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "scroll-task-00") })
 	viewCommand(keys, "/help")
 	waitFor(t, func() bool { return strings.Contains(out.text(), "Type / to search") })
 	keys <- Key{Name: "pagedown"}
@@ -177,7 +178,7 @@ func TestOrchestrationRunScrollRegionsAndSheetsPreserveTranscriptPosition(t *tes
 	keys <- Key{Name: "escape"}
 	viewCommand(keys, "/view chat")
 	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "scrollback:") && !strings.Contains(out.text(), "Unreal Host validates")
+		return strings.Contains(out.text(), "scrollback:") && !strings.Contains(out.text(), "◆ メイン")
 	})
 	keys <- Key{Name: "pagedown"}
 	waitFor(t, func() bool {
@@ -233,7 +234,7 @@ func TestOrchestrationRunLiveUpdatesPickerRuntimeSwitchReconnectAndExport(t *tes
 	waitFor(t, func() bool { return strings.Contains(out.text(), "LIVE ORIGINAL RESPONSE") })
 	viewCommand(keys, "/view orchestration")
 	waitFor(t, func() bool {
-		return observation.Load() && strings.Contains(out.text(), "child-a") && strings.Contains(out.text(), "go test ./...")
+		return observation.Load() && strings.Contains(out.text(), "inspect parser") && strings.Contains(out.text(), "go test ./...")
 	})
 	viewCommand(keys, "/model")
 	waitFor(t, func() bool { return strings.Contains(out.text(), "Synthetic Opus") })
@@ -243,7 +244,7 @@ func TestOrchestrationRunLiveUpdatesPickerRuntimeSwitchReconnectAndExport(t *tes
 	mu.Unlock()
 	updates <- struct{}{}
 	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "child-a  done") && !strings.Contains(out.text(), "go test ./...")
+		return strings.Contains(out.text(), "終了 ✓") && !strings.Contains(out.text(), "go test ./...")
 	})
 	keys <- Key{Name: "escape"}
 	waitFor(t, func() bool { return !strings.Contains(out.text(), "Synthetic Opus") })
@@ -259,12 +260,13 @@ func TestOrchestrationRunLiveUpdatesPickerRuntimeSwitchReconnectAndExport(t *tes
 	f.mu.Unlock()
 	f.events <- host.Event{Kind: "item", Generation: "g", Revision: revision, Item: &item}
 	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "Codex · gpt-switch · medium") && strings.Contains(out.text(), "r8") && strings.Contains(out.text(), "Codex · gpt-fixture · medium")
+		// The finished child is no longer shown (only running agents are).
+		return strings.Contains(out.text(), "Codex gpt-switch · medium") && !strings.Contains(out.text(), "r8")
 	})
 	f.events <- host.Event{Kind: "disconnected"}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "unknown") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "不明") })
 	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "parent s  running") && strings.Contains(out.text(), "r8")
+		return strings.Contains(out.text(), "◆ メイン") && !strings.Contains(out.text(), "r8")
 	})
 	viewCommand(keys, "/export")
 	waitFor(t, func() bool { return strings.Contains(out.text(), "Export as Markdown") })
@@ -287,7 +289,7 @@ func TestOrchestrationRunLiveUpdatesPickerRuntimeSwitchReconnectAndExport(t *tes
 	}
 }
 
-func TestOrchestrationViewCommandDiscoveryPastedAndPrivateSafety(t *testing.T) {
+func TestOrchestrationViewCommandDiscoveryAndPasteSafety(t *testing.T) {
 	s, u := idleSnapshot(), plainUI()
 	u.Input = "/vi"
 	// The menu lists /view alone; its views appear after choosing it.
@@ -320,11 +322,11 @@ func TestOrchestrationViewCommandDiscoveryPastedAndPrivateSafety(t *testing.T) {
 	waitFor(t, func() bool { return strings.Contains(out.text(), "paste safety response") })
 	keys <- Key{Text: "/view orchestration", Paste: true}
 	waitFor(t, func() bool { return strings.Contains(out.text(), "pasted: Enter submits") })
-	if strings.Contains(out.text(), "Unreal Host validates") {
+	if strings.Contains(out.text(), "◆ メイン") {
 		t.Fatal("paste executed view command before Enter")
 	}
 	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "Unreal Host validates") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "◆ メイン") })
 	f.mu.Lock()
 	if len(f.inputs) != 0 || len(f.view.Operations) != 0 {
 		t.Error("pasted view command created public input or an Operation")
@@ -332,20 +334,7 @@ func TestOrchestrationViewCommandDiscoveryPastedAndPrivateSafety(t *testing.T) {
 	f.mu.Unlock()
 	viewCommand(keys, "/view chat")
 	waitFor(t, func() bool { return strings.Contains(out.text(), "paste safety response") })
-	viewCommand(keys, "/login openai api")
-	waitFor(t, func() bool { return strings.Contains(out.text(), "private: API key") })
-	keys <- Key{Text: "/view orchestration"}
-	keys <- Key{Name: "down"}
-	keys <- Key{Name: "tab"}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "*******************") })
-	if strings.Contains(out.rawText(), "key › /view") || strings.Contains(out.text(), "Unreal Host validates") {
-		t.Fatal("private input acquired view navigation")
-	}
-	keys <- Key{Name: "cancel"}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "key entry canceled") })
-	if f.logins != 0 {
-		t.Fatal("private view text stored without submit")
-	}
+
 }
 
 func TestOrchestrationViewDoesNotMutateCanonicalHistoryOrCreateOperations(t *testing.T) {
@@ -358,7 +347,7 @@ func TestOrchestrationViewDoesNotMutateCanonicalHistoryOrCreateOperations(t *tes
 	waitFor(t, func() bool { return strings.Contains(out.text(), "unchanged canonical response") })
 	for _, mode := range []string{"orchestration", "chat", "orchestration"} {
 		viewCommand(keys, "/view "+mode)
-		waitFor(t, func() bool { return strings.Contains(out.text(), "Unreal Host validates") == (mode == "orchestration") })
+		waitFor(t, func() bool { return strings.Contains(out.text(), "◆ メイン") == (mode == "orchestration") })
 	}
 	keys <- Key{Name: "detach"}
 	if err := <-done; err != nil {
@@ -375,7 +364,7 @@ func TestOrchestrationViewDoesNotMutateCanonicalHistoryOrCreateOperations(t *tes
 		done <- Run(t.Context(), Config{Client: f, ID: "s", Keys: keys, Output: out, Theme: &Theme{Plain: true}})
 	}()
 	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "unchanged canonical response") && !strings.Contains(out.text(), "Unreal Host validates")
+		return strings.Contains(out.text(), "unchanged canonical response") && !strings.Contains(out.text(), "◆ メイン")
 	})
 	keys <- Key{Name: "detach"}
 	if err := <-done; err != nil {

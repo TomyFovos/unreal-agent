@@ -32,10 +32,22 @@ func (t TokenCounts) Safe() TokenCounts {
 // approximate request interval, excluding tool execution and approval waits.
 // Tokens are always reported counters; no text-to-token estimate is made.
 type GenerationStatistics struct {
-	Model          string
-	Tokens         TokenCounts
+	Model  string
+	Tokens TokenCounts
+	// ContextTokens is the last model call's input when Tokens sums several
+	// calls. Providers that report one call can keep using Tokens.Input.
+	ContextTokens  int64 `json:",omitzero"`
+	ContextKnown   bool  `json:",omitzero"`
 	DurationMicros int64
 	Source         string
+}
+
+func (s GenerationStatistics) ContextInput() (int64, bool) {
+	if s.ContextKnown {
+		return s.ContextTokens, s.ContextTokens >= 0
+	}
+	tokens := s.Tokens.Safe()
+	return tokens.Input, tokens.InputKnown
 }
 
 func (s GenerationStatistics) Valid() bool {

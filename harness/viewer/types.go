@@ -28,6 +28,12 @@ type Reader interface {
 	Subscribe(context.Context, session.ID, sessionstore.Sequence, int, int) (host.Subscription, error)
 }
 
+// VersionReader avoids retransmitting an unchanged, fully observed stopped
+// Session while preserving periodic detection of a new Host generation.
+type VersionReader interface {
+	Version(context.Context, session.ID) (host.ObservationVersion, error)
+}
+
 // DecodeChild validates a supported canonical plan, never guesses from tool names.
 type Child struct {
 	ID        session.ID
@@ -93,6 +99,7 @@ type Row struct {
 	ManagedPolicyMode     string `json:",omitzero"`
 	ID                    session.ID
 	ParentID              session.ID
+	ParentRuntime         Liveness
 	ParentOperationID     operation.ID
 	ParentOperationStatus operation.Status
 	Label                 string
@@ -102,6 +109,9 @@ type Row struct {
 	Finish                *Finish
 	Failure               string
 	Activity              string
+	CreatedAt             time.Time
+	RecentActivity        []time.Time // canonical item timestamps within the last ten minutes
+	LastActivityAt        time.Time   // latest canonical activity, independent of the transcript cache
 	Usage                 Usage
 	// Elapsed is wall time since canonical creation, not CPU or active time.
 	Elapsed     Duration
@@ -110,6 +120,7 @@ type Row struct {
 	More        bool
 	NeedsResync bool
 	Problem     string
+	LastUsage   Usage
 }
 type Detail struct {
 	Row         Row

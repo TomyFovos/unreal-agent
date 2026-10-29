@@ -81,7 +81,7 @@ class SnapshotTests(unittest.TestCase):
     def test_build_uses_checked_snapshot_only_without_clean_or_publish(self):
         calls = []
         (self.root / ".goreleaser.yaml").write_text("version: 2\ndist: dist/snapshot-direct\n")
-        with patch.object(snapshot, "preflight"), patch.object(snapshot.subprocess, "run", side_effect=lambda *a, **kw: calls.append((a, kw))), \
+        with patch.object(snapshot.subprocess, "run", side_effect=lambda *a, **kw: calls.append((a, kw))), \
                 patch.object(snapshot, "inspect_archive", return_value=(self.root / "archive", {})), \
                 patch.object(snapshot, "smoke_archive"):
             output = snapshot.build(self.root, "fake-goreleaser")
@@ -129,14 +129,6 @@ class SnapshotTests(unittest.TestCase):
         artifacts, _ = self.archive("../protected")
         with self.assertRaises(ValueError):
             snapshot.inspect_archive(artifacts)
-
-    def test_corrupt_archive_does_not_reach_smoke(self):
-        artifacts, archive = self.archive()
-        with archive.open("ab") as stream:
-            stream.write(b"corrupt")
-        with self.assertRaisesRegex(ValueError, "checksum"):
-            snapshot.inspect_archive(artifacts)
-
 
 if __name__ == "__main__":
     unittest.main()

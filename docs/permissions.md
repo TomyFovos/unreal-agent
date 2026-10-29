@@ -37,9 +37,9 @@ runtime tool exclusions and the operator maximum still apply.
 Full Access continues after detach in that Host lifetime. Returning to Read Only
 revokes active privileged leases and requests cancellation of processes,
 native/AST work and child starts. Completed/external effects cannot be undone.
-Canonical Operations record the actual grant and terminal outcome. Host restart
-and stopped/resumed Session lifetimes start in Read Only: private approvals are
-never persisted/replayed. Completed receipts remain durable. Incomplete restored
+Canonical Operations record the actual grant and terminal outcome. The mode last
+selected in a workspace is kept: Host restarts, updates, resumed Sessions and
+new Sessions start in it (U20). Private approvals are never persisted/replayed. Completed receipts remain durable. Incomplete restored
 Operations are canceled with an expired permission decision, not re-executed.
 Inspect history and submit a new request to retry interrupted work.
 

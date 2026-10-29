@@ -130,9 +130,6 @@ func replaceText(data []byte, edits []textEdit, encoding string) ([]byte, error)
 		next = append(next, edit.text...)
 		next = append(next, result[edit.end:]...)
 		result = next
-		if len(result) > mutation.MaxFileBytes {
-			return nil, failure("limit", "replacement exceeds mutation byte limit")
-		}
 	}
 	return result, nil
 }
@@ -225,11 +222,6 @@ func (m *Manager) prepare(edit workspaceEdit, snapshots map[string]mutation.Snap
 			return request, err
 		}
 		request.Changes = append(request.Changes, mutation.Change{Path: path, Expected: snapshot.Revision, Content: data})
-	}
-	if len(request.Changes) > 0 {
-		if err := request.Validate(); err != nil {
-			return request, failure("limit", "workspace edit exceeds mutation limits")
-		}
 	}
 	return request, nil
 }

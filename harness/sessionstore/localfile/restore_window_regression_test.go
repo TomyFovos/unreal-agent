@@ -3,8 +3,6 @@ package localfile
 import (
 	"context"
 	"encoding/json/jsontext"
-	"os"
-	"reflect"
 	"testing"
 
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
@@ -16,25 +14,7 @@ type p3Window interface {
 	Items(context.Context, session.ID, sessionstore.Sequence, int) (sessionstore.Page, error)
 	Close() error
 }
-type p3LegacyWindow struct{ *Store }
 
-func (p3LegacyWindow) Close() error { return nil }
-
-// Reflection permits the exact same behavioral regression to run against the
-// immutable before checkout. It uses the real old Store.Items when no scoped
-// API exists; it does not substitute a second store or execution implementation.
-func p3WindowFor(t *testing.T, s *Store, id session.ID, owner *os.File) p3Window {
-	t.Helper()
-	method := reflect.ValueOf(s).MethodByName("OpenRestoreView")
-	if !method.IsValid() {
-		return p3LegacyWindow{s}
-	}
-	out := method.Call([]reflect.Value{reflect.ValueOf(t.Context()), reflect.ValueOf(id), reflect.ValueOf(owner)})
-	if !out[1].IsNil() {
-		t.Fatal(out[1].Interface().(error))
-	}
-	return out[0].Interface().(p3Window)
-}
 func TestRestoreReadWindowRejectsAppendBetweenPages(t *testing.T) {
 	s, err := New(t.TempDir())
 	if err != nil {
@@ -54,7 +34,10 @@ func TestRestoreReadWindowRejectsAppendBetweenPages(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	view := p3WindowFor(t, s, id, owner)
+	view, err := s.OpenRestoreView(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer view.Close()
 	first, err := view.Items(t.Context(), id, 0, 2)
 	if err != nil || len(first.Items) != 2 || !first.More {

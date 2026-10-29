@@ -17,7 +17,7 @@ func servePermissions(w http.ResponseWriter, r *http.Request, c Config) {
 		writeFrame(w, frame{Error: "unauthenticated_control"})
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxRequestBytes))
+	body, err := io.ReadAll(r.Body)
 	defer clear(body)
 	var q request
 	if err != nil || json.Unmarshal(body, &q, json.RejectUnknownMembers(true)) != nil || q.Permission == nil {
@@ -42,10 +42,6 @@ func servePermissions(w http.ResponseWriter, r *http.Request, c Config) {
 	var reply permission.ControlReply
 	switch p.Action {
 	case "watch":
-		if p.Lease != "" || p.Challenge != "" || p.Mode != "" || p.Operation != "" || p.Allow || p.Expected != 0 {
-			writeFrame(w, frame{Error: "invalid_permission_control"})
-			return
-		}
 		key, release := control.AcquireControl()
 		defer release()
 		for {
@@ -63,10 +59,8 @@ func servePermissions(w http.ResponseWriter, r *http.Request, c Config) {
 			case <-changed:
 			}
 		}
-	case "prepare_full":
-		reply.Challenge, err = control.PrepareFull(p.Lease, p.Expected)
 	case "set_mode":
-		err = control.SetMode(p.Lease, p.Expected, p.Mode, p.Challenge)
+		err = control.SetMode(p.Lease, p.Expected, p.Mode)
 	case "decide":
 		err = control.Decide(p.Lease, p.Expected, p.Operation, p.Allow)
 	default:
@@ -82,18 +76,16 @@ func servePermissions(w http.ResponseWriter, r *http.Request, c Config) {
 
 func validPermissionRequest(p permission.ControlRequest) bool {
 	if p.Action == "watch" {
-		return p.Lease == "" && p.Expected == 0 && p.Mode == "" && p.Challenge == "" && p.Operation == "" && !p.Allow
+		return p.Lease == "" && p.Expected == 0 && p.Mode == "" && p.Operation == "" && !p.Allow
 	}
 	if len(p.Lease) != 64 || p.Expected == 0 {
 		return false
 	}
 	switch p.Action {
-	case "prepare_full":
-		return p.Mode == "" && p.Challenge == "" && p.Operation == "" && !p.Allow
 	case "set_mode":
-		return p.Mode.Valid() && p.Operation == "" && !p.Allow && (p.Mode == permission.FullAccess && len(p.Challenge) == 64 || p.Mode != permission.FullAccess && p.Challenge == "")
+		return p.Mode.Valid() && p.Operation == "" && !p.Allow
 	case "decide":
-		return p.Mode == "" && p.Challenge == "" && p.Operation != "" && len(p.Operation) <= 256
+		return p.Mode == "" && p.Operation != ""
 	}
 	return false
 }

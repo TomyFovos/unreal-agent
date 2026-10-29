@@ -1,9 +1,7 @@
 package localfile
 
 import (
-	"bytes"
 	"context"
-	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -36,73 +34,6 @@ func (s *Store) AcquireWriter(id session.ID) (*os.File, error) {
 		return nil, fmt.Errorf("lock session: %w", err)
 	}
 	return f, nil
-}
-
-// Upgrade preserves the original v2 bytes in an exclusive backup before
-// publishing a v3 header. Call explicitly, under the session writer lock.
-// All history records and sequence numbers are preserved.
-func (s *Store) Upgrade(ctx context.Context, id session.ID) error {
-	if err := validateSessionID(id); err != nil {
-		return err
-	}
-	if err := s.invalidateRestoreView(id); err != nil {
-		return err
-	}
-	if _, _, err := s.readState(ctx, id); err != nil {
-		return err
-	}
-	raw, err := os.ReadFile(s.sessionPath(id))
-	if err != nil {
-		return err
-	}
-	first, rest, ok := bytes.Cut(raw, []byte{'\n'})
-	if !ok {
-		return fmt.Errorf("missing header")
-	}
-	var rec logRecord
-	if err = json.Unmarshal(first, &rec); err != nil {
-		return err
-	}
-	var header sessionRecord
-	if err = json.Unmarshal(rec.Data, &header); err != nil {
-		return err
-	}
-	if header.Version == formatVersion {
-		return nil
-	}
-	if header.Version != 2 {
-		return fmt.Errorf("unsupported migration from %d", header.Version)
-	}
-	backup := s.sessionPath(id) + ".v2"
-	f, err := os.OpenFile(backup, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err == nil {
-		if err = persistTemporary(f, raw); err != nil {
-			return err
-		}
-		if err = syncDirectory(s.directory); err != nil {
-			return err
-		}
-	} else if !errors.Is(err, os.ErrExist) {
-		return err
-	} else {
-		prior, e := os.ReadFile(backup)
-		if e != nil {
-			return e
-		}
-		if !bytes.Equal(prior, raw) {
-			return fmt.Errorf("existing v2 backup differs; explicit migration required")
-		}
-	}
-	header.Version = formatVersion
-	prefix, err := encodeRecord(recordSession, header)
-	if err != nil {
-		return err
-	}
-	if err = publishFile(s.directory, s.sessionPath(id), append(prefix, rest...)); err != nil {
-		return err
-	}
-	s.evictCachedWriteState(id)
-	return nil
 }
 
 func (s *Store) Operations(ctx context.Context, id session.ID) ([]operation.Operation, error) {

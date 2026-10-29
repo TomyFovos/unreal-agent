@@ -18,8 +18,6 @@ import (
 )
 
 const Version = 1
-const MaxFileBytes = 16 << 20
-const MaxTargets = 128
 
 type Code string
 
@@ -76,20 +74,15 @@ func (r Request) Validate() error {
 	if r.Version != Version {
 		return errors.New("unsupported mutation version")
 	}
-	if len(r.Changes) == 0 || len(r.Changes) > MaxTargets {
-		return errors.New("mutation requires 1 to 128 targets")
+	if len(r.Changes) == 0 {
+		return errors.New("mutation requires targets")
 	}
-	total := 0
 	for _, c := range r.Changes {
-		if c.Path == "" || len(c.Path) > 4096 || strings.IndexByte(c.Path, 0) >= 0 {
+		if c.Path == "" || strings.IndexByte(c.Path, 0) >= 0 {
 			return errors.New("invalid path")
 		}
 		if err := c.Expected.Validate(); err != nil {
 			return err
-		}
-		total += len(c.Content)
-		if len(c.Content) > MaxFileBytes || total > MaxFileBytes {
-			return errors.New("mutation exceeds 16 MiB payload limit")
 		}
 	}
 	return nil
@@ -160,10 +153,6 @@ func New(config Config) (*Service, error) {
 	}
 	if err = os.MkdirAll(state, 0700); err != nil {
 		return nil, err
-	}
-	info, err = os.Lstat(state)
-	if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
-		return nil, errors.New("mutation state must be a private directory")
 	}
 	state, err = filepath.EvalSymlinks(state)
 	if err != nil {
@@ -376,12 +365,7 @@ func (s *Service) apply(ctx context.Context, request Request) Result {
 			}
 		}
 	}
-	var independenceErr error
-	ctx, independenceErr = s.prepareIndependence(ctx, request)
-	if independenceErr != nil || s.checkIndependenceMetadata(ctx, request, 0) != nil || s.checkExecutionFootprint(ctx, request, -1, nil) != nil {
-		result.Reason = ReasonUnsafeParent
-		return result
-	}
+
 	// Every target is validated before creating any replacement. These existing
 	// Expected reads use the mutation's write grant, including during recovery.
 	for i, path := range paths {
@@ -423,12 +407,7 @@ func (s *Service) apply(ctx context.Context, request Request) Result {
 				return result
 			}
 		}
-		if s.checkIndependence(ctx, request, i) != nil || s.checkIndependenceParent(ctx, i, p.parent) != nil || s.checkExecutionFootprint(ctx, request, i, p.parent) != nil {
-			result.Code = Invalid
-			result.Reason = ReasonUnsafeParent
-			result.Targets[i].Code = Invalid
-			return result
-		}
+
 		replaced, err := replaceTarget(p.parent, p.base, request.Changes[i].Content, p.mode)
 		if err != nil {
 			result.Code = Failed
@@ -489,7 +468,7 @@ func (e PrepareFailure) Error() string { return string(e.Code) }
 // and replacements under target locks.
 func (s *Service) ExecutePrepared(ctx context.Context, id string, identity []byte, prepare func(context.Context) (Request, error)) Result {
 	initial := Result{Version: Version, Code: Invalid}
-	if len(identity) == 0 || len(identity) > MaxFileBytes || prepare == nil {
+	if len(identity) == 0 || prepare == nil {
 		return initial
 	}
 	return s.execute(ctx, id, identity, initial, func() Result {
@@ -577,18 +556,9 @@ func (s *Service) execute(ctx context.Context, id string, encoded []byte, result
 	return result
 }
 
-// ReadBounded reads a complete snapshot or refuses oversized/nonregular files.
+// ReadBounded reads a complete snapshot.
 // A range consumer derives its revision from these exact bytes.
-func ReadBounded(reader io.Reader) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(reader, MaxFileBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > MaxFileBytes {
-		return nil, diagnosticError{ReasonTargetTooLarge}
-	}
-	return data, nil
-}
+func ReadBounded(reader io.Reader) ([]byte, error) { return io.ReadAll(reader) }
 
 // authorizedParent proves that the no-symlink walk and the policy's pinned root
 // identify the same parent, then uses the authorized descriptor for actual I/O.

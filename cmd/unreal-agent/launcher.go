@@ -42,22 +42,61 @@ func runLauncher(ctx context.Context, args []string, output io.Writer) error {
 	return (launcher{start: startBackgroundHost, attach: attachViewer}).run(ctx, args, output)
 }
 
-func (l launcher) run(ctx context.Context, args []string, output io.Writer) error {
+func (l launcher) run(ctx context.Context, args []string, output io.Writer) (err error) {
 	o, err := parseLaunchOptions(args, output, os.Getenv)
 	if err != nil || o.help {
 		return err
 	}
+	defer func() {
+		if err == nil {
+			return
+		}
+		var normal *normalRuntimeError
+		var presented *launchError
+		if errors.As(err, &normal) {
+			text := normal.Code
+			for _, p := range normal.Providers {
+				text += "; " + p.ID + ": " + string(p.Reason)
+			}
+			for _, diagnostic := range normal.Diagnostics {
+				text += "\n" + diagnostic
+			}
+			appendLauncherDiagnostic(o, text)
+			return
+		}
+		if errors.As(err, &presented) {
+			appendLauncherDiagnostic(o, presented.cause.Error())
+			return
+		}
+		message := "起動できませんでした。設定と外部 CLI のログイン状態を確認して unreal を起動し直してください。"
+		var auth *credential.Error
+		if errors.As(err, &auth) {
+			message = "Codex へのログインが必要です。codex login の後に unreal を起動してください。"
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			message = "起動設定が見つかりません。インストール手順を確認して unreal を起動し直してください。"
+		}
+		if strings.Contains(err.Error(), "Host configuration does not match") {
+			message = "別の設定で起動中です。起動オプションを合わせて unreal を実行してください。"
+		}
+		appendLauncherDiagnostic(o, err.Error())
+		err = launcherStartupError(o, message, err)
+	}()
 	client := gateway.NewClient(o.socket)
 	defer client.Close()
 	if l.choose == nil {
 		l.choose = chooseInitialProvider(output)
 	}
 	// Human first-run selection is not gateway readiness work. Finish it under
-	// the same startup lock before starting the bounded readiness deadline.
+	// the same startup lock before waiting for gateway readiness.
 	if err = l.prepareNormalConfig(ctx, client, o); err != nil {
 		return err
 	}
-	startup, cancel := context.WithTimeout(ctx, o.timeout)
+	startup, cancel := context.WithCancel(ctx)
+	if o.timeout > 0 {
+		cancel()
+		startup, cancel = context.WithTimeout(ctx, o.timeout)
+	}
 	err = l.ensureHost(startup, client, o)
 	cancel()
 	if err != nil {
@@ -86,7 +125,11 @@ func (l launcher) prepareNormalConfig(ctx context.Context, client *gateway.Clien
 	if err := makePrivateDirectory(filepath.Dir(o.socket)); err != nil {
 		return err
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, o.timeout)
+	waitCtx, cancel := context.WithCancel(ctx)
+	if o.timeout > 0 {
+		cancel()
+		waitCtx, cancel = context.WithTimeout(ctx, o.timeout)
+	}
 	defer cancel()
 	tick := time.NewTicker(40 * time.Millisecond)
 	defer tick.Stop()
@@ -112,7 +155,7 @@ func (l launcher) prepareNormalConfig(ctx context.Context, client *gateway.Clien
 }
 
 func parseLaunchOptions(args []string, output io.Writer, getenv func(string) string) (launchOptions, error) {
-	o := launchOptions{timeout: 20 * time.Second, id: "default"}
+	o := launchOptions{id: "default"}
 	flags := flag.NewFlagSet("unreal", flag.ContinueOnError)
 	flags.SetOutput(output)
 	flags.StringVar(&o.config, "config", "", "operator runtime JSON (default ~/.config/unreal-agent/runtime.json)")
@@ -126,7 +169,7 @@ func parseLaunchOptions(args []string, output io.Writer, getenv func(string) str
 	flags.BoolVar(&o.bootstrapDocker, "bootstrap-codex-docker-oauth", false, "first-run discovery: explicitly use Docker Sandbox OAuth and validated forward proxy")
 	flags.BoolVar(&o.bootstrapAuto, "bootstrap-codex-auto", false, "first-run discovery: validate native Codex routing; never fall back from an intended Docker source")
 	flags.StringVar(&o.bootstrapClaude, "bootstrap-claude-binary", "", "first-run discovery: optional external Claude executable")
-	flags.DurationVar(&o.timeout, "startup-timeout", o.timeout, "maximum wait for gateway readiness")
+	flags.DurationVar(&o.timeout, "startup-timeout", o.timeout, "optional maximum wait for gateway readiness (0 waits until canceled)")
 	flags.BoolVar(&o.help, "help", false, "show usage")
 	flags.BoolVar(&o.help, "h", false, "show usage")
 	flags.Usage = func() {
@@ -172,11 +215,8 @@ func parseLaunchOptions(args []string, output io.Writer, getenv func(string) str
 	if len(positional) == 1 {
 		o.id = session.ID(positional[0])
 	}
-	if err := validateLaunchName(string(o.id)); err != nil {
-		return o, err
-	}
-	if o.timeout <= 0 {
-		return o, errors.New("startup-timeout must be positive")
+	if o.timeout < 0 {
+		return o, errors.New("startup-timeout must not be negative")
 	}
 	if err := validateBootstrapChoices(o); err != nil {
 		return o, err
@@ -246,29 +286,11 @@ func parseLaunchOptions(args []string, output io.Writer, getenv func(string) str
 		}
 		*path = absolute
 	}
-	if len(o.socket) > 100 {
-		return o, errors.New("socket path exceeds 100 bytes; choose a shorter private directory with --socket")
-	}
 	return o, nil
 }
 
-func validateLaunchName(name string) error {
-	if name == "" || len(name) > 128 || strings.HasPrefix(name, "-") {
-		return errors.New("session name must be 1–128 ASCII letters, digits or dashes, and must not start with a dash")
-	}
-	for _, r := range name {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' {
-			continue
-		}
-		return errors.New("session name must contain only ASCII letters, digits and dashes")
-	}
-	return nil
-}
-
 func probeHost(ctx context.Context, client *gateway.Client) error {
-	probe, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
-	defer cancel()
-	methods, err := client.Methods(probe) // Existing bounded, read-only gateway method.
+	methods, err := client.Methods(ctx) // Existing bounded, read-only gateway method.
 	if err == nil && len(methods) == 0 {
 		return errors.New("Host did not return a valid gateway readiness response")
 	}
@@ -295,7 +317,7 @@ func (l launcher) ensureHost(ctx context.Context, client *gateway.Client, o laun
 	var child *backgroundHost
 	for {
 		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("Host did not become ready; check %s or the existing Host at %s: %w", filepath.Join(o.state, "host.log"), o.socket, err)
+			return launcherStartupError(o, "起動に時間がかかっています。少し待ってから unreal を起動し直してください。", err)
 		}
 		if probeHost(ctx, client) == nil {
 			return checkPrivateSocket(o.socket)
@@ -341,7 +363,7 @@ func (l launcher) ensureHost(ctx context.Context, client *gateway.Client, o laun
 				}
 				child, err = l.start(o)
 				if err != nil {
-					return fmt.Errorf("could not start background Host: %w", err)
+					return launcherStartupError(o, "起動できませんでした。インストール状態を確認して unreal を起動し直してください。", err)
 				}
 			}
 		}
@@ -361,7 +383,7 @@ func (l launcher) ensureHost(ctx context.Context, client *gateway.Client, o laun
 					if err == nil {
 						err = errors.New("serve exited before readiness")
 					}
-					return fmt.Errorf("background Host startup failed; see %s: %w", filepath.Join(o.state, "host.log"), err)
+					return launcherStartupError(o, "起動できませんでした。外部 CLI の起動・ログイン状態を確認して unreal を起動し直してください。", err)
 				}
 				child = &backgroundHost{} // Existing owner is starting; just wait.
 			default:
@@ -410,17 +432,20 @@ func openLauncherSession(ctx context.Context, client *gateway.Client, id session
 }
 
 func launcherSessionError(id session.ID, cause error) error {
-	message := fmt.Sprintf("cannot open session %q; check the Host runtime configuration and permissions", id)
+	message := "会話を開けませんでした。設定と接続先を確認して unreal を起動し直してください。"
 	if errors.Is(cause, localfile.ErrWriterOwned) {
-		message = fmt.Sprintf("session %q is currently owned by another writer", id)
-	} else if errors.Is(cause, host.ErrStopped) {
-		message = fmt.Sprintf("session %q stopped while connecting; run unreal %s again", id, id)
-	} else {
-		var e *gateway.Error
-		if errors.As(cause, &e) && (e.Code == "disconnected" || e.Code == "transport_failed") {
-			message = fmt.Sprintf("Host disconnected while opening session %q; run unreal %s again", id, id)
-		}
+		message = "別の画面で使用中です。その画面を閉じてから unreal を起動し直してください。"
 	}
+	if errors.Is(cause, host.ErrStopped) {
+		message = "接続中に会話が停止しました。unreal を起動し直してください。"
+	}
+	return &launchError{message: message, cause: cause}
+}
+
+func launcherStartupError(o launchOptions, message string, cause error) error {
+	// The private startup log retains the safe cause; ordinary output has no
+	// internal paths, process names, status codes or configuration identifiers.
+
 	return &launchError{message: message, cause: cause}
 }
 

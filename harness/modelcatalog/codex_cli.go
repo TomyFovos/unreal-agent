@@ -6,6 +6,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -28,19 +29,19 @@ type CodexCLI struct {
 	Binary   string
 	Getenv   func(string) string
 	Validate func(context.Context) error // recheck the explicit OAuth proxy route
-	Timeout  time.Duration
-	mu       sync.Mutex
-	cached   Catalog
-	expires  time.Time
+	// CachePath keeps the last model list across processes: the CLI can take
+	// 10-30 seconds to start in a sandbox, and every child and Host would
+	// otherwise wait for it again. Empty selects the user cache directory.
+	CachePath string
+	mu        sync.Mutex
+	cached    Catalog
+	expires   time.Time
 }
 
 func (c *CodexCLI) Catalog(ctx context.Context, refresh bool) Catalog {
 	cache := ReadCodexCache(filepath.Join(c.Home, "models_cache.json"))
 	if cache.Available {
 		return cache
-	}
-	if cache.ProblemCode == "codex_cache_unreadable" || cache.ProblemCode == "codex_cache_oversized" {
-		return cache // never hand unsafe/redirected or oversized sources to a CLI
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -56,9 +57,67 @@ func (c *CodexCLI) Catalog(ctx context.Context, refresh bool) Catalog {
 	if !refresh && time.Now().Before(c.expires) {
 		return c.cached.Clone()
 	}
+	saved, haveSaved := c.readSaved()
+	if !refresh && haveSaved && time.Since(saved.FetchedAt) < 24*time.Hour {
+		c.cached, c.expires = saved.Clone(), time.Now().Add(time.Minute)
+		return saved
+	}
 	result := c.discover(ctx)
+	if result.Available {
+		c.save(result)
+	} else if haveSaved {
+		result = saved // a slow or failed start keeps the last good list
+	}
 	c.cached, c.expires = result.Clone(), time.Now().Add(time.Minute)
 	return result
+}
+
+func (c *CodexCLI) cachePath() string {
+	if c.CachePath != "" {
+		return c.CachePath
+	}
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "unreal-agent", "codex-cli-catalog.json")
+}
+
+func (c *CodexCLI) readSaved() (Catalog, bool) {
+	path := c.cachePath()
+	if path == "" {
+		return Catalog{}, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Catalog{}, false
+	}
+	var saved struct {
+		Home    string
+		Catalog Catalog
+	}
+	if json.Unmarshal(data, &saved) != nil || saved.Home != c.Home || !saved.Catalog.Available || len(saved.Catalog.Models) == 0 {
+		return Catalog{}, false
+	}
+	return saved.Catalog, true
+}
+
+func (c *CodexCLI) save(catalog Catalog) {
+	path := c.cachePath()
+	if path == "" || os.MkdirAll(filepath.Dir(path), 0o700) != nil {
+		return
+	}
+	data, err := json.Marshal(struct {
+		Home    string
+		Catalog Catalog
+	}{c.Home, catalog})
+	if err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, data, 0o600) == nil {
+		_ = os.Rename(tmp, path)
+	}
 }
 
 // Argv has no prompt, model override, provider override, credential value,
@@ -103,13 +162,7 @@ func (c *CodexCLI) discover(ctx context.Context) Catalog {
 		return fail("codex_cli_start_failed")
 	}
 	defer os.RemoveAll(directory)
-	// The CLI's app-server can take about ten seconds to start in a sandbox
-	// (seen on japan-harness-60g), and only answers model/list after that.
-	timeout := c.Timeout
-	if timeout <= 0 || timeout > 60*time.Second {
-		timeout = 30 * time.Second
-	}
-	processCtx, cancel := context.WithTimeout(ctx, timeout)
+	processCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := exec.CommandContext(processCtx, path, codexCatalogArguments(directory)...)
 	cmd.Dir, cmd.Env, cmd.Stderr = directory, env, io.Discard
@@ -135,9 +188,6 @@ func (c *CodexCLI) discover(ctx context.Context) Catalog {
 	if ctx.Err() != nil {
 		return fail("codex_cli_canceled")
 	}
-	if errors.Is(processCtx.Err(), context.DeadlineExceeded) {
-		return fail("codex_cli_timeout")
-	}
 	if err != nil {
 		var failure *codexCatalogError
 		if errors.As(err, &failure) {
@@ -155,11 +205,9 @@ func (e *codexCatalogError) Error() string { return e.code }
 func codexCatalogFailure(code string) error { return &codexCatalogError{code: code} }
 
 // Only initialize, initialized and paginated model/list are written. Server
-// requests, execution notifications and malformed/duplicate JSON fail closed.
+// requests and malformed/duplicate JSON return errors; notifications are ignored.
 func readCodexCatalog(output io.Reader, input io.Writer) (Catalog, error) {
-	scanner := bufio.NewScanner(io.LimitReader(output, 4<<20+1))
-	scanner.Buffer(make([]byte, 4096), 1<<20)
-	frames, bytes := 0, 0
+	scanner := bufio.NewReader(output)
 	send := func(value any) error {
 		data, err := json.Marshal(value)
 		if err != nil {
@@ -172,12 +220,10 @@ func readCodexCatalog(output io.Reader, input io.Writer) (Catalog, error) {
 		return send(map[string]any{"id": id, "method": method, "params": params})
 	}
 	receive := func(id int) (jsontext.Value, error) {
-		for scanner.Scan() {
-			frames++
-			data := scanner.Bytes()
-			bytes += len(data) + 1
-			if frames > 64 || bytes > 4<<20 {
-				return nil, codexCatalogFailure("codex_cli_oversized")
+		for {
+			data, err := scanner.ReadBytes('\n')
+			if err != nil && len(data) == 0 {
+				return nil, fmt.Errorf("read Codex catalog: %w", err)
 			}
 			var frame map[string]jsontext.Value
 			if json.Unmarshal(data, &frame) != nil || frame == nil {
@@ -185,7 +231,7 @@ func readCodexCatalog(output io.Reader, input io.Writer) (Catalog, error) {
 			}
 			if method, ok := frame["method"]; ok {
 				var name string
-				if _, hasID := frame["id"]; hasID || json.Unmarshal(method, &name) != nil || !codexCatalogNotification(name) {
+				if _, hasID := frame["id"]; hasID || json.Unmarshal(method, &name) != nil {
 					return nil, codexCatalogFailure("codex_cli_protocol_invalid")
 				}
 				continue // opaque status metadata; never publish its params
@@ -203,10 +249,6 @@ func readCodexCatalog(output io.Reader, input io.Writer) (Catalog, error) {
 			}
 			return value, nil
 		}
-		if scanner.Err() != nil {
-			return nil, codexCatalogFailure("codex_cli_oversized")
-		}
-		return nil, codexCatalogFailure("codex_cli_protocol_invalid")
 	}
 	if err := request(1, "initialize", map[string]any{"clientInfo": map[string]string{"name": "unreal_agent_catalog", "title": "Unreal Agent model catalog", "version": "1"}, "capabilities": map[string]any{"experimentalApi": false, "explicitGatewayOauth": true, "requestAttestation": false}}); err != nil {
 		return Catalog{}, err
@@ -225,7 +267,7 @@ func readCodexCatalog(output io.Reader, input io.Writer) (Catalog, error) {
 	var rows []codexModelInfo
 	var cursor *string
 	seenCursor := map[string]bool{}
-	for page := 0; page < 8; page++ {
+	for page := 0; ; page++ {
 		if err := request(page+2, "model/list", map[string]any{"limit": 64, "includeHidden": false, "cursor": cursor}); err != nil {
 			return Catalog{}, err
 		}
@@ -241,32 +283,20 @@ func readCodexCatalog(output io.Reader, input io.Writer) (Catalog, error) {
 			return Catalog{}, codexCatalogFailure("codex_cli_metadata_invalid")
 		}
 		rows = append(rows, result.Data...)
-		if len(rows) > 256 {
-			return Catalog{}, codexCatalogFailure("codex_cli_oversized")
-		}
 		if result.NextCursor == nil {
 			return normalizeCodexModels(rows)
 		}
 		cursor = result.NextCursor
-		if len(*cursor) == 0 || len(*cursor) > 1024 || seenCursor[*cursor] {
+		if len(*cursor) == 0 || seenCursor[*cursor] {
 			return Catalog{}, codexCatalogFailure("codex_cli_protocol_invalid")
 		}
 		seenCursor[*cursor] = true
 	}
-	return Catalog{}, codexCatalogFailure("codex_cli_oversized")
 }
 
 // Documented SDK status notifications can precede model/list. None is a
 // command, approval or tool request; all params are discarded. In particular
 // remoteControl status is not an authorization to connect or execute work.
-func codexCatalogNotification(name string) bool {
-	switch name {
-	case "account/updated", "account/rateLimits/updated", "configWarning", "remoteControl/status/changed":
-		return true
-	default:
-		return false
-	}
-}
 
 type codexModelInfo struct {
 	ID      string              `json:"id"`
@@ -285,14 +315,14 @@ func normalizeCodexModels(rows []codexModelInfo) (Catalog, error) {
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].IsDefault && !rows[j].IsDefault })
 	seen := map[string]bool{}
 	for _, row := range rows {
-		if row.Hidden == nil || !validID(row.ID) || !validID(row.Model) || strings.HasPrefix(row.Model, "-") || len(row.Name) > 256 || strings.ContainsAny(row.Name, "\x00\x1b\r\n") || len(row.Efforts) > 16 {
-			return Catalog{}, codexCatalogFailure("codex_cli_metadata_invalid")
+		if !validID(row.Model) || strings.HasPrefix(row.Model, "-") || strings.ContainsAny(row.Name, "\x00\x1b\r\n") {
+			continue
 		}
-		if *row.Hidden {
+		if row.Hidden != nil && *row.Hidden {
 			continue
 		}
 		if seen[row.Model] {
-			return Catalog{}, codexCatalogFailure("codex_cli_metadata_invalid")
+			continue
 		}
 		seen[row.Model] = true
 		m := Model{ID: row.Model, Name: row.Name, DefaultEffort: row.Default}

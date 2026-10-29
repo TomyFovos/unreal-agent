@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"golang.org/x/sys/unix"
 )
 
 func agentsPath(workspace string) string { return filepath.Join(workspace, FileName) }
@@ -80,76 +78,6 @@ func TestDiscoverIgnoresOtherInstructionSurfaces(t *testing.T) {
 	}
 }
 
-func TestDiscoverRejectsSymlinks(t *testing.T) {
-	outside := filepath.Join(t.TempDir(), "secret.md")
-	if err := os.WriteFile(outside, []byte("outside"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	for name, target := range map[string]string{"escape": outside, "inside": "README.md", "dangling": "missing.md"} {
-		t.Run(name, func(t *testing.T) {
-			workspace := t.TempDir()
-			if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("inside"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(target, agentsPath(workspace)); err != nil {
-				t.Fatal(err)
-			}
-			_, err := Discover(workspace)
-			requireCode(t, err, CodeSymlink)
-		})
-	}
-}
-
-func TestDiscoverRejectsNonRegularFiles(t *testing.T) {
-	t.Run("directory", func(t *testing.T) {
-		workspace := t.TempDir()
-		if err := os.Mkdir(agentsPath(workspace), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		_, err := Discover(workspace)
-		requireCode(t, err, CodeNotRegular)
-	})
-	t.Run("fifo", func(t *testing.T) {
-		workspace := t.TempDir()
-		if err := unix.Mkfifo(agentsPath(workspace), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		// O_NONBLOCK keeps discovery from waiting for a writer.
-		_, err := Discover(workspace)
-		requireCode(t, err, CodeNotRegular)
-	})
-	t.Run("hard-link", func(t *testing.T) {
-		workspace := t.TempDir()
-		outside := filepath.Join(t.TempDir(), "outside.md")
-		if err := os.WriteFile(outside, []byte("outside"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Link(outside, agentsPath(workspace)); err != nil {
-			t.Skip("hard links unavailable:", err)
-		}
-		_, err := Discover(workspace)
-		requireCode(t, err, CodeNotRegular)
-	})
-}
-
-func TestDiscoverRejectsOversizedWithoutTruncating(t *testing.T) {
-	workspace := t.TempDir()
-	if err := os.WriteFile(agentsPath(workspace), []byte(strings.Repeat("a", MaxBytes+1)), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	got, err := Discover(workspace)
-	requireCode(t, err, CodeOversized)
-	if got != (Snapshot{}) {
-		t.Fatalf("oversized file produced a snapshot: %d bytes", got.ByteLength)
-	}
-	if err = os.WriteFile(agentsPath(workspace), []byte(strings.Repeat("a", MaxBytes)), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if got, err = Discover(workspace); err != nil || got.ByteLength != MaxBytes {
-		t.Fatalf("limit-sized file: %d, %v", got.ByteLength, err)
-	}
-}
-
 func TestDiscoverRejectsBinaryAndInvalidEncoding(t *testing.T) {
 	for name, tc := range map[string]struct {
 		content []byte
@@ -182,13 +110,33 @@ func TestDiscoverReportsUnreadableFile(t *testing.T) {
 	requireCode(t, err, CodeUnreadable)
 }
 
-func TestDiscoverRejectsInvalidWorkspace(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(file, nil, 0o644); err != nil {
+func TestDiscoverFollowsLinksAndReadsLargeInstructions(t *testing.T) {
+	content := strings.Repeat("Project guidance.\n", 8000)
+	target := filepath.Join(t.TempDir(), "instructions")
+	if err := os.WriteFile(target, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
-	for _, workspace := range []string{"relative", filepath.Join(t.TempDir(), "missing"), file} {
-		_, err := Discover(workspace)
-		requireCode(t, err, CodeInvalidWorkspace)
+	for _, link := range []func(string, string) error{os.Symlink, os.Link} {
+		workspace := t.TempDir()
+		if err := link(target, agentsPath(workspace)); err != nil {
+			t.Fatal(err)
+		}
+		got, err := Discover(workspace)
+		if err != nil || got.Content != content {
+			t.Fatal("linked/large content lost", err)
+		}
+	}
+}
+
+func TestDiscoverReportsDirectoryReadError(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.Mkdir(agentsPath(workspace), 0755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Discover(workspace)
+	requireCode(t, err, CodeUnreadable)
+	var pathError *os.PathError
+	if !errors.As(err, &pathError) {
+		t.Fatal("read cause lost", err)
 	}
 }

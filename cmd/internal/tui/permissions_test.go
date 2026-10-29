@@ -11,14 +11,11 @@ import (
 
 func TestStoppedPermissionDisplayCannotGrant(t *testing.T) {
 	s := Snapshot{Permissions: permission.ModeSnapshot{Enabled: true, Mode: permission.ReadOnly, SelectedMode: permission.FullAccess, Stopped: true}}
-	if p := permissionPicker(s); len(p.Options) != 0 || !strings.Contains(p.Title, "expired") {
+	if p := permissionPicker(s); len(p.Options) != 0 || !strings.Contains(p.Title, "停止中") {
 		t.Fatal("stopped picker permits privilege selection")
 	}
 	if !strings.Contains(permissionStatus(s), "Session stopped") || permissionBadge(s) == "FULL " {
 		t.Fatal("stopped status claims active Full Access")
-	}
-	if !strings.Contains(strings.Join(fullPermissionConfirmation(s, 1, "fixture").Instructions, " "), "Session stop/resume") {
-		t.Fatal("confirmation omits Session-lifetime expiry")
 	}
 }
 
@@ -54,10 +51,8 @@ func humanUI(t *testing.T) (*permission.Controller, chan Key, *screenObserver, *
 				var out permission.ControlReply
 				var err error
 				switch r.Action {
-				case "prepare_full":
-					out.Challenge, err = c.PrepareFull(key, r.Expected)
 				case "set_mode":
-					err = c.SetMode(key, r.Expected, r.Mode, r.Challenge)
+					err = c.SetMode(key, r.Expected, r.Mode)
 				case "decide":
 					err = c.Decide(key, r.Expected, r.Operation, r.Allow)
 				}
@@ -68,7 +63,7 @@ func humanUI(t *testing.T) (*permission.Controller, chan Key, *screenObserver, *
 	go func() {
 		done <- Run(t.Context(), Config{Client: f, ID: "s", Keys: keys, Output: screen, Theme: &theme, Size: func() (int, int) { return 80, 24 }, WatchPermissions: watch})
 	}()
-	waitFor(t, func() bool { return strings.Contains(screen.text(), "Permissions: Read Only") })
+	waitFor(t, func() bool { return strings.Contains(screen.text(), "[Read Only]") })
 	return c, keys, screen, f, done
 }
 
@@ -85,43 +80,21 @@ func stopHumanUI(t *testing.T, keys chan Key, done <-chan error) {
 	}
 }
 
-func TestHumanTUIFullRequiresSeparateUnpastedConfirmationAndCanRevoke(t *testing.T) {
+func TestHumanTUIFullSelectionAppliesImmediatelyAndCanRevoke(t *testing.T) {
 	c, keys, screen, f, done := humanUI(t)
 	defer stopHumanUI(t, keys, done)
 	keys <- Key{Text: "/permissions"}
 	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool { return strings.Contains(screen.text(), "Schemas are capabilities") })
+	waitFor(t, func() bool { return strings.Contains(screen.text(), "権限を選んでください") })
 	keys <- Key{Name: "down"}
 	keys <- Key{Name: "down"}
 	keys <- Key{Name: "enter"}
 	waitFor(t, func() bool {
-		return strings.Contains(screen.text(), "NO OS SANDBOX") && strings.Contains(screen.text(), "shared mounts")
-	})
-	if c.Snapshot().Mode != permission.ReadOnly {
-		t.Fatal("selection granted Full without confirmation")
-	}
-	keys <- Key{Name: "down", Paste: true}
-	keys <- Key{Name: "enter", Paste: true}
-	keys <- Key{Name: "escape"}
-	waitFor(t, func() bool { return !strings.Contains(screen.text(), "NO OS SANDBOX") })
-	if c.Snapshot().Mode != permission.ReadOnly {
-		t.Fatal("paste approved Full")
-	}
-	keys <- Key{Text: "/permissions"}
-	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool { return strings.Contains(screen.text(), "Schemas are capabilities") })
-	keys <- Key{Name: "down"}
-	keys <- Key{Name: "down"}
-	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool { return strings.Contains(screen.text(), "NO OS SANDBOX") })
-	keys <- Key{Name: "down"}
-	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool {
-		return c.Snapshot().Mode == permission.FullAccess && strings.Contains(screen.text(), "Permissions: Full Access")
+		return c.Snapshot().Mode == permission.FullAccess && strings.Contains(screen.text(), "[Full Access]")
 	})
 	keys <- Key{Text: "/permissions"}
 	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool { return strings.Contains(screen.text(), "Schemas are capabilities") })
+	waitFor(t, func() bool { return strings.Contains(screen.text(), "権限を選んでください") })
 	keys <- Key{Name: "up"}
 	keys <- Key{Name: "up"}
 	keys <- Key{Name: "enter"}
@@ -139,19 +112,27 @@ func TestHumanTUIOnceDenyAndDetachNeverApprovePending(t *testing.T) {
 			c, keys, screen, _, done := humanUI(t)
 			keys <- Key{Text: "/permissions"}
 			keys <- Key{Name: "enter"}
-			waitFor(t, func() bool { return strings.Contains(screen.text(), "Schemas are capabilities") })
+			waitFor(t, func() bool { return strings.Contains(screen.text(), "権限を選んでください") })
 			keys <- Key{Name: "down"}
 			keys <- Key{Name: "enter"}
 			waitFor(t, func() bool {
-				return c.Snapshot().Mode == permission.Ask && strings.Contains(screen.text(), "Permissions: Ask for Approval")
+				return c.Snapshot().Mode == permission.Ask && strings.Contains(screen.text(), "[Ask]")
 			})
-			ctx := permission.WithController(permission.WithPolicy(t.Context(), permission.Unrestricted()), c)
+			operationCtx, cancelOperation := context.WithCancel(t.Context())
+			defer cancelOperation()
+			ctx := permission.WithController(permission.WithPolicy(operationCtx, permission.Unrestricted()), c)
 			result := c.Request(ctx, permission.Request{ID: "pending-op", Tool: "Bash", Privileged: true, Scope: "AMBIENT filesystem, network, environment, credentials and shared mounts; no OS sandbox"})
 			waitFor(t, func() bool {
-				return strings.Contains(screen.text(), "Allow once") && strings.Contains(screen.text(), "pending-op") && strings.Contains(screen.text(), "AMBIENT")
+				return strings.Contains(screen.text(), "Allow once") && strings.Contains(screen.text(), "Allow Bash?") && !strings.Contains(screen.text(), "pending-op") && strings.Contains(screen.text(), "AMBIENT")
 			})
 			if action == "detach" {
 				stopHumanUI(t, keys, done)
+				select {
+				case <-result:
+					t.Fatal("detach answered pending operation")
+				default:
+				}
+				cancelOperation()
 			} else {
 				// Allow once is selected first; Deny is one step down.
 				if action == "deny" {
@@ -182,17 +163,17 @@ func TestHumanTUIPermissionProjectionAndSmallDisplay(t *testing.T) {
 	s.Permissions = permission.ModeSnapshot{Enabled: true, Mode: permission.ReadOnly, Revision: 5}
 	for _, size := range [][2]int{{80, 24}, {16, 8}, {160, 40}} {
 		u := plainUI()
-		u.Picker = fullPermissionConfirmation(s, 5, "private-control-challenge")
+		u.Picker = operationPermissionConfirmation(s, permission.Pending{ID: "op", Tool: "Bash", Scope: "echo test"})
 		if size[0] == 160 {
 			u.View = ViewSplit
 		}
 		frame := RenderFrame(s, u, size[0], size[1])
 		bounds(t, frame, size[0], size[1])
+		if size[0] == 16 && !strings.Contains(frameText(frame), "Allow once") {
+			t.Fatal("small terminal hid approval options")
+		}
 		if strings.Contains(frameText(frame), "private-control-challenge") {
 			t.Fatal("private control key displayed")
-		}
-		if permissionReviewFits(size[0], size[1]) != (size[0] >= 80 && size[1] >= 24) {
-			t.Fatal("hidden confirmation allowed")
 		}
 	}
 	m := NewModel("s")
@@ -214,8 +195,5 @@ func TestHumanTUIPermissionProjectionAndSmallDisplay(t *testing.T) {
 	if permissionControlAction(confirm).Allow || permissionGrants(confirm) {
 		t.Fatal("Deny must deny")
 	}
-	full := fullPermissionConfirmation(s, 5, "challenge")
-	if permissionGrants(full) {
-		t.Fatal("Full Access confirmation must start on keep current mode")
-	}
+
 }

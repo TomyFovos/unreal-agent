@@ -54,9 +54,9 @@ func TestDebugToolsGenerationAndDisabledHistory(t *testing.T) {
 }
 func TestDebugAdapterConfiguration(t *testing.T) {
 	configs, err := DebugAdapterConfiguration(func(string) string {
-		return `[{"id":"test","path":"/adapter","directory":"/workspace","allowed_attach_pids":[123]}]`
+		return `[{"id":"test","path":"/adapter","directory":"/workspace"}]`
 	})
-	if err != nil || len(configs) != 1 || len(configs[0].AllowedAttachPIDs) != 1 {
+	if err != nil || len(configs) != 1 {
 		t.Fatal(configs, err)
 	}
 	for _, raw := range []string{`[{"unknown":"secret"}]`, strings.Repeat("x", 65537)} {
@@ -67,8 +67,12 @@ func TestDebugAdapterConfiguration(t *testing.T) {
 	base := func(context.Context, ToolConfig) (Tools, error) {
 		return Tools{Registry: tool.NewRegistry(tool.StaticTranslators{})}, nil
 	}
-	if _, _, err := DebugTools(base, []dap.AdapterConfig{{ID: "test", Path: "relative", Directory: "/workspace"}}, nil); err == nil {
-		t.Fatal("invalid adapter accepted")
+	invalidFactory, _, err := DebugTools(base, []dap.AdapterConfig{{ID: "test", Path: "relative", Directory: "/workspace"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invalidFactory(t.Context(), ToolConfig{SessionID: "invalid"}); err == nil {
+		t.Fatal("invalid adapter accepted at real generation")
 	}
 	factory, identity, err := DebugTools(base, nil, nil)
 	if err != nil || identity != "" {

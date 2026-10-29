@@ -2,6 +2,8 @@ package claudeagent
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -105,7 +107,8 @@ func appendedPrompt(mode string, subagents SubagentCLI) string {
 		mode = "set by the operator"
 	}
 	return fmt.Sprintf("You are running inside Unreal Agent. Unreal Agent records this conversation and decides tool approvals with its permission mode (now: %s).\n"+
-		"When Claude Code refuses a shell command on its own (for example by its organization policy), Unreal Agent runs that exact command in its own shell after its own approval. Its result then arrives as additional context that starts with %q. Treat that as the command's real result and do not run the command again.", mode, ranPrefix) + subagentPrompt(subagents)
+		"Whenever you ask for or await the user's reply, start your message with 【要確認】, including in ordinary foreground turns. Write choices as numbered prose in your message. AskUserQuestion is unavailable.\n"+
+		"When Claude Code declines a shell command itself, Unreal Agent handles it as an ordinary Bash request under its permission mode. Its result then arrives as additional context that starts with %q. Treat that as the command's real result and do not run the command again.", mode, ranPrefix) + subagentPrompt(subagents)
 }
 
 func modeLabel(controller *permission.Controller) string {
@@ -113,4 +116,21 @@ func modeLabel(controller *permission.Controller) string {
 		return ""
 	}
 	return controller.Snapshot().Mode.Label()
+}
+
+// projectInstructions gives Claude the workspace's AGENTS.md, which the GPT
+// agents get from Unreal, unless the workspace's CLAUDE.md already brings it
+// in (Claude Code reads CLAUDE.md itself).
+func projectInstructions(directory string) string {
+	if directory == "" {
+		return ""
+	}
+	if claude, err := os.ReadFile(filepath.Join(directory, "CLAUDE.md")); err == nil && strings.Contains(string(claude), "AGENTS.md") {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(directory, "AGENTS.md"))
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	return "\n\nProject instructions (AGENTS.md at the workspace root):\n" + strings.ToValidUTF8(string(data), "\uFFFD")
 }

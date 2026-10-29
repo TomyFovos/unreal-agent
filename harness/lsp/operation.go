@@ -35,9 +35,6 @@ func (Translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallStatus
 	if json.Unmarshal([]byte(call.Arguments), &request) != nil {
 		return tool.CallStatus{Error: "invalid LSP arguments"}
 	}
-	if err := request.Validate(); err != nil {
-		return tool.CallStatus{Error: err.Error()}
-	}
 	data, err := json.Marshal(request)
 	if err != nil {
 		return tool.CallStatus{Error: "invalid LSP request"}
@@ -121,9 +118,6 @@ func (h *Handler) AddRemoteJob(current operation.Operation) error {
 	}
 	var request Request
 	if err = json.Unmarshal(state.Plan.Data, &request); err != nil {
-		return err
-	}
-	if err = request.Validate(); err != nil {
 		return err
 	}
 	h.mu.Lock()

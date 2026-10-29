@@ -3,11 +3,9 @@ package tui
 import (
 	"context"
 	"encoding/json/v2"
-	"errors"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -28,7 +26,7 @@ func fileWorkspace(raw []byte) string {
 	if c.Runtime != nil {
 		w = c.Runtime.Workspace
 	}
-	if !filepath.IsAbs(w) || len(w) > 4096 || SafeText(w) != w || strings.ContainsAny(w, "\n\t") {
+	if !filepath.IsAbs(w) || SafeText(w) != w || strings.ContainsAny(w, "\n\t") {
 		return ""
 	}
 	return filepath.Clean(w)
@@ -109,9 +107,6 @@ func insertFileMention(editor *Editor, mention fileMention, relative string) boo
 	}
 	suffix := strings.TrimPrefix(value[mention.end:], " ")
 	prefix := value[:mention.start] + text + " "
-	if len(prefix)+len(suffix) > 65536 {
-		return false
-	}
 	// No Apply(Enter), command dispatch, submission, or file-content read.
 	editor.data = []byte(prefix + suffix)
 	editor.cursor = len(prefix)
@@ -138,7 +133,6 @@ type fileCompletion struct {
 	hasDismissed             bool
 	picker                   *Picker
 	index                    filesearch.Index
-	indexResult              filesearch.Result
 	scanning                 bool
 	scanID, searchID         uint64
 	scanCancel, searchCancel context.CancelFunc
@@ -147,7 +141,7 @@ type fileCompletion struct {
 func newFileCompletion(ctx context.Context) *fileCompletion {
 	return &fileCompletion{ctx: ctx, events: make(chan fileEvent, 2),
 		scan: func(ctx context.Context, root string) (filesearch.Result, error) {
-			return filesearch.Scan(ctx, root, filesearch.DefaultLimits())
+			return filesearch.Scan(ctx, root)
 		},
 		search: func(ctx context.Context, index filesearch.Index, query string) ([]filesearch.Match, error) {
 			return index.Search(ctx, query, filesearch.ResultLimit)
@@ -168,7 +162,7 @@ func (f *fileCompletion) close(u *UIState) {
 	if u.Picker == f.picker {
 		u.Picker = nil
 	}
-	f.picker, f.index, f.indexResult, f.scanning = nil, filesearch.Index{}, filesearch.Result{}, false
+	f.picker, f.index, f.scanning = nil, filesearch.Index{}, false
 }
 
 func (f *fileCompletion) sync(s Snapshot, u *UIState, e *Editor) {
@@ -181,7 +175,7 @@ func (f *fileCompletion) sync(s Snapshot, u *UIState, e *Editor) {
 	if f.hasDismissed && mention != f.dismissed {
 		f.hasDismissed = false
 	}
-	if !s.Connected || u.Private != nil || u.Sheet != nil || u.Busy || u.Picker != nil && u.Picker != f.picker || !active || f.hasDismissed && mention == f.dismissed {
+	if !s.Connected || u.Sheet != nil || u.Busy || u.Picker != nil && u.Picker != f.picker || !active || f.hasDismissed && mention == f.dismissed {
 		f.close(u)
 		return
 	}
@@ -215,12 +209,6 @@ func (f *fileCompletion) sync(s Snapshot, u *UIState, e *Editor) {
 }
 
 func (f *fileCompletion) deliver(ctx context.Context, event fileEvent) {
-	// A search deadline is a visible bounded-search outcome. Deliver it through
-	// the Run lifetime rather than dropping it because its own deadline expired;
-	// scope/query IDs still reject superseded outcomes.
-	if errors.Is(event.err, context.DeadlineExceeded) {
-		ctx = f.ctx
-	}
 	select {
 	case f.events <- event:
 	case <-ctx.Done():
@@ -243,7 +231,7 @@ func (f *fileCompletion) startSearch() {
 	}
 	f.picker.Hint = "searching filenames"
 	id, index, query := f.searchID, f.index, f.mention.query
-	ctx, cancel := context.WithTimeout(f.ctx, 250*time.Millisecond)
+	ctx, cancel := context.WithCancel(f.ctx)
 	f.searchCancel = cancel
 	go func() {
 		defer cancel()
@@ -262,17 +250,17 @@ func (f *fileCompletion) apply(event fileEvent) {
 		}
 		f.scanning = false
 		if event.err != nil {
-			f.picker.Hint = "workspace filenames unavailable"
+			f.picker.Hint = "workspace filenames unavailable: " + SafeText(event.err.Error())
 			return
 		}
-		f.index, f.indexResult = event.result.Index, event.result
+		f.index = event.result.Index
 		f.startSearch()
 	} else {
 		if event.id != f.searchID {
 			return
 		}
 		if event.err != nil {
-			f.picker.Hint = "filename search limit reached; shorten query or Esc close"
+			f.picker.Hint = "filename search failed: " + SafeText(event.err.Error())
 			return
 		}
 		f.picker.Options = nil
@@ -282,15 +270,6 @@ func (f *fileCompletion) apply(event fileEvent) {
 		f.picker.Hint = "Enter/Tab insert path; Esc close"
 		if len(event.matches) == 0 {
 			f.picker.Hint = "no matching safe workspace files; Esc close"
-		}
-		if len(f.mention.query) > filesearch.QueryLimit {
-			f.picker.Hint = "query limit: 256 bytes; shorten query"
-		}
-		if f.indexResult.Limited {
-			f.picker.Hint += "; scan limit reached"
-		}
-		if f.indexResult.Incomplete {
-			f.picker.Hint += "; some directories omitted"
 		}
 	}
 }
@@ -318,13 +297,9 @@ func (f *fileCompletion) key(key Key, u *UIState, e *Editor, width, height int) 
 		p.move(delta)
 		return true
 	case "enter", "tab":
-		if width < 20 || height < 8 {
-			p.Hint = "enlarge terminal to select files; Esc close"
-			return true
-		}
 		if len(p.Options) > 0 {
 			selected := p.Options[p.Selection]
-			if filesearch.Eligible(f.workspace, selected) && insertFileMention(e, f.mention, selected) {
+			if insertFileMention(e, f.mention, selected) {
 				f.close(u)
 			} else {
 				p.Options = nil

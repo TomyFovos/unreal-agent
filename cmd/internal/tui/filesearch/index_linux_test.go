@@ -13,7 +13,7 @@ func TestScanRejectsInvalidUTF8Filename(t *testing.T) {
 	root := t.TempDir()
 	fixtureFile(t, root, "safe.md", "data")
 	fixtureFile(t, root, string([]byte{0xff}), "data")
-	r, err := Scan(context.Background(), root, DefaultLimits())
+	r, err := Scan(context.Background(), root)
 	if err != nil || len(r.Index.files) != 1 || r.Index.files[0] != "safe.md" {
 		t.Fatal("invalid filename entered the index", r, err)
 	}

@@ -36,6 +36,8 @@ type fakeGPT struct {
 	mu                        sync.Mutex
 	leadEfforts, workerEffort []string
 	refusedLead               bool
+	sawEmailInstruction       bool
+	leadHold                  <-chan struct{}
 }
 
 var approvalText = regexp.MustCompile(`asks for approval of request (\S+):`)
@@ -86,6 +88,18 @@ func (g *fakeGPT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	all := strings.Join(texts, "\n")
+	if strings.Contains(all, "You are the implementation lead") {
+		g.mu.Lock()
+		hold := g.leadHold
+		g.mu.Unlock()
+		if hold != nil {
+			select {
+			case <-hold:
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}
 	call := func(id, name string, arguments any) []any {
 		data, _ := json.Marshal(arguments)
 		return []any{map[string]any{"type": "function_call", "id": id, "call_id": id, "name": name, "arguments": string(data)}}
@@ -94,6 +108,7 @@ func (g *fakeGPT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	switch {
 	case strings.Contains(all, "You are the implementation lead"):
+		g.sawEmailInstruction = g.sawEmailInstruction || strings.Contains(all, "email=implementer@example.com")
 		g.leadEfforts = append(g.leadEfforts, effort)
 		switch {
 		case g.leadRuns && !calls["lead-bash"]:
@@ -258,6 +273,25 @@ func TestSubagentCommandRunsLeadAndWorkers(t *testing.T) {
 	if list := cli("", "list"); !strings.Contains(list, handle[1]+"  lead (gpt-6.1-sol ultra)  completed  lead done") {
 		t.Fatal(list)
 	}
+	// The designer need not wait: the lead's end arrives as a message that
+	// wakes it, with the summary.
+	ended := false
+	for end := time.Now().Add(30 * time.Second); !ended && time.Now().Before(end); time.Sleep(100 * time.Millisecond) {
+		view, err := h.client.Inspect(t.Context(), "designer", 0, 256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range view.History.Items {
+			if in, ok := item.Data.(inbox.Input); ok && in.Kind == inbox.InputPeer {
+				if peer, err := in.DecodePeerMessage(); err == nil && peer.Kind == "ended" && strings.Contains(peer.Text, "lead done") && peer.Handle == handle[1] {
+					ended = true
+				}
+			}
+		}
+	}
+	if !ended {
+		t.Fatal("the lead's end did not reach the designer as a message")
+	}
 	if _, err := os.Stat(h.gpt.leadMarker); err != nil {
 		t.Fatal("the lead's approved command did not run", err)
 	}
@@ -269,7 +303,7 @@ func TestSubagentCommandRunsLeadAndWorkers(t *testing.T) {
 // in Ask without asking the human, and the report reaches Claude.
 func TestClaudeDrivesGPTThroughBash(t *testing.T) {
 	h := startGPTHost(t, false)
-	start := h.binary + " subagent start --template lead <<'EOF'\nImplement the feature.\nEOF"
+	start := h.binary + " subagent start --template lead <<'EOF'\nImplement the feature. Git author email=implementer@example.com.\nEOF"
 	wait := h.binary + " subagent wait --timeout 120s"
 	steps := []testclaude.AgentStep{}
 	for _, command := range []string{start, wait} {
@@ -305,4 +339,9 @@ func TestClaudeDrivesGPTThroughBash(t *testing.T) {
 		t.Fatal("Claude's prompt does not name the command")
 	}
 	h.check(t)
+	h.gpt.mu.Lock()
+	defer h.gpt.mu.Unlock()
+	if !h.gpt.sawEmailInstruction {
+		t.Fatal("the child did not start with the email instruction intact")
+	}
 }

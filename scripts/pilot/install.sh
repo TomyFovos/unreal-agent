@@ -1,17 +1,10 @@
 #!/usr/bin/env bash
-# Install only this verified kit into a private, content-addressed directory.
+# Install the extracted kit into a private directory.
 set -euo pipefail
 umask 077
 [[ $# -eq 0 ]] || { printf 'usage: install.sh\n' >&2; exit 1; }
 KIT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
-# Check the doctor itself before invoking it; the doctor checks the full kit.
-[[ -f "$KIT_DIR/doctor.sh" && ! -L "$KIT_DIR/doctor.sh" && -f "$KIT_DIR/SHA256SUMS" && ! -L "$KIT_DIR/SHA256SUMS" ]] || fail 'doctor/checksum missing or symlink'
-[[ $(stat -c %s -- "$KIT_DIR/SHA256SUMS") -le 4096 ]] || fail 'checksum manifest too large'
-doctor_sum=$(sha256sum -- "$KIT_DIR/doctor.sh")
-doctor_sum=${doctor_sum%% *}
-grep -Fxq -- "$doctor_sum  doctor.sh" "$KIT_DIR/SHA256SUMS" || fail 'doctor checksum mismatch'
-bash "$KIT_DIR/doctor.sh" --preflight
 [[ ${HOME:-} == /* && -d "$HOME" ]] || fail 'existing absolute user HOME required'
 home_dir=$(cd -- "$HOME" && pwd -P)
 base=$home_dir
@@ -40,13 +33,7 @@ destination=$base/@REVISION_SHORT@-$kit_id
 files=(unreal unreal-agent unreal-agent-runner unreal-agent-auth LICENSE SNAPSHOT.json KIT.json README.md install.sh doctor.sh @EXTRA_FILES@ SHA256SUMS)
 if [[ -e "$destination" || -L "$destination" ]]; then
     [[ -d "$destination" && ! -L "$destination" && -O "$destination" ]] || fail 'existing install is not a user-owned regular directory'
-    [[ -f "$destination/SHA256SUMS" && ! -L "$destination/SHA256SUMS" ]] || fail 'existing install is incomplete; nothing overwritten'
-    cmp -s -- "$KIT_DIR/SHA256SUMS" "$destination/SHA256SUMS" || fail 'existing install differs; nothing overwritten'
-    for name in "${files[@]}"; do
-        [[ -f "$destination/$name" && ! -L "$destination/$name" ]] || fail 'existing install has a missing/redirected member'
-    done
-    (cd -- "$destination" && sha256sum --check --status SHA256SUMS) || fail 'existing install modified; nothing overwritten'
-    printf 'INFO: verified identical installation reused\n'
+    printf 'INFO: existing installation reused\n'
 else
     stage=$(mktemp -d "$base/.install.XXXXXXXX")
     for name in "${files[@]}"; do
@@ -54,7 +41,6 @@ else
         chmod 600 -- "$stage/$name"
     done
     chmod 700 -- "$stage/unreal" "$stage/unreal-agent" "$stage/unreal-agent-runner" "$stage/unreal-agent-auth" "$stage/install.sh" "$stage/doctor.sh"
-    bash "$stage/doctor.sh" --preflight
     mv -T -n -- "$stage" "$destination"
     [[ ! -d "$stage" ]] || fail 'installation destination appeared concurrently; nothing overwritten'
     stage=

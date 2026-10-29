@@ -14,17 +14,15 @@ import (
 // ModesConfig opts in to human control. Maximum is an operator-reviewed upper
 // bound, not a grant. Old configurations without this field retain their policy.
 type ModesConfig struct {
+	// Retained to decode existing configuration; human approvals do not expire.
+	ApprovalTimeoutMillis int
 	Enabled               bool
 	Maximum               *Config
-	ApprovalTimeoutMillis int
 }
 
 func (c ModesConfig) Validate() error {
 	if c.Enabled && c.Maximum == nil {
 		return errors.New("permission modes require an explicit maximum policy")
-	}
-	if c.ApprovalTimeoutMillis < 0 || c.ApprovalTimeoutMillis > 3600000 {
-		return errors.New("invalid approval timeout")
 	}
 	return nil
 }
@@ -109,9 +107,10 @@ type Controller struct {
 	active            map[string]context.CancelFunc
 	changed           chan struct{}
 	lease             string
-	challenge         string
-	challengeRevision uint64
 	stopped           bool
+	// OnModeChange hears each mode the human selects, so the Host can keep
+	// it for the workspace (U20). It runs with the controller locked.
+	OnModeChange func(Mode)
 }
 type controllerKey struct{}
 
@@ -123,9 +122,6 @@ func NewController(ctx context.Context, baseline, maximum *Policy, timeout time.
 	baseline = baseline.Intersect(&Policy{all: true, readOnly: true})
 	if maximum == nil {
 		maximum = DenyAll()
-	}
-	if timeout <= 0 {
-		timeout = 2 * time.Minute
 	}
 	c := &Controller{ctx: ctx, cancel: cancel, baseline: baseline, maximum: maximum, mode: ReadOnly, revision: 1, timeout: timeout, pending: map[string]*pendingApproval{}, active: map[string]context.CancelFunc{}, changed: make(chan struct{})}
 	context.AfterFunc(ctx, func() { c.mu.Lock(); defer c.mu.Unlock(); c.stopLocked() })
@@ -143,7 +139,7 @@ func (c *Controller) stopLocked() {
 	}
 	c.stopped = true
 	c.revokeLocked("canceled")
-	c.lease, c.challenge = "", ""
+	c.lease = ""
 	c.notifyLocked()
 }
 func WithController(ctx context.Context, c *Controller) context.Context {
@@ -229,7 +225,7 @@ func (c *Controller) Request(ctx context.Context, r Request) <-chan Permit {
 		result <- c.denied(c.mode, "canceled")
 		return result
 	}
-	if r.ID == "" || r.Tool == "" || len(r.ID) > 256 || len(r.Tool) > 128 || len(r.Scope) > 512 {
+	if r.ID == "" || r.Tool == "" {
 		result <- c.denied(c.mode, "denied")
 		return result
 	}
@@ -264,13 +260,14 @@ func (c *Controller) Request(ctx context.Context, r Request) <-chan Permit {
 	case FullAccess:
 		result <- c.permitLocked(ctx, r, "full_access", c.maximum)
 	case Ask:
-		if len(c.pending) >= 128 {
-			result <- c.denied(Ask, "denied")
-			return result
-		}
-		p := &pendingApproval{request: r, ctx: ctx, result: result, deadline: time.Now().Add(c.timeout)}
+		p := &pendingApproval{request: r, ctx: ctx, result: result}
 		c.pending[r.ID] = p
-		waitCtx, stop := context.WithTimeout(ctx, c.timeout)
+		waitCtx, stop := context.WithCancel(ctx)
+		if c.timeout > 0 {
+			stop()
+			waitCtx, stop = context.WithTimeout(ctx, c.timeout)
+			p.deadline = time.Now().Add(c.timeout)
+		}
 		p.stop = context.AfterFunc(waitCtx, func() {
 			c.mu.Lock()
 			defer c.mu.Unlock()
@@ -305,7 +302,6 @@ func (c *Controller) revokeLocked(state string) {
 		cancel()
 	}
 	clear(c.active)
-	c.challenge = ""
 }
 func nonce() string {
 	var v [32]byte
@@ -318,13 +314,12 @@ func nonce() string {
 var ErrControl = errors.New("permission control stale or unauthorized")
 
 // AcquireControl is called only by the authenticated local TUI control stream.
-// The token/challenge never enter projections, model context or durable history.
+// The token never enters projections, model context or durable history.
 func (c *Controller) AcquireControl() (string, func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	key := nonce()
 	c.lease = key
-	c.challenge = ""
 	c.notifyLocked()
 	var once sync.Once
 	return key, func() {
@@ -335,10 +330,6 @@ func (c *Controller) AcquireControl() (string, func()) {
 				return
 			}
 			c.lease = ""
-			c.challenge = ""
-			for _, p := range c.pending {
-				c.finishLocked(p, c.denied(c.mode, "denied"))
-			}
 			c.notifyLocked()
 		})
 	}
@@ -346,28 +337,18 @@ func (c *Controller) AcquireControl() (string, func()) {
 func (c *Controller) validControl(key string, rev uint64) bool {
 	return c.ctx.Err() == nil && key != "" && key == c.lease && rev == c.revision
 }
-func (c *Controller) PrepareFull(key string, rev uint64) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.validControl(key, rev) {
-		return "", ErrControl
-	}
-	c.challenge = nonce()
-	c.challengeRevision = rev
-	return c.challenge, nil
-}
-func (c *Controller) SetMode(key string, rev uint64, mode Mode, challenge string) error {
+func (c *Controller) SetMode(key string, rev uint64, mode Mode) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.validControl(key, rev) || !mode.Valid() {
 		return ErrControl
 	}
-	if mode == FullAccess && (challenge == "" || challenge != c.challenge || rev != c.challengeRevision) {
-		return ErrControl
-	}
 	c.revokeLocked("revoked")
 	c.mode = mode
 	c.notifyLocked()
+	if c.OnModeChange != nil {
+		c.OnModeChange(mode)
+	}
 	return nil
 }
 func (c *Controller) Decide(key string, rev uint64, id string, allow bool) error {
@@ -380,7 +361,7 @@ func (c *Controller) Decide(key string, rev uint64, id string, allow bool) error
 	if p == nil {
 		return ErrControl
 	}
-	if !time.Now().Before(p.deadline) || p.ctx.Err() != nil {
+	if !p.deadline.IsZero() && !time.Now().Before(p.deadline) || p.ctx.Err() != nil {
 		c.finishLocked(p, c.denied(Ask, "timeout"))
 		return ErrControl
 	}
@@ -419,7 +400,7 @@ func (c *Controller) Answer(id string, allow bool) error {
 	if c.ctx.Err() != nil || c.mode != Ask || p == nil {
 		return ErrControl
 	}
-	if !time.Now().Before(p.deadline) || p.ctx.Err() != nil {
+	if !p.deadline.IsZero() && !time.Now().Before(p.deadline) || p.ctx.Err() != nil {
 		c.finishLocked(p, c.denied(Ask, "timeout"))
 		return ErrControl
 	}

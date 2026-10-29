@@ -1,9 +1,24 @@
 # Claude in `/model` (the Claude Code route)
 
 `Claude` in `/model` runs the official Claude Code CLI on the user's own
-Claude subscription login (U21). Anthropic refuses subscription OAuth
-requests from other harnesses, so Unreal does not call the Messages API for
-Claude itself. It uses no MCP server, mod, API key or organization setting.
+Claude subscription login (U21). It uses no MCP server, mod or API key.
+
+## Why Claude Code, not a direct connection
+
+Unreal first tried to call Claude itself with the user's subscription login
+(OAuth), keeping its own tools and Operations. That route was dropped:
+
+- Anthropic's terms reserve subscription OAuth for Claude Code and
+  Anthropic's own apps; other products are pointed to API keys or supported
+  clouds
+  ([Authentication and credential use](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)).
+- In practice, requests from Unreal's own client with that login were
+  rejected (HTTP 429).
+- An API key was not an option: Unreal uses subscriptions only, never metered
+  API billing (U5).
+
+So Unreal runs the official Claude Code with the user's login instead, and
+keeps approvals, records and orchestration on its side (U21).
 
 ## Requirements
 
@@ -22,9 +37,45 @@ Claude itself. It uses no MCP server, mod, API key or organization setting.
 
 ## How a turn runs
 
-Each Unreal turn runs one Claude Code process. It continues the Session's own
+Each Unreal turn starts Claude Code and continues the Session's own
 Claude Code conversation: the first turn uses `--session-id`, later turns use
 `--resume`.
+
+After Claude's `Respond` returns and the Session has no model call or pending
+tool/operation, Unreal checks the last context size reported by Claude Code:
+the last model call's input + cache read + cache creation, with `result.usage`
+as a fallback when no per-call measurement is available. Above **200,000
+tokens**, it immediately resumes the same conversation with `/compact` in the
+background. Configure this with `Context.ClaudeCompactThresholdTokens` in the
+runtime JSON; zero or an omitted value uses the default. The threshold is
+provisional and will be revisited using production observations. This setting
+is outside immutable Session identity, so changing it does not require a new
+Session. Tool batches and input steering within a turn never trigger compaction.
+
+New user input or a child notice that starts a turn stops and reaps the compact
+process before the real turn starts. An interrupted summary is not saved; a
+short Session record and log note the interruption and retain the previous
+context size. If it still exceeds the threshold at the next idle boundary,
+Unreal tries again. There is at most one Claude Code process for the same
+conversation, across both compaction and ordinary turns.
+
+At turn start, compaction remains only as an emergency fallback when the last
+context size is **strictly greater than twice the configured threshold**
+(400,000 tokens with the default). It then waits for `/compact` before sending
+the input. At or below that value, the new turn does not wait for compaction.
+
+The English compact instruction preserves the goal, decisions, unanswered user
+questions, active child handles and roles, files being changed, and next steps.
+The header and main card show 「会話を圧縮中」 with a spinner, and the input
+field remains usable. A short Session context record stores the
+before/after token counts (unreported after counts stay unknown), and the last
+reported size survives Host restart. The summary stays in Claude Code's own
+conversation; Unreal's canonical messages and receipts are preserved. Failures
+are logged with their cause, and the original input still runs without compacting.
+
+The gauge also uses the last model call's input + cache read + cache creation
+for 「文脈」, even when several calls occur between recorded responses. Cache
+ratios and `/analyze` totals continue to use the summed usage of those calls.
 
 - **Tools:** Claude Code runs its own tools (Read, Edit, Write, Bash and the
   rest).
@@ -34,8 +85,40 @@ Claude Code conversation: the first turn uses `--session-id`, later turns use
 - **After switching models:** if another model (such as Codex) answered in the
   meantime, those turns are sent to Claude as context. Codex sees Claude's
   turns the same way.
+- **Input during work:** new user messages in a foreground Claude turn go
+  into the next `PostToolBatch` (`turn.batch`) hook's `additionalContext`.
+  Multiple messages are delivered together, with credential redaction and
+  terminal control removal. The Coordinator projects them into that turn and
+  persists its continuation input watermark, so the completed turn does not
+  resend them. User input still interrupts a background turn and starts a new
+  foreground turn. The Codex route keeps its existing steering behavior.
+- **Child waits:** interruption recognizes the adjacent words `subagent wait`
+  anywhere in a Bash command, including variables, substitutions, `timeout`
+  and pipes. It also checks for pending user input when the wait begins.
+  This hint does not grant approval: the strict literal command check still
+  decides whether orchestration can skip an approval request. It does not
+  impose a wait timeout.
+- **Read child results:** `ended` notices wait until the current model call
+  finishes. If a recorded `subagent wait` or `subagent show` result already
+  contains that child's final report, Unreal suppresses its notice. Unread
+  completions, child messages and approval requests keep their existing paths.
+- **Stopping:** `/stop main` ends the model call and its own tools, clears its
+  progress/pulse, and waits for the next user message. Children continue.
+  Subscriber eviction drains queues without waiting while holding the Session
+  mutex, so concurrent gateway reads cannot freeze submission or inspection.
+- **Host restart:** unfinished child start operations are canceled without
+  respawning. A durable `ended` peer message tells the parent that Unreal Agent
+  restarted and points to `subagent show HANDLE` for the partial report. Its
+  stable input ID prevents duplicate notices across restoration. Claude handles
+  that message through the existing background-turn path.
 
 ## Approvals
+
+Claude Code starts with `--disallowedTools Agent Monitor AskUserQuestion`.
+Whenever Claude asks for or awaits a user reply, including in ordinary user
+turns, its instructions require a message beginning with `【要確認】` and choices
+written as numbered prose. The attention band keeps that question visible until
+the next user input, even as background replies arrive.
 
 Claude Code asks Unreal before a call that needs approval. Unreal's permission
 mode decides:
@@ -49,23 +132,21 @@ mode decides:
 Claude Code's own rules still apply first:
 
 - **Allowed without asking Unreal:** reads inside the workspace, and commands
-  on the organization's allow list.
-- **Refused by Claude Code:** commands on the organization's deny list.
+  Claude Code's settings allow.
+- **Declined by Claude Code:** commands its settings do not run.
 
-## Commands the organization policy refuses (U22)
+## Commands Claude Code declines (U22)
 
-Some commands are refused by Claude Code's organization policy, such as
-`git push`, `curl` or `rm -rf`. Unreal runs such a command itself, in its own
-shell:
+When Claude Code declines a shell command itself, Unreal handles it as an
+ordinary Bash request of the Session:
 
-1. It runs the exact command in Claude Code's working directory.
-2. Unreal's mode decides first, as for any Bash call: Full Access runs it, Ask
-   asks the human, Read Only denies it.
-3. The run is a normal Unreal Bash Operation.
-4. Its result goes back to Claude in the same turn.
+1. Unreal's permission mode decides, as for any Bash call: Full Access runs it,
+   Ask asks the human, Read Only denies it.
+2. If allowed, it runs in Claude Code's working directory as a normal Unreal
+   Bash Operation, recorded in the Session.
+3. Its result goes back to Claude in the same turn.
 
-The organization's deny rules do not apply to Unreal's own shell. This is the
-same as for Codex.
+Codex commands go through the same permission mode.
 
 ## Models and errors
 

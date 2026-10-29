@@ -28,37 +28,21 @@ type configuration struct {
 	AuthStatus                                                          string
 	Catalog, CatalogStream                                              string
 	CatalogWait, CatalogChild, InitializeModelsOnly                     bool
-	BridgeSteps                                                         []bridgeStep
-	BridgeChildSteps                                                    []bridgeStep
-	BridgeSource, BridgeEvent                                           string
-	BridgeExtraServer                                                   bool
-	BridgeOnce                                                          bool
-	BridgeManagedPermissionsOnly                                        bool
-	BridgePermissionRules                                               string
-	StructuredResponses                                                 []string
-	StructuredHelperInputs                                              []string
-	StructuredAssistantFrames                                           []string
-	StructuredInitializeError                                           bool
-	StructuredSerializerFailures                                        int
-	StructuredEnforcementReminder                                       bool
-	StructuredAfterResultMillis                                         int
-	StructuredTrailing                                                  string
-	StructuredHoldAfterResult                                           bool
 	AgentSteps                                                          []agentStep
 	AgentFinal                                                          string
 	AgentOnce                                                           bool
-}
-type bridgeStep struct {
-	Name, Arguments, Contains           string
-	Error, Duplicate, DuplicateEnvelope bool
-	ReadEdit                            bool
+	AgentInputTokens, AgentStepInputTokens                              int64
+	CompactPreTokens, CompactPostTokens                                 int64
+	CompactFailure                                                      string
+	CompactCrash, CompactUnknownAfter                                   bool
+	CompactDelayMillis                                                  int
 }
 type call struct {
 	Arguments, Environment   []string
 	Input, System, Directory string
 	PID, ChildPID            int
-	Schema                   string
-	Initialize, UserFrame    string `json:",omitempty"`
+	OverlappingPID           int
+	InputAt                  time.Time
 }
 
 const help = "--safe-mode --restricted --setting-sources --settings --tools --disallowedTools --allowedTools --strict-mcp-config --mcp-config --disable-slash-commands --no-chrome --no-session-persistence --model --effort --input-format --output-format --verbose --include-partial-messages --permission-prompts --json-schema"
@@ -158,16 +142,6 @@ func main() {
 	if slices.Contains(args, "--permission-prompt-tool") {
 		agent(dir, args, c)
 		return
-	}
-	if slices.Contains(args, `{"mcpServers":{"unreal":{"type":"sdk","name":"unreal"}}}`) {
-		bridge(dir, path, args, c)
-		return
-	}
-	for i, arg := range args {
-		if arg == "--allowedTools" && i+1 < len(args) && args[i+1] == "StructuredOutput" {
-			structured(dir, path, args, c)
-			return
-		}
 	}
 	if !slices.Contains(args, "-p") && slices.Contains(args, "stream-json") {
 		catalog(dir, path, args, c)

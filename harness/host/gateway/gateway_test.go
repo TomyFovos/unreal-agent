@@ -3,6 +3,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -60,7 +61,7 @@ func fixture(t *testing.T) (*host.Host, *Client, string, string) {
 	done := make(chan error, 1)
 	socket := filepath.Join(dir, "host.sock")
 	go func() {
-		done <- ListenAndServe(ctx, socket, Config{Host: owner, Policy: permission.Unrestricted(), Auth: authflow.New(credential.NewManager(backend, nil))})
+		done <- ListenAndServe(ctx, socket, Config{Host: owner, Policy: permission.Unrestricted(), Auth: authflow.New(credential.NewManager(backend))})
 	}()
 	client := NewClient(socket)
 	t.Cleanup(func() {
@@ -248,10 +249,13 @@ func TestSocketOwnershipAndProtocolBounds(t *testing.T) {
 	if err != nil || stat.Mode().Perm() != 0600 {
 		t.Fatal(stat, err)
 	}
-	if _, err = client.call(bounded(t), "inspect", request{ID: "x", Limit: 257}); err == nil {
-		t.Fatal("unbounded request accepted")
+	if _, err = client.Open(bounded(t), host.Create, "large-page"); err != nil {
+		t.Fatal(err)
 	}
-	body := strings.Repeat("x", MaxRequestBytes+1)
+	if _, err = client.call(bounded(t), "inspect", request{ID: "large-page", Limit: 5000}); err != nil {
+		t.Fatal("large page refused", err)
+	}
+	body := strings.Repeat("x", 128<<10+1)
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "http://localhost/v1/inspect", strings.NewReader(body))
 	Handler(Config{Host: owner}).ServeHTTP(w, r)
@@ -278,14 +282,47 @@ func TestBoundedExtensionAndLocalRequestBoundary(t *testing.T) {
 	if err != nil || string(result) != string(value) {
 		t.Fatal(string(result), err)
 	}
-	if _, err = c.Extension(t.Context(), jsontext.Value(`{"large":"`+strings.Repeat("x", MaxRequestBytes)+`"}`)); err == nil {
-		t.Fatal("oversized extension accepted")
+	large := jsontext.Value(`{"large":"` + strings.Repeat("x", 128<<10) + `"}`)
+	if got, err := c.Extension(t.Context(), large); err != nil || !bytes.Equal(got, large) {
+		t.Fatal("large extension lost", err)
 	}
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "http://localhost/v1/extension", strings.NewReader(`{}`))
 	req.Header.Set("Origin", "https://untrusted.example")
 	handler.ServeHTTP(w, req)
-	if calls != 1 || w.Code != http.StatusBadRequest {
+	if calls != 2 || w.Code != http.StatusBadRequest {
 		t.Fatal("extension bypassed local origin validation")
+	}
+}
+
+func TestGatewayHistoryBeforeRoundTrip(t *testing.T) {
+	_, client, _, _ := fixture(t)
+	v, err := client.Open(bounded(t), host.Create, "backward")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tail, err := client.InspectBefore(bounded(t), "backward", 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tail.History.Items) != 1 || tail.History.More || tail.HistoryState == nil {
+		t.Fatal("wrong tail response", tail)
+	}
+	before := tail.History.Items[0].Sequence
+	older, err := client.InspectBefore(bounded(t), "backward", before, 128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if older.History.NextAfter != before-1 || older.Generation != v.Generation {
+		t.Fatal("wrong predecessor cursor", older.History)
+	}
+	// A subscription from the tail is still a forward subscription.
+	sub, err := client.Subscribe(bounded(t), "backward", tail.History.NextAfter, 128, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Cancel()
+	if len(sub.Initial.History.Items) != 0 {
+		t.Fatal("tail subscription replayed old items")
 	}
 }

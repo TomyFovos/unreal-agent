@@ -69,7 +69,7 @@ func StartChild(ctx context.Context, owner *host.Session, generation string, inp
 	} else if requested != nil {
 		return host.Receipt{}, &RuntimeError{Code: "selection_unsupported"}
 	}
-	spec, e := NewSpec(Plan{Version: 1, Action: "start", ParentID: owner.ID, Template: name, Text: task, Configuration: &configured, RuntimeBound: bound})
+	spec, e := NewSpec(Plan{Version: 1, Action: "start", ParentID: owner.ID, Template: name, Text: task, Configuration: &configured, RuntimeBound: bound, Notify: true})
 	if e != nil {
 		return host.Receipt{}, e
 	}

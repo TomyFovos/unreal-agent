@@ -24,9 +24,6 @@ func DebugAdapterConfiguration(getenv func(string) string) ([]dap.AdapterConfig,
 	if raw == "" {
 		return nil, nil
 	}
-	if len(raw) > 65536 {
-		return nil, errors.New("debug adapter configuration exceeds 64 KiB")
-	}
 	var adapters []dap.AdapterConfig
 	if json.Unmarshal([]byte(raw), &adapters, json.RejectUnknownMembers(true)) != nil {
 		return nil, errors.New("invalid debug adapter configuration")
@@ -48,12 +45,6 @@ func DebugTools(base ToolFactory, adapters []dap.AdapterConfig, disallowed []str
 	if err = json.Unmarshal(encoded, &configuredAdapters); err != nil {
 		return nil, "", err
 	}
-	// Configuration validation is pure; no adapter starts until an operation.
-	probe, err := dap.NewManager(context.Background(), configuredAdapters...)
-	if err != nil {
-		return nil, "", err
-	}
-	probe.Close()
 	enabled := len(configuredAdapters) > 0 && !slices.Contains(disallowed, dapTool.Name)
 	identity := ""
 	if len(configuredAdapters) > 0 {

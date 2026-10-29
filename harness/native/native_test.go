@@ -50,9 +50,9 @@ func TestReadRangeRevisionBinaryAndLarge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	file.Truncate(mutation.MaxFileBytes + 1)
+	file.Truncate(16<<20 + 1)
 	file.Close()
-	if got := execute(e, t, Request{Action: "read", Path: "huge"}); got.Code != "read_failed" {
+	if got := execute(e, t, Request{Action: "read", Path: "huge"}); got.Code != "binary" {
 		t.Fatal(got)
 	}
 }

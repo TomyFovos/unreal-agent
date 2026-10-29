@@ -55,7 +55,7 @@ func TestMultiProviderPickerNamespacesCancelAndConfirm(t *testing.T) {
 				}
 				cancel()
 			})
-			waitFor(t, func() bool { return strings.Contains(out.text(), "running") })
+			waitFor(t, func() bool { return strings.Contains(out.text(), "入力待ち") })
 			command := func() {
 				keys <- Key{Text: "/model"}
 				keys <- Key{Name: "enter"}

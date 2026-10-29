@@ -20,12 +20,9 @@ type layoutBaselineFlatSpec struct {
 }
 
 type layoutBaselineFlatOperation struct {
-	// ExecutionBasis binds the concrete executor footprint before canonical publication.
-	// RecoveryBasis carries bounded uncertainty constraints; neither grants authority.
-	ExecutionBasis jsontext.Value       `json:",omitzero"`
-	RecoveryBasis  []UncertainEffect    `json:",omitzero"`
-	Dependencies   []ID                 `json:",omitzero"`
-	Permission     *permission.Decision `json:",omitzero"`
+	// Host dependencies retain their flat canonical field name.
+	Dependencies []ID                 `json:",omitzero"`
+	Permission   *permission.Decision `json:",omitzero"`
 	// ToolName records origin for current-policy checks on resume; it is not a grant.
 	ToolName        string            `json:",omitzero"`
 	Denial          *permission.Error `json:",omitzero"`
@@ -52,19 +49,13 @@ func TestExecutionMetadataFlatCanonicalCompatibility(t *testing.T) {
 				current = WithDependencies(current, old.Dependencies)
 			case "empty-slices":
 				old.Dependencies = []ID{}
-				old.RecoveryBasis = []UncertainEffect{}
 				current = WithDependencies(current, old.Dependencies)
-				current = WithRecoveryBasis(current, old.RecoveryBasis)
 			case "idempotency-only":
 				old.Idempotency = jsontext.Value(`{"key":"synthetic"}`)
 				current = WithIdempotency(current, old.Idempotency)
 			case "full":
-				old.ExecutionBasis = jsontext.Value(`{"version":1}`)
 				old.Dependencies = []ID{"prior"}
-				old.RecoveryBasis = []UncertainEffect{{ID: "blocked", Basis: jsontext.Value(`{"version":1}`)}}
-				current = WithExecutionBasis(current, old.ExecutionBasis)
 				current = WithDependencies(current, old.Dependencies)
-				current = WithRecoveryBasis(current, old.RecoveryBasis)
 				old.Idempotency = jsontext.Value(`{"key":"synthetic"}`)
 				current = WithIdempotency(current, old.Idempotency)
 			}
@@ -100,7 +91,7 @@ func TestExecutionMetadataFlatCanonicalCompatibility(t *testing.T) {
 	}
 }
 
-func TestSpecPrerequisitesRemainFlatWithoutExecutorProof(t *testing.T) {
+func TestSpecPrerequisitesRemainFlat(t *testing.T) {
 	for _, deps := range [][]ID{nil, {}, {"host-prior"}} {
 		old := layoutBaselineFlatSpec{Dependencies: deps, Type: TypeValue, Version: VersionValue}
 		current := WithPrerequisites(Spec{Type: old.Type, Version: old.Version}, deps)
@@ -123,49 +114,43 @@ func TestSpecPrerequisitesRemainFlatWithoutExecutorProof(t *testing.T) {
 			t.Fatal("ordinary legacy Spec gained allocation")
 		}
 	}
-	for _, raw := range []string{`{"ExecutionBasis":{"version":1}}`, `{"RecoveryBasis":[]}`, `{"PreparationRequired":true}`} {
-		var spec Spec
-		if err := json.Unmarshal([]byte(raw), &spec, json.RejectUnknownMembers(true)); err == nil {
-			t.Fatal("Spec accepted executor proof")
-		}
-	}
 	spec := WithPrerequisites(Spec{}, []ID{"host-prior"})
 	current := WithDependencies(Operation{}, spec.DependencyIDs())
 	spec.DependencyIDs()[0] = "changed-spec"
-	if current.DependencyIDs()[0] != "host-prior" || len(current.ExecutionBasis()) != 0 || len(current.RecoveryBasis()) != 0 {
-		t.Fatal("Spec copied alias or invented executor proof")
+	if current.DependencyIDs()[0] != "host-prior" {
+		t.Fatal("Spec retained a dependency alias")
 	}
 }
 
 func TestExecutionMetadataNilAndCopyOnWrite(t *testing.T) {
 	plain := Operation{}
-	if CloneExecutionMetadata(plain).Execution != nil || plain.ExecutionBasis() != nil || plain.RecoveryBasis() != nil || plain.DependencyIDs() != nil {
+	if CloneExecutionMetadata(plain).Execution != nil || plain.DependencyIDs() != nil {
 		t.Fatal("nil fast path changed representation")
 	}
 	if !SameExecutionMetadata(plain, Operation{Execution: &ExecutionMetadata{}}) {
 		t.Fatal("empty container changed prior semantic comparison")
 	}
-	if WithDependencies(plain, nil).Execution != nil || WithRecoveryBasis(plain, nil).Execution != nil || WithExecutionBasis(plain, nil).Execution != nil {
+	if WithDependencies(plain, nil).Execution != nil {
 		t.Fatal("nil setter allocated container")
 	}
 	original := WithDependencies(Operation{}, []ID{"prior"})
-	changed := WithExecutionBasis(original, jsontext.Value(`{"version":1}`))
+	changed := WithDependencies(original, []ID{"prior"})
 	if changed.Execution == original.Execution {
 		t.Fatal("setter retained mutable metadata container")
 	}
 	changed.DependencyIDs()[0] = "worker"
-	if original.DependencyIDs()[0] != "prior" || len(original.ExecutionBasis()) != 0 {
+	if original.DependencyIDs()[0] != "prior" {
 		t.Fatal("copy-on-write modified canonical metadata")
 	}
 	worker := CloneExecutionMetadata(changed)
-	worker.ExecutionBasis()[2] = 'X'
-	if SameExecutionMetadata(changed, worker) || !bytes.Equal(changed.ExecutionBasis(), jsontext.Value(`{"version":1}`)) {
+	worker.DependencyIDs()[0] = "worker2"
+	if SameExecutionMetadata(changed, worker) || changed.DependencyIDs()[0] != "worker" {
 		t.Fatal("worker mutated comparison baseline")
 	}
 }
 
 func TestExecutionMetadataBadFlatMembersAreRejected(t *testing.T) {
-	for _, raw := range []string{`{"Dependencies":["a"],"Dependencies":["b"]}`, `{"ExecutionBasis":{},"ExecutionBasis":{}}`, `{"Dependencies":"scalar"}`, `{"RecoveryBasis":{}}`, `{"Execution":{"Dependencies":["a"]}}`, `{"Idempotency":{},"Idempotency":{}}`, `{"Idempotence":{"Idempotency":{}}}`, `{"PreparationRequired":"true"}`} {
+	for _, raw := range []string{`{"Dependencies":["a"],"Dependencies":["b"]}`, `{"Dependencies":"scalar"}`, `{"Execution":{"Dependencies":["a"]}}`, `{"Idempotency":{},"Idempotency":{}}`, `{"Idempotence":{"Idempotency":{}}}`} {
 		var value Operation
 		if err := json.Unmarshal([]byte(raw), &value, json.RejectUnknownMembers(true)); err == nil {
 			t.Fatal("invalid or nested metadata accepted")

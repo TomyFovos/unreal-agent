@@ -13,8 +13,6 @@ import (
 )
 
 const Version = 1
-const MaxSourceBytes = 2 << 20
-const MaxMatches = 1000
 
 type Target struct {
 	Path     string             `json:"path"`
@@ -40,24 +38,21 @@ func (r Request) Validate() error {
 	default:
 		return Failure("unsupported_language")
 	}
-	if len(r.Query) == 0 || len(r.Query) > 16<<10 {
+	if len(r.Query) == 0 {
 		return Failure("invalid_query")
 	}
-	if len(r.Targets) == 0 || len(r.Targets) > mutation.MaxTargets {
+	if len(r.Targets) == 0 {
 		return Failure("invalid_targets")
 	}
-	if r.MaxBytes < 0 || r.MaxBytes > native.MaxOutputBytes {
+	if r.MaxBytes < 0 {
 		return Failure("invalid_limit")
 	}
-	if r.Replacement != nil && len(*r.Replacement) > MaxSourceBytes {
-		return Failure("replacement_too_large")
-	}
-	if r.Apply && (r.Replacement == nil || r.ExpectedMatches == nil || *r.ExpectedMatches <= 0 || *r.ExpectedMatches > MaxMatches) {
+	if r.Apply && (r.Replacement == nil || r.ExpectedMatches == nil || *r.ExpectedMatches <= 0) {
 		return Failure("expected_match_count_required")
 	}
 	seen := map[string]bool{}
 	for _, target := range r.Targets {
-		if target.Path == "" || len(target.Path) > 4096 || seen[target.Path] || strings.IndexByte(target.Path, 0) >= 0 {
+		if target.Path == "" || seen[target.Path] || strings.IndexByte(target.Path, 0) >= 0 {
 			return Failure("invalid_targets")
 		}
 		seen[target.Path] = true
@@ -169,7 +164,6 @@ func (e Executor) prepare(ctx context.Context, r Request) ([]mutation.Change, Re
 	result := Result{Version: Version, Code: "ok"}
 	changes := []mutation.Change{}
 	budget := r.MaxBytes
-	total := 0
 	paths := map[string]bool{}
 	for _, target := range r.Targets {
 		if err := ctx.Err(); err != nil {
@@ -194,9 +188,6 @@ func (e Executor) prepare(ctx context.Context, r Request) ([]mutation.Change, Re
 			return nil, result, err
 		}
 		result.Count += len(parsed.matches)
-		if result.Count > MaxMatches {
-			return nil, result, Failure("match_limit")
-		}
 		file := File{Path: target.Path, Revision: snap.Revision, Count: len(parsed.matches)}
 		for _, match := range parsed.matches {
 			if budget <= 0 {
@@ -213,10 +204,6 @@ func (e Executor) prepare(ctx context.Context, r Request) ([]mutation.Change, Re
 		}
 		result.Files = append(result.Files, file)
 		if r.Replacement != nil {
-			total += len(parsed.content)
-			if total > mutation.MaxFileBytes {
-				return nil, result, Failure("replacement_too_large")
-			}
 			// Include no-match files too: all target revisions are locked/preflighted.
 			changes = append(changes, mutation.Change{Path: target.Path, Expected: snap.Revision, Content: parsed.content})
 		}

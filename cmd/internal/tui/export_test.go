@@ -438,7 +438,7 @@ func TestExportPickerNavigationResponsiveAndCommandDiscovery(t *testing.T) {
 	}
 	for _, short := range []bool{false, true} {
 		help := strings.Join(helpSheet(Theme{}, short).Lines, "\n")
-		if !strings.Contains(help, "/copy: full conversation or latest response") || !strings.Contains(help, "/export: latest response, full conversation, or choose a response") {
+		if !strings.Contains(help, "/copy: choose messages; Space selects several") || !strings.Contains(help, "/export: latest response, full conversation, or choose a response") {
 			t.Fatal("help outdated")
 		}
 	}

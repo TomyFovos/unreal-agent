@@ -15,7 +15,7 @@ import (
 )
 
 func withViewer(config gateway.Config, directory string) gateway.Config {
-	config.Extension = viewer.ExtensionHandler{Host: config.Host, Directory: directory}
+	config.Extension = viewer.NewExtensionHandler(config.Host, directory)
 	return config
 }
 func attachViewer(ctx context.Context, client *gateway.Client, id session.ID) error {

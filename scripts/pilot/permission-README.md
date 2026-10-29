@@ -81,7 +81,7 @@ bash "$permission_package/gate.sh" resume-check gate-d
 stopはUnix peer UID/PID、binary、serve引数、専用config/store/socket/authパス、
 process start timeを照合し、pidfdでそのHostだけへSIGTERMします。照合できなければ
 停止しません。再起動は通常launcherがgateway readiness/lock/stale socketを処理します。
-PASSはcanonical履歴prefix/terminal receipts不変、Operation重複0、Read Only再初期化。
+PASSはcanonical履歴prefix/terminal receipts不変、Operation重複0、再起動前に最後に選んだPermission modeの維持。
 
 ## Gate E — 実際のOperationと人間承認
 
@@ -123,7 +123,7 @@ Splitの右ペイン上のホイールはOrchestrationをスクロールしま�
 （HTTP 200内のAPI error）を区別します。502/既知server errorは上流障害の候補ですが、
 この表示だけで実機の原因を断定しません。tool receiptが成功なら、その副作用は既に
 完了しています。`/resume`は履歴/完了Operationを再利用し、同じ副作用を再実行しません。
-Host再起動後はRead Onlyへ戻ります。`retryable`はOperationの再実行許可ではありません。
+Host再起動後も最後に選んだPermission modeを維持します。`retryable`はOperationの再実行許可ではありません。
 
 失敗時はdetachし、次の読み取り専用コマンドでsafe分類とreceipt件数だけ確認できます。
 本文・arguments・ID・環境・認証headerは表示しません。`sample_state=expected_after`は
@@ -149,10 +149,10 @@ bash "$permission_package/gate.sh" verify full
 bash "$permission_package/gate.sh" checkpoint gate-e
 bash "$permission_package/gate.sh" stop
 "$permission_gate/unreal" gate-e
-# Read Onlyと既存履歴を確認し、推論を送らずdetach
+# 再起動前と同じPermission modeと既存履歴を確認してdetach
 bash "$permission_package/gate.sh" resume-check gate-e
 "$permission_gate/unreal" gate-e
-# prompt restartを1回送信し、拒否receipt/Finalを待ってdetach
+# prompt restartを1回送信し、モード確認のFinalを待ってdetach
 bash "$permission_package/gate.sh" verify restart
 ```
 

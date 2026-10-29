@@ -7,12 +7,13 @@ import (
 	"time"
 
 	"github.com/rivo/uniseg"
-	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
-	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
+	"github.com/unreallabsai/unreal-agent/internal/displaytext"
+	"github.com/unreallabsai/unreal-agent/internal/usertext"
 )
 
 type Notification struct {
@@ -34,7 +35,8 @@ type UIState struct {
 	Input                 string
 	Cursor                int // byte boundary in Input; never a grapheme interior
 	Pasted                bool
-	Private               *credential.Reference
+	Selected, Secret      bool
+	HistoryLoading        bool
 	Busy                  bool
 	Outbox                string
 	Notification          Notification
@@ -48,10 +50,11 @@ type UIState struct {
 	MenuOptions           []commandCandidate
 	Parent                *viewer.Row
 	Viewer                viewer.PanelSnapshot
-	LegacyPanel           string
 	View                  ViewMode
 	OrchestrationScroll   int
 	cache                 *bodyCache
+	index                 *renderIndex
+	collect               *conversationCache
 }
 
 type Frame struct {
@@ -74,8 +77,6 @@ type Frame struct {
 type displayRow struct {
 	content    line
 	role, seam string
-	label      bool
-	bare       bool
 }
 type layout struct {
 	width, height, main, text int
@@ -86,38 +87,17 @@ type layout struct {
 func makeLayout(width, height int) layout {
 	w, h := max(0, min(width-1, 511)), max(0, min(height, 200))
 	l := layout{width: w, height: h, main: w, tiny: width < 50}
-	l.text = min(100, max(1, w-9))
-	if l.tiny {
-		l.text = max(1, w-2)
-	}
+	l.text = min(100, max(1, w-2))
 	return l
 }
 func (l layout) gutter(label, seam string, text line) line {
-	if l.tiny {
-		if label != "" {
-			prefix := label + " "
-			if seam != "" {
-				prefix += seam + " "
-			}
-			return joined(textLine(prefix, roleStyle(label)), text).clip(l.main)
-		}
-		return joined(textLine(seam+strings.Repeat(" ", max(0, 2-uniseg.StringWidth(seam))), meta), text).clip(l.main)
+	if label != "" {
+		text = joined(textLine(SafeText(label)+" ", roleStyle(label)), text)
 	}
-	label = SafeText(label)
-	seamStyle := seamStyle(seam)
-	if seam == "›" || seam == ">" {
-		switch label {
-		case "you":
-			seamStyle = youStyle
-		case "cmd":
-			seamStyle = strong
-		case "key":
-			seamStyle = privateStyle
-		case "child":
-			seamStyle = strong
-		}
-	}
-	return joined(textLine(strings.Repeat(" ", max(0, 6-uniseg.StringWidth(label)))+label, roleStyle(label)), textLine(" ", normal), textLine(fmt.Sprintf("%-1s", seam), seamStyle), textLine(" ", normal), text).clip(l.main)
+	return l.markedGutter(seam, seamStyle(seam), text)
+}
+func (l layout) markedGutter(mark string, color style, text line) line {
+	return joined(textLine(mark+strings.Repeat(" ", max(0, 2-uniseg.StringWidth(mark))), color), text).clip(l.main)
 }
 func seamStyle(s string) style {
 	switch s {
@@ -136,14 +116,20 @@ func seamStyle(s string) style {
 	}
 }
 func (l layout) row(r displayRow) line {
-	if r.bare {
-		return r.content.clip(l.main)
+	mark, color := r.seam, seamStyle(r.seam)
+	switch r.role {
+	case "you":
+		mark, color = r.seam, visualStyle(stateYou)
+	case "agent":
+		color = visualStyle(stateMain)
+	case "draft":
+		color = visualStyle(dimColor)
+	case "error":
+		color = visualStyle(stateBad)
+	case "host":
+		color = visualStyle(dimColor)
 	}
-	label := ""
-	if r.label && !l.tiny {
-		label = r.role
-	}
-	return l.gutter(label, r.seam, r.content)
+	return l.markedGutter(mark, color, r.content)
 }
 
 func connection(s Snapshot, now time.Time) string {
@@ -209,114 +195,100 @@ func usage(u viewer.Usage) string {
 	return prefix + "in " + field(u.Input, llm.UsageInput) + " out " + field(u.Output, llm.UsageOutput)
 }
 func header(s Snapshot, u UIState, l layout) line {
-	conn, run := connection(s, u.Now), runtime(s)
-	permissions := permissionStatus(s)
-	cs, rs := meta, meta
-	if conn == "disconnected" {
-		cs = failureStyle
-	} else if conn != "connected" {
-		cs = warningStyle
-	}
-	if run == "failed" {
-		rs = failureStyle
-	} else if run == "unknown" {
-		rs = warningStyle
-	} else if run == "stopped" {
-		rs = strong
-	}
-	elapsed, tokens := "", ""
-	model := ""
-	if s.Selection != nil && l.width >= 69 {
-		model = topologyText(selectionLabel(*s.Selection, u.Theme), 256)
-	}
-	if u.Parent != nil {
-		if s.Connected && runtime(s) == "running" && u.Parent.Elapsed.Known {
-			elapsed = duration(u.Parent.Elapsed.Value)
-		}
-		if value := usage(u.Parent.Usage); value != "" {
-			tokens = value
-		}
-	}
-	shortTokens := func() {
-		if u.Parent != nil && u.Parent.Usage.Known {
-			prefix := ""
-			if u.Parent.Usage.Partial {
-				prefix = "~"
+	name := SafeText(string(s.ID))
+	state, role := "入力待ち", bandNeutral
+	elapsed := ""
+	switch connection(s, u.Now) {
+	case "connecting":
+		state, role = u.Theme.spinner(u.Now.UnixMilli())+" 接続中", bandWarn
+	case "reconnecting":
+		state, role = u.Theme.spinner(u.Now.UnixMilli())+" 再接続中", bandWarn
+	case "resyncing":
+		state, role = u.Theme.spinner(u.Now.UnixMilli())+" 再同期中", bandWarn
+	case "disconnected":
+		state, role = "✗ 切断", bandBad
+	default:
+		switch runtime(s) {
+		case "stopped":
+			state, role = u.Theme.symbol("▪", "#")+" 停止", bandNeutral
+		case "failed":
+			state, role = "✗ 失敗", bandBad
+		default:
+			if mainBusy(s) {
+				state, role = "● 稼働中", bandOK
 			}
-			tokens = prefix + number(u.Parent.Usage.Input) + "/" + number(u.Parent.Usage.Output)
+			if backgroundActive(s, u) {
+				state, role = fmt.Sprintf("%s 裏で作業中 子%d", u.Theme.spinner(u.Now.UnixMilli()), workingChildren(s, u)), bandOK
+			}
+			if s.Progress != nil && s.Progress.Mode == "compacting" {
+				state, role = u.Theme.spinner(u.Now.UnixMilli())+" 会話を圧縮中", bandOK
+			}
+			if u.Parent != nil && u.Parent.Elapsed.Known {
+				elapsed = " " + coarseDuration(u.Parent.Elapsed.Value)
+			}
 		}
 	}
-	connText, runText := conn, run
-	if conn == "connected" {
-		if !u.Theme.ASCII {
-			connText = "⇄ connected"
-		}
-	} else if conn == "disconnected" {
-		connText = u.Theme.symbol("✗", "x") + " " + conn
-	} else {
-		connText = u.Theme.spinner(u.Now.UnixMilli()) + " " + conn
-	}
-	if run == "unknown" {
-		runText = "? unknown"
-	} else if run == "stopped" {
-		runText = u.Theme.symbol("▪", "#") + " stopped"
-	} else if run == "failed" {
-		runText = u.Theme.symbol("✗", "x") + " failed"
-	}
-	if l.width < 69 {
-		shortTokens()
-		if conn == "connected" && !u.Theme.ASCII {
-			connText = "⇄"
+	permissions, shortPermission, permissionRole := "", "", bandNeutral
+	if s.Permissions.Enabled {
+		switch s.Permissions.Mode {
+		case permission.FullAccess:
+			permissions, shortPermission, permissionRole = "Full Access", "FULL", bandWarn
+		case permission.Ask:
+			permissions, shortPermission = "Ask", "ASK"
+		case permission.ReadOnly:
+			permissions, shortPermission = "Read Only", "RO"
 		}
 	}
-	id := SafeText(string(s.ID))
-	brand := ""
-	if l.width >= 69 {
-		brand = "unreal agent  "
+	model := ""
+	if s.Selection != nil {
+		model = headerModelLabel(*s.Selection, u.Theme)
 	}
 	build := func() line {
-		metric := ""
-
-		if model != "" {
-			metric += "  " + model
+		out := u.Theme.roleLine(name, bandSession)
+		for _, part := range []struct {
+			text string
+			role colorRole
+		}{{state + elapsed, role}, {permissions, permissionRole}, {model, bandNeutral}} {
+			if part.text != "" {
+				out = joined(out, textLine(" ", normal), u.Theme.roleLine(part.text, part.role))
+			}
 		}
-		if elapsed != "" {
-			metric += "  " + elapsed
-		}
-		if tokens != "" {
-			metric += "  " + tokens
-		}
-		return joined(textLine(permissions+permissionSeparator(permissions), warningStyle), textLine(brand, agentStyle), textLine(id, strong), textLine("  "+u.View.effective(l.width+1).title(), meta), textLine("  "+connText, cs), textLine("  "+runText, rs), textLine(metric, meta))
+		return out
 	}
 	if build().width() > l.width {
 		model = ""
 	}
 	if build().width() > l.width {
-		brand = ""
-	}
-	if build().width() > l.width {
-		shortTokens()
-	}
-	if build().width() > l.width {
 		elapsed = ""
 	}
 	if build().width() > l.width {
-		tokens = ""
+		permissions = shortPermission
 	}
-	if l.width < 39 && build().width() > l.width && run == "running" {
-		runText = ""
-	}
-	if build().width() > l.width && conn == "connected" && !u.Theme.ASCII {
-		connText = "⇄"
-	}
-	if build().width() > l.width {
-		keep := 8
-		if l.width < 39 {
-			keep = 1
-		}
-		id = middle(id, max(keep, l.width-textLine(connText, cs).width()-textLine(runText, rs).width()-textLine(u.View.effective(l.width+1).title(), meta).width()-6), u.Theme)
+	if row := build(); row.width() > l.width {
+		name = middle(name, max(0, textLine(name, normal).width()-(row.width()-l.width)), u.Theme)
 	}
 	return build().clip(l.width)
+}
+
+func headerModelLabel(s sessionstore.RuntimeSelection, t Theme) string {
+	name := s.Name
+	if name == "" {
+		name = s.Model
+	}
+	provider := modelcatalog.ProviderName(s.Provider)
+	switch s.Provider {
+	case "openai-codex":
+		provider = "Codex"
+	case "claude-code":
+		provider = "Claude"
+	}
+	if provider != "" && !strings.HasPrefix(name, provider) {
+		name = provider + " " + name
+	}
+	if s.Effort != "" {
+		name += t.symbol(" · ", " / ") + string(s.Effort)
+	}
+	return topologyText(name, 256)
 }
 
 func conversation(s Snapshot, u UIState, l layout) []displayRow {
@@ -325,102 +297,119 @@ func conversation(s Snapshot, u UIState, l layout) []displayRow {
 		entries = u.Transcript.Entries
 		s.OlderDropped = u.Transcript.Older
 	}
-	if len(entries) == 0 && len(s.Lines) > 0 {
-		for _, v := range s.Lines {
-			role, text := "agent", v
-			if before, after, ok := strings.Cut(v, "> "); ok {
-				role, text = before, after
-			}
-			entries = append(entries, Entry{Role: role, Text: SafeText(text)})
-		}
-	}
 	var out []displayRow
-	if s.OlderDropped {
+	switch {
+	case u.HistoryLoading:
+		out = append(out, displayRow{content: textLine("古い履歴を読み込み中", meta)})
+	case s.OlderDropped:
 		out = append(out, displayRow{content: textLine(olderMessage, meta)})
+	case s.Connected && s.LazyHistory:
+		out = append(out, displayRow{content: textLine("ここが会話の始まり", meta)})
 	}
-	lastRole := ""
-	for _, e := range entries {
-		if e.PeerID != "" {
-			for _, child := range children(u, s) {
-				if string(child.ID) == e.PeerID {
-					e.Role = "child"
-					break
-				}
-			}
-		}
-		if len(out) > 0 {
+	gap := func() {
+		if len(out) > 0 && len(out[len(out)-1].content) > 0 {
 			out = append(out, displayRow{})
 		}
-		show := e.Role != lastRole
-		if l.tiny && show {
-			out = append(out, displayRow{content: textLine(e.Role, roleStyle(e.Role)), bare: true})
+	}
+	lastRole, background := "", s.HistoryBackground
+	work := backgroundPrefix(s.HistoryWorkPrefix)
+	marks := marksFor(u, s)
+	flush := func(active bool) {
+		if work.entries > 0 {
+			gap()
+			out = append(out, displayRow{content: work.rowWithMark(marks, l.text, u.Theme, active, u.Now.UnixMilli())})
+			lastRole = "background"
+			work = backgroundWork{}
 		}
+	}
+	for _, e := range entries {
+		if e.Role == "error" && s.Selection != nil {
+			e.Text = usertext.Failure(e.Code, e.Text, s.Selection.Provider)
+			e.Code = "user_message"
+		}
+		switch e.Role {
+		case "you":
+			background = false
+		case "peer", "child":
+			background = true
+			if e.PeerKind == "ready" {
+				continue
+			}
+		}
+		if e.Role == "peer" || e.Role == "child" || background && e.Role == "agent" && !forHuman(e.Text) {
+			work.add(e)
+			continue
+		}
+		flush(false)
+		// Dispatch receipts and tool-only responses follow their agent message
+		// without an extra blank line or another agent marker.
+		callOnly := e.Text == "" && len(e.Calls) > 0
+		if !callOnly || lastRole != "agent" {
+			gap()
+		}
+		show := e.Role != lastRole
 		var content []bodyLine
-		if e.Text != "" || len(e.Calls) == 0 {
+		if !callOnly {
 			if u.cache != nil {
 				content = u.cache.get(e, l.text, u.Theme)
 			} else {
 				content = entryBody(e, l.text, u.Theme)
 			}
 		}
-		if l.tiny && len(e.Calls) > 0 {
-			n := len(e.Calls)
-			spawns := 0
-			for _, c := range e.Calls {
-				if c.Name == "SubagentStart" {
-					spawns++
-				}
-			}
-			done, failed, canceled, active := 0, 0, 0, 0
-			for _, raw := range e.Calls {
-				r, _ := currentReceipt(raw, s, u)
-				switch r.Status {
-				case operation.StatusCompleted:
-					done++
-				case operation.StatusFailed:
-					failed++
-				case operation.StatusCanceled:
-					canceled++
-				default:
-					active++
-				}
-			}
-			mark := u.Theme.symbol("▸", ">")
-			if failed > 0 {
-				mark = u.Theme.symbol("✗", "x")
-			} else if active == 0 && canceled == 0 {
-				mark = u.Theme.symbol("✓", "+")
-			}
-			counts := fmt.Sprintf("%d running, %d done", active, done)
-			if failed > 0 {
-				counts += fmt.Sprintf(", %d failed", failed)
-			}
-			if canceled > 0 {
-				counts += fmt.Sprintf(", %d canceled", canceled)
-			}
-			text := fmt.Sprintf("%s %d tool calls: %s", mark, n, counts)
-			if spawns > 0 {
-				text = fmt.Sprintf("%s %d spawns: %s", mark, spawns, counts)
-			}
-			content = append(content, bodyLine{text: textLine(middle(text, l.text, u.Theme), meta)})
-		} else {
-			content = append(content, toolRows(e, s, u, l)...)
-		}
 		for i, b := range content {
-			out = append(out, displayRow{content: b.text, role: e.Role, seam: b.seam, label: show && i == 0})
+			mark := b.seam
+			switch e.Role {
+			case "you":
+				mark = u.Theme.symbol("▎", "|")
+				b.text = append(line(nil), b.text...)
+				b.text = joined(b.text, textLine(strings.Repeat(" ", max(0, l.text-b.text.width())), normal))
+				for j := range b.text {
+					b.text[j].style.bg = youBlock
+					if b.text[j].style.fg == "" {
+						b.text[j].style.fg = colorDefault
+					}
+				}
+			case "agent":
+				if show && i == 0 {
+					mark = u.Theme.symbol("●", "*")
+				}
+			case "error":
+				if i == 0 {
+					mark = u.Theme.symbol("✗", "x")
+				}
+			case "host":
+				if i == 0 {
+					mark = u.Theme.symbol("·", ".")
+				}
+			}
+			out = append(out, displayRow{content: b.text, role: e.Role, seam: mark})
+		}
+		if len(e.Calls) > 0 {
+			var chips []bodyLine
+			timed := false
+			if u.cache != nil {
+				chips, timed = u.cache.chipRows(e, s, u, l)
+			} else {
+				chips = toolChips(e, s, u, l)
+			}
+			start := len(out)
+			for _, b := range chips {
+				out = append(out, displayRow{content: b.text})
+			}
+			if timed && u.collect != nil {
+				u.collect.patches = append(u.collect.patches, timedChips{start, len(out), e})
+			}
 		}
 		lastRole = e.Role
+		if e.Role == "you" {
+			gap()
+		}
 	}
+	flush(backgroundTurn(s) && mainBusy(s) && s.Connected && s.Running && u.Transcript == nil)
 	if u.Transcript == nil && s.Connected && s.Running && s.Progress != nil && s.Progress.Mode == "streaming" && s.Progress.Text != "" {
-		if len(out) > 0 {
-			out = append(out, displayRow{})
-		}
-		show := lastRole != "agent"
-		if l.tiny && show {
-			out = append(out, displayRow{content: textLine("agent", agentStyle), bare: true})
-		}
-		for i, b := range entryBody(Entry{Role: "draft", Text: s.Progress.Text}, l.text, u.Theme) {
-			out = append(out, displayRow{content: b.text, role: "agent", seam: u.Theme.symbol("⋮", ":"), label: show && i == 0})
+		gap()
+		for _, b := range entryBody(Entry{Role: "draft", Text: s.Progress.Text}, l.text, u.Theme) {
+			out = append(out, displayRow{content: b.text, role: "draft", seam: u.Theme.symbol("⋮", ":")})
 		}
 	}
 	if len(out) == 0 && !s.Connected {
@@ -431,16 +420,21 @@ func conversation(s Snapshot, u UIState, l layout) []displayRow {
 
 func composer(s Snapshot, u UIState, l layout) ([]line, int, int, int, string) {
 	label := "you"
-	command := strings.HasPrefix(u.Input, "/") && !u.Pasted && u.Private == nil
+	command := strings.HasPrefix(u.Input, "/") && !u.Pasted
 	if command {
 		label = "cmd"
 	}
 	input, cursor := u.Input, min(max(0, u.Cursor), len(u.Input))
-	if u.Private != nil {
-		label = "key"
-		cursor = min(64, uniseg.GraphemeClusterCount(input[:cursor]))
+	if u.Secret {
+		maskedCursor := min(64, uniseg.GraphemeClusterCount(input[:cursor]))
 		input = strings.Repeat("*", min(64, uniseg.GraphemeClusterCount(input)))
+		cursor = maskedCursor
 	}
+	prompt := textLine(u.Theme.symbol("›", ">")+" ", visualStyle(stateYou))
+	if label == "cmd" {
+		prompt = joined(u.Theme.roleLine(" "+label+" ", chipColor), textLine(" ", normal), prompt)
+	}
+	textWidth := min(l.text, max(1, l.main-prompt.width()))
 	placeholder := ""
 	if input == "" {
 		placeholder = "Ask, or type / for commands"
@@ -448,8 +442,6 @@ func composer(s Snapshot, u UIState, l layout) ([]line, int, int, int, string) {
 			placeholder = "Message " + string(s.ID) + ", or /child-send TEXT for " + string(child)
 		}
 		switch {
-		case u.Private != nil:
-			placeholder = "Type or paste the key; it stays masked"
 		case !s.Connected && s.Status == "connecting":
 			placeholder = "Connecting to the host"
 		case !s.Connected:
@@ -471,7 +463,7 @@ func composer(s Snapshot, u UIState, l layout) ([]line, int, int, int, string) {
 			str = "    "
 			w = 4
 		}
-		if str != "\n" && col+w > l.text {
+		if str != "\n" && col+w > textWidth {
 			parts = append(parts, current)
 			current = nil
 			row++
@@ -486,11 +478,15 @@ func composer(s Snapshot, u UIState, l layout) ([]line, int, int, int, string) {
 			row++
 			col = 0
 		} else {
-			if w > l.text {
+			if w > textWidth {
 				str = "�"
 				w = 1
 			}
-			current = append(current, textLine(str, normal)...)
+			color := normal
+			if u.Selected {
+				color.reverse = true
+			}
+			current = append(current, textLine(str, color)...)
 			col += w
 		}
 		pos = end
@@ -502,7 +498,7 @@ func composer(s Snapshot, u UIState, l layout) ([]line, int, int, int, string) {
 		cursorRow, cursorCol = 0, 0
 	}
 	parts = append(parts, current)
-	if cursorCol >= l.text {
+	if cursorCol >= textWidth {
 		cursorRow++
 		cursorCol = 0
 	}
@@ -513,30 +509,24 @@ func composer(s Snapshot, u UIState, l layout) ([]line, int, int, int, string) {
 	start := max(0, cursorRow-limit+1)
 	end := min(len(parts), start+limit)
 	if placeholder != "" {
-		parts[0] = textLine(placeholder, meta).clip(l.text)
+		parts[0] = textLine(placeholder, meta).clip(textWidth)
 	}
 	rows := make([]line, 0, end-start)
 	for i, p := range parts[start:end] {
-		role, seam := "", ""
+		prefix := textLine(strings.Repeat(" ", prompt.width()), normal)
 		if i == 0 {
-			role = label
-			seam = u.Theme.symbol("›", ">")
+			prefix = prompt
 		}
-		if l.tiny {
-			role = ""
-		}
-		rows = append(rows, l.gutter(role, seam, p))
+		rows = append(rows, joined(prefix, p).clip(l.main))
 	}
-	offset := 9
-	if l.tiny {
-		offset = 2
-	}
-	return rows, cursorRow - start, min(l.main-1, offset+cursorCol), len(parts) - (end - start), label
+	return rows, cursorRow - start, min(l.main-1, prompt.width()+cursorCol), len(parts) - (end - start), label
 }
 
 func rule(u UIState, l layout, overflow int, label string) line {
 	value := ""
 	switch {
+	case u.Selected:
+		value = "Type/paste replace   Backspace/Delete erase   Esc/arrows deselect"
 	case u.Picker != nil:
 		value = "selection; Esc back/cancel"
 		if u.Picker.Kind == "file" {
@@ -544,8 +534,6 @@ func rule(u UIState, l layout, overflow int, label string) line {
 		}
 	case u.Sheet != nil && u.Sheet.Analysis != "":
 		value = "PgUp/PgDn scroll  Esc/Enter back  ^D detach"
-	case u.Private != nil:
-		value = "private: API key for " + u.Private.Provider + "/" + u.Private.ID
 	case u.Pasted:
 		value = "pasted: Enter submits; registered commands run"
 	case label == "cmd":
@@ -571,20 +559,19 @@ func rule(u UIState, l layout, overflow int, label string) line {
 		}
 		value += fmt.Sprintf("+%d lines", overflow)
 	}
-	if len(u.Input) >= 48<<10 && u.Private == nil {
-		value += fmt.Sprintf("  %d KB of 64 KB", len(u.Input)/1024)
-	}
 	mark := u.Theme.symbol("─", "-")
 	if value == "" {
 		return textLine(strings.Repeat(mark, l.width), meta)
 	}
-	value = middle(value, max(0, l.width-4), u.Theme)
+	value = tail(value, max(0, l.width-4), u.Theme)
 	return textLine(mark+" "+value+" "+strings.Repeat(mark, max(0, l.width-uniseg.StringWidth(value)-3)), meta).clip(l.width)
 }
 func keybar(s Snapshot, u UIState, l layout, label string) line {
 	enter, tab := u.Theme.symbol("⏎", "enter"), u.Theme.symbol("⇥", "tab")
-	value := enter + " send   / commands   ^C stop session   ^D detach"
+	value := enter + " send   ^A select all   / commands   ^C stop session   ^D detach"
 	switch {
+	case u.Selected && u.Picker == nil && u.Sheet == nil:
+		value = "Type/paste replace  Backspace/Delete erase  Esc/arrows deselect"
 	case u.Picker != nil:
 		value = u.Theme.symbol("↑↓", "up/down") + " select  " + enter + " continue  Esc back/cancel  ^D detach"
 		if u.Picker.Kind == "response-export" {
@@ -598,8 +585,6 @@ func keybar(s Snapshot, u UIState, l layout, label string) line {
 		}
 	case u.Sheet != nil && u.Sheet.Analysis != "":
 		value = "PgUp/PgDn scroll  Esc/Enter back  ^D detach"
-	case u.Private != nil:
-		value = enter + " store key   ^C cancel entry   ^D detach"
 	case u.Busy:
 		value = "^C cancel waiting   ^D detach"
 	case label == "cmd":
@@ -625,7 +610,7 @@ func keybar(s Snapshot, u UIState, l layout, label string) line {
 	case focus(u, s) != "":
 		value = enter + " send to " + string(s.ID) + "   /child-send TEXT   ^C stop session"
 	case l.width < 69:
-		value = enter + " send  / cmds  ^C stop  ^D detach"
+		value = enter + " send  ^A all  / cmds  ^C stop  ^D detach"
 	case l.width >= 119:
 		value += "   PgUp/PgDn scroll"
 	}
@@ -636,6 +621,15 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 	l := makeLayout(width, height)
 	if u.Now.IsZero() {
 		u.Now = time.Now()
+	}
+	if u.cache != nil {
+		if f, ok := u.cache.inputFrame(s, u, width, height); ok {
+			return f
+		}
+		u.index = u.cache.prepare(s, u)
+	} else {
+		var temporary bodyCache
+		u.index = temporary.prepare(s, u)
 	}
 	if u.Parent == nil {
 		for i := range u.Viewer.Rows {
@@ -651,30 +645,27 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 		return f
 	}
 	if width < 20 || height < 6 {
-		mark := u.Theme.symbol("⇄", "+")
-		if !s.Connected {
-			mark = "?"
+		f.Lines = append(f.Lines, header(s, u, l).paint(u.Theme))
+		if u.Picker != nil {
+			rows, offset := pickerRows(u.Picker, u, l, max(0, l.height-3))
+			f.PickerOffset = offset
+			for _, row := range rows {
+				f.Lines = append(f.Lines, row.clip(l.width).paint(u.Theme))
+			}
 		}
-		run := u.Theme.symbol("▸", ">")
-		if runtime(s) == "stopped" {
-			run = u.Theme.symbol("▪", "#")
-		}
-		if runtime(s) == "failed" {
-			run = u.Theme.symbol("✗", "x")
-		}
-		if runtime(s) == "unknown" {
-			run = "?"
-		}
-		f.Lines = append(f.Lines, textLine(permissionBadge(s)+mark+" "+run, meta).clip(l.width).paint(u.Theme))
 		if l.height > 1 {
 			for len(f.Lines) < l.height-2 {
 				f.Lines = append(f.Lines, "")
 			}
 			text := u.Input
-			if u.Private != nil {
+			if u.Secret {
 				text = strings.Repeat("*", min(64, uniseg.GraphemeClusterCount(text)))
 			}
-			f.Lines = append(f.Lines, textLine(text, normal).clip(l.width).paint(u.Theme))
+			color := normal
+			if u.Selected {
+				color.reverse = true
+			}
+			f.Lines = append(f.Lines, textLine(text, color).clip(l.width).paint(u.Theme))
 			f.CursorX = min(max(0, l.width-1), uniseg.StringWidth(text))
 			f.CursorY = len(f.Lines) - 1
 		}
@@ -690,9 +681,7 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 	shortHint := ""
 	if height < 16 {
 		shortHint = "^C stop"
-		if u.Private != nil {
-			shortHint = "^C cancel entry"
-		} else if u.Busy {
+		if u.Busy {
 			shortHint = "^C cancel waiting"
 		}
 		inputLayout.text = max(1, l.text-len(shortHint)-2)
@@ -709,33 +698,30 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 			l.rail = max(48, min(60, width*3/10))
 		}
 		l.main = l.width - l.rail - 3
-		l.text = min(100, max(1, l.main-9))
+		l.text = min(100, max(1, l.main-2))
 	} else if f.View == ViewChat && width >= 120 && len(children(u, s)) > 0 {
 		l.rail = max(34, min(48, width*3/10))
 		if width >= 160 {
 			l.rail = 48
 		}
 		l.main = l.width - l.rail - 3
-		l.text = min(100, max(1, l.main-9))
+		l.text = min(100, max(1, l.main-2))
 	}
+	var attention []line
 	if u.cache != nil {
-		u.cache.begin(l.text, u.Theme.ASCII)
-		defer u.cache.end()
+		attention = u.cache.attentionRows(s, u, full)
+	} else {
+		attention = attentionBand(s, u, full)
 	}
-	footer := 2 + len(input) // rule, composer, permanent statistics row
+	footer := len(attention) + 2 + len(input) // rule, composer, permanent statistics row
 	if l.height >= 16 {
 		footer++
 	}
-	dockState, dockUI := s, u
-	if f.View == ViewOrchestration {
-		if runtime(s) == "failed" {
-			dockState.Failure = "provider/session failure; /analyze Errors for details"
-		}
-		if dockUI.Busy {
-			dockUI.Outbox = "request pending"
-		}
+	dockUI := u
+	if f.View == ViewOrchestration && dockUI.Busy {
+		dockUI.Outbox = "request pending"
 	}
-	states := stateDock(dockState, dockUI, l)
+	states := stateDock(s, dockUI, l)
 	notifications := notificationDock(dockUI, l)
 	blank := 0
 	if l.height >= 20 {
@@ -745,7 +731,7 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 	if l.height >= 20 {
 		minimum = l.height * 2 / 5
 	}
-	if u.Picker != nil && (u.Picker.Kind == "permission-full" || u.Picker.Kind == "permission-once") {
+	if u.Picker != nil && u.Picker.Kind == "permission-once" {
 		// Permission scopes take priority over old conversation and dock rows.
 		minimum = 1
 		states = nil
@@ -795,11 +781,6 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 	var extra []line
 	if u.Picker != nil {
 		extra, f.PickerOffset = pickerRows(u.Picker, u, l, available)
-	}
-	if u.LegacyPanel != "" {
-		for _, v := range strings.Split(SafeText(u.LegacyPanel), "\n") {
-			extra = append(extra, l.gutter("", "", textLine(v, meta)))
-		}
 	}
 	title := ""
 	if u.Sheet != nil {
@@ -858,7 +839,11 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 	f.ConversationY, f.ConversationWidth = 1+blank, l.main
 	var body []displayRow
 	if f.View != ViewOrchestration {
-		body = conversation(s, u, l)
+		if u.cache != nil {
+			body = u.cache.conversationRows(s, u, l)
+		} else {
+			body = conversation(s, u, l)
+		}
 	}
 	f.ConversationRows = len(body)
 	f.ScrollMax = max(0, len(body)-conversationRoom)
@@ -866,28 +851,23 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 	end := max(0, len(body)-scroll)
 	start := max(0, end-conversationRoom)
 	visible := body[start:end]
-	if len(visible) > 0 && start > 0 {
-		for i := range visible {
-			if visible[i].role != "" {
-				visible = append([]displayRow(nil), visible...)
-				visible[i].label = true
-				// Tiny already has role rows in the transcript. Replacing the
-				// first visible body row with a repeated label loses a real line
-				// on every page. Use its reserved seam without changing the body.
-				if l.tiny && !visible[i].bare {
-					visible[i].seam = u.Theme.symbol("↪", ">")
-				}
-				break
-			}
-		}
+	var headerRow line
+	if u.cache != nil {
+		headerRow = u.cache.header(s, u, l)
+	} else {
+		headerRow = header(s, u, l)
 	}
-	rows := []line{header(s, u, l)}
+	rows := []line{headerRow}
 	if blank > 0 {
 		rows = append(rows, nil)
 	}
 	var topology OrchestrationSnapshot
 	if f.View != ViewChat {
-		topology = BuildOrchestration(s, u.Viewer, u.Now, max(64, l.height*8))
+		if u.cache != nil {
+			topology.cards, topology.beads = u.cache.workCards(s, u)
+		} else {
+			topology.cards, topology.beads = buildWorkCards(s, u.Viewer, u.Now)
+		}
 	}
 	if f.View == ViewOrchestration {
 		var pane []line
@@ -929,6 +909,7 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 			rows[at] = joined(left, textLine(strings.Repeat(" ", l.main-left.width()+3), normal), right.clip(l.rail))
 		}
 	}
+	rows = append(rows, attention...)
 	if l.height >= 16 {
 		rows = append(rows, keybar(s, u, full, label))
 	}
@@ -936,11 +917,18 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 	f.CursorY = len(rows) + cy
 	f.CursorX = max(0, cx)
 	rows = append(rows, input...)
-	rows = append(rows, statisticsBar(s, u, full))
+	if u.cache != nil {
+		rows = append(rows, u.cache.statistics(s, u, full))
+	} else {
+		rows = append(rows, statisticsBar(s, u, full))
+	}
 	for _, r := range rows[:min(len(rows), l.height)] {
 		f.Lines = append(f.Lines, r.clip(l.width).paint(u.Theme))
 	}
 	f.CursorY = min(f.CursorY, l.height-1)
+	if u.cache != nil {
+		u.cache.rememberFrame(s, u, width, height, f, f.CursorY-cy, len(input), overflow)
+	}
 	return f
 }
 
@@ -962,11 +950,8 @@ func selectionLabel(s sessionstore.RuntimeSelection, t Theme) string {
 	return SafeText(name) + t.symbol(" · ", " / ") + string(s.Effort)
 }
 
-// Render is retained for embedders of the old string hook. The interactive path
-// uses structured RenderFrame and a differential terminal renderer.
-func Render(s Snapshot, input, status string, width, height int, panel string) string {
-	u := UIState{Theme: Theme{Plain: true}, Input: strings.TrimPrefix(input, "> "), Notification: Notification{Text: status}, LegacyPanel: panel}
-	u.Cursor = len(u.Input)
-	f := RenderFrame(s, u, width, height)
-	return "\x1b[H" + strings.Join(f.Lines, "\r\n")
+// forHuman reports a message the agent marked for the user.
+func forHuman(text string) bool {
+	text = strings.TrimSpace(text)
+	return displaytext.ForHuman(text)
 }

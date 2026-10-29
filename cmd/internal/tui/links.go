@@ -11,8 +11,6 @@ import (
 
 var webURLPattern = regexp.MustCompile("(?i)https?://[^\\s<>\"`]+")
 
-const maxBareLinksPerLine = 256
-
 // webTextLine only annotates already visible text. Paths remain visible in
 // plain/unsupported terminals, and insertion/selection never performs an action.
 func webTextLine(text string, s style) line {
@@ -22,7 +20,7 @@ func webTextLine(text string, s style) line {
 	}
 	text = strings.ReplaceAll(text, "\t", "    ")
 	glyphIndex, position := 0, 0
-	for _, match := range webURLPattern.FindAllStringIndex(text, maxBareLinksPerLine) {
+	for _, match := range webURLPattern.FindAllStringIndex(text, -1) {
 		start, end := match[0], match[1]
 		if start > 0 {
 			if !webBoundary(text[:start]) {

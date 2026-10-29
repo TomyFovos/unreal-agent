@@ -93,8 +93,8 @@ func (s *liveSession) send(ctx context.Context, command string, args jsontext.Va
 	s.pending[seq] = pending
 	s.mu.Unlock()
 	raw, err := json.Marshal(message{Seq: seq, Type: "request", Command: command, Arguments: args})
-	if err != nil || len(raw) > MaxFrameBytes {
-		return nil, &Error{Code: "request_too_large"}
+	if err != nil {
+		return nil, err
 	}
 	wire := append([]byte(fmt.Sprintf("Content-Length: %d\r\n\r\n", len(raw))), raw...)
 	s.writeMu.Lock()
@@ -170,20 +170,14 @@ func (s *liveSession) read(events <-chan primitives.PrimitiveEvent) {
 func frame(buffer []byte) (body, remaining []byte, complete bool, err error) {
 	end := bytes.Index(buffer, []byte("\r\n\r\n"))
 	if end < 0 {
-		if len(buffer) > 1024 {
-			return nil, nil, false, &Error{Code: "invalid_header"}
-		}
 		return nil, buffer, false, nil
-	}
-	if end > 1024 {
-		return nil, nil, false, &Error{Code: "invalid_header"}
 	}
 	header := string(buffer[:end])
 	if !strings.HasPrefix(header, "Content-Length: ") || strings.Contains(header, "\r\n") {
 		return nil, nil, false, &Error{Code: "invalid_header"}
 	}
 	count, err := strconv.Atoi(strings.TrimPrefix(header, "Content-Length: "))
-	if err != nil || count <= 0 || count > MaxFrameBytes {
+	if err != nil || count <= 0 {
 		return nil, nil, false, &Error{Code: "invalid_length"}
 	}
 	if len(buffer) < end+4+count {

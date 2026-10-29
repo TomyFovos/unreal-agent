@@ -118,21 +118,19 @@ func TestHumanPermissionRealTerminalConfirmationOnceDenyDetach(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	readUntil("Permissions: Read Only")
+	readUntil("[Read Only]")
 	send("/permissions\r")
-	readUntil("Schemas are capabilities")
+	readUntil("権限を選んでください")
 	send("\x1b[B\x1b[B\r")
-	readUntil("NO OS SANDBOX")
-	v, _ := client.Inspect(t.Context(), s.ID, 0, 128)
-	if v.Permissions.Mode != permission.ReadOnly {
-		t.Fatal("selection approved Full")
+	readUntil("[Full Access]")
+	v, err := client.Inspect(t.Context(), s.ID, 0, 128)
+	if err != nil || v.Permissions.Mode != permission.FullAccess {
+		t.Fatal("selection did not immediately apply Full Access", err)
 	}
-	send("\x1b[B\r")
-	readUntil("Permissions: Full Access")
 	send("/permissions\r")
-	readUntil("Schemas are capabilities")
+	readUntil("権限を選んでください")
 	send("\x1b[A\r")
-	readUntil("Permissions: Ask for Approval")
+	readUntil("[Ask]")
 	root := t.TempDir()
 	spec, err := operation.NewShellSpec(operation.ShellInput{Shell: "/bin/sh", Directory: root, Command: "printf once >> marker"}, t.TempDir(), 256)
 	if err != nil {
@@ -170,11 +168,9 @@ func TestHumanPermissionRealTerminalConfirmationOnceDenyDetach(t *testing.T) {
 		t.Fatal("denied/duplicate execution", err)
 	}
 	send("/permissions\r")
-	readUntil("Schemas are capabilities")
+	readUntil("権限を選んでください")
 	send("\x1b[B\r")
-	readUntil("NO OS SANDBOX")
-	send("\x1b[B\r")
-	readUntil("Permissions: Full Access")
+	readUntil("[Full Access]")
 	send("\x04")
 	waited := make(chan error, 1)
 	go func() { waited <- cmd.Wait() }()

@@ -1,21 +1,13 @@
 package llm
 
-import "errors"
-
-// RecoveryProvider is an opt-in model projection capability, never execution
-// authority. Existing providers without the marker retain their original path.
-func RecoveryProvider(adapter Adapter) string {
-	if capable, ok := adapter.(interface{ ConversationRecoveryProvider() string }); ok {
-		return capable.ConversationRecoveryProvider()
-	}
-	return ""
-}
-
-func (e *ContinuationError) ConversationRecoveryRequired() bool { return true }
-func NeedsConversationRecovery(err error) bool {
-	var marked interface {
-		error
-		ConversationRecoveryRequired() bool
-	}
-	return errors.As(err, &marked) && marked.ConversationRecoveryRequired()
+// ConversationRecord describes a provider's private conversation. Unknown
+// post-compaction sizes stay unknown until the provider reports usage again.
+type ConversationRecord struct {
+	Provider     string
+	InputTokens  int64
+	InputKnown   bool
+	BeforeTokens int64  `json:",omitzero"`
+	Compacted    bool   `json:",omitzero"`
+	Interrupted  bool   `json:",omitzero"`
+	Error        string `json:",omitzero"`
 }

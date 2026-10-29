@@ -48,7 +48,7 @@ func Run(ctx context.Context, args []string, input io.Reader, output io.Writer) 
 	if err != nil {
 		return err
 	}
-	service := authflow.New(credential.NewManager(backend, nil))
+	service := authflow.New(credential.NewManager(backend))
 	ref := credential.Reference{Provider: *provider, ID: *id, Method: credential.Method(*method)}
 	switch args[0] {
 	case "login":

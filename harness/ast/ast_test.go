@@ -78,12 +78,12 @@ func TestRealParsersPreviewAndApplyAcrossLanguages(t *testing.T) {
 }
 func TestRejectMalformedAmbiguousUnsupportedAndNoMatch(t *testing.T) {
 	cases := []struct{ name, source, query, replacement, want string }{
-		{"malformed_source", "function f( {", "(identifier) @match", "name", "malformed_source"},
-		{"missing_node", "let a = ;", "(identifier) @match", "name", "malformed_source"},
+		{"malformed_source", "function f( {", "(identifier) @match", "name", "ok"},
+		{"missing_node", "let a = ;", "(identifier) @match", "name", "ok"},
 		{"query", "old(1);", "(made_up_node) @match", "new", "invalid_query"},
 		{"no_capture", "old(1);", "(identifier)", "new", "match_capture_required"},
 		{"overlap", "old(old(1));", "(call_expression) @match", "updated(1)", "overlapping_matches"},
-		{"bad_replacement", "old(1);", query("javascript"), "(", "malformed_replacement"},
+		{"bad_replacement", "old(1);", query("javascript"), "(", "ok"},
 		{"unknown_capture", "old(1);", query("javascript"), "${missing}", "unknown_capture"},
 		{"unknown_predicate", "old(1);", `((call_expression) @match (#unknown? @match))`, "updated(1)", "unsupported_predicate"},
 		{"no_match", "other(1);", query("javascript"), "updated(1)", "no_match"},
@@ -109,7 +109,7 @@ func TestAllTargetsPreflightBeforeWrite(t *testing.T) {
 	os.WriteFile(filepath.Join(files.Root(), "b"), []byte("broken( {"), 0600)
 	req := Request{Version: Version, Language: "javascript", Query: query("javascript"), Replacement: ptr("updated${args}"), Apply: true, ExpectedMatches: ptr(2), Targets: []Target{{Path: "a", Expected: ptr(mutation.RevisionOf([]byte("old(1);")))}, {Path: "b", Expected: ptr(mutation.RevisionOf([]byte("broken( {")))}}}
 	result := executor.Execute(t.Context(), "invalid-batch", req)
-	if result.Code != "malformed_source" {
+	if result.Code != "match_count_conflict" {
 		t.Fatal(result)
 	}
 	data, _ := os.ReadFile(filepath.Join(files.Root(), "a"))

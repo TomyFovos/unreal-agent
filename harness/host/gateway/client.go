@@ -1,12 +1,12 @@
 package gateway
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -29,19 +29,27 @@ type Client struct {
 func NewClient(socket string) *Client {
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
-	}, MaxConnsPerHost: 8}
+	}}
 	return &Client{http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, transport: transport}
 }
 func (c *Client) Close() error { c.transport.CloseIdleConnections(); return nil }
-func (c *Client) connect(ctx context.Context, path string, q request) (*http.Response, *bufio.Scanner, error) {
+
+func (c *Client) Version(ctx context.Context, id session.ID) (host.ObservationVersion, error) {
+	f, err := c.call(ctx, "version", request{ID: id})
+	if err != nil {
+		return host.ObservationVersion{}, err
+	}
+	if f.Version == nil {
+		return host.ObservationVersion{}, errors.New("gateway: missing observation version")
+	}
+	return *f.Version, nil
+}
+func (c *Client) connect(ctx context.Context, path string, q request) (*http.Response, *jsontext.Decoder, error) {
 	body, err := json.Marshal(q)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer clear(body)
-	if len(body) > MaxRequestBytes {
-		return nil, nil, &Error{Code: "request_too_large"}
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost/v1/"+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, err
@@ -57,23 +65,20 @@ func (c *Client) connect(ctx context.Context, path string, q request) (*http.Res
 		response.Body.Close()
 		return nil, nil, &Error{Code: "transport_failed"}
 	}
-	scanner := bufio.NewScanner(response.Body)
-	scanner.Buffer(make([]byte, 4096), MaxFrameBytes+1)
+	scanner := jsontext.NewDecoder(response.Body)
 	return response, scanner, nil
 }
-func next(scanner *bufio.Scanner) (frame, error) {
+func next(scanner *jsontext.Decoder) (frame, error) {
 	var f frame
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return f, &Error{Code: "invalid_frame"}
-		}
-		return f, io.EOF
+	value, err := scanner.ReadValue()
+	if err != nil {
+		return f, err
 	}
-	if err := json.Unmarshal(scanner.Bytes(), &f); err != nil {
-		return f, &Error{Code: "invalid_frame"}
+	if err := json.Unmarshal(value, &f); err != nil {
+		return f, fmt.Errorf("decode gateway frame: %w", err)
 	}
 	if f.Error != "" {
-		return f, &Error{Code: f.Error}
+		return f, &Error{Code: f.Error, Reason: SafeReason(f.Reason)}
 	}
 	return f, nil
 }
@@ -102,6 +107,18 @@ func (c *Client) Inspect(ctx context.Context, id session.ID, after sessionstore.
 	}
 	if e != nil {
 		return host.View{}, e
+	}
+	return *f.View, nil
+}
+
+// InspectBefore reads a predecessor window without moving a subscription cursor.
+func (c *Client) InspectBefore(ctx context.Context, id session.ID, before sessionstore.Sequence, limit int) (host.View, error) {
+	f, err := c.call(ctx, "history-before", request{ID: id, Before: before, Limit: limit})
+	if err != nil {
+		return host.View{}, err
+	}
+	if f.View == nil {
+		return host.View{}, errors.New("gateway: missing view")
 	}
 	return *f.View, nil
 }
@@ -138,7 +155,7 @@ func (c *Client) Subscribe(ctx context.Context, id session.ID, after sessionstor
 		}
 		return host.Subscription{}, err
 	}
-	events := make(chan host.Event, max(1, min(capacity, 128)))
+	events := make(chan host.Event, max(1, capacity))
 	var once sync.Once
 	closeStream := func() { once.Do(func() { cancel(); response.Body.Close() }) }
 	go func() {
@@ -194,11 +211,11 @@ func (c *Client) ListCredentials(ctx context.Context) ([]credential.Metadata, er
 	return f.Entries, e
 }
 
-// Extension carries one bounded JSON value to the owner-installed extension.
+// Extension carries one JSON value to the owner-installed extension.
 // That extension defines its own typed protocol; this transport neither reads
 // Session files nor grants access to arbitrary child owners.
 func (c *Client) Extension(ctx context.Context, value jsontext.Value) (jsontext.Value, error) {
-	if len(value) > MaxRequestBytes || !value.IsValid() {
+	if !value.IsValid() {
 		return nil, &Error{Code: "invalid_extension_request"}
 	}
 	body := value.Clone()
@@ -218,11 +235,11 @@ func (c *Client) Extension(ctx context.Context, value jsontext.Value) (jsontext.
 	if response.StatusCode != http.StatusOK {
 		return nil, &Error{Code: "extension_failed"}
 	}
-	result, err := io.ReadAll(io.LimitReader(response.Body, MaxFrameBytes+1))
+	result, err := io.ReadAll(response.Body)
 	if err != nil {
 		return nil, &Error{Code: "invalid_extension_frame"}
 	}
-	if len(result) > MaxFrameBytes || !jsontext.Value(result).IsValid() {
+	if !jsontext.Value(result).IsValid() {
 		return nil, &Error{Code: "invalid_extension_frame"}
 	}
 	return result, nil

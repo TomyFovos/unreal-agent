@@ -40,7 +40,7 @@ func TestCreateWithHostRecordsRejectsInvalidRecordWithoutSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot.Content = "tampered"
+	snapshot.Version++
 	for _, record := range []sessionstore.HostRecord{
 		{Version: 1, Kind: sessionstore.HostProjectInstructions, ProjectInstructions: &snapshot},
 		{Version: 1, Kind: sessionstore.HostProjectInstructions},

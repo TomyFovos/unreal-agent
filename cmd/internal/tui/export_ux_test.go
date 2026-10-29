@@ -139,7 +139,7 @@ func (f *gatedExportSubmit) Submit(ctx context.Context, id session.ID, generatio
 	}
 }
 
-func TestPastedExportPrivateEntryRemovedCopyAndInvalidArguments(t *testing.T) {
+func TestPastedExportRemovedCopyAndInvalidArguments(t *testing.T) {
 	f := conversationFixture("public response")
 	release := make(chan struct{})
 	client := &gatedExportSubmit{pagedTranscriptClient: f, release: release}
@@ -171,13 +171,6 @@ func TestPastedExportPrivateEntryRemovedCopyAndInvalidArguments(t *testing.T) {
 	waitFor(t, func() bool {
 		return strings.Contains(out.text(), "exported to") && !strings.Contains(out.text(), "cancel waiting")
 	})
-	keys <- Key{Text: "/login openai synthetic-id"}
-	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "private: API key") })
-	keys <- Key{Text: "/export last"}
-	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.logins == 1 })
-	waitFor(t, func() bool { return strings.Contains(out.text(), "API key stored") })
 	keys <- Key{Text: "/clipboard last"}
 	keys <- Key{Name: "enter"}
 	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.inputs) == 1 })
@@ -192,7 +185,7 @@ func TestPastedExportPrivateEntryRemovedCopyAndInvalidArguments(t *testing.T) {
 	exportFiles(t, dir, 1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.inputs) != 1 || string(f.inputs[0].Payload) != `"/clipboard last"` || f.login != "/export last" {
+	if len(f.inputs) != 1 || string(f.inputs[0].Payload) != `"/clipboard last"` {
 		t.Fatal("command safety changed")
 	}
 }

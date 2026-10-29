@@ -45,8 +45,9 @@ func TestSearchResultAndQueryBounds(t *testing.T) {
 			t.Fatal(limit, len(m), err)
 		}
 	}
-	m, err := index.Search(context.Background(), strings.Repeat("x", QueryLimit+1), 32)
-	if err != nil || len(m) != 0 {
+	index.files = append(index.files, strings.Repeat("x", 257))
+	m, err := index.Search(context.Background(), strings.Repeat("x", 257), 32)
+	if err != nil || len(m) != 1 {
 		t.Fatal(m, err)
 	}
 	m, err = index.Search(context.Background(), "not-matching", 32)

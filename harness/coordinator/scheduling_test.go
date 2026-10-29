@@ -154,7 +154,7 @@ func TestCoordinatorRunDefersCompletionsUntilModelFinishes(t *testing.T) {
 						store, inputs, operations, contextbuilder.NewBuilder(), registry, adapter,
 					)
 					var runErr error
-					go func() { runErr = current.Run(ctx) }()
+					go func() { runErr = runLiveCoordinator(ctx, current) }()
 
 					finishOperation := func(index int) {
 						value := store.resume.Operations[index]
@@ -254,7 +254,7 @@ func TestCoordinatorRunSlurpsIndependentOperationCompletions(t *testing.T) {
 			store, newTestInbox(t), operations, contextbuilder.NewBuilder(), registry, adapter,
 		)
 		var runErr error
-		go func() { runErr = current.Run(ctx) }()
+		go func() { runErr = runLiveCoordinator(ctx, current) }()
 		synctest.Wait()
 		synctest.Sleep(2 * slurpIdleTimeout)
 		requests := adapter.requestSnapshot()
@@ -291,7 +291,7 @@ func TestCoordinatorRunPersistsCompletedUpdatesBeforeClosure(t *testing.T) {
 		}}
 		builder := contextbuilder.NewBuilder()
 		current := newTestCoordinatorWithAdapter(store, newTestInbox(t), operations, builder, registry, adapter)
-		err := current.Run(t.Context())
+		err := runLiveCoordinator(t.Context(), current)
 		if err == nil || err.Error() != "operation updates closed" {
 			t.Fatalf("Run error = %v, want closed operation updates error", err)
 		}

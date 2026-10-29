@@ -57,7 +57,7 @@ func assertRecordCompatibility(t *testing.T, kind recordType, value any) []byte 
 
 func TestEncodeRecordCanonicalCompatibility(t *testing.T) {
 	plain := validOperation("operation-1", operation.StatusReady)
-	metadata := operation.WithPreparationRequired(operation.WithIdempotency(operation.WithExecutionBasis(plain, jsontext.Value(`{"basis":[null,true,1e+09,"\u0061"]}`)), jsontext.Value(`{"nonce":"<>&\u2028\u2029"}`)), true)
+	metadata := operation.WithIdempotency(operation.WithDependencies(plain, []operation.ID{"prior"}), jsontext.Value(`{"nonce":"<>&\u2028\u2029"}`))
 	tests := []struct {
 		name  string
 		kind  recordType
@@ -174,7 +174,7 @@ func TestEncodeRecordPointerValuesKeepCompatibility(t *testing.T) {
 
 func TestEncodeRecordOwnsOutputAndPreservesInput(t *testing.T) {
 	raw := jsontext.Value(`{"body":"日本語<>&\n","n":1.2300e+07}`)
-	op := operation.WithIdempotency(operation.WithExecutionBasis(validOperation("owned", operation.StatusReady), raw), raw)
+	op := operation.WithIdempotency(validOperation("owned", operation.StatusReady), raw)
 	op.State = raw
 	snapshot := operation.CloneExecutionMetadata(op)
 	snapshot.State = raw.Clone()

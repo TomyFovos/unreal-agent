@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
-	"time"
-	"unicode/utf8"
 	"uuid"
 
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -50,7 +48,7 @@ func NewManager(ctx context.Context, configs ...AdapterConfig) (*Manager, error)
 		for _, raw := range []jsontext.Value{c.LaunchFields, c.AttachFields} {
 			if len(raw) > 0 {
 				var fields map[string]jsontext.Value
-				if len(raw) > MaxResultBytes || json.Unmarshal(raw, &fields) != nil || fields == nil {
+				if json.Unmarshal(raw, &fields) != nil || fields == nil {
 					cancel()
 					return nil, &Error{Code: "invalid_adapter_configuration"}
 				}
@@ -185,7 +183,7 @@ func (m *Manager) CancelRemoteJob(id operation.ID, _ string) error {
 	return nil
 }
 func (m *Manager) Execute(ctx context.Context, r Request) (Result, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(m.ctx, cancel)
 	defer stop()
@@ -258,9 +256,6 @@ func (m *Manager) Execute(ctx context.Context, r Request) (Result, error) {
 			return fail(err)
 		}
 	}
-	if r.Command == "disconnect" && r.Terminate && s.attached {
-		return fail(&Error{Code: "cannot_terminate_attached_target"})
-	}
 	args := arguments(r)
 	body, err := s.request(ctx, r.Command, args)
 	if err != nil {
@@ -281,10 +276,6 @@ func (m *Manager) Execute(ctx context.Context, r Request) (Result, error) {
 	if err := decodeResult(&result, r, body); err != nil {
 		return fail(err)
 	}
-	encoded, _ := json.Marshal(result)
-	if len(encoded) > MaxResultBytes {
-		return fail(&Error{Code: "result_too_large"})
-	}
 	return result, nil
 }
 func (m *Manager) start(ctx context.Context, r Request) (Result, error) {
@@ -300,9 +291,6 @@ func (m *Manager) start(ctx context.Context, r Request) (Result, error) {
 	if !ok {
 		return fail(&Error{Code: "unsupported_adapter"})
 	}
-	if r.Command == "attach" && !slices.Contains(c.AllowedAttachPIDs, r.Start.ProcessID) {
-		return fail(&permission.Error{Code: permission.Denied, Capability: "debuggee.attach", Reason: "target is not explicitly authorized"})
-	}
 	// Keep the adapter alive long enough to detach on owner cancellation. The
 	// Manager cancellation callback owns shutdown and always cancels this context.
 	processContext, cancel := context.WithCancel(context.WithoutCancel(m.ctx))
@@ -310,10 +298,10 @@ func (m *Manager) start(ctx context.Context, r Request) (Result, error) {
 	s.commandMu.Lock()
 	defer s.commandMu.Unlock()
 	m.mu.Lock()
-	if m.closed || len(m.sessions) >= 8 {
+	if m.closed {
 		m.mu.Unlock()
 		cancel()
-		return fail(&Error{Code: "session_limit"})
+		return fail(&Error{Code: "expired"})
 	}
 	if _, exists := m.sessions[r.Handle.ID]; exists {
 		m.mu.Unlock()
@@ -411,9 +399,6 @@ initialized:
 }
 func arguments(r Request) map[string]any {
 	count := r.Count
-	if count == 0 {
-		count = MaxItems
-	}
 	switch r.Command {
 	case "continue", "pause", "next", "stepIn", "stepOut":
 		return map[string]any{"threadId": r.ThreadID}
@@ -475,32 +460,18 @@ func decodeResult(out *Result, r Request, body jsontext.Value) error {
 	case "setBreakpoints":
 		items = data.Breakpoints
 	case "evaluate":
-		out.Value = bounded(data.Result, &out.Truncated)
+		out.Value = data.Result
 		out.VariablesReference = data.VariablesReference
 	}
 	count := r.Count
-	if count == 0 {
-		count = MaxItems
-	}
-	if len(items) > count {
+	if count > 0 && len(items) > count {
 		items = items[:count]
 		out.Truncated = true
 	}
 	for _, i := range items {
-		out.Items = append(out.Items, Item{ID: i.ID, Name: bounded(i.Name, &out.Truncated), Value: bounded(i.Value, &out.Truncated), Type: bounded(i.Type, &out.Truncated), VariablesReference: i.VariablesReference, Source: bounded(i.Source.Path, &out.Truncated), Line: i.Line, Column: i.Column, Verified: i.Verified})
+		out.Items = append(out.Items, Item{ID: i.ID, Name: i.Name, Value: i.Value, Type: i.Type, VariablesReference: i.VariablesReference, Source: i.Source.Path, Line: i.Line, Column: i.Column, Verified: i.Verified})
 	}
 	return nil
-}
-func bounded(s string, truncated *bool) string {
-	if len(s) <= 2048 {
-		return s
-	}
-	s = s[:2048]
-	for len(s) > 0 && !utf8.ValidString(s) {
-		s = s[:len(s)-1]
-	}
-	*truncated = true
-	return s + "…"
 }
 
 var _ operation.RemoteJobHandler = (*Manager)(nil)

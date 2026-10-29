@@ -2,80 +2,110 @@ package coordinator
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
+	"strings"
+	"unicode"
 	"uuid"
 
-	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
+	"github.com/unreallabsai/unreal-agent/internal/secretguard"
 )
 
 type bridgeReply struct {
 	outcomes []llm.ToolOutcome
-	request  llm.Request
-	budget   int64
 	err      error
+	inputs   []string
 }
 type bridgeRequest struct {
-	ctx        context.Context
-	origin     session.TurnID
-	response   llm.Response
-	reply      chan bridgeReply
-	begin      bool
-	refresh    bool
-	reserve    int64
-	projection *llm.ContextProjection
+	ctx                context.Context
+	origin             session.TurnID
+	response           llm.Response
+	reply              chan bridgeReply
+	begin              bool
+	waitingForChildren bool
+	steering           bool
 }
 
-func (current *coordinator) refreshProjectedToolContext(ctx context.Context, origin session.TurnID) func(context.Context, llm.ContextProjection) (llm.Request, int64, error) {
-	return func(callCtx context.Context, projection llm.ContextProjection) (llm.Request, int64, error) {
-		request := bridgeRequest{ctx: callCtx, origin: origin, reply: make(chan bridgeReply, 1), refresh: true, projection: &projection}
+func (current *coordinator) steeringRendezvous(ctx context.Context, origin session.TurnID) func(context.Context) ([]string, error) {
+	return func(callCtx context.Context) ([]string, error) {
+		request := bridgeRequest{ctx: callCtx, origin: origin, reply: make(chan bridgeReply, 1), steering: true}
 		select {
 		case current.bridgeRequests <- request:
 		case <-ctx.Done():
-			return llm.Request{}, 0, ctx.Err()
+			return nil, ctx.Err()
 		case <-callCtx.Done():
-			return llm.Request{}, 0, callCtx.Err()
+			return nil, callCtx.Err()
 		}
 		select {
 		case reply := <-request.reply:
-			return reply.request, reply.budget, reply.err
+			return reply.inputs, reply.err
 		case <-ctx.Done():
-			return llm.Request{}, 0, ctx.Err()
+			return nil, ctx.Err()
 		case <-callCtx.Done():
-			return llm.Request{}, 0, callCtx.Err()
+			return nil, callCtx.Err()
 		}
 	}
 }
 
-func (current *coordinator) refreshToolContext(ctx context.Context, origin session.TurnID) func(context.Context, int64) (llm.Request, int64, error) {
-	return func(callCtx context.Context, reserve int64) (llm.Request, int64, error) {
-		request := bridgeRequest{ctx: callCtx, origin: origin, reply: make(chan bridgeReply, 1), refresh: true, reserve: reserve}
-		select {
-		case current.bridgeRequests <- request:
-		case <-ctx.Done():
-			return llm.Request{}, 0, ctx.Err()
-		case <-callCtx.Done():
-			return llm.Request{}, 0, callCtx.Err()
+// External inputs projected here precede the next Claude response. Peer inputs
+// remain deferred for their own turn, and are not acknowledged by this batch.
+func (current *coordinator) deliverSteering(ctx context.Context, request bridgeRequest) error {
+	var inputs []string
+	var remaining []sessionstore.Item
+	for _, item := range current.deferredContext {
+		input := item.Data.(inbox.Input)
+		if input.Kind != inbox.InputExternal {
+			remaining = append(remaining, item)
+			continue
 		}
-		select {
-		case reply := <-request.reply:
-			return reply.request, reply.budget, reply.err
-		case <-ctx.Done():
-			return llm.Request{}, 0, ctx.Err()
-		case <-callCtx.Done():
-			return llm.Request{}, 0, callCtx.Err()
+		var text string
+		if err := json.Unmarshal(input.Payload, &text); err != nil {
+			return err
+		}
+		text = safeSteeringText(text)
+		inputs = append(inputs, text)
+		if b, ok := current.dependencies.ContextBuilder.(interface{ SetHistoryItem(sessionstore.Item) }); ok {
+			b.SetHistoryItem(item)
+		}
+		if err := current.dependencies.ContextBuilder.AddExternalInput(input); err != nil {
+			return err
 		}
 	}
+	if len(inputs) > 0 {
+		current.modelInputs += len(inputs)
+		current.turnExternals = current.state.externalInputs
+		if err := current.commitBridgeContinuation(ctx); err != nil {
+			return err
+		}
+		current.deferredContext = remaining
+		current.state.callModel = false
+	}
+	request.reply <- bridgeReply{inputs: inputs}
+	return nil
 }
 
-func (current *coordinator) beginToolRendezvous(ctx context.Context, origin session.TurnID) func(context.Context) error {
-	return func(callCtx context.Context) error {
-		request := bridgeRequest{ctx: callCtx, origin: origin, reply: make(chan bridgeReply, 1), begin: true}
+func safeSteeringText(text string) string {
+	text = secretguard.Redact(text)
+	return secretguard.Redact(strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if unicode.IsControl(r) || r >= 0x202a && r <= 0x202e || r >= 0x2066 && r <= 0x2069 || r == 0x200e || r == 0x200f || r == 0x061c || r == 0x2028 || r == 0x2029 {
+			return -1
+		}
+		return r
+	}, text))
+}
+
+func (current *coordinator) beginToolRendezvous(ctx context.Context, origin session.TurnID) func(context.Context, bool) error {
+	return func(callCtx context.Context, waitingForChildren bool) error {
+		request := bridgeRequest{ctx: callCtx, origin: origin, reply: make(chan bridgeReply, 1), begin: true, waitingForChildren: waitingForChildren}
 		select {
 		case current.bridgeRequests <- request:
 		case <-ctx.Done():
@@ -99,13 +129,6 @@ type bridgeRound struct {
 	turn    session.TurnID
 	calls   []string
 	results map[string]llm.ToolOutcome
-}
-
-// A disposable replay index rebuilt from public canonical ToolCalls/receipts.
-// It is not a second operation history and never authorizes re-execution.
-type canonicalBridgeCall struct {
-	identity [32]byte
-	outcome  *llm.ToolOutcome
 }
 
 func (current *coordinator) flushDeferredContext() error {
@@ -158,46 +181,17 @@ func (current *coordinator) acceptBridgeRequest(ctx context.Context, request bri
 	}
 	if request.begin {
 		current.bridgeActive = true
+		current.waitingForChildren = request.waitingForChildren
+		if (request.waitingForChildren || current.backgroundTurn) && current.state.externalInputs > current.turnExternals {
+			current.interruptModel()
+			request.reply <- bridgeReply{err: context.Canceled}
+			return nil
+		}
 		request.reply <- bridgeReply{}
 		return nil
 	}
-	if request.refresh {
-		if current.dependencies.BeforeGeneration != nil {
-			if err := current.dependencies.BeforeGeneration(request.ctx); err != nil {
-				request.reply <- bridgeReply{err: err}
-				return nil
-			}
-		}
-		var built contextbuilder.Result
-		var err error
-		if request.projection != nil {
-			if b, ok := current.dependencies.ContextBuilder.(interface {
-				BuildWithProjection(llm.ContextProjection) (contextbuilder.Result, error)
-			}); ok {
-				built, err = b.BuildWithProjection(*request.projection)
-			} else {
-				err = errors.New("context projection unsupported")
-			}
-		} else if b, ok := current.dependencies.ContextBuilder.(interface {
-			BuildWithReserve(int64) (contextbuilder.Result, error)
-		}); ok {
-			built, err = b.BuildWithReserve(request.reserve)
-		} else {
-			built, err = current.dependencies.ContextBuilder.Build()
-		}
-		reply := bridgeReply{request: built.Request, err: err}
-		if built.Report.Context != nil {
-			reply.budget = built.Report.Context.Budget.Input
-			if current.dependencies.ContextBuilt != nil {
-				current.dependencies.ContextBuilt(*built.Report.Context)
-			}
-		}
-		request.reply <- reply
-		return nil
-	}
-	if current.toolAdmissionErr != nil {
-		request.reply <- bridgeReply{err: current.toolAdmissionErr}
-		return nil
+	if request.steering {
+		return current.deliverSteering(ctx, request)
 	}
 	round := &bridgeRound{request: request, turn: current.state.currentTurnID, results: map[string]llm.ToolOutcome{}}
 	seen := map[string]bool{}
@@ -215,8 +209,7 @@ func (current *coordinator) acceptBridgeRequest(ctx context.Context, request bri
 				return nil
 			}
 			if seen[call.CallID] {
-				_, err := current.checkToolAdmission(request.response)
-				request.reply <- bridgeReply{err: err}
+				request.reply <- bridgeReply{err: llm.ErrToolIdentityConflict}
 				return nil
 			}
 			seen[call.CallID] = true
@@ -227,22 +220,6 @@ func (current *coordinator) acceptBridgeRequest(ctx context.Context, request bri
 	}
 	if len(round.calls) == 0 {
 		return errors.New("empty tool rendezvous")
-	}
-	if len(request.response.Output) == 1 && len(round.calls) == 1 {
-		call := request.response.Output[0].Data.(llm.ToolCall)
-		if prior := current.structuredCalls[call.CallID]; prior != nil {
-			digest, err := toolFingerprint(call)
-			if err != nil || prior.identity != digest {
-				request.reply <- bridgeReply{err: llm.ErrToolIdentityConflict}
-				return nil
-			}
-			if prior.outcome == nil {
-				request.reply <- bridgeReply{err: llm.ErrToolRecoveryRequired}
-				return nil
-			}
-			request.reply <- bridgeReply{outcomes: []llm.ToolOutcome{*prior.outcome}}
-			return nil
-		}
 	}
 	current.bridge, current.bridgeActive = round, true
 	if _, err := current.handleModelResponse(ctx, sessionstore.ModelResponse{TurnID: round.turn, Response: request.response}); err != nil {
@@ -258,8 +235,8 @@ func (current *coordinator) acceptBridgeRequest(ctx context.Context, request bri
 }
 
 func (current *coordinator) rememberBridgeResult(status sessionstore.ToolCallStatus, result llm.ToolResult, translator tool.ResultTranslator) {
-	if current.bridge == nil && current.structuredCalls[status.CallID] == nil {
-		return // no callback/replay consumer; do not classify the same receipt twice
+	if current.bridge == nil {
+		return // no active callback consumer
 	}
 	failed := status.Status.Error != ""
 	if classifier, ok := translator.(tool.ResultFailureClassifier); ok {
@@ -273,9 +250,6 @@ func (current *coordinator) rememberBridgeResult(status sessionstore.ToolCallSta
 		}
 	}
 	outcome := llm.ToolOutcome{Result: result, Failed: failed}
-	if prior := current.structuredCalls[status.CallID]; prior != nil {
-		prior.outcome = &outcome
-	}
 	if current.bridge != nil && current.bridge.turn == status.TurnID {
 		current.bridge.results[status.CallID] = outcome
 	}
@@ -291,10 +265,20 @@ func (current *coordinator) deliverBridgeResults(ctx context.Context) error {
 		outcomes = append(outcomes, round.results[id])
 	}
 	current.modelInputs += len(outcomes)
+	if err := current.commitBridgeContinuation(ctx); err != nil {
+		return err
+	}
+	current.bridge = nil
+	round.request.reply <- bridgeReply{outcomes: outcomes}
+	return nil
+}
+
+func (current *coordinator) commitBridgeContinuation(ctx context.Context) error {
 	turn := session.Turn{
 		ID: session.TurnID(uuid.New().String()), PreviousTurnID: current.state.currentTurnID,
 		Type: session.TurnRegular, RuntimeRevision: current.modelRevision,
 		ToolContinuation: current.modelOrigin, InputWatermark: current.modelInputs,
+		ExternalInputWatermark: current.turnExternals,
 	}
 	item, err := current.addItemToLocalState(sessionstore.Item{Kind: sessionstore.ItemTurn, Data: turn})
 	if err != nil {
@@ -304,7 +288,5 @@ func (current *coordinator) deliverBridgeResults(ctx context.Context) error {
 		return err
 	}
 	current.state.callModel = false
-	current.bridge = nil
-	round.request.reply <- bridgeReply{outcomes: outcomes}
 	return nil
 }

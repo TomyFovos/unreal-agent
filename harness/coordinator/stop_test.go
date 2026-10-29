@@ -244,7 +244,7 @@ func TestCoordinatorCancellationWhileCollectingUpdates(t *testing.T) {
 				run := newStopTestRun(t, 1)
 				ctx, cancel := context.WithCancelCause(t.Context())
 				defer cancel(nil)
-				go func() { run.done <- run.current.Run(ctx) }()
+				go func() { run.done <- run.run(ctx) }()
 				synctest.Wait()
 				if source == "inbox" {
 					submitTestInput(t, run.inputs, externalEvent(t, 0, "input", "hello"))
@@ -315,7 +315,7 @@ func TestCoordinatorCancellationTakesPrecedenceOverModelError(t *testing.T) {
 				return llm.Response{}, ctx.Err()
 			}
 		}}
-		go func() { run.done <- run.current.Run(ctx) }()
+		go func() { run.done <- run.run(ctx) }()
 		synctest.Wait()
 		run.input(t, externalEvent(t, 0, "input", "hello"))
 		cancelModel := run.current.cancelModel
@@ -361,6 +361,7 @@ func TestCoordinatorWhenIdleDeliversRestoredResults(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				run := newStopTestRun(t, 1)
+				run.live = false
 				status := run.store.items[2].Data.(sessionstore.ToolCallStatus)
 				status.Operations[0].Status = operation.StatusCompleted
 				run.store.items[2].Data = status
@@ -406,12 +407,13 @@ type stopTestRun struct {
 	operations *fakeOperationManager
 	calls      []stopTestCall
 	done       chan error
+	live       bool
 }
 
 func newStopTestRun(t *testing.T, pending int) *stopTestRun {
 	t.Helper()
 	store, registry := independentToolCalls(t, pending)
-	run := &stopTestRun{store: store, inputs: newTestInbox(t), operations: newFakeOperationManager(), done: make(chan error, 1)}
+	run := &stopTestRun{live: pending > 0, store: store, inputs: newTestInbox(t), operations: newFakeOperationManager(), done: make(chan error, 1)}
 	adapter := &fakeAdapter{respond: func(ctx context.Context, request llm.Request) (llm.Response, error) {
 		call := stopTestCall{ctx: ctx, request: request, response: make(chan llm.Response)}
 		run.calls = append(run.calls, call)
@@ -426,11 +428,30 @@ func newStopTestRun(t *testing.T, pending int) *stopTestRun {
 	return run
 }
 
+// Seeded operations in lifecycle tests are owned by the current live executor.
+// Recovery tests use Run so its restoration closes the previous lifetime.
+func runLiveCoordinator(ctx context.Context, current *coordinator) error {
+	if err := current.loadHistory(ctx); err != nil {
+		return err
+	}
+	for _, op := range current.dependencies.Restored.Operations {
+		current.addOperationToLocalState(op)
+	}
+	return current.runLoop(ctx)
+}
+
+func (run *stopTestRun) run(ctx context.Context) error {
+	if !run.live {
+		return run.current.Run(ctx)
+	}
+	return runLiveCoordinator(ctx, run.current)
+}
+
 func (run *stopTestRun) start(t *testing.T) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
-	go func() { run.done <- run.current.Run(ctx) }()
+	go func() { run.done <- run.run(ctx) }()
 	synctest.Wait()
 }
 

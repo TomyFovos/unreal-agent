@@ -12,11 +12,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/analysis"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/viewer"
 	"github.com/unreallabsai/unreal-agent/internal/privateexport"
 	"github.com/unreallabsai/unreal-agent/internal/secretguard"
 )
@@ -61,11 +63,25 @@ type exportTurn struct {
 	internal bool
 }
 type conversationIndex struct {
-	turns     map[session.TurnID]exportTurn
-	order     []exportTurn
-	responses []ResponseChoice
-	users     int
-	latest    sessionstore.Sequence
+	inputTokens             int64
+	inputTokenResponses     int
+	pruning                 analysis.Pruning
+	cacheLatest, cacheTotal viewer.Usage
+	turns                   map[session.TurnID]exportTurn
+	order                   []exportTurn
+	responses               []ResponseChoice
+	users                   int
+	latest                  sessionstore.Sequence
+}
+
+func (index *conversationIndex) observeUsage(usage llm.Usage) {
+	viewer.AddUsage(&index.cacheTotal, usage)
+	index.cacheLatest = viewer.Usage{}
+	viewer.AddUsage(&index.cacheLatest, usage)
+	if reported := llm.ReportedTokens(usage); reported.InputKnown {
+		index.inputTokens += reported.Input
+		index.inputTokenResponses++
+	}
 }
 
 // Capture the canonical tail from the Host, including messages not yet seen by
@@ -161,6 +177,18 @@ func indexConversation(ctx context.Context, r Reader, id session.ID, through ses
 		case sessionstore.ItemHostRecord:
 			if record, ok := item.Data.(sessionstore.HostRecord); ok {
 				switch record.Kind {
+				case sessionstore.HostContext:
+					if record.Context != nil && record.Context.Kind == "prune" {
+						index.pruning.Epochs++
+						index.pruning.Results += len(record.Context.Projections)
+						if record.Context.UnitID != "" {
+							index.pruning.Results++
+						}
+						index.pruning.Tokens += record.Context.PrunedTokens
+					}
+					if record.Context != nil && record.Context.Usage != nil {
+						index.observeUsage(*record.Context.Usage)
+					}
 				case "configuration":
 					if active == nil {
 						active = sessionstore.SelectionFromConfiguration(record.Configuration)
@@ -197,6 +225,7 @@ func indexConversation(ctx context.Context, r Reader, id session.ID, through ses
 			}
 		case sessionstore.ItemModelResponse:
 			if response, ok := item.Data.(sessionstore.ModelResponse); ok {
+				index.observeUsage(response.Response.Usage)
 				turn := index.turns[response.TurnID]
 				if turn.internal {
 					break
@@ -342,6 +371,16 @@ func ConversationText(ctx context.Context, r Reader, id session.ID, through sess
 
 func writeConversation(ctx context.Context, r Reader, id session.ID, through sessionstore.Sequence, index conversationIndex, w io.Writer) error {
 	if _, err := fmt.Fprintf(w, "# Unreal Agent Session Export\n\nSession: %s\nExported: %s\n", metadataText(string(id)), time.Now().Format("2006-01-02 15:04:05 MST")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "Latest %s; Session %s\n", viewer.CacheLabel(index.cacheLatest), viewer.CacheLabel(index.cacheTotal)); err != nil {
+		return err
+	}
+	average := "unknown"
+	if index.inputTokenResponses > 0 {
+		average = fmt.Sprintf("%.1f (%d reported calls)", float64(index.inputTokens)/float64(index.inputTokenResponses), index.inputTokenResponses)
+	}
+	if _, err := fmt.Fprintf(w, "Average input tokens / call  %s\nPruned tool results  %d · estimated tokens removed %d · epochs %d\n", average, index.pruning.Results, index.pruning.Tokens, index.pruning.Epochs); err != nil {
 		return err
 	}
 	var writeErr error

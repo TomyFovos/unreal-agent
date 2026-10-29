@@ -216,9 +216,6 @@ func replayItem(state *storedState, record itemRecord) error {
 	switch record.Item.Kind {
 	case sessionstore.ItemHostRecord:
 		r := record.Item.Data.(sessionstore.HostRecord)
-		if err := r.Validate(); err != nil {
-			return err
-		}
 		item := state.sessionHead.appendItem(sessionstore.ItemHostRecord, r, record.Item.RecordedAt)
 		state.Items = append(state.Items, item)
 		return nil

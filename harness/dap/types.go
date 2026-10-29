@@ -15,9 +15,7 @@ import (
 
 const PlanType operation.RemoteJobPlanType = "dap"
 const PlanVersion operation.RemoteJobPlanVersion = 1
-const MaxFrameBytes = 1 << 20
 const MaxResultBytes = 32 << 10
-const MaxItems = 100
 
 type Handle struct {
 	ID         string `json:"id"`
@@ -31,9 +29,8 @@ type AdapterConfig struct {
 	Environment []string `json:"environment,omitempty"`
 	// LaunchFields/AttachFields are trusted Host configuration for adapter-specific
 	// options. Model requests cannot supply an opaque arbitrary adapter payload.
-	LaunchFields      jsontext.Value `json:"launch_fields,omitempty"`
-	AttachFields      jsontext.Value `json:"attach_fields,omitempty"`
-	AllowedAttachPIDs []int          `json:"allowed_attach_pids,omitempty"`
+	LaunchFields jsontext.Value `json:"launch_fields,omitempty"`
+	AttachFields jsontext.Value `json:"attach_fields,omitempty"`
 }
 type Start struct {
 	Adapter     string   `json:"adapter"`
@@ -71,7 +68,7 @@ func (r Request) Validate() error {
 	if r.Version != 1 || !idPattern.MatchString(r.Handle.ID) || !idPattern.MatchString(r.OwnerGeneration) {
 		return &Error{Code: "invalid_request"}
 	}
-	if r.Count < 0 || r.Count > MaxItems || r.Offset < 0 || len(r.Expression) > 8192 || len(r.Breakpoints) > MaxItems {
+	if r.Count < 0 || r.Offset < 0 {
 		return &Error{Code: "invalid_request"}
 	}
 	if r.Command == "launch" || r.Command == "attach" {
@@ -126,8 +123,8 @@ func NewSpec(r Request) (operation.Spec, error) {
 		return operation.Spec{}, err
 	}
 	raw, err := json.Marshal(r)
-	if err != nil || len(raw) > MaxResultBytes {
-		return operation.Spec{}, &Error{Code: "request_too_large"}
+	if err != nil {
+		return operation.Spec{}, err
 	}
 	spec, err := operation.NewRemoteJobSpec(operation.RemoteJobPlan{Type: PlanType, Version: PlanVersion, Data: raw})
 	spec.MaxOutputLength = MaxResultBytes
@@ -145,7 +142,7 @@ func codeOf(err error) string {
 	return "adapter_failed"
 }
 
-// Item covers bounded DAP thread/frame/scope/variable/breakpoint records. Only
+// Item covers DAP thread/frame/scope/variable/breakpoint records. Only
 // normalized supported fields leave the transport; arbitrary response JSON does not.
 type Item struct {
 	ID                 int    `json:"id,omitzero"`
@@ -174,7 +171,6 @@ type Result struct {
 func copyConfig(c AdapterConfig) AdapterConfig {
 	c.Arguments = slices.Clone(c.Arguments)
 	c.Environment = slices.Clone(c.Environment)
-	c.AllowedAttachPIDs = slices.Clone(c.AllowedAttachPIDs)
 	c.LaunchFields = slices.Clone(c.LaunchFields)
 	c.AttachFields = slices.Clone(c.AttachFields)
 	return c

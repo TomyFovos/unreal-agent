@@ -67,6 +67,7 @@ func TestCoordinatorRestoresSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	resumedOperation.Status = operation.StatusCanceled
 	if current.state.currentTurnID != turn.ID ||
 		current.state.currentTurnType != session.TurnRegular ||
 		!reflect.DeepEqual(current.state.operations[resumedOperation.ID], resumedOperation) {
@@ -379,6 +380,7 @@ func TestCoordinatorOverlaysResumedOperationsAfterHistorySnapshots(t *testing.T)
 	if err := current.restore(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	first.Status, resumedSecond.Status = operation.StatusCanceled, operation.StatusCanceled
 	if !reflect.DeepEqual(current.state.operations[first.ID], first) ||
 		!reflect.DeepEqual(current.state.operations[second.ID], resumedSecond) {
 		t.Fatalf("restored operations = %#v", current.state.operations)
@@ -386,10 +388,7 @@ func TestCoordinatorOverlaysResumedOperationsAfterHistorySnapshots(t *testing.T)
 	if err := current.dispatchOperationsToManager(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	want := map[operation.ID]operation.Operation{
-		first.ID:  first,
-		second.ID: resumedSecond,
-	}
+	want := map[operation.ID]operation.Operation{}
 	got := make(map[operation.ID]operation.Operation, len(operations.adds))
 	for _, value := range operations.adds {
 		got[value.ID] = value
@@ -1258,7 +1257,7 @@ func TestCoordinatorRunBatchesCompletedToolCallsIntoOneTurn(t *testing.T) {
 	)
 	done := make(chan error, 1)
 	go func() {
-		done <- current.Run(ctx)
+		done <- runLiveCoordinator(ctx, current)
 	}()
 
 	operationValue.Status = operation.StatusCompleted
@@ -1366,7 +1365,7 @@ func TestCoordinatorRunHandlesOperationUpdateWhileModelIsRunning(t *testing.T) {
 	)
 	done := make(chan error, 1)
 	go func() {
-		done <- current.Run(ctx)
+		done <- runLiveCoordinator(ctx, current)
 	}()
 
 	submitTestInput(t, inputs, externalEvent(t, 1, "input-1", "hello"))
@@ -1816,7 +1815,7 @@ func TestCoordinatorRunStoresOperationUpdatesWithoutRedispatch(t *testing.T) {
 		adapter,
 	)
 
-	err := current.Run(t.Context())
+	err := runLiveCoordinator(t.Context(), current)
 	if err == nil || err.Error() != "operation updates closed" {
 		t.Fatalf("Run error = %v, want closed operation updates error", err)
 	}
@@ -1967,7 +1966,7 @@ func TestCoordinatorRunReturnsReconciliationError(t *testing.T) {
 		registry,
 	)
 
-	err := current.Run(t.Context())
+	err := runLiveCoordinator(t.Context(), current)
 	if err == nil || err.Error() != `add tool call "call-1" result to context: terminal result failed` {
 		t.Fatalf("Run error = %v", err)
 	}
@@ -2030,7 +2029,7 @@ func TestCoordinatorDoesNotCompleteToolCallBeforeOperationIsStored(t *testing.T)
 	}
 }
 
-func TestCoordinatorRunDispatchesRestoredNonTerminalOperations(t *testing.T) {
+func TestCoordinatorRunClosesRestoredNonTerminalOperationsWithoutDispatch(t *testing.T) {
 	store := emptyFakeStore()
 	statuses := []operation.Status{
 		operation.StatusReady,
@@ -2070,18 +2069,16 @@ func TestCoordinatorRunDispatchesRestoredNonTerminalOperations(t *testing.T) {
 	if err == nil || err.Error() != "inbox output closed" {
 		t.Fatalf("Run error = %v, want closed inbox error", err)
 	}
-	sort.Slice(operations.adds, func(left, right int) bool {
-		return operations.adds[left].ID < operations.adds[right].ID
-	})
-	want := []operation.Operation{
-		{ID: "awaiting", Type: operation.TypeShell, Version: 1, Status: operation.StatusAwaiting},
-		{ID: "ready", Type: operation.TypeShell, Version: 1, Status: operation.StatusReady},
+	if len(operations.adds) != 0 {
+		t.Fatalf("restored operations redispatched: %#v", operations.adds)
 	}
-	if !reflect.DeepEqual(operations.adds, want) {
-		t.Fatalf("dispatched operations = %#v, want %#v", operations.adds, want)
+	if len(store.savedOperations) != 3 {
+		t.Fatalf("unfinished operations not closed: %#v", store.savedOperations)
 	}
-	if len(store.savedOperations) != 1 || store.savedOperations[0].ID != "canceling" || store.savedOperations[0].Status != operation.StatusCanceled {
-		t.Fatal("restored cancellation was not recorded", store.savedOperations)
+	for _, op := range store.savedOperations {
+		if op.Status != operation.StatusCanceled {
+			t.Fatalf("unfinished operation not terminal: %#v", op)
+		}
 	}
 	if len(adapter.requests) != 0 {
 		t.Fatalf("model requests = %#v", adapter.requests)
@@ -2106,13 +2103,13 @@ func TestCoordinatorRunReturnsOperationDispatchError(t *testing.T) {
 		tool.NewRegistry(tool.StaticTranslators{}),
 	)
 
-	err := current.Run(t.Context())
+	err := runLiveCoordinator(t.Context(), current)
 	if err == nil || err.Error() != `dispatch operation "operation-1": dispatch failed` {
 		t.Fatalf("Run error = %v", err)
 	}
 }
 
-func TestCoordinatorRunReturnsUnsupportedRecoveredOperation(t *testing.T) {
+func TestCoordinatorRunClosesUnsupportedRecoveredOperation(t *testing.T) {
 	store := emptyFakeStore()
 	store.resume.Operations = []operation.Operation{
 		{ID: "unsupported", Type: "remote", Version: 1, Status: operation.StatusReady},
@@ -2140,11 +2137,16 @@ func TestCoordinatorRunReturnsUnsupportedRecoveredOperation(t *testing.T) {
 	)
 
 	err := current.Run(t.Context())
-	if !errors.Is(err, operation.ErrUnsupported) {
-		t.Fatalf("Run error = %v, want unsupported operation", err)
+	if err == nil || err.Error() != "inbox output closed" {
+		t.Fatalf("Run error = %v", err)
 	}
-	if _, ok := current.state.operations["unsupported"]; !ok {
-		t.Fatal("unsupported operation was not retained")
+	if len(operations.adds) != 0 || len(store.savedOperations) != 2 {
+		t.Fatal("recovered operations were dispatched or not closed")
+	}
+	for _, op := range store.savedOperations {
+		if op.Status != operation.StatusCanceled {
+			t.Fatal("recovered operation not terminal", op)
+		}
 	}
 }
 

@@ -95,7 +95,21 @@ func (s *Session) SelectRuntime(ctx context.Context, generation string, expected
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.running {
-		return ErrStopped
+		// The executing runtime has released its writer. A stopped selection
+		// owns that same lease for its one append; it must not write alongside
+		// another Host or against history changed since this projection.
+		writer, err := s.store.AcquireWriter(s.ID)
+		if err != nil {
+			return err
+		}
+		defer writer.Close()
+		page, err := s.store.Items(ctx, s.ID, sessionstore.Sequence(len(s.items)), 1)
+		if err != nil {
+			return err
+		}
+		if len(page.Items) > 0 || page.NextAfter != sessionstore.Sequence(len(s.items)) {
+			return ErrConflict
+		}
 	}
 	if s.runtime.ApplySelection == nil || s.selection == nil || s.runtime.ValidateSelection == nil && choice.Provider != s.selection.Provider {
 		return errors.New("runtime switching unavailable")

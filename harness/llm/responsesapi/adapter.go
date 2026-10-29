@@ -55,6 +55,8 @@ type Config struct {
 	CacheKeyPlacement CacheKeyPlacement
 	// Nil uses DefaultMaxAttempts.
 	MaxAttempts *int
+	// Nil shares MaxAttempts; Codex distinguishes request and stream retries.
+	MaxStreamAttempts *int
 	// Trace borrows read-only bodies: request JSON and terminal response JSON or HTTP error.
 	Trace func(Exchange)
 	// Extensions are provider-specific top-level fields merged into every request
@@ -70,6 +72,7 @@ type adapter struct {
 	trace             func(Exchange)
 	cacheKeyPlacement CacheKeyPlacement
 	maxAttempts       int
+	maxStreamAttempts int
 	extensions        map[string]jsontext.Value
 }
 
@@ -89,6 +92,13 @@ func NewAdapter(remote *primitives.RemoteClient, config Config) (llm.Adapter, er
 	if maxAttempts <= 0 {
 		return nil, errors.New("max attempts must be positive")
 	}
+	maxStreamAttempts := maxAttempts
+	if config.MaxStreamAttempts != nil {
+		maxStreamAttempts = *config.MaxStreamAttempts
+	}
+	if maxStreamAttempts <= 0 {
+		return nil, errors.New("max stream attempts must be positive")
+	}
 	return &adapter{
 		remote:            remote,
 		endpoint:          config.Endpoint,
@@ -96,14 +106,12 @@ func NewAdapter(remote *primitives.RemoteClient, config Config) (llm.Adapter, er
 		trace:             config.Trace,
 		cacheKeyPlacement: config.CacheKeyPlacement,
 		maxAttempts:       maxAttempts,
+		maxStreamAttempts: maxStreamAttempts,
 		extensions:        config.Extensions,
 	}, nil
 }
 
 func (adapter *adapter) Respond(ctx context.Context, request llm.Request, options llm.RequestOptions) (llm.Response, error) {
-	if err := llm.ValidateContinuation(request.Input); err != nil {
-		return llm.Response{}, diagnosed(err, FailureDiagnostic{Stage: "request_build", Reason: "invalid_continuation"})
-	}
 	key := ""
 	if options.CacheKey != "" {
 		key = fmt.Sprintf("%x", sha256.Sum256([]byte(options.CacheKey)))
@@ -211,4 +219,8 @@ func canceledError(ctx context.Context) error {
 		return ctx.Err()
 	}
 	return context.Canceled
+}
+
+func (err *APIError) ContextOverflow() bool {
+	return err.Code == "context_length_exceeded" || err.Code == "context_window_exceeded"
 }

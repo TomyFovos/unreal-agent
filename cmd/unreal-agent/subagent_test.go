@@ -178,7 +178,7 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err = credential.NewManager(backend, nil).Login(t.Context(), identity("parent").Provider.Auth, credential.Material{Token: credential.NewSecret(managedKey), Owner: credential.Managed}); err != nil {
+				if err = credential.NewManager(backend).Login(t.Context(), identity("parent").Provider.Auth, credential.Material{Token: credential.NewSecret(managedKey), Owner: credential.Managed}); err != nil {
 					t.Fatal(err)
 				}
 				cmd.Args = append(cmd.Args, "--credential-directory", credentialDirectory)
@@ -409,13 +409,13 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 				t.Fatalf("viewer page: %v %+v", e, page)
 			}
 			if scenario.control == "steer" {
-				again, e := observer.Steer(ctx, plan.ChildID, "viewer-steer", "VIEWER_STEER_INPUT")
+				again, e := remote.SteerChild(ctx, viewer.ControlRequest{ParentID: "parent", ParentGeneration: view.Generation, OperationID: completed.ID, ChildID: plan.ChildID, InputID: "viewer-steer", Text: "VIEWER_STEER_INPUT"})
 				if e != nil || again != receipt {
 					t.Fatalf("terminal steer retry: %v", e)
 				}
 			}
 			if scenario.control == "cancel" {
-				again, e := observer.Cancel(ctx, plan.ChildID, "viewer-cancel", "stop")
+				again, e := remote.CancelChild(ctx, viewer.ControlRequest{ParentID: "parent", ParentGeneration: view.Generation, OperationID: completed.ID, ChildID: plan.ChildID, InputID: "viewer-cancel", Text: "stop"})
 				if e != nil || again != receipt {
 					t.Fatalf("terminal cancel retry: %v", e)
 				}

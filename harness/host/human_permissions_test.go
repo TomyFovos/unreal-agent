@@ -4,6 +4,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"os"
 	"path/filepath"
@@ -23,15 +24,7 @@ func modeHost(t *testing.T, directory string) *Host {
 func controlMode(t *testing.T, c *permission.Controller, key string, mode permission.Mode) {
 	t.Helper()
 	rev := c.Snapshot().Revision
-	proof := ""
-	if mode == permission.FullAccess {
-		var err error
-		proof, err = c.PrepareFull(key, rev)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := c.SetMode(key, rev, mode, proof); err != nil {
+	if err := c.SetMode(key, rev, mode); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -65,7 +58,10 @@ func humanShell(t *testing.T, root string) operation.Spec {
 	}
 	return s
 }
-func TestHumanHostFullAccessDetachAttachAndRestartExpires(t *testing.T) {
+
+// The selected mode survives detach and a Host restart (U20); approvals and
+// the old generation's control do not.
+func TestHumanHostFullAccessDetachAttachAndRestartKeepsTheMode(t *testing.T) {
 	dir, root := t.TempDir(), t.TempDir()
 	h := modeHost(t, dir)
 	s, err := h.Create(t.Context(), Options{ID: "human", Policy: permission.Unrestricted()})
@@ -105,8 +101,8 @@ func TestHumanHostFullAccessDetachAttachAndRestartExpires(t *testing.T) {
 		t.Fatal(err)
 	}
 	view, _ := r.Inspect(0, 4096)
-	if !view.Permissions.Enabled || view.Permissions.Stopped || view.Permissions.Mode != permission.ReadOnly || len(view.History.Items) < len(before.History.Items) {
-		t.Fatal("restart retained elevation or lost history")
+	if !view.Permissions.Enabled || view.Permissions.Stopped || view.Permissions.Mode != permission.FullAccess || len(view.History.Items) < len(before.History.Items) {
+		t.Fatal("restart lost the selected mode or history")
 	}
 	if _, err = r.PermissionControl(s.Generation); err == nil {
 		t.Fatal("old generation accepted")
@@ -114,13 +110,10 @@ func TestHumanHostFullAccessDetachAttachAndRestartExpires(t *testing.T) {
 	if _, err = r.SubmitOperation(timeout(t), r.Generation, "new", "new", "Bash", spec); err != nil {
 		t.Fatal(err)
 	}
-	denied := waitOperation(t, r, "new", func(o operation.Operation) bool { return o.Status == operation.StatusFailed })
-	if denied.Denial == nil {
-		t.Fatal("privileged resume did not require human approval")
-	}
+	waitOperation(t, r, "new", func(o operation.Operation) bool { return o.Status == operation.StatusCompleted })
 	content, err := os.ReadFile(filepath.Join(root, "marker"))
-	if err != nil || string(content) != "one" {
-		t.Fatal("duplicate effect or missing work", err, string(content))
+	if err != nil || string(content) != "oneone" {
+		t.Fatal("old work repeated or new work missing", err, string(content))
 	}
 }
 func TestHumanHostPendingApprovalRecoveryDoesNotExecuteOrDuplicate(t *testing.T) {
@@ -150,7 +143,7 @@ func TestHumanHostPendingApprovalRecoveryDoesNotExecuteOrDuplicate(t *testing.T)
 	result := waitOperation(t, r, "one-op", func(o operation.Operation) bool {
 		return o.Status == operation.StatusCanceled || o.Status == operation.StatusFailed
 	})
-	if result.Denial == nil || result.Permission == nil || result.Permission.State != "expired" {
+	if result.Status != operation.StatusCanceled || result.Permission == nil || result.Permission.State != "pending" {
 		t.Fatal("resume reused approval", result)
 	}
 	replayed, err := r.SubmitOperation(timeout(t), r.Generation, "one-input", "one-op", "Bash", spec)
@@ -197,5 +190,45 @@ func TestHumanHostUpperParentDenySurvivesFullApproval(t *testing.T) {
 	}
 	if _, err = os.Stat(filepath.Join(root, "marker")); !os.IsNotExist(err) {
 		t.Fatal("denied side effect")
+	}
+}
+
+// The workspace's last selected mode survives a Host restart, an update and
+// new Sessions (U20).
+func TestSelectedModeSurvivesHostRestart(t *testing.T) {
+	directory := t.TempDir()
+	h := modeHost(t, directory)
+	s, err := h.Create(t.Context(), Options{ID: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.PermissionControl(s.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, release := c.AcquireControl()
+	controlMode(t, c, key, permission.FullAccess)
+	release()
+	stop(t, s)
+	h.Close()
+	h = modeHost(t, directory)
+	for _, id := range []string{"first", "second"} {
+		var s *Session
+		if id == "first" {
+			s, err = h.Resume(t.Context(), Options{ID: session.ID(id)})
+		} else {
+			s, err = h.Create(t.Context(), Options{ID: session.ID(id)})
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := s.PermissionControl(s.Generation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := c.Snapshot().Mode; got != permission.FullAccess {
+			t.Fatalf("%s started in %s after a restart", id, got)
+		}
+		stop(t, s)
 	}
 }

@@ -13,18 +13,19 @@ func (m *Model) setPermissions(generation string, snapshot permission.ModeSnapsh
 	}
 	snapshot.Pending = append([]permission.Pending(nil), snapshot.Pending...)
 	m.state.Permissions = snapshot
+	m.state.Version++
 }
 func permissionPicker(s Snapshot) *Picker {
-	p := &Picker{Kind: "permissions", Title: "Permissions · " + s.Permissions.Mode.Label(), Hint: "Schemas are capabilities, not permission grants", PermissionRevision: s.Permissions.Revision, Options: []string{"Read Only", "Ask for Approval", "Full Access"}}
+	p := &Picker{Kind: "permissions", Title: "Permissions · " + s.Permissions.Mode.Label(), Hint: "権限を選んでください", PermissionRevision: s.Permissions.Revision, Options: []string{"Read Only · 読むだけ", "Ask · 書き込みと実行の前に確認", "Full Access · 確認なし。OS の隔離ではありません"}}
 	if s.Permissions.Stopped {
-		p.Title = "Permissions expired · Session stopped"
+		p.Title = "Permissions · 停止中"
 		p.Options = nil
-		p.Hint = "Resume starts Read Only; privileged operations require reapproval"
+		p.Hint = "/resume で再開すると、前に選んだ権限を使います"
 		return p
 	}
 	if !s.Permissions.Enabled {
 		p.Options = nil
-		p.Hint = "Legacy configured policy; opt in with PermissionModes.Enabled and a reviewed Maximum"
+		p.Hint = "この設定では権限を変更できません。権限を選べる設定で起動してください"
 		return p
 	}
 	switch s.Permissions.Mode {
@@ -34,16 +35,9 @@ func permissionPicker(s Snapshot) *Picker {
 		p.Selection = 2
 	}
 	for _, op := range s.Permissions.Pending {
-		p.Options = append(p.Options, "Review "+SafeText(op.Tool)+" · Operation "+SafeText(op.ID))
+		p.Options = append(p.Options, "確認: "+SafeText(op.Tool)+" · "+SafeText(op.Scope))
 	}
 	return p
-}
-func fullPermissionConfirmation(s Snapshot, revision uint64, challenge string) *Picker {
-	return &Picker{Kind: "permission-full", Title: "Confirm Full Access · Session " + SafeText(string(s.ID)), Options: []string{"Deny / keep current mode", "Confirm Full Access for this Session"}, PermissionRevision: revision, PermissionChallenge: challenge, Instructions: []string{
-		"NO OS SANDBOX. Bash can execute arbitrary commands.",
-		"Filesystem, network, credentials, environment and shared mounts may be accessed.",
-		"Continues after detach; Session stop/resume and Host restart require reapproval. /permissions can revoke. Operator maximum and explicit denies still apply.",
-	}}
 }
 
 // operationPermissionConfirmation shows what will run first and starts on
@@ -54,8 +48,7 @@ func operationPermissionConfirmation(s Snapshot, op permission.Pending) *Picker 
 		p.Footer = append(p.Footer, "Runs as you, with your files, network and credentials; no OS sandbox.")
 	}
 	p.Footer = append(p.Footer,
-		"Esc: answer later in /permissions. Timeout or detach denies.",
-		"Session "+SafeText(string(s.ID))+" · request "+SafeText(op.ID))
+		"Esc: answer later in /permissions. /stop cancels the operation.")
 	return p
 }
 
@@ -71,8 +64,6 @@ func permissionGrants(p *Picker) bool {
 	switch p.Kind {
 	case "permission-once":
 		return p.Selection == 0
-	case "permission-full":
-		return p.Selection == 1
 	}
 	return false
 }
@@ -84,17 +75,9 @@ func permissionControlAction(p *Picker) permission.ControlRequest {
 		r.Operation = p.PermissionOperation
 		r.Allow = permissionGrants(p)
 	}
-	if p.Kind == "permission-full" {
-		r.Action = "set_mode"
-		r.Mode = permission.FullAccess
-		r.Challenge = p.PermissionChallenge
-	}
 	return r
 }
 
-// Approval requires a reviewable display; Tiny keeps its normal editing behavior
-// but cannot hide access warnings behind an active confirm key.
-func permissionReviewFits(width, height int) bool { return width >= 80 && height >= 24 }
 func permissionStatus(s Snapshot) string {
 	if !s.Permissions.Enabled {
 		return ""

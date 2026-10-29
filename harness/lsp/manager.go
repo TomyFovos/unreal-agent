@@ -44,7 +44,6 @@ type Manager struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	mutation *mutation.Service
-	timeout  time.Duration
 	mu       sync.Mutex
 	configs  map[string]ServerConfig
 	servers  map[string]*instance
@@ -57,17 +56,8 @@ func New(ctx context.Context, config Config) (*Manager, error) {
 	if config.Mutation == nil {
 		return nil, errors.New("LSP requires a mutation service")
 	}
-	if len(config.Servers) > 32 {
-		return nil, errors.New("too many language servers")
-	}
-	if config.RequestTimeout == 0 {
-		config.RequestTimeout = 30 * time.Second
-	}
-	if config.RequestTimeout < 0 {
-		return nil, errors.New("invalid request timeout")
-	}
 	life, cancel := context.WithCancel(ctx)
-	m := &Manager{ctx: life, cancel: cancel, mutation: config.Mutation, timeout: config.RequestTimeout, configs: make(map[string]ServerConfig), servers: make(map[string]*instance)}
+	m := &Manager{ctx: life, cancel: cancel, mutation: config.Mutation, configs: make(map[string]ServerConfig), servers: make(map[string]*instance)}
 	for _, server := range config.Servers {
 		if server.Language == "" || !filepath.IsAbs(server.Path) {
 			cancel()
@@ -95,12 +85,6 @@ func (m *Manager) path(uri string) (string, error) {
 	path, err := m.mutation.Path(filepath.FromSlash(u.Path))
 	if err != nil {
 		return "", failure("invalid", "edit target is outside workspace")
-	}
-	rel, _ := filepath.Rel(m.mutation.Root(), path)
-	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
-		if part == ".git" {
-			return "", failure("denied", "version-control metadata is not an edit target")
-		}
 	}
 	return path, nil
 }
@@ -221,7 +205,7 @@ func (m *Manager) Execute(ctx context.Context, operationID string, request Reque
 		return resultError(result, failure("invalid", err.Error()))
 	}
 	ctx = permission.WithPolicy(ctx, permission.FromContext(m.ctx))
-	ctx, cancel := context.WithTimeout(ctx, m.timeout)
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if err := permission.FromContext(ctx).CheckTool("LSP"); err != nil {
 		return resultError(result, err)
@@ -368,12 +352,9 @@ func (m *Manager) Execute(ctx context.Context, operationID string, request Reque
 			if err != nil {
 				return resultError(result, err)
 			}
-			if len(published.Diagnostics) == 0 {
-				return resultError(result, failure("limit", "diagnostics exceed result limit"))
-			}
 			result.Data = published.Diagnostics
 			result.Code = "ok"
-			return bounded(result)
+			return result
 		}
 	}
 	if capability != "" && !server.supports(capability) {
@@ -409,23 +390,12 @@ func (m *Manager) Execute(ctx context.Context, operationID string, request Reque
 		if json.Unmarshal(data, &candidates) != nil {
 			return resultError(result, failure("protocol", "invalid code actions"))
 		}
-		if len(candidates) > 128 {
-			return resultError(result, failure("limit", "too many code actions"))
-		}
 		summaries := make([]ActionSummary, 0, len(candidates))
 		// Previous actions expire at the next query; no unbounded server-side cache.
 		clear(server.actions)
 		for _, candidate := range candidates {
 			summary := ActionSummary{Title: candidate.Title, Kind: candidate.Kind}
-			if len(summary.Title) > 4096 {
-				summary.Title = summary.Title[:4096]
-			}
 			unsupported := candidate.Edit == nil || len(candidate.Command) > 0 && string(candidate.Command) != "null" || len(candidate.Disabled) > 0 && string(candidate.Disabled) != "null"
-			if !unsupported {
-				if _, err := m.prepare(*candidate.Edit, snapshots, versions(server), server.encoding); err != nil {
-					unsupported = true
-				}
-			}
 			summary.Unsupported = unsupported
 			if unsupported {
 				summary.Reason = "requires command execution, resolution, or an unsupported workspace edit"
@@ -438,11 +408,11 @@ func (m *Manager) Execute(ctx context.Context, operationID string, request Reque
 		}
 		result.Data, _ = json.Marshal(summaries)
 		result.Code = "ok"
-		return bounded(result)
+		return result
 	}
 	result.Data = data
 	result.Code = "ok"
-	return bounded(result)
+	return result
 }
 func resultError(result Result, err error) Result {
 	result.Code = errorCode(err)
@@ -455,13 +425,6 @@ func resultError(result Result, err error) Result {
 		result.Message = typed.Message
 	default:
 		result.Message = "language-server operation failed"
-	}
-	return result
-}
-func bounded(result Result) Result {
-	if len(result.Data) > MaxResultBytes {
-		result.Data = nil
-		return resultError(result, failure("limit", "semantic result exceeds byte limit"))
 	}
 	return result
 }
@@ -483,20 +446,10 @@ func (m *Manager) synchronize(ctx context.Context, s *instance, snapshot mutatio
 	if !utf8.Valid(snapshot.Data) || strings.ContainsRune(string(snapshot.Data), 0) {
 		return failure("unsupported", "document is not UTF-8 text")
 	}
-	if len(snapshot.Data) > maxMessageBytes/2 {
-		return failure("limit", "document exceeds synchronization limit")
-	}
 	if !s.syncOpenClose || (s.syncChange != 1 && s.syncChange != 2) {
 		return failure("unsupported", "server does not support document synchronization")
 	}
 	previous, exists := s.documents[snapshot.Path]
-	total := len(snapshot.Data) - len(previous.snapshot.Data)
-	for _, doc := range s.documents {
-		total += len(doc.snapshot.Data)
-	}
-	if total > MaxWorkspaceBytes {
-		return failure("limit", "synchronized text exceeds byte limit")
-	}
 	if previous.version >= 2147483647 {
 		return failure("expired", "document version exhausted; restart server")
 	}
@@ -510,9 +463,6 @@ func (m *Manager) synchronize(ctx context.Context, s *instance, snapshot mutatio
 			return err
 		}
 	} else {
-		if len(s.documents) >= MaxDocuments {
-			return failure("limit", "too many synchronized documents")
-		}
 		if err := s.rpc.notify(ctx, "textDocument/didOpen", map[string]any{"textDocument": map[string]any{"uri": fileURI(snapshot.Path), "languageId": s.config.Language, "version": version, "text": string(snapshot.Data)}}); err != nil {
 			return err
 		}
@@ -522,7 +472,6 @@ func (m *Manager) synchronize(ctx context.Context, s *instance, snapshot mutatio
 }
 func (m *Manager) workspace(ctx context.Context, s *instance) (map[string]mutation.Snapshot, error) {
 	snapshots := make(map[string]mutation.Snapshot)
-	total := 0
 	err := filepath.WalkDir(m.mutation.Root(), func(path string, entry fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -548,10 +497,6 @@ func (m *Manager) workspace(ctx context.Context, s *instance) (map[string]mutati
 		snapshot, err := m.mutation.Snapshot(ctx, path)
 		if err != nil {
 			return err
-		}
-		total += len(snapshot.Data)
-		if len(snapshots) >= MaxDocuments || total > MaxWorkspaceBytes {
-			return failure("limit", "workspace exceeds semantic edit snapshot limit")
 		}
 		snapshots[snapshot.Path] = snapshot
 		matches := len(s.config.Extensions) == 0

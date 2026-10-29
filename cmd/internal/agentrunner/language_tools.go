@@ -33,9 +33,6 @@ func LanguageServerConfiguration(getenv func(string) string) ([]lsp.ServerConfig
 	if raw == "" {
 		return nil, nil
 	}
-	if len(raw) > 65536 {
-		return nil, errors.New("language server configuration exceeds 64 KiB")
-	}
 	var servers []lsp.ServerConfig
 	if err := json.Unmarshal([]byte(raw), &servers, json.RejectUnknownMembers(true)); err != nil {
 		return nil, errors.New("invalid language server configuration")

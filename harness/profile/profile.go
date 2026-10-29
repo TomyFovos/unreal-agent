@@ -32,9 +32,6 @@ func Resolve(s Selection, p provider.Selection) (Resolved, error) {
 	if s.Version != 1 {
 		return Resolved{}, errors.New("profile: unsupported_version")
 	}
-	if strings.TrimSpace(s.Source) == "" {
-		return Resolved{}, errors.New("profile: selection_source_required")
-	}
 	r := Resolved{selection: s, guidance: map[string]string{}}
 	switch s.ID {
 	case "conservative":
@@ -51,12 +48,6 @@ func Resolve(s Selection, p provider.Selection) (Resolved, error) {
 		return Resolved{}, errors.New("profile: unsupported_id")
 	}
 	return r, nil
-}
-func ValidateResume(recorded, requested Selection) error {
-	if recorded != requested {
-		return errors.New("profile: incompatible_resume_selection")
-	}
-	return nil
 }
 
 // Compose only adjusts existing descriptions. It cannot register a tool, change

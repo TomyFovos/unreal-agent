@@ -281,7 +281,7 @@ func TestServeExternalCodexTUIAndRotation(t *testing.T) {
 			t.Logf("hosted calls=%d responses=%d running=%t inspect error=%v; terminal=%q", calls.Load(), responseCount(v), v.Running, inspectErr, text)
 		}
 	})
-	waitInteractive(t, func() bool { return strings.Contains(output.String(), "⇄ connected  running") })
+	waitInteractive(t, func() bool { return strings.Contains(output.String(), "入力待ち") })
 	keys <- tui.Key{Text: "Say hello."}
 	keys <- tui.Key{Name: "enter"}
 	waitInteractive(t, func() bool { return strings.Contains(output.String(), "Codex response 1") })
@@ -427,7 +427,7 @@ func TestServeManagedAPIKeysWithExternalCodexConfigured(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err = credential.NewManager(store, nil).Login(t.Context(), ref, credential.Material{Token: credential.NewSecret(key), Owner: credential.Managed}); err != nil {
+				if err = credential.NewManager(store).Login(t.Context(), ref, credential.Material{Token: credential.NewSecret(key), Owner: credential.Managed}); err != nil {
 					t.Fatal(err)
 				}
 			}

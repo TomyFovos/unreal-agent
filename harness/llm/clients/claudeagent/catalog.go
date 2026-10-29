@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -44,7 +45,7 @@ func Discover(ctx context.Context, binary string, environ func() []string) (mode
 		return modelcatalog.Catalog{}, Account{}, err
 	}
 	defer os.RemoveAll(dir)
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-prompt-tool", "stdio", "--no-session-persistence")
 	cmd.Dir, cmd.Env = dir, environment(environ())
@@ -62,13 +63,31 @@ func Discover(ctx context.Context, binary string, environ func() []string) (mode
 	if err = cmd.Start(); err != nil {
 		return modelcatalog.Catalog{}, Account{}, &Error{Code: "cli_missing", Message: err.Error()}
 	}
-	defer func() {
-		_ = stdin.Close()
-		cancel()
-		_ = cmd.Wait()
-	}()
+	var finishOnce sync.Once
+	finishProcess := func(drain bool) {
+		finishOnce.Do(func() {
+			_ = stdin.Close()
+			if !drain {
+				cancel()
+			}
+			exited := make(chan struct{})
+			go func() { _ = cmd.Wait(); close(exited) }()
+			select {
+			case <-exited:
+			case <-ctx.Done():
+				cancel()
+				<-exited
+			case <-time.After(cmd.WaitDelay):
+				cancel()
+				<-exited
+			}
+			cancel()
+		})
+	}
+	defer finishProcess(false)
 	if err = (&writer{w: stdin}).send(map[string]any{"type": "control_request", "request_id": "unreal-catalog", "request": map[string]any{"subtype": "initialize"}}); err != nil {
-		return modelcatalog.Catalog{}, Account{}, &Error{Code: "catalog_unavailable", Message: lastLine(stderr.String())}
+		finishProcess(true)
+		return modelcatalog.Catalog{}, Account{}, startFailure(stderr.String(), &Error{Code: "catalog_unavailable", Message: lastLine(stderr.String())})
 	}
 	reader := bufio.NewReaderSize(stdout, 64<<10)
 	for {
@@ -93,6 +112,7 @@ func Discover(ctx context.Context, binary string, environ func() []string) (mode
 			return catalog, f.Response.Response.Account, nil
 		}
 		if readErr != nil {
+			finishProcess(true)
 			return modelcatalog.Catalog{}, Account{}, startFailure(stderr.String(), &Error{Code: "catalog_unavailable", Message: lastLine(stderr.String())})
 		}
 	}
@@ -104,7 +124,7 @@ func normalize(models []cliModel) modelcatalog.Catalog {
 	c := modelcatalog.Catalog{Source: "Claude Code initialize", Available: true, Authoritative: true, FetchedAt: time.Now()}
 	seen := map[string]bool{}
 	for _, info := range models {
-		if info.Value == "" || info.Value == "default" || seen[info.Value] || len(c.Models) == 128 {
+		if info.Value == "" || info.Value == "default" || seen[info.Value] {
 			continue
 		}
 		seen[info.Value] = true

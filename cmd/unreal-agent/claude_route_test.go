@@ -40,6 +40,58 @@ func claudeRouteConfiguration(t *testing.T, f *testclaude.Fixture) serveConfigur
 	}
 }
 
+func TestClaudeCompactsConversationWhenIdle(t *testing.T) {
+	f := testclaude.New(t)
+	f.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentInputTokens: 120_000, AgentFinal: "first complete", CompactPreTokens: 120_050, CompactPostTokens: 12_000})
+	cfg := claudeRouteConfiguration(t, f)
+	cfg.Context.ClaudeCompactThresholdTokens = 100_000
+	c, _, _ := startInteractiveHost(t, cfg, "--normal-runtime")
+	v, err := c.Open(t.Context(), host.Create, "compact-route")
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitInteractive(t, c, v, "first", "first task")
+	end := inspectInteractive(t, c, "compact-route", func(v host.View) bool {
+		for _, item := range v.History.Items {
+			if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Context != nil && record.Context.Conversation != nil && record.Context.Conversation.Compacted {
+				return hasFinalText(v, "first complete") && v.Progress == nil
+			}
+		}
+		return false
+	})
+	calls := f.Calls(t)
+	if len(calls) != 2 || !strings.HasPrefix(calls[1].Input, "/compact ") || calls[1].OverlappingPID != 0 {
+		t.Fatalf("turn inputs=%+v", calls)
+	}
+	compacted := 0
+	for _, item := range end.History.Items {
+		if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Context != nil && record.Context.Conversation != nil && record.Context.Conversation.Compacted {
+			r := record.Context.Conversation
+			compacted++
+			if r.BeforeTokens != 120_050 || !r.InputKnown || r.InputTokens != 12_000 {
+				t.Fatal("incorrect compact counts", r)
+			}
+		}
+		if response, ok := item.Data.(sessionstore.ModelResponse); ok {
+			for _, output := range response.Response.Output {
+				if m, ok := output.Data.(llm.Message); ok && strings.Contains(m.Text, "compact complete") {
+					t.Fatal("compact response entered canonical messages")
+				}
+			}
+		}
+	}
+	if compacted != 1 {
+		t.Fatal("missing Session compact record", compacted)
+	}
+	f.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentFinal: "second complete"})
+	submitInteractive(t, c, v, "second", "second task")
+	inspectInteractive(t, c, "compact-route", func(v host.View) bool { return hasFinalText(v, "second complete") })
+	calls = f.Calls(t)
+	if len(calls) != 3 || calls[2].Input != "second task" || calls[2].OverlappingPID != 0 {
+		t.Fatalf("next input after idle compaction = %+v", calls)
+	}
+}
+
 // Claude Code asks Unreal before it writes; Unreal's mode decides, and the
 // human decides in Ask. Every call is kept as a canonical receipt.
 func TestClaudeRouteHumanPermissions(t *testing.T) {
@@ -111,8 +163,8 @@ func TestClaudeRouteHumanPermissions(t *testing.T) {
 	}
 }
 
-// A command Claude Code's organization policy refuses is run by Unreal's own
-// Bash under Unreal's mode (U22), and its result is handed back to Claude.
+// A command Claude Code declines is handled as Unreal's own Bash request under
+// Unreal's mode (U22), and its result is handed back to Claude.
 func TestClaudeRouteRunsRefusedCommandsInUnrealShell(t *testing.T) {
 	for _, mode := range []string{"full", "ask-allow", "ask-deny", "readonly"} {
 		t.Run(mode, func(t *testing.T) {

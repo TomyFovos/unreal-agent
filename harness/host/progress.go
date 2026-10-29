@@ -4,13 +4,14 @@ import (
 	"context"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 )
 
-// Progress is an ephemeral bounded snapshot. Generation is carried by View/Event;
+// Progress is an ephemeral snapshot. Generation is carried by View/Event;
 // Epoch disambiguates multiple model calls and retries within the same turn.
 type Progress struct {
 	TurnID          session.TurnID
@@ -20,24 +21,13 @@ type Progress struct {
 	Statistics      *llm.GenerationStatistics `json:",omitzero"`
 }
 
-const maxProgressBytes = 64 << 10
-
 type progressAdapter struct {
 	session *Session
 	next    llm.Adapter
 	now     func() time.Time
 }
 
-func (a *progressAdapter) RequiresFullToolBatch() bool          { return llm.RequiresToolBatch(a.next) }
-func (a *progressAdapter) ConversationRecoveryProvider() string { return llm.RecoveryProvider(a.next) }
-func (a *progressAdapter) NoAutomaticReplay() bool              { return llm.RequiresExplicitReplay(a.next) }
-
-func (s *Session) modelReplayHeld(turn session.TurnID) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.progress = &Progress{TurnID: turn, Mode: "model_send_unknown", Text: "Previous Native request outcome is unknown. Enter a new instruction to continue.", Done: true}
-	s.broadcast(Event{Kind: "progress", Progress: s.progress})
-}
+func (a *progressAdapter) RequiresFullToolBatch() bool { return llm.RequiresToolBatch(a.next) }
 
 // ModelBusy reports whether a model call of this Session is in flight, and
 // a channel that closes when that changes.
@@ -88,8 +78,10 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 	s.respondingLocked(1)
 	defer func() { s.mu.Lock(); s.respondingLocked(-1); s.mu.Unlock() }()
 	s.progress = &Progress{TurnID: turn, Epoch: epoch, Mode: "completed_response"}
+	o.ConversationTokens = s.conversationTokensLocked()
 	s.broadcast(Event{Kind: "progress", Progress: s.progress})
 	s.mu.Unlock()
+	o.RecordConversation = s.recordConversation
 	lastBroadcast := time.Time{}
 	now := a.now
 	if now == nil {
@@ -108,9 +100,39 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 		}
 		return stats
 	}
+	pendingUTF8 := ""        // an incomplete rune belongs to the next delta, not to invalid text
 	done := false            // accessed only with s.mu
 	waitingForTools := false // freeze statistics throughout approval/execution waits
+	// Tools and steering can both commit a continuation within one invocation.
+	// Its progress follows that new canonical turn. Caller holds s.mu.
+	resumeProgress := func() {
+		if !done && ctx.Err() == nil && s.running && s.progressEpoch == epoch {
+			for i := len(s.items) - 1; i >= 0; i-- {
+				if next, ok := s.items[i].Data.(session.Turn); ok {
+					if next.ToolContinuation == origin && next.ID != turn {
+						s.progressEpoch++
+						epoch, turn = s.progressEpoch, next.ID
+						pendingUTF8 = ""
+						s.progress = &Progress{TurnID: turn, Epoch: epoch, Mode: "completed_response"}
+						s.broadcast(Event{Kind: "progress", Progress: s.progress})
+					}
+					break
+				}
+			}
+		}
+	}
 	prior := o.Progress
+	if steering := o.Steering; steering != nil {
+		o.Steering = func(callCtx context.Context) ([]string, error) {
+			inputs, err := steering(callCtx)
+			if err == nil && len(inputs) > 0 {
+				s.mu.Lock()
+				resumeProgress()
+				s.mu.Unlock()
+			}
+			return inputs, err
+		}
+	}
 	if tools := o.Tools; tools != nil {
 		o.Tools = func(callCtx context.Context, public llm.Response) ([]llm.ToolOutcome, error) {
 			s.mu.Lock()
@@ -131,22 +153,7 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 				return outcomes, err
 			}
 			s.mu.Lock()
-			// The Coordinator has committed a continuation before returning its
-			// canonical receipts. Start a new ephemeral display epoch for that
-			// turn; never keep an old draft alive after its response is durable.
-			if !done && ctx.Err() == nil && s.running && s.progressEpoch == epoch {
-				for i := len(s.items) - 1; i >= 0; i-- {
-					if next, ok := s.items[i].Data.(session.Turn); ok {
-						if next.ToolContinuation == origin {
-							s.progressEpoch++
-							epoch, turn = s.progressEpoch, next.ID
-							s.progress = &Progress{TurnID: turn, Epoch: epoch, Mode: "completed_response"}
-							s.broadcast(Event{Kind: "progress", Progress: s.progress})
-						}
-						break
-					}
-				}
-			}
+			resumeProgress()
 			s.mu.Unlock()
 			return outcomes, nil
 		}
@@ -158,11 +165,16 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 			if p.Attempt >= current.Attempt {
 				if p.Reset || p.Attempt > current.Attempt {
 					current.Text = ""
+					pendingUTF8 = ""
 					current.Truncated = false
 					current.Statistics = nil
 					started = now()
 				}
+				phaseChanged := current.Mode != p.Phase && (current.Mode == "compacting" || p.Phase != "")
 				current.Mode = "streaming"
+				if p.Phase != "" {
+					current.Mode = p.Phase
+				}
 				current.Attempt = p.Attempt
 				if p.Tokens != nil {
 					tokens := p.Tokens.Safe()
@@ -177,14 +189,15 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 					}
 					current.Statistics = &llm.GenerationStatistics{Model: r.Model.ID, Tokens: tokens, DurationMicros: now().Sub(started).Microseconds(), Source: "client_clock"}
 				}
-				remaining := maxProgressBytes - len(current.Text)
-				delta := p.Delta
-				if len(delta) > remaining {
-					delta = delta[:remaining]
-					current.Truncated = true
+				pendingUTF8 += p.Delta
+				end := 0
+				for end < len(pendingUTF8) && utf8.FullRuneInString(pendingUTF8[end:]) {
+					_, size := utf8.DecodeRuneInString(pendingUTF8[end:])
+					end += size
 				}
-				current.Text = strings.ToValidUTF8(current.Text+delta, "")
-				if p.Reset || lastBroadcast.IsZero() || now().Sub(lastBroadcast) >= 30*time.Millisecond {
+				current.Text += strings.ToValidUTF8(pendingUTF8[:end], "")
+				pendingUTF8 = pendingUTF8[end:]
+				if p.Reset || phaseChanged || lastBroadcast.IsZero() || now().Sub(lastBroadcast) >= 30*time.Millisecond {
 					s.broadcast(Event{Kind: "progress", Progress: current})
 					lastBroadcast = now()
 				}

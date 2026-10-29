@@ -13,7 +13,7 @@ import (
 
 func TestContextAnalysisDerivedMetricsUnknownUsageAndResponsiveSheets(t *testing.T) {
 	m := NewModel("context-session")
-	d := contextengine.Diagnostics{Version: 1, Provider: "claude-code", Model: "synthetic-model", RuntimeRevision: 4, ThroughSequence: 900, CheckpointBoundary: 768, CheckpointVersion: 1, CanonicalUnits: 600, Recent: 12, Retrieved: 3, Referenced: 2, Omitted: 583, EstimatedInputTokens: 4500, Budget: contextengine.Budget{Window: 32768, Input: 5000, WindowSource: "conservative-fallback", ResponseReserve: 4096, ProtocolReserve: 1024}, Utilization: 90, RetrievalMicros: 42, Measurement: "estimated", Cache: "rebuilt-canonical"}
+	d := contextengine.Diagnostics{Version: 1, Provider: "claude-code", Model: "synthetic-model", RuntimeRevision: 4, ThroughSequence: 900, CanonicalUnits: 600, Recent: 12, Omitted: 583, EstimatedInputTokens: 4500, Budget: contextengine.Budget{Window: 32768, Input: 5000, WindowSource: "conservative-fallback", ResponseReserve: 4096, ProtocolReserve: 1024}, Utilization: 90, Measurement: "estimated", Cache: "rebuilt-canonical"}
 	if err := m.apply(host.View{Generation: "g", Revision: 1, Running: true, Context: &d}); err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +22,7 @@ func TestContextAnalysisDerivedMetricsUnknownUsageAndResponsiveSheets(t *testing
 		t.Fatal("estimated context became measured provider usage")
 	}
 	lines := strings.Join(analysis.Lines(r, "Context", true), "\n")
-	for _, text := range []string{"estimated (not actual usage)", "Canonical context units  600", "Retrieved                3", "through sequence 768", "4500 / 5000", "input usage unknown"} {
+	for _, text := range []string{"estimated (not actual usage)", "Canonical context units  600", "History in view          12", "Request source boundary  900", "4500 / 5000", "input usage unknown"} {
 		if !strings.Contains(lines, text) {
 			t.Fatal("context metric missing", text)
 		}

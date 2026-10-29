@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"time"
+	"sync"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/harness/authflow"
@@ -28,7 +28,8 @@ import (
 )
 
 type serveConfiguration struct {
-	providerStatuses []modelcatalog.Provider
+	providerStatuses    []modelcatalog.Provider
+	providerDiagnostics []string
 	// Launcher is nonsecret local discovery policy, outside Session identity.
 	Launcher        *normalLauncherConfig `json:",omitzero"`
 	Context         contextengine.Config  `json:",omitzero"`
@@ -93,7 +94,6 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		defer policy.Close()
 		capabilityPolicy := policy
 		var modeMaximum *permission.Policy
-		var approvalTimeout time.Duration
 		if config.PermissionModes != nil {
 			if err = config.PermissionModes.Validate(); err != nil {
 				return err
@@ -105,7 +105,6 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 				}
 				defer modeMaximum.Close()
 				capabilityPolicy = modeMaximum
-				approvalTimeout = time.Duration(config.PermissionModes.ApprovalTimeoutMillis) * time.Millisecond
 			}
 		}
 		var resolver credential.Resolver
@@ -115,7 +114,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			if e != nil {
 				return e
 			}
-			manager := credential.NewManager(store, nil)
+			manager := credential.NewManager(store)
 			resolver = manager
 			auth = authflow.New(manager)
 		}
@@ -126,6 +125,12 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 				return err
 			}
 			resolver = withExternalCodexCredentials(resolver, codexPath)
+		}
+		if normalMode && codexPath == "" {
+			resolver = withCodexDiscoveryCredentials(resolver, *codexFile, os.Getenv)
+		}
+		for _, diagnostic := range config.providerDiagnostics {
+			fmt.Fprintln(output, diagnostic)
 		}
 		registry, err := registeredProviders(config.Runtime, config.Providers)
 		if err != nil {
@@ -176,6 +181,11 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			runtimeConfig.ProviderProcess = true
 			runtimeConfig.ToolFilter = func(_, name string) bool { return capabilityPolicy.CheckTool(name) == nil }
 		}
+		var rediscover func(context.Context) error
+		if normalMode {
+			runtimeConfig.Discovered = &agentrunner.DiscoveredBackends{}
+			rediscover = normalRediscovery(config, *codexFile, runtimeConfig.Discovered, os.Getenv, output)
+		}
 		factory, identity, err := agentrunner.NewRuntimeFactory(runtimeConfig)
 		if err != nil {
 			return err
@@ -189,7 +199,12 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 				return err
 			}
 		}
-		owner, err := host.New(ctx, host.Config{Directory: *directory, Build: factory, PermissionMaximum: modeMaximum, ApprovalTimeout: approvalTimeout})
+		var failureLog sync.Mutex
+		owner, err := host.New(ctx, host.Config{Directory: *directory, Build: factory, PermissionMaximum: modeMaximum, OnFailure: func(id session.ID, cause error) {
+			failureLog.Lock()
+			defer failureLog.Unlock()
+			fmt.Fprintln(output, gateway.SafeReason(fmt.Sprintf("session %s: %v", id, cause)))
+		}})
 		if err != nil {
 			return err
 		}
@@ -200,8 +215,8 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			return err
 		}
 		gatewayConfig := withViewer(gateway.Config{Host: owner, Policy: policy, Configuration: identity, Auth: auth, Workspace: workspace}, *directory)
-		binding := launcherHostBinding{Configuration: absolutePath(*path), Sessions: absolutePath(*directory), Credentials: absolutePath(*credentials), CodexFile: absolutePath(*codexFile), Normal: *normal, Identity: ownLauncherIdentity()}
-		models := modelUI{supported: config.providerStatuses, binding: &binding, owner: owner, runtime: runtimeConfig, templates: templates, policy: policy, cache: codexModelCache(codexPath), codexRead: codexRead, claudeAgent: claudeAgent, next: gatewayConfig.Extension}
+		binding := launcherHostBinding{Configuration: absolutePath(*path), Sessions: absolutePath(*directory), Credentials: absolutePath(*credentials), CodexFile: absolutePath(*codexFile), Normal: *normal}
+		models := modelUI{rediscover: rediscover, supported: config.providerStatuses, binding: &binding, owner: owner, runtime: runtimeConfig, templates: templates, policy: policy, codexRead: codexRead, claudeAgent: claudeAgent, next: gatewayConfig.Extension}
 		gatewayConfig.Extension = models
 		return gateway.ListenAndServe(ctx, *socket, gatewayConfig)
 	case "attach":

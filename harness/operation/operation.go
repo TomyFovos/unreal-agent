@@ -39,8 +39,7 @@ type Spec struct {
 }
 
 type Operation struct {
-	// ExecutionBasis binds the concrete executor footprint before canonical publication.
-	// RecoveryBasis carries bounded uncertainty constraints; neither grants authority.
+	// Execution carries optional Host dependencies.
 	Execution  *ExecutionMetadata   `json:",embed"`
 	Permission *permission.Decision `json:",omitzero"`
 	// ToolName records origin for current-policy checks on resume; it is not a grant.

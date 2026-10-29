@@ -22,3 +22,5 @@ func checkPrivateSocket(string) error                            { return unsupp
 func tryStartupLock(string) (*os.File, error)                    { return nil, unsupportedLauncher() }
 func gatewaySocketOwned(string) (bool, error)                    { return false, unsupportedLauncher() }
 func startBackgroundHost(launchOptions) (*backgroundHost, error) { return nil, unsupportedLauncher() }
+
+func appendLauncherDiagnostic(launchOptions, string) {}

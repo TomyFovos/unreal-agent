@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -14,7 +16,7 @@ import (
 )
 
 // The Read Only gate runs before Claude Code's own rules, which would otherwise
-// approve the organization's allow list by themselves.
+// approve their allowed commands by themselves.
 const gateMatcher = "Bash|PowerShell|Edit|MultiEdit|Write|NotebookEdit"
 
 // approver asks Unreal's permission mode about Claude Code's tool calls, one at
@@ -40,7 +42,7 @@ func (a *approver) decide(ctx context.Context, toolName string, input jsontext.V
 		return true, ""
 	}
 	name, scope := approvalSubject(toolName, input)
-	readOnly := toolName == "Bash" && permission.ReadOnlyCommand(inputFields(input).Command)
+	readOnly := toolName == "Bash" && permission.ReadOnlyCommand(inputFields(input).Command) || toolName == "Read" && dropped(inputFields(input).FilePath)
 	id := "claude:" + toolUseID
 	if toolUseID == "" {
 		id = "claude:" + uuid.New().String()
@@ -66,6 +68,15 @@ func (a *approver) gate(ctx context.Context, in hookInput) map[string]any {
 	}
 	if in.ToolName == "Bash" && subagentCommand(inputFields(in.ToolInput).Command, a.cli) {
 		return map[string]any{} // children follow the mode themselves
+	}
+	if in.ToolName == "Bash" {
+		if command, ok := currentSubagentCommand(inputFields(in.ToolInput).Command, a.cli); ok {
+			var input map[string]any
+			if json.Unmarshal(in.ToolInput, &input) == nil {
+				input["command"] = command
+				return map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "Unreal Agent ran its current subagent command.", "updatedInput": input}}
+			}
+		}
 	}
 	if controller := permission.ControllerFromContext(ctx); controller != nil {
 		readOnly := in.ToolName == "Bash" && permission.ReadOnlyCommand(inputFields(in.ToolInput).Command)
@@ -147,6 +158,17 @@ func denialMessage(state string) string {
 		return "Unreal Agent canceled the approval for this tool call."
 	}
 	return "Unreal Agent denied this tool call."
+}
+
+// dropped reports a file the user sent from Windows into ~/drop: reading it
+// is reading what the user handed over, in every mode.
+func dropped(path string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil || path == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Join(home, "drop"), filepath.Clean(path))
+	return err == nil && rel != "." && !strings.HasPrefix(rel, "..")
 }
 
 func first(values ...string) string {

@@ -15,9 +15,6 @@ type translator struct{ generation string }
 
 func New(generation string) tool.Translator { return &translator{generation: generation} }
 func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallStatus {
-	if len(call.Arguments) > debug.MaxResultBytes {
-		return tool.ErrorStatus("DAP request too large", 1024)
-	}
 	var request debug.Request
 	if json.Unmarshal([]byte(call.Arguments), &request, json.RejectUnknownMembers(true)) != nil {
 		return tool.ErrorStatus("invalid DAP arguments", 1024)
@@ -58,7 +55,7 @@ func (t *translator) TranslateResult(callID string, status tool.CallStatus, ops 
 				text = "Debugger operation is running."
 			default:
 				var outcome debug.Result
-				if len(state.Handle) > debug.MaxResultBytes || json.Unmarshal(state.Handle, &outcome, json.RejectUnknownMembers(true)) != nil || outcome.Version != 1 {
+				if json.Unmarshal(state.Handle, &outcome, json.RejectUnknownMembers(true)) != nil || outcome.Version != 1 {
 					return result, errors.New("invalid typed DAP result")
 				}
 				data, err := json.Marshal(outcome)
@@ -81,7 +78,7 @@ func Definition() tool.Definition {
 			"handle":    map[string]any{"type": "object", "required": []string{"id"}, "properties": map[string]any{"id": str(), "generation": str()}, "additionalProperties": false},
 			"command":   map[string]any{"type": "string", "enum": []string{"launch", "attach", "setBreakpoints", "threads", "stackTrace", "scopes", "variables", "evaluate", "continue", "pause", "next", "stepIn", "stepOut", "inspect", "disconnect"}},
 			"start":     map[string]any{"type": "object", "required": []string{"adapter"}, "additionalProperties": false, "properties": map[string]any{"adapter": str(), "program": str(), "arguments": map[string]any{"type": "array", "items": str()}, "directory": str(), "process_id": integer(), "stop_on_entry": map[string]any{"type": "boolean"}}},
-			"thread_id": integer(), "frame_id": integer(), "variables_reference": integer(), "stop_epoch": integer(), "expression": str(), "source": str(), "offset": integer(), "count": map[string]any{"type": "integer", "minimum": 1, "maximum": debug.MaxItems}, "terminate": map[string]any{"type": "boolean"},
-			"breakpoints": map[string]any{"type": "array", "maxItems": debug.MaxItems, "items": map[string]any{"type": "object", "required": []string{"line"}, "additionalProperties": false, "properties": map[string]any{"line": map[string]any{"type": "integer", "minimum": 1}, "column": integer()}}},
+			"thread_id": integer(), "frame_id": integer(), "variables_reference": integer(), "stop_epoch": integer(), "expression": str(), "source": str(), "offset": integer(), "count": map[string]any{"type": "integer", "minimum": 1}, "terminate": map[string]any{"type": "boolean"},
+			"breakpoints": map[string]any{"type": "array", "items": map[string]any{"type": "object", "required": []string{"line"}, "additionalProperties": false, "properties": map[string]any{"line": map[string]any{"type": "integer", "minimum": 1}, "column": integer()}}},
 		}}}}
 }

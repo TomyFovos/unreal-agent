@@ -3,7 +3,6 @@ package tui
 import (
 	"encoding/json/v2"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -11,6 +10,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/mutation"
 	files "github.com/unreallabsai/unreal-agent/harness/native"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
@@ -40,9 +40,13 @@ func receiptStatus(ops []operation.Operation) operation.Status {
 			return operation.StatusFailed
 		case operation.StatusCanceled:
 			status = operation.StatusCanceled
-		case operation.StatusReady, operation.StatusCanceling:
-			if status != operation.StatusCanceled {
+		case operation.StatusReady:
+			if status != operation.StatusCanceled && status != operation.StatusCanceling {
 				status = operation.StatusReady
+			}
+		case operation.StatusCanceling:
+			if status != operation.StatusCanceled {
+				status = operation.StatusCanceling
 			}
 		case operation.StatusAwaiting:
 			if status == operation.StatusCompleted {
@@ -118,6 +122,12 @@ func updateReceipts(entries []Entry, d sessionstore.ToolCallStatus, at time.Time
 func currentReceipt(r Receipt, s Snapshot, u UIState) (Receipt, viewer.Duration) {
 	var latest []operation.Operation
 	for _, id := range r.Operations {
+		if u.index != nil {
+			if op, ok := u.index.operations[id]; ok {
+				latest = append(latest, op)
+			}
+			continue
+		}
 		for _, op := range s.Operations {
 			if op.ID == id {
 				latest = append(latest, op)
@@ -127,7 +137,18 @@ func currentReceipt(r Receipt, s Snapshot, u UIState) (Receipt, viewer.Duration)
 	if len(latest) > 0 {
 		r.Status = receiptStatus(latest)
 		for _, op := range latest {
-			if reason := operationReason(op); reason != "" {
+			reason := ""
+			if u.index != nil {
+				var ok bool
+				reason, ok = u.index.reasons[op.ID]
+				if !ok {
+					reason = operationReason(op)
+					u.index.reasons[op.ID] = reason
+				}
+			} else {
+				reason = operationReason(op)
+			}
+			if reason != "" {
 				r.Reason = reason
 			}
 		}
@@ -144,7 +165,7 @@ func currentReceipt(r Receipt, s Snapshot, u UIState) (Receipt, viewer.Duration)
 	}
 	if !d.Known && !r.StartedAt.IsZero() {
 		end := r.EndedAt
-		if end.IsZero() && s.Connected && r.Status == operation.StatusReady {
+		if end.IsZero() && s.Connected && !operationVisualState(r.Status).ended() {
 			end = u.Now
 		}
 		if !end.IsZero() && !end.Before(r.StartedAt) {
@@ -157,106 +178,160 @@ func currentReceipt(r Receipt, s Snapshot, u UIState) (Receipt, viewer.Duration)
 	}
 	return r, d
 }
-func stateMark(s operation.Status, t Theme) (string, string, style) {
-	switch s {
-	case operation.StatusAwaiting:
-		return t.symbol("◌", "."), "queued", meta
-	case operation.StatusReady, operation.StatusCanceling:
-		return t.symbol("▸", ">"), "running", liveStyle
-	case operation.StatusCompleted:
-		return t.symbol("✓", "+"), "", meta
-	case operation.StatusFailed:
-		return t.symbol("✗", "x"), "failed", failureStyle
-	case operation.StatusCanceled:
-		return t.symbol("⊘", "-"), "canceled", normal
+
+// chipSurface adds the same padding and fallback delimiters as roleLine,
+// without translating symbols in user/tool text. Nested badges keep their face.
+func chipSurface(content line, role colorRole, t Theme) line {
+	base := visualStyle(role)
+	content = append(line(nil), content...)
+	for i := range content {
+		if content[i].style.fg == "" {
+			content[i].style.fg = base.fg
+		}
+		if content[i].style.bg == "" {
+			content[i].style.bg = base.bg
+		}
+	}
+	frame := t.roleLine("  ", role)
+	return joined(frame[:len(frame)/2], content, frame[len(frame)/2:])
+}
+
+func toolTarget(name, target string, width int, t Theme) string {
+	switch name {
+	case "read", "write", "edit", "Read", "Write", "Edit", "ViewImage", "NotebookEdit":
+		// Keep a whole basename when it fits; middle may shorten only the
+		// directory part. A long basename itself still uses middle.
+		if i := strings.LastIndexAny(target, "/\\"); i >= 0 {
+			base := target[i+1:]
+			if n := textLine(base, normal).width(); n < width {
+				return middle(target[:i+1], width-n, t) + base
+			}
+		}
+		return middle(target, width, t)
 	default:
-		return "?", "unknown", warningStyle
+		return tail(target, width, t)
 	}
 }
-func toolRows(e Entry, s Snapshot, u UIState, l layout) []bodyLine {
-	var result []bodyLine
-	completed := map[string]int{}
-	n := 0
-	for _, raw := range e.Calls {
-		r, _ := currentReceipt(raw, s, u)
-		if r.Status == operation.StatusCompleted && r.Name != "SubagentStart" {
-			completed[r.Name]++
-			n++
-		}
-	}
-	if n >= 2 {
-		var names []string
-		for name := range completed {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		var labels []string
-		for _, name := range names {
-			labels = append(labels, fmt.Sprintf("%s %d", name, completed[name]))
-		}
-		text := fmt.Sprintf("%s %d tool calls: %s", u.Theme.symbol("✓", "+"), n, strings.Join(labels, ", "))
-		result = append(result, bodyLine{text: textLine(middle(text, l.text, u.Theme), meta)})
-	}
-	for _, raw := range e.Calls {
-		r, d := currentReceipt(raw, s, u)
-		if n >= 2 && r.Status == operation.StatusCompleted && r.Name != "SubagentStart" {
-			continue
-		}
-		name, target := r.Name, r.Target
-		var spawned *viewer.Row
-		if name == "SubagentStart" {
-			name = "spawn"
-			for _, child := range children(u, s) {
-				for _, id := range r.Operations {
-					if id == child.ParentOperationID {
-						target = string(child.ID) + "  " + child.Label
-						copy := child
-						spawned = &copy
-					}
+
+func receiptChip(r Receipt, d viewer.Duration, s Snapshot, u UIState, width int, rows []viewer.Row, marks map[session.ID]string) (line, string) {
+	state := toolVisualState(r, s)
+	name, target := displayTool(r.Name, r.Target)
+	var badge line
+	spawned := false
+	if r.Name == "SubagentStart" {
+		for _, child := range rows {
+			for _, id := range r.Operations {
+				if id != "" && id == child.ParentOperationID {
+					state = childVisualState(child, s)
+					badge = u.Theme.roleLine("["+marks[child.ID]+"]", badgeColor)
+					target, name = childTitle(child), ""
+					spawned = true
+					break
 				}
 			}
-		}
-		mark, word, st := stateMark(r.Status, u.Theme)
-		if spawned != nil {
-			mark, word, st, _ = childState(*spawned, s, u.Theme)
-		}
-		if word == "running" {
-			word = ""
-		}
-		if d.Known && (r.Status == operation.StatusReady && (spawned == nil || spawned.Finish == nil) || r.Status == operation.StatusCompleted && d.Value >= 5*time.Second) {
-			if word != "" {
-				word += "  "
+			if spawned {
+				break
 			}
-			word += duration(d.Value)
-		}
-		suffix := ""
-		if word != "" {
-			suffix = "  " + word
-		}
-		prefix := mark + " " + name
-		room := max(0, l.text-len(suffix)-textLine(prefix, normal).width()-2)
-		if target != "" {
-			prefix += "  " + middle(target, room, u.Theme)
-		}
-		bodyStyle := normal
-		if r.Status == operation.StatusCompleted && spawned == nil {
-			bodyStyle = meta
-		}
-		markStyle := st
-		if r.Status == operation.StatusCompleted && spawned == nil {
-			markStyle = successStyle
-			markStyle.faint = true
-		}
-		row := joined(textLine(mark, markStyle), textLine(strings.TrimPrefix(prefix, mark), bodyStyle))
-		suffixStyle := meta
-		if word == "failed" || word == "unknown" {
-			suffixStyle = st
-		}
-		row = joined(row, textLine(strings.Repeat(" ", max(0, l.text-row.width()-textLine(suffix, meta).width()))+suffix, suffixStyle))
-		result = append(result, bodyLine{text: row.clip(l.text)})
-		if r.Reason != "" && (r.Status == operation.StatusFailed || r.Status == operation.StatusCanceled) {
-			result = append(result, bodyLine{text: textLine(middle(r.Reason, l.text, u.Theme), meta)})
 		}
 	}
+	mark, word, color := state.presentation(u.Theme)
+	role, suffix := chipColor, ""
+	if state == stateFailed {
+		role = chipBad
+	}
+	if !spawned {
+		switch state {
+		case stateWorking:
+			if d.Known {
+				suffix = " " + coarseDuration(d.Value)
+			}
+		case stateCompleted:
+		default:
+			suffix = " " + word
+		}
+	}
+	room := max(0, min(40, width)-u.Theme.roleLine("  ", role).width())
+	prefix := joined(textLine(mark+" ", color), badge)
+	if len(badge) > 0 {
+		prefix = joined(prefix, textLine(" ", normal))
+	}
+	// Reserve the state/elapsed suffix before shortening a name or target.
+	name = tail(name, max(0, room-prefix.width()-textLine(suffix, normal).width()), u.Theme)
+	prefix = joined(prefix, textLine(name, normal))
+	if target != "" {
+		gap := " "
+		if spawned {
+			gap = ""
+		}
+		available := max(0, room-prefix.width()-textLine(suffix+gap, normal).width())
+		if spawned {
+			target = tail(target, available, u.Theme)
+		} else {
+			target = toolTarget(name, target, available, u.Theme)
+		}
+		if target != "" {
+			prefix = joined(prefix, textLine(gap+target, normal))
+		}
+	}
+	chip := chipSurface(joined(prefix, textLine(suffix, normal)).clip(room), role, u.Theme)
+	reason := ""
+	if state == stateFailed && r.Reason != "" {
+		reason = tail(strings.SplitN(r.Reason, "\n", 2)[0], width, u.Theme)
+	}
+	return chip, reason
+}
+
+// toolChips keeps call order, collapsing only three or more completed calls
+// of the same expanded tool in this response. Active/failed calls stay separate.
+func toolChips(e Entry, s Snapshot, u UIState, l layout) []bodyLine {
+	type call struct {
+		receipt Receipt
+		elapsed viewer.Duration
+	}
+	calls := make([]call, len(e.Calls))
+	completed := map[string]int{}
+	for i, raw := range e.Calls {
+		r, d := currentReceipt(raw, s, u)
+		calls[i] = call{r, d}
+		if toolVisualState(r, s) == stateCompleted && r.Name != "SubagentStart" {
+			name, _ := displayTool(r.Name, r.Target)
+			completed[name]++
+		}
+	}
+	rows := children(u, s)
+	marks := marksFor(u, s)
+	var result []bodyLine
+	var row line
+	flush := func() {
+		if len(row) > 0 {
+			result = append(result, bodyLine{text: row})
+			row = nil
+		}
+	}
+	grouped := map[string]bool{}
+	for _, c := range calls {
+		r := c.receipt
+		name, _ := displayTool(r.Name, r.Target)
+		if r.Name != "SubagentStart" && toolVisualState(r, s) == stateCompleted && completed[name] >= 3 {
+			if grouped[name] {
+				continue
+			}
+			grouped[name] = true
+			r.Name, r.Target = name, fmt.Sprintf("%s%d", u.Theme.symbol("×", "x"), completed[name])
+		}
+		chip, reason := receiptChip(r, c.elapsed, s, u, l.text, rows, marks)
+		if len(row) > 0 && row.width()+1+chip.width() > l.text {
+			flush()
+		}
+		if len(row) > 0 {
+			row = joined(row, textLine(" ", normal))
+		}
+		row = joined(row, chip)
+		if reason != "" {
+			flush()
+			result = append(result, bodyLine{text: textLine(reason, visualStyle(dimColor))})
+		}
+	}
+	flush()
 	return result
 }

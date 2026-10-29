@@ -12,7 +12,9 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/unreallabsai/unreal-agent/harness/authflow"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
@@ -23,10 +25,8 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
+	"github.com/unreallabsai/unreal-agent/internal/secretguard"
 )
-
-const MaxFrameBytes = 32 << 20
-const MaxRequestBytes = 128 << 10
 
 // Config is owned by the serving process. Clients cannot choose an execution
 // policy, replace the runtime configuration, or create their own store writer.
@@ -46,12 +46,14 @@ type request struct {
 	Mode            host.Mode
 	Generation      string
 	After           sessionstore.Sequence
+	Before          sessionstore.Sequence
 	Limit, Capacity int
 	Input           inbox.Input
 	Reference       credential.Reference
 	Secret          string `json:",omitzero"`
 }
 type frame struct {
+	Version    *host.ObservationVersion `json:",omitzero"`
 	Permission *permission.ControlReply `json:",omitzero"`
 	View       *host.View               `json:",omitzero"`
 	Event      *host.Event              `json:",omitzero"`
@@ -60,10 +62,34 @@ type frame struct {
 	Entries    []credential.Metadata    `json:",omitzero"`
 	Methods    []authflow.Support       `json:",omitzero"`
 	Error      string                   `json:",omitzero"`
+	Reason     string                   `json:",omitzero"`
 }
-type Error struct{ Code string }
+type Error struct{ Code, Reason string }
 
-func (e *Error) Error() string { return "gateway: " + e.Code }
+func (e *Error) Error() string {
+	message := "gateway: " + SafeReason(e.Code)
+	if e.Reason != "" {
+		message += ": " + SafeReason(e.Reason)
+	}
+	return message
+}
+
+// SafeReason applies the shared credential guard before a diagnostic crosses
+// the gateway or reaches a terminal, including diagnostics from older peers.
+func SafeReason(value string) string {
+	value = secretguard.Redact(value)
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 || r >= 0x202a && r <= 0x202e || r >= 0x2066 && r <= 0x2069 || r == 0x200e || r == 0x200f || r == 0x061c {
+			return -1
+		}
+		return r
+	}, value)
+	value = secretguard.Redact(value)
+	if secretguard.Sensitive(value) {
+		return "[protected]"
+	}
+	return value
+}
 func (e *Error) Is(target error) bool {
 	return (e.Code == "stale_generation" && target == host.ErrStaleGeneration) || (e.Code == "writer_owned" && target == localfile.ErrWriterOwned) || (e.Code == "stopped" && target == host.ErrStopped) || (e.Code == "conflict" && target == host.ErrConflict) || (e.Code == "not_found" && target == fs.ErrNotExist)
 }
@@ -141,7 +167,7 @@ func Handler(c Config) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.Header().Set("Cache-Control", "no-store")
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxRequestBytes))
+		body, err := io.ReadAll(r.Body)
 		defer clear(body)
 		var q request
 		if err == nil {
@@ -154,7 +180,7 @@ func Handler(c Config) http.Handler {
 		result, sub, err := dispatch(r.Context(), c, r.URL.Path, q)
 		q.Secret = ""
 		if err != nil {
-			writeFrame(w, frame{Error: errorCode(err)})
+			writeFrame(w, frame{Error: errorCode(err), Reason: SafeReason(err.Error())})
 			return
 		}
 		if sub != nil {
@@ -182,6 +208,14 @@ func Handler(c Config) http.Handler {
 	})
 }
 func dispatch(ctx context.Context, c Config, path string, q request) (frame, *host.Subscription, error) {
+	if path == "/v1/version" {
+		s, err := c.Host.Attach(q.ID)
+		if err != nil {
+			return frame{}, nil, err
+		}
+		version := s.ObservationVersion()
+		return frame{Version: &version}, nil, nil
+	}
 	if path == "/v1/auth/methods" {
 		return frame{Methods: authflow.Matrix()}, nil, nil
 	}
@@ -206,7 +240,7 @@ func dispatch(ctx context.Context, c Config, path string, q request) (frame, *ho
 	if q.Capacity == 0 {
 		q.Capacity = 32
 	}
-	if q.Limit < 1 || q.Limit > 256 || q.Capacity < 1 || q.Capacity > 128 {
+	if q.Limit < 1 || q.Capacity < 1 {
 		return frame{}, nil, &Error{Code: "invalid_bounds"}
 	}
 	var s *host.Session
@@ -223,6 +257,9 @@ func dispatch(ctx context.Context, c Config, path string, q request) (frame, *ho
 	case "/v1/open", "/v1/inspect":
 		v, e := s.Inspect(q.After, q.Limit)
 		return frame{View: &v}, nil, e
+	case "/v1/history-before":
+		v, e := s.InspectBefore(q.Before, q.Limit)
+		return frame{View: &v}, nil, e
 	case "/v1/submit":
 		receipt, e := s.Submit(ctx, q.Generation, q.Input)
 		return frame{Receipt: &receipt}, nil, e
@@ -237,9 +274,6 @@ func writeFrame(w http.ResponseWriter, f frame) error {
 	encoded, err := json.Marshal(f)
 	if err != nil {
 		return err
-	}
-	if len(encoded) > MaxFrameBytes {
-		encoded = []byte(`{"Error":"frame_too_large"}`)
 	}
 	controller := http.NewResponseController(w)
 	_ = controller.SetWriteDeadline(time.Now().Add(5 * time.Second))

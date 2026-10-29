@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/internal/usertext"
 	"io"
 	"strings"
 	"sync"
@@ -13,8 +14,6 @@ import (
 	"uuid"
 
 	"github.com/unreallabsai/unreal-agent/harness/analysis"
-	"github.com/unreallabsai/unreal-agent/harness/authflow"
-	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
@@ -28,10 +27,6 @@ type Client interface {
 	Reader
 	Open(context.Context, host.Mode, session.ID) (host.View, error)
 	Submit(context.Context, session.ID, string, inbox.Input) (host.Receipt, error)
-	Methods(context.Context) ([]authflow.Support, error)
-	Login(context.Context, credential.Reference, credential.Secret) (credential.Metadata, error)
-	Logout(context.Context, credential.Reference) error
-	ListCredentials(context.Context) ([]credential.Metadata, error)
 }
 type permissionWatchResult struct {
 	generation   string
@@ -48,11 +43,8 @@ type Config struct {
 	Output           io.Writer
 	Size             func() (int, int)
 	Theme            *Theme
-	// Legacy Panel remains available to embedders. Live Dock uses structured
-	// Viewer data; both hooks are read-only projections, never Session access.
-	Panel       func(width, height int) string
-	Viewer      func(time.Time) viewer.PanelSnapshot
-	ViewChanged func(ViewMode) // frontend read-only observation scope
+	Viewer           func(time.Time) viewer.PanelSnapshot
+	ViewChanged      func(ViewMode) // frontend read-only observation scope
 	// InitialView is the first view; empty means Split, which narrow
 	// terminals show as Chat until they reach 120 columns.
 	InitialView         ViewMode
@@ -71,14 +63,18 @@ type Config struct {
 }
 type commandResult struct {
 	text, kind           string
+	errorProvider        string
 	permissionSnapshot   *permission.ModeSnapshot
 	permissionGeneration string
 	err                  error
 	input                *inbox.Input
 	sheet                *Sheet
 	picker               *Picker
+	capabilities         map[string]modelcatalog.Capabilities
 	transcript           *transcriptPage
 	transcriptTop        bool
+	olderLoaded          bool
+	olderStep            int
 	// clipboard is text for the terminal's clipboard (OSC 52), written by the
 	// render loop so it never interleaves with a frame.
 	clipboard string
@@ -94,6 +90,13 @@ func Run(ctx context.Context, c Config) error {
 		defer c.ViewChanged(ViewChat)
 	}
 	m := NewModel(c.ID)
+	var current Snapshot
+	snapshot := func() Snapshot {
+		if current.Version != m.Version() {
+			current = m.Snapshot()
+		}
+		return current
+	}
 	if c.RuntimeCapabilities != nil {
 		if health, err := c.RuntimeCapabilities(ctx); err == nil {
 			m.setCapabilities(health)
@@ -152,7 +155,7 @@ func Run(ctx context.Context, c Config) error {
 		u.Scroll = 0
 		u.HistoryTop = false
 		u.Transcript = nil
-		generation := m.Snapshot().Generation
+		generation := snapshot().Generation
 		var text string
 		if input.Kind == inbox.InputExternal {
 			_ = json.Unmarshal(input.Payload, &text)
@@ -184,7 +187,7 @@ func Run(ctx context.Context, c Config) error {
 			send(inputs[0])
 			return
 		}
-		generation := m.Snapshot().Generation
+		generation := snapshot().Generation
 		start("sending  stop request", func(ctx context.Context) commandResult {
 			for _, input := range inputs {
 				if _, err := c.Client.Submit(ctx, c.ID, generation, input); err != nil {
@@ -197,9 +200,12 @@ func Run(ctx context.Context, c Config) error {
 	var renderer Renderer
 	var complete completion
 	complete.reset()
-	tick := time.NewTicker(30 * time.Millisecond)
+	tick := time.NewTicker(120 * time.Millisecond)
 	defer tick.Stop()
 	dirty := true
+	viewerDirty := true
+	viewerSecond := int64(0)
+	animated := false
 	width, height := 80, 24
 	previousWidth, previousHeight, previousRows := 0, 0, 0
 	previousConversationHeight := 0
@@ -233,6 +239,7 @@ func Run(ctx context.Context, c Config) error {
 			u.Now = time.Now()
 			u.Input = editor.Text()
 			u.Cursor = editor.cursor
+			u.Selected = editor.Selected
 			u.Pasted = editor.Pasted
 			if u.Picker != nil && u.Picker.Kind == "view" {
 				p := u.Picker
@@ -241,16 +248,14 @@ func Run(ctx context.Context, c Config) error {
 					u.Picker = viewPicker(selected, width)
 				}
 			}
-			if c.Viewer != nil {
+			if c.Viewer != nil && (viewerDirty || viewerSecond != u.Now.Unix()) {
 				u.Viewer = c.Viewer(u.Now)
+				viewerDirty, viewerSecond = false, u.Now.Unix()
 			}
 			if u.Sheet != nil && u.Sheet.Analysis != "" {
 				u.Sheet.Lines = analysis.Lines(m.Analysis(u.Now, u.Viewer.Rows), u.Sheet.Analysis, u.Theme.ASCII)
 			}
-			if c.Panel != nil {
-				u.LegacyPanel = c.Panel(width, height)
-			}
-			s := m.Snapshot()
+			s := snapshot()
 			if c.WatchPermissions != nil && s.Connected && s.Generation != "" && permissionGeneration != s.Generation {
 				if cancelPermission != nil {
 					cancelPermission()
@@ -298,7 +303,7 @@ func Run(ctx context.Context, c Config) error {
 					}
 				}()
 			}
-			if s.Permissions.Enabled && len(s.Permissions.Pending) > 0 && s.Permissions.Pending[0].ID != u.PermissionDismissed && u.Picker == nil && u.Sheet == nil && u.Private == nil && !u.Busy && strings.TrimSpace(editor.Text()) == "" {
+			if s.Permissions.Enabled && len(s.Permissions.Pending) > 0 && s.Permissions.Pending[0].ID != u.PermissionDismissed && u.Picker == nil && u.Sheet == nil && !u.Busy && strings.TrimSpace(editor.Text()) == "" {
 				u.Picker = operationPermissionConfirmation(s, s.Permissions.Pending[0])
 			}
 			files.sync(s, &u, &editor)
@@ -337,6 +342,7 @@ func Run(ctx context.Context, c Config) error {
 			if _, err := io.WriteString(c.Output, renderer.Draw(frame)); err != nil {
 				return err
 			}
+			animated = u.Busy || s.Progress != nil || !s.Connected || pulse(s, u, makeLayout(width, height)) != nil
 			dirty = false
 		}
 		select {
@@ -347,14 +353,13 @@ func Run(ctx context.Context, c Config) error {
 				u.Notification = Notification{}
 				dirty = true
 			}
-			s := m.Snapshot()
-			if now.Unix() != u.Now.Unix() || !u.Theme.Still && now.UnixMilli()/120 != u.Now.UnixMilli()/120 && (u.Busy || s.Progress != nil || !s.Connected || pulse(s, u, makeLayout(width, height)) != nil) {
+			if now.Unix() != u.Now.Unix() || !u.Theme.Still && animated && now.UnixMilli()/120 != u.Now.UnixMilli()/120 {
 				dirty = true
 			}
 		case <-changes:
 			dirty = true
 		case result := <-permissionEvents:
-			if result.generation != m.Snapshot().Generation {
+			if result.generation != snapshot().Generation {
 				if result.connection.Cancel != nil {
 					result.connection.Cancel()
 				}
@@ -375,19 +380,24 @@ func Run(ctx context.Context, c Config) error {
 			dirty = true
 		case result := <-files.events:
 			// Revalidate scope/cursor before accepting asynchronous candidates.
-			files.sync(m.Snapshot(), &u, &editor)
+			files.sync(snapshot(), &u, &editor)
 			files.apply(result)
 			dirty = true
 		case _, ok := <-c.Updates:
+			viewerDirty = true
 			if !ok {
 				c.Updates = nil
 			}
 			dirty = true
 		case result := <-results:
+			u.HistoryLoading = false
 			u.Busy = false
+			if result.capabilities != nil {
+				m.setCapabilities(result.capabilities)
+			}
 			u.Outbox = ""
 			cancelJob = nil
-			if result.permissionGeneration != "" && result.permissionGeneration != m.Snapshot().Generation {
+			if result.permissionGeneration != "" && result.permissionGeneration != snapshot().Generation {
 				dirty = true
 				continue
 			}
@@ -403,15 +413,31 @@ func Run(ctx context.Context, c Config) error {
 			}
 			if !canceledWaiting {
 				if result.err != nil {
-					text := "not confirmed: " + result.err.Error()
+					m.diagnostic(result.err)
+					provider := ""
+					if selected := snapshot().Selection; selected != nil {
+						provider = selected.Provider
+					}
+					if result.errorProvider != "" {
+						provider = result.errorProvider
+					}
+					text := usertext.Failure("", result.err.Error(), provider)
 					var exportErr *ExportError
 					if errors.As(result.err, &exportErr) {
 						text = "export failed: " + exportErr.Error()
 					}
 					notice(text, "error")
 					if result.input != nil {
-						u.Notification.Hint = "/retry resends it with the same input ID; it cannot be committed twice"
+						u.Notification.Hint = "/retry で安全に再送できます（重複して送信されません）"
 					}
+				} else if result.olderLoaded {
+					u.Scroll += result.olderStep
+					u.HistoryTop = result.transcriptTop
+					if u.HistoryTop {
+						u.Scroll = RenderFrame(snapshot(), u, width, height).ScrollMax
+					}
+					previousWidth = -1
+					u.Notification = Notification{}
 				} else if result.transcript != nil {
 					u.Transcript = result.transcript
 					if len(result.transcript.Entries) == 0 && !result.transcript.Newer {
@@ -420,7 +446,7 @@ func Run(ctx context.Context, c Config) error {
 					u.Scroll = 0
 					u.HistoryTop = result.transcriptTop && u.Transcript != nil
 					if result.transcriptTop && u.Transcript != nil {
-						u.Scroll = RenderFrame(m.Snapshot(), u, width, height).ScrollMax
+						u.Scroll = RenderFrame(snapshot(), u, width, height).ScrollMax
 					}
 					previousWidth = -1
 					u.Notification = Notification{}
@@ -448,7 +474,7 @@ func Run(ctx context.Context, c Config) error {
 				return nil
 			}
 			dirty = true
-			s := m.Snapshot()
+			s := snapshot()
 			u.Input, u.Pasted = editor.Text(), editor.Pasted
 			files.sync(s, &u, &editor)
 			wheel := key.Name == "wheelup" || key.Name == "wheeldown"
@@ -456,7 +482,7 @@ func Run(ctx context.Context, c Config) error {
 				// Wheel reports never interact with approval/model/file pickers,
 				// private inputs or the composer. Only the hovered history pane
 				// scrolls; synthetic keyboard-only tests may omit coordinates.
-				if key.Paste || u.Private != nil || u.Picker != nil || u.Sheet != nil {
+				if key.Paste || u.Picker != nil || u.Sheet != nil {
 					continue
 				}
 				if key.MouseY != 0 {
@@ -478,10 +504,31 @@ func Run(ctx context.Context, c Config) error {
 					key.Name = "pagedown"
 				}
 			}
+			// Selection belongs to the composer, including when slash completion is open.
+			if (u.Picker == nil || u.Picker.Kind == "file") && u.Sheet == nil && !key.Paste {
+				if key.Name == "selectall" || key.Name == "escape" && editor.Selected {
+					if u.Picker != nil && u.Picker.Kind == "file" {
+						files.dismissed, files.hasDismissed = files.mention, true
+						files.close(&u)
+					}
+					editor.Apply(key)
+					complete.resetMenu(&u)
+					continue
+				}
+				if editor.Selected {
+					switch key.Name {
+					case "up", "down":
+						editor.Apply(key)
+						continue
+					case "pageup", "pagedown", "historyhome", "historyend":
+						editor.Selected = false
+					}
+				}
+			}
 			if files.key(key, &u, &editor, width, height) {
 				continue
 			}
-			if !key.Paste && u.Private == nil && u.Sheet != nil && u.Sheet.Analysis == "" {
+			if !key.Paste && u.Sheet != nil && u.Sheet.Analysis == "" {
 				if key.Name == "escape" {
 					u.Sheet = nil
 					continue
@@ -495,7 +542,7 @@ func Run(ctx context.Context, c Config) error {
 					continue
 				}
 			}
-			if !key.Paste && u.Private == nil && u.Sheet != nil && u.Sheet.Analysis != "" && !u.Busy {
+			if !key.Paste && u.Sheet != nil && u.Sheet.Analysis != "" && !u.Busy {
 				switch key.Name {
 				case "escape", "enter":
 					u.Picker = analyzePicker(u.Sheet.Analysis)
@@ -513,8 +560,12 @@ func Run(ctx context.Context, c Config) error {
 					continue
 				}
 			}
-			if !key.Paste && u.Private == nil && u.Picker != nil && !u.Busy {
+			if !key.Paste && u.Picker != nil && !u.Busy {
 				p := u.Picker
+				if p.Kind == "copy" && (key.Text == " " || key.Name == "space") {
+					p.toggleCopy()
+					continue
+				}
 				switch key.Name {
 				case "escape":
 					if p.Kind == "permission-once" {
@@ -557,6 +608,15 @@ func Run(ctx context.Context, c Config) error {
 					if len(p.Options) == 0 {
 						continue
 					}
+					if p.Kind == "copy" {
+						choices := p.copySelection()
+						u.Picker = nil
+						start("copying the selected messages", func(ctx context.Context) commandResult {
+							text, err := CopyMessagesText(ctx, c.Client, c.ID, choices)
+							return commandResult{clipboard: text, text: fmt.Sprintf("クリップボードに %d 文字コピーしました", utf8.RuneCountInString(text)), err: err}
+						})
+						continue
+					}
 					if p.Kind == "permissions" {
 						if permissionConnection.Request == nil {
 							notice("permission control disconnected; reconnect the TUI", "warning")
@@ -573,36 +633,14 @@ func Run(ctx context.Context, c Config) error {
 						}
 						mode := []permission.Mode{permission.ReadOnly, permission.Ask, permission.FullAccess}[p.Selection]
 						request := permissionConnection.Request
-						if mode == permission.FullAccess {
-							if !permissionReviewFits(width, height) {
-								notice("Resize to at least 80x24 to review Full Access", "warning")
-								continue
-							}
-							start("preparing Full Access confirmation", func(ctx context.Context) commandResult {
-								out, err := request(ctx, permission.ControlRequest{Action: "prepare_full", Expected: p.PermissionRevision})
-								if err != nil {
-									return commandResult{err: err}
-								}
-								return commandResult{permissionGeneration: s.Generation, picker: fullPermissionConfirmation(s, out.Snapshot.Revision, out.Challenge)}
-							})
-						} else {
-							u.Picker = nil
-							start("changing Session permissions", func(ctx context.Context) commandResult {
-								out, err := request(ctx, permission.ControlRequest{Action: "set_mode", Expected: p.PermissionRevision, Mode: mode})
-								return commandResult{permissionGeneration: s.Generation, text: mode.Label() + " active", err: err, permissionSnapshot: &out.Snapshot}
-							})
-						}
+						u.Picker = nil
+						start("changing Session permissions", func(ctx context.Context) commandResult {
+							out, err := request(ctx, permission.ControlRequest{Action: "set_mode", Expected: p.PermissionRevision, Mode: mode})
+							return commandResult{permissionGeneration: s.Generation, text: "権限を変更しました: " + mode.Label(), err: err, permissionSnapshot: &out.Snapshot}
+						})
 						continue
 					}
-					if p.Kind == "permission-full" || p.Kind == "permission-once" {
-						if p.Kind == "permission-full" && p.Selection == 0 {
-							u.Picker = nil
-							continue
-						}
-						if !permissionReviewFits(width, height) && permissionGrants(p) {
-							notice("Resize to at least 80x24 to review permission scope", "warning")
-							continue
-						}
+					if p.Kind == "permission-once" {
 						if permissionConnection.Request == nil {
 							notice("permission control disconnected; reconnect the TUI", "warning")
 							continue
@@ -635,18 +673,14 @@ func Run(ctx context.Context, c Config) error {
 					}
 					if p.Kind == "provider" {
 						b := p.Providers[p.Selection]
-						if b.Availability != "available" {
-							notice("provider "+b.Availability+" · "+b.Reason.Hint(), "warning")
-							continue
-						}
 						current := s.Selection
 						start("loading "+b.Name+" catalog", func(ctx context.Context) commandResult {
 							catalog := b.Catalog
 							if c.ProviderCatalog != nil {
 								var e error
-								catalog, e = c.ProviderCatalog(ctx, b.ID, false)
+								catalog, e = c.ProviderCatalog(ctx, b.ID, b.Availability != "available")
 								if e != nil {
-									return commandResult{err: e}
+									return commandResult{err: e, errorProvider: b.ID}
 								}
 							}
 							var selected *sessionstore.RuntimeSelection
@@ -659,7 +693,11 @@ func Run(ctx context.Context, c Config) error {
 							next.Providers = p.Providers
 							next.Revision = p.Revision
 							next.Title = b.Name + " · Model"
-							return commandResult{picker: next}
+							result := commandResult{picker: next}
+							if c.RuntimeCapabilities != nil {
+								result.capabilities, _ = c.RuntimeCapabilities(ctx)
+							}
+							return result
 						})
 						continue
 					}
@@ -709,20 +747,13 @@ func Run(ctx context.Context, c Config) error {
 						generation, revision := s.Generation, p.Revision
 						u.Picker = nil
 						start("changing model for the next turn", func(ctx context.Context) commandResult {
-							return commandResult{text: "Model changed: " + selectionLabel(selected, u.Theme) + "; applies from the next completed turn boundary", err: c.SelectModel(ctx, generation, revision, selected)}
+							return commandResult{text: "モデルを変更しました: " + selectionLabel(selected, u.Theme) + "（次のターンから）", err: c.SelectModel(ctx, generation, revision, selected)}
 						})
 						continue
 					}
 				}
 			}
 			if key.Name == "cancel" {
-				if u.Private != nil {
-					editor.Clear()
-					u.Private = nil
-					notice("key entry canceled", "")
-					complete.resetMenu(&u)
-					continue
-				}
 				if u.Busy {
 					if cancelJob != nil {
 						cancelJob()
@@ -750,7 +781,26 @@ func Run(ctx context.Context, c Config) error {
 					continue
 				}
 				u.HistoryTop = true
-				if s.OlderDropped && !u.Busy && u.Private == nil {
+				if s.LazyHistory && s.OlderDropped && !u.Busy {
+					u.HistoryLoading = true
+					start("古い履歴を読み込み中", func(ctx context.Context) commandResult {
+						for {
+							if err := m.LoadOlder(ctx, c.Client.(BackwardReader)); err != nil {
+								return commandResult{err: err}
+							}
+							m.mu.Lock()
+							older := m.state.OlderDropped
+							m.mu.Unlock()
+							if !older {
+								break
+							}
+							if err := ctx.Err(); err != nil {
+								return commandResult{err: err}
+							}
+						}
+						return commandResult{olderLoaded: true, transcriptTop: true}
+					})
+				} else if s.OlderDropped && !u.Busy {
 					start("loading first canonical history page", func(ctx context.Context) commandResult {
 						page, err := loadTranscriptPage(ctx, c.Client, c.ID, 0, s.After, false)
 						return commandResult{transcript: page, transcriptTop: true, err: err}
@@ -804,7 +854,14 @@ func Run(ctx context.Context, c Config) error {
 				if u.Transcript != nil {
 					older, boundary = u.Transcript.Older, u.Transcript.First
 				}
-				if u.Scroll >= frame.ScrollMax && older && boundary > 1 && !u.Busy && u.Private == nil {
+				if u.Transcript == nil && s.LazyHistory && u.Scroll+step >= frame.ScrollMax && older && !u.Busy {
+					u.Scroll = min(frame.ScrollMax, u.Scroll+step)
+					u.HistoryLoading = true
+					start("古い履歴を読み込み中", func(ctx context.Context) commandResult {
+						err := m.LoadOlder(ctx, c.Client.(BackwardReader))
+						return commandResult{olderLoaded: true, olderStep: step, err: err}
+					})
+				} else if u.Scroll >= frame.ScrollMax && older && boundary > 1 && !u.Busy {
 					start("loading earlier canonical history", func(ctx context.Context) commandResult {
 						page, err := loadTranscriptPage(ctx, c.Client, c.ID, boundary, s.After, true)
 						return commandResult{transcript: page, err: err}
@@ -824,7 +881,7 @@ func Run(ctx context.Context, c Config) error {
 					u.OrchestrationScroll = min(frame.OrchestrationMax, u.OrchestrationScroll+step)
 					continue
 				}
-				if u.Scroll == 0 && u.Transcript != nil && u.Transcript.Last < s.After && !u.Busy && u.Private == nil {
+				if u.Scroll == 0 && u.Transcript != nil && u.Transcript.Last < s.After && !u.Busy {
 					boundary := u.Transcript.Last
 					start("loading later canonical history", func(ctx context.Context) commandResult {
 						page, err := loadTranscriptPage(ctx, c.Client, c.ID, boundary, s.After, false)
@@ -853,6 +910,15 @@ func Run(ctx context.Context, c Config) error {
 				complete.apply(&editor, s, &u)
 				continue
 			}
+			if key.Paste {
+				// Files dragged onto the terminal arrive as Windows paths; the
+				// sandbox has them in its drop directory once they were sent.
+				var missing []string
+				key.Text, missing = mapDroppedPaths(key.Text, DropDirectory())
+				if len(missing) > 0 {
+					notice("not in the sandbox yet: "+strings.Join(missing, ", ")+"; drop them on the sandbox's .cmd in Windows first", "warning")
+				}
+			}
 			if key.Name != "enter" {
 				before, pasted := editor.Text(), editor.Pasted
 				editor.Apply(key)
@@ -861,12 +927,17 @@ func Run(ctx context.Context, c Config) error {
 				}
 				continue
 			}
+			if editor.continuesLine() {
+				editor.Apply(Key{Name: "backspace"})
+				editor.Apply(Key{Text: "\n"})
+				continue
+			}
 			if u.Busy {
 				notice("request pending; ^C cancels waiting", "warning")
 				continue
 			}
 			u.Notification = Notification{}
-			if u.Sheet != nil && u.Private == nil {
+			if u.Sheet != nil {
 				u.Sheet = nil
 				complete.resetMenu(&u)
 				continue
@@ -880,23 +951,8 @@ func Run(ctx context.Context, c Config) error {
 				editor.replace(candidate.Name)
 			}
 			complete.resetMenu(&u)
-			line := editor.Text()
+			line := editor.Expanded()
 			editor.Clear()
-			if u.Private != nil {
-				ref := *u.Private
-				u.Private = nil
-				secret := credential.NewSecret(line)
-				line = ""
-				start("storing key for "+ref.Provider+"/"+ref.ID, func(ctx context.Context) commandResult {
-					_, err := c.Client.Login(ctx, ref, secret)
-					secret = credential.Secret{}
-					if err != nil {
-						err = errors.New("credential storage failed")
-					}
-					return commandResult{text: "API key stored; it is checked on the next provider request", err: err}
-				})
-				continue
-			}
 			if strings.TrimSpace(line) == "" {
 				continue
 			}
@@ -974,7 +1030,16 @@ func Run(ctx context.Context, c Config) error {
 					continue
 				}
 				if len(parts) == 1 {
-					u.Picker, u.Sheet = commandPicker("Copy to the clipboard", []string{"Full conversation", "Latest response"}, []string{"/copy all", "/copy last"}), nil
+					u.Sheet = nil
+					through := s.After
+					start("loading public messages", func(ctx context.Context) commandResult {
+						through, err := exportBoundary(ctx, c.Client, c.ID, through)
+						if err != nil {
+							return commandResult{err: err}
+						}
+						choices, err := CopyChoices(ctx, c.Client, c.ID, through)
+						return commandResult{picker: copyPicker(choices), err: err}
+					})
 					continue
 				}
 				last := len(parts) == 2 && parts[1] == "last"
@@ -993,7 +1058,7 @@ func Run(ctx context.Context, c Config) error {
 					if err != nil {
 						return commandResult{err: err}
 					}
-					return commandResult{clipboard: text, text: fmt.Sprintf("copied %d characters to the clipboard (terminal OSC 52)", utf8.RuneCountInString(text))}
+					return commandResult{clipboard: text, text: fmt.Sprintf("クリップボードに %d 文字コピーしました", utf8.RuneCountInString(text))}
 				})
 			case "/help":
 				u.Sheet = helpSheet(u.Theme, height < 20)
@@ -1025,8 +1090,12 @@ func Run(ctx context.Context, c Config) error {
 						var err error
 						catalog, err = fetch(ctx)
 						if err != nil {
+							m.diagnostic(err)
 							catalog = modelcatalog.Catalog{Problem: "catalog unavailable"}
 						}
+					}
+					if !catalog.Available && catalog.ProblemCode != "" {
+						m.diagnostic(errors.New("catalog_unavailable: " + catalog.ProblemCode))
 					}
 					p := modelPicker(catalog, current, m.Analysis(time.Now(), nil).ToolBridgeEnabled)
 					if c.ProviderCatalogs != nil {
@@ -1044,10 +1113,17 @@ func Run(ctx context.Context, c Config) error {
 					if selectionSnapshot.PendingSelection != nil {
 						p.Revision = selectionSnapshot.PendingSelection.Revision
 					}
-					return commandResult{picker: p}
+					result := commandResult{picker: p}
+					if c.RuntimeCapabilities != nil {
+						result.capabilities, _ = c.RuntimeCapabilities(ctx)
+					}
+					return result
 				})
 			case "/analyze":
-				u.Picker = analyzePicker("")
+				start("loading full history for analysis", func(ctx context.Context) commandResult {
+					err := m.EnsureAnalysis(ctx, c.Client)
+					return commandResult{picker: analyzePicker(""), err: err}
+				})
 			case "/detach":
 				return nil
 			case "/retry":
@@ -1076,46 +1152,12 @@ func Run(ctx context.Context, c Config) error {
 				}
 				stopSession(chosen...)
 			case "/login":
-				if len(parts) != 3 {
-					notice("usage: /login PROVIDER ID (then enter key privately)", "warning")
-					continue
-				}
-				ref := credential.Reference{Provider: parts[1], ID: parts[2], Method: credential.APIKey}
-				if err := authflow.ValidateMethod(ref); err != nil {
-					notice(err.Error(), "warning")
-					continue
-				}
-				u.Private = &ref
-			case "/logout":
-				if len(parts) != 3 {
-					notice("usage: /logout PROVIDER ID", "warning")
-					continue
-				}
-				ref := credential.Reference{Provider: parts[1], ID: parts[2], Method: credential.APIKey}
-				start("removing "+ref.Provider+"/"+ref.ID, func(ctx context.Context) commandResult {
-					return commandResult{text: "credential removed", err: c.Client.Logout(ctx, ref)}
-				})
-			case "/methods":
-				start("loading authentication methods", func(ctx context.Context) commandResult {
-					methods, err := c.Client.Methods(ctx)
-					sheet := &Sheet{Title: "auth"}
-					for _, m := range methods {
-						sheet.Lines = append(sheet.Lines, fmt.Sprintf("%s/%s   %s", m.Provider, m.Method, m.Status))
-					}
-					return commandResult{sheet: sheet, err: err}
-				})
-			case "/credentials":
-				start("loading credential references", func(ctx context.Context) commandResult {
-					entries, err := c.Client.ListCredentials(ctx)
-					sheet := &Sheet{Title: "auth"}
-					for _, e := range entries {
-						sheet.Lines = append(sheet.Lines, e.Reference.Provider+"/"+e.Reference.ID)
-					}
-					if len(sheet.Lines) == 0 {
-						sheet.Lines = []string{"no stored credentials"}
-					}
-					return commandResult{sheet: sheet, err: err}
-				})
+				u.Sheet = &Sheet{Title: "ログイン", Lines: []string{
+					"Codex: Bash で codex login を実行してください。",
+					"Claude: 別の Bash で claude を起動し、その中で /login を実行してください。",
+					"ログイン後は /model refresh、または /model で接続先を選んでください。",
+				}}
+
 			default:
 				if c.Command == nil {
 					notice("unknown command "+parts[0]+"; type / or /help", "warning")

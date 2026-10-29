@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // agentStep is one tool call the synthetic Claude Code runs itself, as the
@@ -17,7 +19,7 @@ import (
 type agentStep struct {
 	Tool  string         // Claude Code tool name: Read, Edit, Write or Bash
 	Input jsontext.Value // the tool input
-	// Refused simulates Claude Code's organization policy refusing a command:
+	// Refused simulates Claude Code declining a command itself:
 	// no approval request, a permission_denied frame, then the batch hook.
 	Refused bool
 }
@@ -86,11 +88,27 @@ func agent(dir string, args []string, c configuration) {
 	}
 	message, _ := user["message"].(map[string]any)
 	prompt, _ := message["content"].(string)
-	entry := call{Arguments: args, Environment: os.Environ(), PID: os.Getpid(), Input: prompt}
+	entry := call{Arguments: args, Environment: os.Environ(), PID: os.Getpid(), Input: prompt, InputAt: time.Now()}
 	entry.Directory, _ = os.Getwd()
 	steps := c.AgentSteps
-	if previous, err := os.ReadFile(filepath.Join(dir, "calls.jsonl")); err == nil && len(previous) > 0 && c.AgentOnce {
-		steps = nil
+	if previous, err := os.ReadFile(filepath.Join(dir, "calls.jsonl")); err == nil {
+		if len(previous) > 0 && c.AgentOnce {
+			steps = nil
+		}
+		conversation := func(args []string) string {
+			for i, arg := range args {
+				if (arg == "--resume" || arg == "--session-id") && i+1 < len(args) {
+					return args[i+1]
+				}
+			}
+			return ""
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(previous)), "\n") {
+			var old call
+			if json.Unmarshal([]byte(line), &old) == nil && old.PID > 0 && conversation(old.Arguments) == conversation(args) && syscall.Kill(old.PID, 0) == nil {
+				entry.OverlappingPID = old.PID
+			}
+		}
 	}
 	if log, err := os.OpenFile(filepath.Join(dir, "calls.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); err == nil {
 		encoded, _ := json.Marshal(entry)
@@ -107,9 +125,44 @@ func agent(dir string, args []string, c configuration) {
 	if slices.Contains(args, "--replay-user-messages") {
 		_ = out.Encode(map[string]any{"type": "user", "isReplay": true, "parent_tool_use_id": nil, "message": message})
 	}
+	if strings.HasPrefix(prompt, "/compact") {
+		_ = out.Encode(map[string]any{"type": "system", "subtype": "status", "status": "compacting"})
+		time.Sleep(time.Duration(c.CompactDelayMillis) * time.Millisecond)
+		if c.CompactCrash {
+			fmt.Fprintln(os.Stderr, "synthetic compact process failure")
+			os.Exit(9)
+		}
+		if c.CompactFailure != "" {
+			_ = out.Encode(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true, "result": c.CompactFailure})
+		} else {
+			before, after := c.CompactPreTokens, c.CompactPostTokens
+			if before == 0 {
+				before = 250_000
+			}
+			if after == 0 {
+				after = 12_000
+			}
+			metadata := map[string]any{"trigger": "manual", "pre_tokens": before}
+			result := map[string]any{"type": "result", "subtype": "success", "is_error": false, "result": "compact complete"}
+			if !c.CompactUnknownAfter {
+				metadata["post_tokens"] = after
+				result["usage"] = map[string]any{"input_tokens": after}
+			}
+			_ = out.Encode(map[string]any{"type": "system", "subtype": "compact_boundary", "compact_metadata": metadata})
+			_ = out.Encode(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": "synthetic conversation summary"}})
+			_ = out.Encode(result)
+		}
+		for next() != nil {
+		}
+		return
+	}
 	cwd, _ := os.Getwd()
 	var notes []string
 	for i, step := range steps {
+		if c.AgentStepInputTokens > 0 {
+			_ = out.Encode(map[string]any{"type": "stream_event", "event": map[string]any{"type": "message_start", "message": map[string]any{"usage": map[string]any{"input_tokens": c.AgentStepInputTokens}}}})
+			_ = out.Encode(map[string]any{"type": "stream_event", "event": map[string]any{"type": "message_stop"}})
+		}
 		id := fmt.Sprintf("toolu_fake_%d", i+1)
 		var input map[string]any
 		_ = json.Unmarshal(step.Input, &input)
@@ -148,6 +201,11 @@ func agent(dir string, args []string, c configuration) {
 					notes = append(notes, note)
 				}
 			}
+			if log, err := os.OpenFile(filepath.Join(dir, "batches.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); err == nil {
+				data, _ := json.Marshal(answer)
+				_, _ = log.Write(append(data, '\n'))
+				_ = log.Close()
+			}
 		}
 	}
 	final := c.AgentFinal
@@ -158,7 +216,11 @@ func agent(dir string, args []string, c configuration) {
 		final += "\n" + strings.Join(notes, "\n")
 	}
 	_ = out.Encode(map[string]any{"type": "assistant", "parent_tool_use_id": nil, "message": map[string]any{"id": "msg_fake_final", "content": []any{map[string]any{"type": "text", "text": final}}}})
-	_ = out.Encode(map[string]any{"type": "result", "subtype": "success", "is_error": false, "result": final, "usage": map[string]any{"input_tokens": 10, "cache_read_input_tokens": 20, "cache_creation_input_tokens": 30, "output_tokens": 40}})
+	inputTokens := c.AgentInputTokens
+	if inputTokens == 0 {
+		inputTokens = 10
+	}
+	_ = out.Encode(map[string]any{"type": "result", "subtype": "success", "is_error": false, "result": final, "usage": map[string]any{"input_tokens": inputTokens, "cache_read_input_tokens": 20, "cache_creation_input_tokens": 30, "output_tokens": 40}})
 	for next() != nil {
 	}
 }

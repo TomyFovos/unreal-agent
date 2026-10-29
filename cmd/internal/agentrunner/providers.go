@@ -117,7 +117,7 @@ func buildSessionClient(selected Provider, model, apiKey, endpoint string, attem
 			return nil, provider.Selection{}, err
 		}
 		selection.Auth.ID = credentialID
-		resolver = credential.NewManager(store, nil)
+		resolver = credential.NewManager(store)
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	// Proxy configuration is scoped to this client; never set HTTPS_PROXY globally.

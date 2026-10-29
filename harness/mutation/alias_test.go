@@ -23,9 +23,9 @@ func TestConfiguredRootAliasSharesCanonicalTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entries, truncated, err := s.ReadDir(t.Context(), alias, 10)
-	if err != nil || truncated || len(entries) != 0 {
-		t.Fatal(entries, truncated, err)
+	entries, err := s.ReadDir(t.Context(), alias)
+	if err != nil || len(entries) != 0 {
+		t.Fatal(entries, err)
 	}
 	path := filepath.Join(alias, "a")
 	if r := s.Apply(t.Context(), request(path, Revision{}, "one")); r.Code != Applied {

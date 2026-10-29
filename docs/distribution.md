@@ -1,4 +1,37 @@
-# Local snapshot distribution
+# Distribution and GitHub releases
+
+## CI and pre-releases
+
+GitHub Actions runs CI for pushes to `main` and pull requests on Ubuntu 24.04:
+`make test check build` plus `cd scripts && python3 -m unittest discover -p 'test_*.py'`.
+The Go/Python job has a 15-minute timeout (the latest Ubuntu job took 5m08s).
+The six fuzz targets and harbor checks remain separate jobs. Distribution
+supports Linux amd64 only. Tests requiring subscription logins keep their
+existing environment-variable gates and are skipped when those are absent.
+
+Pushing a `v*` tag in `TomyFovos/unreal-agent` runs the release workflow. It
+checks `make test check` and the Python tests, installs GoReleaser **2.18.2**,
+then runs `make snapshot` and `scripts/common_development_bundle.py` on the
+tagged commit. The resulting GitHub Release is a **pre-release** with:
+
+- `unreal-agent-linux-amd64-<rev>.tar.gz`
+- `unreal-agent-linux-amd64-<rev>.tar.gz.sha256`
+
+`<rev>` is the first seven characters of the tagged commit SHA. The archive
+uses the same builder and contents as the previous local common development
+kits. Download and install it using [install.md](install.md). The build job
+has read-only repository access; only the separate Release creation job has
+`contents: write`, using the automatic `GITHUB_TOKEN`. There is no runner-only
+archive or Docker Hub publication.
+
+Normal CI, kit builds and releases run on GitHub. Local work before Sandbox
+deployment is limited to installing the downloaded kit in an isolated WSL
+HOME, starting it and checking real inference with subscription login. CI's
+synthetic checks and skipped login-dependent tests do not establish that
+real inference works. The local build instructions below are for reproducing
+or validating changes to the distribution workflow.
+
+## Local snapshot reproduction
 
 The current common development kit uses the **same archive and setup** in both
 asp and devlore. From its extracted directory, run:
@@ -19,7 +52,6 @@ history and reconnect references remain unchanged. A private, atomic workspace b
 that choice persistent. `--instance`/`--config` remain explicit destinations.
 A new session name alone cannot change an already-started Host's registration.
 See the packaged Japanese README for both environments' identical commands.
-The provider-specific Pilot profiles below are retained compatibility paths.
 
 An unchanged profile reuses its original instance after the native launcher has
 saved `runtime.json`, across new Bash sessions and an identical reinstall. The
@@ -42,43 +74,17 @@ UNREAL_COMMON_BIN_DIR=/absolute/path/to/extracted/common-kit \
 go test ./cmd/unreal-agent -run '^TestCommon' -count=1 -v
 ```
 
-For an existing **asp** Sandbox using Docker host-owned ChatGPT OAuth, see
-[Docker Sandbox OAuth compatibility](docker-sandbox-oauth.md). Old 6284e49
-binaries cannot use the new explicit `docker_sandbox_oauth` route. Build a new
-snapshot from the validated OAuth implementation revision and package it with:
-
-```sh
-python3 scripts/asp_oauth_bundle.py --snapshot /absolute/path/to/snapshot.tar.gz \
-  --revision <full-snapshot-revision> --copy-to /mnt/c/work/unreal-agent-pilot/asp
-make test-asp-oauth
-# Optional native install/reinstall/preflight/idle Host tests, no inference:
-UNREAL_ASP_OAUTH_KIT=/absolute/path/to/extracted/kit make test-asp-oauth
-```
-
-The new kit contains all four CGO Linux amd64 binaries, bounded native auth
-preflight, a read-only asp profile and Japanese instructions. Packaging uses
-the same snapshot/checksum/ELF/libc validators and reserves fresh output and
-Windows delivery directories. It never updates the devlore kit. The existing
-6284e49 installer and provider profiles retain their default behavior.
-
-The operator explicitly sources `activate.sh --model <id>` inside asp, then
-uses `unreal <session>` and `/model`. Activation installs into a new private,
-content-addressed directory and defines `unreal` in **that shell only**. It
-does not change PATH, shell startup files, Codex auth/config, default runtime
-configuration or old Session stores. The wrapper invokes native `unreal`
-with a dedicated config/state/socket, no automatic prompt. `--smoke-only` is
-an explicit operator opt-in to one short real request; WSL tests never send
-that request to a real provider. `unset -f unreal` restores shell command
-resolution. The Pilot history is retained.
-
 Build the Fork's current worktree on **Linux amd64** with Go 1.27, a working
 C compiler, Python 3.12 or newer, and **GoReleaser 2.18.2**:
 
 ```sh
 make test-snapshot
-make snapshot
-# If GoReleaser is installed elsewhere:
-make snapshot GORELEASER=/absolute/path/to/goreleaser
+tools_dir=$(mktemp -d /tmp/unreal-release-tools.XXXXXXXX)
+GOBIN="$tools_dir" go install -ldflags='-X main.version=2.18.2' github.com/goreleaser/goreleaser/v2@v2.18.2
+"$tools_dir/goreleaser" --version
+make snapshot GORELEASER="$tools_dir/goreleaser"
+python3 scripts/common_development_bundle.py --snapshot /path/printed/by/snapshot.tar.gz \
+  --revision "$(git rev-parse HEAD)"
 ```
 
 The wrapper runs `goreleaser check` separately, then
@@ -92,9 +98,11 @@ of the same configuration with only that path replaced by the reserved
 directory's `artifacts/` path. Build, archive, and publishing semantics are
 otherwise identical to the checked-in configuration.
 
-The configuration in `.goreleaser.yaml` is snapshot-only. Its pre-build hook
-rejects non-snapshot runs, and release publishing is disabled. The existing
-tag-triggered release workflow has **not** been enabled or migrated for this Fork.
+The configuration in `.goreleaser.yaml` remains snapshot-only. Its pre-build
+hook rejects non-snapshot runs, and GoReleaser publishing is disabled. The
+tag-triggered workflow packages that verified snapshot into the common kit,
+verifies its sibling checksum, transfers both files to the publishing job,
+and creates the GitHub pre-release with `gh release create --prerelease`.
 Invoke snapshots through the wrapper so output directories are safely reserved.
 
 ## Executables
@@ -146,22 +154,18 @@ appropriate emulator. macOS amd64/arm64 require Apple SDK/toolchains (normally
 native macOS CI) and native runtime/AST tests. These targets are deliberately
 absent from the current matrix and are not claimed to work from WSL.
 
-## Validation and later publication
+## Validation
 
 ```sh
-make test-claude-structured  # fake CLI/Host; no real inference
-CGO_ENABLED=1 go test -race ./...
-make check
-make build
-git diff --check
+make test check build
+cd scripts && python3 -m unittest discover -p 'test_*.py'
 ```
 
-Before a formal release: identify a reviewed clean source revision, validate
-each target's C toolchain and runtime, establish the supported libc baseline,
-add CLI version reporting if desired, and configure Fork-specific release
-ownership, signing/notarization, and Homebrew policy. The inherited workflow's
-upstream repository guard, CGO-disabled build matrix, and upstream Docker
-destination must be reviewed separately. Publishing remains a future task.
+The release workflow builds only Linux amd64 with CGO enabled on Ubuntu 24.04.
+The kit records the binaries' minimum glibc version; the installer checks it
+on the destination. Validate installation, startup and real inference in WSL
+before Sandbox deployment. Other architectures and operating systems require
+their own C toolchains and runtime validation before distribution support.
 
 ## asp manual-install kit
 
@@ -172,7 +176,7 @@ Sandbox. Supply the archive alongside its original `SHA256SUMS`:
 ```sh
 UNREAL_PILOT_SNAPSHOT=/absolute/path/to/existing/snapshot.tar.gz make test-pilot-kit
 python3 scripts/pilot_kit.py --snapshot /absolute/path/to/existing/snapshot.tar.gz \
-  --copy-to /mnt/c/work/unreal-agent-pilot/asp
+  --copy-to /path/to/output/asp
 ```
 
 The builder requires Python 3.12, Go (build-metadata inspection only), and
@@ -193,54 +197,3 @@ a safe refusal. No PATH, existing Codex executable/auth/config, permissions,
 default Host, OS packages or Session Store are changed. Doctor executes only
 help/methods in an empty temporary HOME; auth contents and network/API access
 remain unchecked. Use the original Codex command to resume normal work.
-
-## Provider-specific Sandbox scripts
-
-The optional operator profiles reuse that existing binary installation. They
-contain only scripts, Japanese instructions and checksums; authentication,
-binary/config defaults and project files are not bundled or changed:
-
-```sh
-make test-pilot-provider
-# Include startup checks against the existing 6284e49 binaries (fake auth only):
-UNREAL_PILOT_KIT_DIRECTORY=/absolute/path/to/verified/extracted/kit make test-pilot-provider
-python3 scripts/provider_pilot_bundle.py --copy-to /mnt/c/work/unreal-agent-pilot
-```
-
-Each delivery reserves a new directory under `asp/` or `devlore/`, without
-overwriting previous kits. The Japanese README gives the `sbx cp` commands
-(Windows CLI availability remains unconfirmed) and a single Sandbox command.
-The historical `asp/6284e49-*` binary install can also be reused in a separate
-devlore home; it does not select the provider or the Session Store.
-
-`asp` fixes the provider to `openai-codex`; preflight checks only the existing
-External Codex auth file's path metadata. `devlore` fixes it to `claude-code`
-with the **structured** bridge. Before any Claude invocation, devlore requires
-both `--policy-audited` and `--trust-managed-policy`. The operator must first
-audit that Sandbox's local/remote administrative policy, managed hooks/helpers,
-environment configuration and telemetry. These flags attest review and opt in
-to the existing administrative trust boundary; they are not an automatic audit
-or a guarantee that remote policy remains unchanged. Missing CLI/login or
-unreviewed policy stops the script. It never enables a side-effecting built-in
-tool, requests MCP grants, or selects a fallback provider.
-
-An explicit `--model` is required. Both profiles use the existing `~/workspace`,
-only read/grep/glob permissions, and private per-Sandbox/per-instance config,
-state and socket paths. `Launcher.DiscoverProviders=false` prevents additional
-registration while retaining the existing isolated provider transport. It does
-not grant tool subprocess, write or unrestricted network/filesystem access.
-An existing config is reused only when identical; choose a new `--instance`
-for changed settings rather than overwriting canonical startup/history.
-
-`--preflight-only` does not start a Host or inference. A normal run verifies or
-starts the dedicated Host, submits one short text-only smoke in a fresh Session,
-checks the durable response and absence of Operations, then attaches the native
-TUI. `--smoke-only` omits the TUI; `--attach-only` reconnects to the last smoke
-Session without resubmission. Provider errors/timeouts are not retried, and
-history remains available. Existing incompatible/stale sockets and Hosts are
-not unlinked, killed or silently reused. Stop only the identified Pilot Host to
-return to the original Codex/Claude CLI; keep its state and existing credentials.
-
-Unit/native Host tests use dummy auth status and fake Claude only. WSL validation
-does not establish Sandbox login, API connectivity, model availability, managed
-policy approval or real inference success; those remain operator-run gates.

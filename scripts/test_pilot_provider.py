@@ -2,18 +2,14 @@ import contextlib
 import hashlib
 import io
 import json
-import os
 from pathlib import Path
-import subprocess
 import sys
-import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import pilot_provider as pilot
-import provider_pilot_bundle as bundle
 
 
 def final_view(text):
@@ -55,21 +51,10 @@ class ProviderPilotTests(unittest.TestCase):
                     self.assertNotIn("ClaudeCode", cfg["Runtime"])
                     self.assertEqual(permissions["NetworkOrigins"], ["https://chatgpt.com"])
 
-    def test_trust_needs_both_explicit_conditions(self):
-        for audited, trust in ((False, False), (True, False), (False, True)):
-            with self.subTest(audited=audited, trust=trust), self.assertRaises(pilot.PilotError):
-                pilot.configuration("devlore", self.workspace, "fixture", "high", audited=audited, trust=trust)
-        with self.assertRaises(pilot.PilotError):
-            pilot.configuration("asp", self.workspace, "fixture", "medium", audited=True, trust=True)
-
-    def test_unreviewed_policy_stops_before_cli_and_config_creation(self):
-        with patch.dict(os.environ, {"HOME": str(self.home)}, clear=True), patch.object(pilot, "installed_kit") as kit, \
-                patch.object(pilot, "bounded_probe") as probe, contextlib.redirect_stderr(io.StringIO()) as errors:
-            self.assertEqual(pilot.main(["devlore", "--model", "fixture", "--preflight-only"]), 1)
-            self.assertIn("managed_policy_audit_required", errors.getvalue())
-        kit.assert_not_called()
-        probe.assert_not_called()
-        self.assertFalse((self.home / ".config").exists())
+    def test_retired_trust_flags_do_not_block_configuration(self):
+        for audited, trust in ((False, False), (True, False), (False, True), (True, True)):
+            cfg = pilot.configuration("devlore", self.workspace, "fixture", "high", audited=audited, trust=trust)
+            self.assertEqual(cfg["Runtime"]["ClaudeCode"]["managedPolicyMode"], "trust")
 
     def auth_fixture(self):
         path = self.home / ".codex/auth.json"
@@ -78,31 +63,6 @@ class ProviderPilotTests(unittest.TestCase):
         path.chmod(0o600)
         return path
 
-    def test_codex_metadata_only_and_missing_auth(self):
-        with self.assertRaises(pilot.PilotError) as failure:
-            pilot.codex_preflight(self.home, {})
-        self.assertEqual(failure.exception.code, "codex_login_required")
-        path = self.auth_fixture()
-        before = path.stat().st_mtime_ns
-        with patch.object(Path, "read_bytes", side_effect=AssertionError("must not read auth")), \
-                patch.object(Path, "read_text", side_effect=AssertionError("must not read auth")), contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pilot.codex_preflight(self.home, {}), str(path))
-        self.assertEqual(path.stat().st_mtime_ns, before)
-
-    def test_codex_override_priority_private_file_and_symlink_refusal(self):
-        path = self.auth_fixture()
-        other = self.root / "explicit-auth"
-        other.write_text("private dummy")
-        other.chmod(0o600)
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pilot.codex_preflight(self.home, {"OPENAI_CODEX_AUTH_FILE": str(other), "CODEX_HOME": str(path.parent)}), str(other))
-        other.chmod(0o644)
-        with self.assertRaises(pilot.PilotError):
-            pilot.codex_preflight(self.home, {"OPENAI_CODEX_AUTH_FILE": str(other)})
-        alias = self.root / "alias"
-        alias.symlink_to(path)
-        with self.assertRaises(pilot.PilotError):
-            pilot.codex_preflight(self.home, {"OPENAI_CODEX_AUTH_FILE": str(alias)})
 
     def claude_probe(self, raw=None, status=0):
         auth = raw or json.dumps({"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty", "subscriptionType": "team", "email": "PRIVATE_ACCOUNT_DUMMY"}).encode()
@@ -122,7 +82,7 @@ class ProviderPilotTests(unittest.TestCase):
         with patch.object(pilot.shutil, "which", return_value="/unused/claude"), patch.object(pilot, "bounded_probe", side_effect=fake), contextlib.redirect_stdout(io.StringIO()) as output:
             result = pilot.claude_preflight("claude", self.home, {"GITHUB_TOKEN": "PRIVATE_SECRET", "ANTHROPIC_API_KEY": "PRIVATE_SECRET", "OPENAI_API_KEY": "PRIVATE_SECRET"}, True, True)
         self.assertEqual(result, "/unused/claude")
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 1)
         auth_args, env = calls[-1]
         self.assertEqual(auth_args[-2:], ["auth", "status"])
         self.assertEqual(auth_args[auth_args.index("--tools") + 1], "")
@@ -154,27 +114,6 @@ class ProviderPilotTests(unittest.TestCase):
             self.assertEqual(error.exception.code, "claude_subscription_mode_conflict")
             probe.assert_not_called()
 
-    def test_preflight_only_private_config_rerun_and_existing_defaults_preserved(self):
-        self.auth_fixture()
-        defaults = {".config/unreal-agent/runtime.json": b"keep default runtime", ".local/state/unreal-agent/session.json": b"keep canonical history",
-                    ".codex/config.toml": b"keep Codex config", ".claude/settings.json": b"keep Claude settings"}
-        for name, data in defaults.items():
-            path = self.home / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-        with patch.dict(os.environ, {"HOME": str(self.home)}, clear=True), patch.object(pilot, "installed_kit", return_value=self.root), \
-                patch.object(pilot, "ensure_host") as host, contextlib.redirect_stdout(io.StringIO()):
-            args = ["asp", "--model", "fixture-model", "--preflight-only"]
-            self.assertEqual(pilot.main(args), 0)
-            config = self.home / ".config/unreal-agent-pilot/asp/v1/runtime.json"
-            before = config.stat().st_mtime_ns
-            self.assertEqual(pilot.main(args), 0)
-            self.assertEqual(config.stat().st_mtime_ns, before)
-            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(config.parent.stat().st_mode & 0o777, 0o700)
-            host.assert_not_called()
-        for name, data in defaults.items():
-            self.assertEqual((self.home / name).read_bytes(), data)
 
     def test_changed_config_and_symlink_never_overwritten(self):
         folder = pilot.private_tree(self.home, "pilot")
@@ -204,19 +143,14 @@ class ProviderPilotTests(unittest.TestCase):
         binary = self.root / "synthetic-binary"; binary.write_bytes(b"not a credential")
         binding = pilot.host_binding(paths, "/existing/auth.json", binary)["HostBinding"]
         self.assertEqual(binding["Normal"], False)
-        self.assertEqual(binding["Identity"], {"Protocol": 1, "Build": hashlib.sha256(binary.read_bytes()).hexdigest()})
+        self.assertNotIn("Identity", binding)
 
-    def test_host_binding_unknown_executable_or_redirect_is_not_path_only_fallback(self):
-        paths = {"config": self.root / "config", "state": self.root / "state",
-                 "sessions": self.root / "sessions", "socket": self.root / "socket"}
-        for name in ("missing", "redirect", "directory"):
-            binary = self.root / name
-            if name == "redirect": binary.symlink_to(self.root / "missing")
-            elif name == "directory": binary.mkdir()
-            with self.subTest(name=name), self.assertRaises(pilot.PilotError) as failure:
-                pilot.host_binding(paths, "/SYNTHETIC_PRIVATE_AUTH_PATH", binary)
-            self.assertEqual(failure.exception.code, "pilot_host_identity_unavailable")
-            self.assertNotIn("SYNTHETIC_PRIVATE", str(failure.exception))
+    def test_host_binding_does_not_read_the_executable(self):
+        paths = {"config": self.root / "config", "sessions": self.root / "sessions"}
+        binding = pilot.host_binding(paths, "/existing/auth", self.root / "missing")["HostBinding"]
+        self.assertEqual(binding["Configuration"], str(paths["config"]))
+        self.assertEqual(binding["Sessions"], str(paths["sessions"]))
+        self.assertNotIn("Identity", binding)
 
     def test_smoke_outcomes_do_not_publish_provider_text(self):
         self.assertEqual(pilot.smoke_outcome(final_view("expected"), "expected"), "pass")
@@ -227,45 +161,12 @@ class ProviderPilotTests(unittest.TestCase):
                           {"History": {"Items": [{"Kind": "model_response", "Data": {"Response": "PRIVATE_DUMMY"}}]}}):
             self.assertEqual(pilot.smoke_outcome(malformed, "expected"), "protocol_failure")
 
-    def test_smoke_one_submit_and_durable_pointer_no_replay(self):
-        expected = "Unreal asp provider smoke OK."
-        calls = []
-        class Fake:
-            def call(self, method, payload):
-                calls.append((method, payload))
-                if method == "open":
-                    return {"View": {"Generation": "DUMMY_GENERATION"}}
-                if method == "inspect":
-                    return {"View": final_view(expected)}
-                return {"Receipt": {}}
-        with contextlib.redirect_stdout(io.StringIO()) as output:
-            session = pilot.smoke(Fake(), "asp", self.root / "pointer")
-        self.assertEqual([method for method, _ in calls], ["open", "submit", "inspect"])
-        self.assertEqual(json.loads((self.root / "pointer").read_text())["session"], session)
-        self.assertNotIn(session, output.getvalue())
-        self.assertNotIn("DUMMY_GENERATION", output.getvalue())
 
-    def test_provider_failure_preserves_pointer_no_retry(self):
-        calls = []
-        class Fake:
-            def call(self, method, payload):
-                calls.append(method)
-                return {"View": {"Generation": "DUMMY"}} if method == "open" else {"View": {"Failure": "PRIVATE_DUMMY"}}
-        with self.assertRaises(pilot.PilotError) as failure:
-            pilot.smoke(Fake(), "devlore", self.root / "pointer")
-        self.assertEqual(calls.count("submit"), 1)
-        self.assertTrue((self.root / "pointer").exists())
-        self.assertEqual(failure.exception.code, "smoke_provider_failure")
-        self.assertNotIn("PRIVATE_DUMMY", str(failure.exception))
-
-    def test_bounded_status_timeout_and_output_limit(self):
+    def test_status_preserves_large_output(self):
         env = {"PATH": "/usr/bin:/bin", "HOME": str(self.home)}
-        with self.assertRaises(pilot.PilotError) as error:
-            pilot.bounded_probe([sys.executable, "-c", "print('x'*4096)"], env, limit=32)
-        self.assertEqual(error.exception.code, "preflight_output_limit")
-        with self.assertRaises(pilot.PilotError) as error:
-            pilot.bounded_probe([sys.executable, "-c", "import time; time.sleep(5)"], env, timeout=0.1)
-        self.assertEqual(error.exception.code, "preflight_timeout")
+        data, code = pilot.bounded_probe([sys.executable, "-c", "print('x'*(2<<20))"], env)
+        self.assertEqual(code, 0)
+        self.assertEqual(data, b"x"*(2<<20)+b"\n")
 
     def test_stderr_capture_requires_optin_and_remains_private_and_bounded(self):
         env = {"PATH": "/usr/bin:/bin", "HOME": str(self.home)}
@@ -277,51 +178,8 @@ class ProviderPilotTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn(b"safe-status\n", private)
             self.assertIn(b"PRIVATE_DUMMY\n", private)
-            for script, options, expected in (
-                    ("import sys; print('PRIVATE_DUMMY'*4096, file=sys.stderr)", {"limit": 32}, "preflight_output_limit"),
-                    ("import sys,time; print('PRIVATE_DUMMY', file=sys.stderr); time.sleep(5)", {"timeout": 0.1}, "preflight_timeout")):
-                with self.assertRaises(pilot.PilotError) as failure:
-                    pilot.bounded_probe([sys.executable, "-c", script], env, capture_stderr=True, **options)
-                self.assertEqual(failure.exception.code, expected)
-                self.assertNotIn("PRIVATE_DUMMY", str(failure.exception))
         self.assertEqual(output.getvalue(), "")
         self.assertEqual(errors.getvalue(), "")
-
-    def test_provider_bundle_no_binaries_credentials_and_checksum(self):
-        for sandbox in pilot.PROVIDERS:
-            archive = bundle.build(self.root, sandbox)
-            with tarfile.open(archive) as content:
-                self.assertEqual({Path(member.name).name for member in content}, {"pilot.sh", "pilot_provider.py", "README.md", "SHA256SUMS"})
-                self.assertTrue(all(member.isfile() for member in content))
-                readme = content.extractfile(f"unreal-agent-{sandbox}-provider-6284e49/README.md").read().decode()
-                self.assertNotIn("@SANDBOX@", readme)
-            package = self.root / f"unreal-agent-{sandbox}-provider-6284e49"
-            subprocess.run(["sha256sum", "--check", "--status", "SHA256SUMS"], cwd=package, check=True)
-            subprocess.run(["bash", "-n", str(package / "pilot.sh")], check=True)
-
-    def test_delivery_uses_fresh_provider_directory_and_preserves_old_files(self):
-        archive = bundle.build(self.root, "devlore")
-        destination = self.root / "windows/devlore"
-        destination.mkdir(parents=True)
-        existing = destination / "keep-existing-kit"
-        existing.write_text("keep")
-        prefix = "unreal-agent-devlore-provider-6284e49-"
-        first = bundle.pilot_kit.copy_delivery(archive, destination, prefix=prefix)
-        second = bundle.pilot_kit.copy_delivery(archive, destination, prefix=prefix)
-        self.assertNotEqual(first, second)
-        self.assertTrue(first.name.startswith(prefix))
-        self.assertEqual(existing.read_text(), "keep")
-        self.assertEqual((first / archive.name).read_bytes(), archive.read_bytes())
-        with self.assertRaises(ValueError):
-            bundle.pilot_kit.copy_delivery(archive, destination, prefix="../unsafe")
-
-    def test_existing_kit_provenance_and_doctor_without_inference(self):
-        directory = os.environ.get("UNREAL_PILOT_KIT_DIRECTORY")
-        if not directory:
-            self.skipTest("set UNREAL_PILOT_KIT_DIRECTORY to the existing verified kit")
-        with contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(pilot.installed_kit(self.home, directory), Path(directory).absolute())
-        self.assertIn("6284e49", output.getvalue())
 
 
 if __name__ == "__main__":

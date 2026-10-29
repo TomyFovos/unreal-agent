@@ -68,18 +68,11 @@ func TestHumanPermissionGatewayRequiresAuthenticatedPeerAndBoundLease(t *testing
 	}
 	defer w.Cancel()
 	rev := w.Initial.Revision
-	if _, err = w.Request(t.Context(), permission.ControlRequest{Action: "set_mode", Expected: rev, Mode: permission.FullAccess}); err == nil {
-		t.Fatal("unconfirmed Full Access")
-	}
-	prepared, err := w.Request(t.Context(), permission.ControlRequest{Action: "prepare_full", Expected: rev})
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := w.Request(t.Context(), permission.ControlRequest{Action: "set_mode", Expected: rev, Mode: permission.FullAccess, Challenge: prepared.Challenge})
+	out, err := w.Request(t.Context(), permission.ControlRequest{Action: "set_mode", Expected: rev, Mode: permission.FullAccess})
 	if err != nil || out.Snapshot.Mode != permission.FullAccess {
 		t.Fatal(err, out)
 	}
-	if _, err = w.Request(t.Context(), permission.ControlRequest{Action: "set_mode", Expected: rev, Mode: permission.FullAccess, Challenge: prepared.Challenge}); err == nil {
+	if _, err = w.Request(t.Context(), permission.ControlRequest{Action: "set_mode", Expected: rev, Mode: permission.FullAccess}); err == nil {
 		t.Fatal("confirmation replay")
 	}
 	w.Cancel()
@@ -89,7 +82,7 @@ func TestHumanPermissionGatewayRequiresAuthenticatedPeerAndBoundLease(t *testing
 		t.Fatal("detach revoked approved Session")
 	}
 	encoded, _ := json.Marshal(view)
-	if strings.Contains(string(encoded), prepared.Challenge) || strings.Contains(string(encoded), "Lease") {
+	if strings.Contains(string(encoded), "Lease") {
 		t.Fatal("private authority in public snapshot")
 	}
 	server := httptest.NewServer(Handler(Config{Host: owner}))

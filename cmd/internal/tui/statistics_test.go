@@ -28,13 +28,13 @@ func TestStatisticsFakeStreamUpdatesWithoutMovingComposerOrSubmitting(t *testing
 			t.Fatal(err)
 		}
 	}()
-	waitFor(t, func() bool { return strings.Contains(out.text(), "Codex/fixture-model") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "Codex fixture-model") })
 	keys <- Key{Text: "unsent composer"}
 	waitFor(t, func() bool { return strings.Contains(out.text(), "unsent composer") })
 	for i, output := range []int64{3, 8} {
 		stats := &llm.GenerationStatistics{Model: "fixture-model", Source: "client_clock", DurationMicros: 1_000_000, Tokens: llm.TokenCounts{Input: 12, Output: output, InputKnown: true, OutputKnown: true}}
 		f.events <- host.Event{Generation: "g", Revision: uint64(i + 1), Kind: "progress", Progress: &host.Progress{TurnID: "turn", Epoch: 1, Attempt: 1, Mode: "streaming", Statistics: stats}}
-		want := "TPS~" + strconvQuoteRate(output) + "(est)"
+		want := "~" + strconvQuoteRate(output) + " tok/s"
 		waitFor(t, func() bool { return strings.Contains(out.text(), want) })
 		if !strings.Contains(out.text(), "unsent composer") || out.cursorY() != 22 {
 			t.Fatal("stream statistics moved/cleared composer", out.text())
@@ -67,10 +67,10 @@ func TestStatisticsFooterSourcesUnknownAndResponsiveComposer(t *testing.T) {
 				f := RenderFrame(s, u, size[0], size[1])
 				bounds(t, f, size[0], size[1])
 				bar := f.Lines[len(f.Lines)-1]
-				if size[0] >= 44 && (!strings.Contains(bar, "TPS 10.0(api)") || !strings.Contains(bar, "high")) {
+				if size[0] >= 44 && !strings.Contains(bar, "10.0 tok/s") {
 					t.Fatal("rate/effort missing", bar)
 				}
-				if size[0] >= 80 && (!strings.Contains(bar, "fixture-model") || !strings.Contains(bar, "120") || !strings.Contains(bar, "20")) {
+				if size[0] >= 80 && (!strings.Contains(f.Lines[0], "fixture-model") || !strings.Contains(f.Lines[0], "high") || !strings.Contains(bar, "文脈 120") || strings.Contains(bar, "累計")) {
 					t.Fatal("model/usage missing", bar)
 				}
 				if size[1] >= 14 && f.CursorY != size[1]-2 {
@@ -82,20 +82,20 @@ func TestStatisticsFooterSourcesUnknownAndResponsiveComposer(t *testing.T) {
 	s := statsFixture("openai-codex")
 	u := UIState{Theme: Theme{Plain: true}}
 	s.Progress = &host.Progress{TurnID: "turn", Epoch: 1, Mode: "streaming"}
-	if bar := statisticsBar(s, u, makeLayout(120, 24)).plain(); !strings.Contains(bar, "TPS —") || strings.Contains(bar, "10.0") {
+	if bar := statisticsBar(s, u, makeLayout(120, 24)).plain(); !strings.Contains(bar, "速度 —") || strings.Contains(bar, "10.0") {
 		t.Fatal("new generation displayed stale previous rate", bar)
 	}
 	s.Progress = nil
 	s.LastGeneration.Source = "client_clock"
-	if text := statisticsBar(s, u, makeLayout(120, 24)).plain(); !strings.Contains(text, "TPS~10.0(est)") {
+	if text := statisticsBar(s, u, makeLayout(120, 24)).plain(); !strings.Contains(text, "~10.0 tok/s") {
 		t.Fatal(text)
 	}
 	s.LastGeneration = nil
-	if text := statisticsBar(s, u, makeLayout(120, 24)).plain(); !strings.Contains(text, "TPS —") || !strings.Contains(text, "In:— Out:—") {
+	if text := statisticsBar(s, u, makeLayout(120, 24)).plain(); !strings.Contains(text, "速度 —") || !strings.Contains(text, "文脈 —") {
 		t.Fatal("unknown fabricated", text)
 	}
 	u.Theme.ASCII = true
-	if text := statisticsBar(s, u, makeLayout(120, 24)).plain(); strings.Contains(text, "—") || !strings.Contains(text, "TPS -") {
+	if text := statisticsBar(s, u, makeLayout(120, 24)).plain(); strings.Contains(text, "—") || !strings.Contains(text, "速度 -") {
 		t.Fatal(text)
 	}
 	s = statsFixture("claude-code")
@@ -110,7 +110,7 @@ func TestStatisticsStreamingCompletionReconnectAndCopyIsolation(t *testing.T) {
 	m.state = statsFixture("claude-code")
 	m.state.Progress = &host.Progress{TurnID: "turn", Epoch: 1, Mode: "streaming", Statistics: &llm.GenerationStatistics{Model: "fixture-model", Source: "client_clock", DurationMicros: 1_000_000, Tokens: llm.TokenCounts{Input: 12, Output: 3, InputKnown: true, OutputKnown: true}}}
 	u := UIState{Theme: Theme{Plain: true}}
-	if bar := statisticsBar(m.Snapshot(), u, makeLayout(120, 24)).plain(); !strings.Contains(bar, "TPS~3.0(est)") || !strings.Contains(bar, "Out:3") {
+	if bar := statisticsBar(m.Snapshot(), u, makeLayout(120, 24)).plain(); !strings.Contains(bar, "~3.0 tok/s") || !strings.Contains(bar, "文脈 12") {
 		t.Fatal(bar)
 	}
 	response := llm.Response{Model: "fixture-model", Generation: &llm.GenerationStatistics{Model: "fixture-model", Source: "provider_api", DurationMicros: 2_000_000, Tokens: llm.TokenCounts{Input: 20, Output: 10, InputKnown: true, OutputKnown: true}}}
@@ -120,7 +120,7 @@ func TestStatisticsStreamingCompletionReconnectAndCopyIsolation(t *testing.T) {
 	}
 	m.status("disconnected", false)
 	bar := statisticsBar(m.Snapshot(), u, makeLayout(120, 24)).plain()
-	if !strings.Contains(bar, "TPS 5.0(api)") || !strings.Contains(bar, "Out:10") {
+	if !strings.Contains(bar, "5.0 tok/s") || !strings.Contains(bar, "文脈 20") {
 		t.Fatal("completed rate lost on detach", bar)
 	}
 	if err := m.apply(v); err != nil {

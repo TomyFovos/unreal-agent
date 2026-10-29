@@ -65,9 +65,6 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 		}
 		c.Backends[id] = p
 	}
-	if len(configured) > 32 {
-		return c, nil, errors.New("subagent: at most 32 templates are supported")
-	}
 	templates := map[string]subagent.Template{}
 	for name, source := range configured {
 		workers := map[string]subagent.Template{}
@@ -168,12 +165,6 @@ func childTemplateFor(c agentrunner.RuntimeConfig, name string, source childTemp
 	if source.Pinned {
 		template.Default = &subagent.RuntimeRequest{Provider: resolved.Provider.Provider, Model: resolved.Provider.Model.ID, Effort: resolved.ReasoningEffort}
 	}
-	// Reuse the protocol validator for child capabilities, including required
-	// Finish; this creates no Session or process.
-	check := subagent.ChildConfig{Version: 1, ParentID: "validation", OperationID: "validation", ChildID: subagent.ChildID("validation", "validation"), ReadyID: "ready:validation", Task: "validation", Workspace: template.Workspace, SessionDirectory: template.Workspace, Runtime: template.Runtime, Policy: template.Policy}
-	if err = check.Validate(); err != nil {
-		return template, err
-	}
 	for _, config := range []*permission.Config{&template.Policy, template.Baseline} {
 		if config == nil {
 			continue
@@ -259,6 +250,7 @@ func withSubagentTools(base agentrunner.ToolFactory, configuration subagent.Conf
 			return fail(err)
 		}
 		configured.RemoteJobs = append(configured.RemoteJobs, manager)
+		configured.InterruptedInput = manager.InterruptedInput
 		configured.Close = func() error {
 			var err error
 			err = manager.Close()
@@ -301,7 +293,7 @@ func runChild(ctx context.Context, args []string, diagnostics io.Writer) error {
 		if err != nil {
 			return err
 		}
-		resolver = credential.NewManager(store, nil)
+		resolver = credential.NewManager(store)
 	}
 	if *codexFile != "" {
 		if !filepath.IsAbs(*codexFile) {
@@ -318,9 +310,6 @@ const childApprovalTimeout = 1000 * time.Hour
 
 func childFactory(resolver credential.Resolver, codexFile string) subagent.ChildFactory {
 	return func(ctx context.Context, c subagent.ChildConfig, link subagent.ChildLink) (*host.Session, io.Closer, error) {
-		if err := c.Validate(); err != nil {
-			return nil, nil, err
-		}
 		var identity agentrunner.RuntimeIdentity
 		if err := json.Unmarshal(c.Runtime, &identity, json.RejectUnknownMembers(true)); err != nil {
 			return nil, nil, errors.New("child runtime configuration is invalid")

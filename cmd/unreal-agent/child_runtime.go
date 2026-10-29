@@ -86,10 +86,6 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig) subagent.RuntimeResolver 
 			return fail("incompatible_runtime")
 		}
 		template.Runtime = raw
-		check := subagent.ChildConfig{Version: 1, ParentID: "validation", OperationID: "validation", ChildID: subagent.ChildID("validation", "validation"), ReadyID: "ready:validation", Task: "validation", SessionDirectory: c.SessionDirectory, Workspace: template.Workspace, Runtime: raw, Policy: template.Policy}
-		if check.Validate() != nil {
-			return fail("incompatible_capability")
-		}
 		return template, nil
 	}
 }

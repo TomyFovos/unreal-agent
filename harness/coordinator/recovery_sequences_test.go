@@ -44,7 +44,7 @@ func TestCoordinatorResumesMixedDeliveryAfterSteering(t *testing.T) {
 						return llm.Response{}, requestContext.Err()
 					}
 				}}
-				go func() { run.done <- run.current.Run(ctx) }()
+				go func() { run.done <- run.run(ctx) }()
 				synctest.Wait()
 				run.input(t, externalEvent(t, 0, "first", "first input"))
 				run.update(t, 0, operation.StatusCompleted)
@@ -105,6 +105,7 @@ func TestCoordinatorResumesMixedDeliveryAfterSteering(t *testing.T) {
 func TestCoordinatorResumesPartiallyCompletedToolCall(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		run := newStopTestRun(t, 1)
+		run.live = false
 		second := run.store.resume.Operations[0]
 		second.ID = "operation-1"
 		run.store.resume.Operations = append(run.store.resume.Operations, second)
@@ -119,51 +120,52 @@ func TestCoordinatorResumesPartiallyCompletedToolCall(t *testing.T) {
 			t.Fatal(err)
 		}
 		restoreTestRun(t, run, store)
+		messagesRequireBatch(run)
 		run.start(t)
+		if len(run.calls) != 1 || len(run.operations.adds) != 0 {
+			t.Fatal("recovery did not deliver the unknown result without execution")
+		}
+		assertStopResult(t, run.calls[0].request, "call-0", interruptedOperationResult)
+		if messagesResult(t, run.calls[0].request, "call-0").State != llm.ToolResultUnknown {
+			t.Fatal("interrupted result was not unknown")
+		}
+		if run.current.state.operations[first.ID].Status != operation.StatusCompleted || run.current.state.operations[second.ID].Status != operation.StatusCanceled {
+			t.Fatal("recovery changed a known result or left unfinished work")
+		}
+		page, err := store.Items(t.Context(), "session-1", sessionstore.BeforeFirst, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipts := 0
+		for _, item := range page.Items {
+			if saved, ok := item.Data.(sessionstore.ToolCallStatus); ok && saved.Status.Error == interruptedOperationResult && len(saved.Operations) == 2 {
+				receipts++
+				if saved.Operations[0].Status != operation.StatusCompleted || saved.Operations[1].Status != operation.StatusCanceled {
+					t.Fatal("canonical receipt lost outcomes")
+				}
+			}
+		}
+		if receipts != 1 {
+			t.Fatalf("terminal unknown receipts = %d, want 1", receipts)
+		}
 		run.input(t, stopInput(t, "stop", inbox.StopWhenIdle))
-		run.assertRunning(t)
-		if len(run.calls) != 0 || run.current.pendingInputs() != 0 {
-			t.Fatal("partial completion produced a finished tool result")
-		}
-		if len(run.operations.adds) == 0 {
-			t.Fatal("unfinished operation was not dispatched")
-		}
-		for _, dispatched := range run.operations.adds {
-			if !reflect.DeepEqual(dispatched, second) {
-				t.Fatalf("redispatched operation = %#v, want %#v", dispatched, second)
-			}
-		}
-		run.update(t, 1, operation.StatusCompleted)
-		if len(run.calls) != 1 {
-			t.Fatalf("requests = %d, want one completed tool result", len(run.calls))
-		}
-		assertStopResult(t, run.calls[0].request, "call-0", "completed,completed")
-		completedResults := 0
-		for _, item := range run.calls[0].request.Input {
-			if item.Type == llm.ItemToolResult && item.Data.(llm.ToolResult).Output[0].Value == "completed,completed" {
-				completedResults++
-			}
-		}
-		if completedResults != 1 {
-			t.Fatalf("completed tool results = %d, want 1", completedResults)
-		}
-		run.update(t, 1, operation.StatusCompleted)
-		if run.current.pendingInputs() != 1 {
-			t.Fatal("duplicate terminal update changed the delivery balance")
-		}
-		run.respond(t, 0, textResponse("Done."))
+		run.respond(t, 0, textResponse("Continue after checking state."))
 		run.assertStopped(t)
 		resumed := newStopTestRun(t, 0)
 		restoreTestRun(t, resumed, store)
-		if len(resumed.current.dependencies.Restored.Operations) != 0 {
-			t.Fatal("settled operations were retained for recovery")
-		}
+		messagesRequireBatch(resumed)
 		resumed.start(t)
-		resumed.input(t, stopInput(t, "stop-again", inbox.StopWhenIdle))
-		resumed.assertStopped(t)
 		if len(resumed.calls) != 0 || len(resumed.operations.adds) != 0 {
-			t.Fatal("settled tool call ran again on resume")
+			t.Fatal("settled unknown operation ran again")
 		}
+		resumed.input(t, externalEvent(t, 0, "next", "Continue independent work"))
+		if len(resumed.calls) != 1 {
+			t.Fatal("unknown operation held subsequent work")
+		}
+		assertStopResult(t, resumed.calls[0].request, "call-0", interruptedOperationResult)
+		resumed.input(t, stopInput(t, "stop-again", inbox.StopWhenIdle))
+		resumed.respond(t, 0, textResponse("Done."))
+		resumed.assertStopped(t)
 	})
 }
 

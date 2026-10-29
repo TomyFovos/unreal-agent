@@ -83,7 +83,7 @@ func startProcess(ctx context.Context, c Config, child ChildConfig, mode permiss
 								close(p.connected)
 							}
 						case "approval", "approval_done":
-							if f.Approval == nil || f.Approval.ID == "" || len(f.Approval.ID) > 256 || len(f.Approval.Tool) > 128 || len(f.Approval.Scope) > 512 {
+							if f.Approval == nil || f.Approval.ID == "" {
 								err = fmt.Errorf("invalid child approval frame")
 								break
 							}

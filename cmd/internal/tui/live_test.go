@@ -10,7 +10,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/rivo/uniseg"
-	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -80,10 +79,6 @@ func TestLivePhase4CommandsCompletionAndPasteIsolation(t *testing.T) {
 		t.Fatal("pasted Tab executed")
 	}
 	u.Pasted = false
-	u.Private = &credential.Reference{Provider: "openai", ID: "key"}
-	if len(commandSheet(s, u, makeLayout(80, 24))) != 0 {
-		t.Fatal("private menu")
-	}
 	var d Decoder
 	keys := d.Feed([]byte("\t\x1b[5~\x1b[6~\x1b[200~\t/stop\n\x1b[5~\x1b[201~"))
 	if keys[0].Name != "tab" || keys[1].Name != "pageup" || keys[2].Name != "pagedown" {
@@ -96,7 +91,7 @@ func TestLivePhase4CommandsCompletionAndPasteIsolation(t *testing.T) {
 	}
 }
 
-func TestLivePhase4MultilineComposerCursorMaskedAndScroll(t *testing.T) {
+func TestLivePhase4MultilineComposerCursorAndScroll(t *testing.T) {
 	s, u := idleSnapshot(), plainUI()
 	u.Input = "猫👩🏽‍💻é\nline two\nline three\nline four\nline five\nline six"
 	u.Cursor = len(u.Input)
@@ -109,15 +104,8 @@ func TestLivePhase4MultilineComposerCursorMaskedAndScroll(t *testing.T) {
 	}
 	u.Cursor = len("猫👩🏽‍💻")
 	f := RenderFrame(s, u, 80, 24)
-	if f.CursorX != 13 {
+	if f.CursorX != 6 {
 		t.Fatalf("grapheme cursor: %d", f.CursorX)
-	}
-	u.Input = strings.Repeat("SECRET", 30)
-	u.Cursor = len(u.Input)
-	u.Private = &credential.Reference{Provider: "openai", ID: "private-key"}
-	f = RenderFrame(s, u, 80, 24)
-	if strings.Contains(frameText(f), "SECRET") || strings.Count(frameText(f), "*") != 64 || !strings.Contains(frameText(f), "private: API key for openai/private-key") {
-		t.Fatal("private mask: " + frameText(f))
 	}
 	u = plainUI()
 	s.Entries = []Entry{{Role: "agent", Text: strings.Repeat("a canonical line\n", 60) + "LATEST"}}
@@ -127,12 +115,12 @@ func TestLivePhase4MultilineComposerCursorMaskedAndScroll(t *testing.T) {
 	}
 	u.Scroll = 20
 	f = RenderFrame(s, u, 80, 24)
-	if strings.Contains(frameText(f), "LATEST") || !strings.Contains(frameText(f), "scrollback") || !strings.Contains(f.Lines[2], "agent") {
-		t.Fatal("scroll/reinsert role: " + frameText(f))
+	if strings.Contains(frameText(f), "LATEST") || !strings.Contains(frameText(f), "scrollback") || !strings.Contains(f.Lines[2], "a canonical line") || strings.Contains(f.Lines[2], "agent") {
+		t.Fatal("scroll/retain content: " + frameText(f))
 	}
 	s.Progress = &host.Progress{Mode: "streaming", Text: "draft"}
 	f = RenderFrame(s, u, 80, 24)
-	if !strings.Contains(f.Lines[19], "generating") {
+	if !strings.Contains(f.Lines[19], "生成中") {
 		t.Fatal("scroll pushed pulse out")
 	}
 }
@@ -152,11 +140,11 @@ func TestLivePhase4ThemeModesAndInjection(t *testing.T) {
 		text := frameText(f)
 		for _, match := range sgrRE.FindAllStringSubmatch(text, -1) {
 			for _, code := range strings.Split(match[1], ";") {
-				if theme.NoColor && (code == "31" || code == "32" || code == "33" || code == "35" || code == "36") {
+				if theme.NoColor && code != "0" && code != "1" && code != "2" && code != "7" {
 					t.Fatal("NO_COLOR emitted color")
 				}
-				if code != "0" && code != "1" && code != "2" && code != "7" && code != "31" && code != "32" && code != "33" && code != "35" && code != "36" {
-					t.Fatalf("unsupported/background SGR: %s", code)
+				if code != "0" && code != "1" && code != "2" && code != "7" && code != "31" && code != "32" && code != "33" && code != "35" && code != "36" && code != "39" && code != "97" && code != "100" && code != "30" && code != "42" && code != "45" {
+					t.Fatalf("unsupported SGR: %s", code)
 				}
 			}
 		}
@@ -164,10 +152,8 @@ func TestLivePhase4ThemeModesAndInjection(t *testing.T) {
 			t.Fatal("plain SGR")
 		}
 		if theme.ASCII {
-			for _, r := range text {
-				if r > 127 && r != '猫' {
-					t.Fatalf("non-ASCII chrome: %q", r)
-				}
+			if strings.ContainsAny(text, "▌◆▁▂▃▅▇✓✗⊘▸›─·") || !strings.Contains(text, "|* メイン") {
+				t.Fatalf("non-ASCII chrome or missing ASCII card: %s", text)
 			}
 		}
 	}
@@ -236,7 +222,6 @@ func TestLiveBoundedCacheDoesNotRetainInputOrOldWidths(t *testing.T) {
 	s, u := idleSnapshot(), plainUI()
 	u.cache = &bodyCache{}
 	u.Input = "PRIVATE_INPUT_NEVER_CACHED"
-	u.Private = &credential.Reference{Provider: "openai", ID: "key"}
 	for i := 0; i < 5; i++ {
 		s.Entries = []Entry{{Role: "agent", Text: fmt.Sprintf("canonical %d", i)}}
 		f := RenderFrame(s, u, 80, 24)
@@ -250,7 +235,6 @@ func TestLiveBoundedCacheDoesNotRetainInputOrOldWidths(t *testing.T) {
 			t.Fatal("secret/editor cached")
 		}
 	}
-	u.Private = nil
 	u.Input = ""
 	u.Cursor = 0
 	f := RenderFrame(s, u, 44, 14)
@@ -264,14 +248,14 @@ func TestLiveHeaderUnknownPartialAndAnimationBudget(t *testing.T) {
 	s, u := idleSnapshot(), plainUI()
 	u.Parent = &viewer.Row{Elapsed: viewer.Duration{Known: true, Value: 42 * time.Second}, Usage: viewer.Usage{Known: true, Partial: true, Input: 2000, Output: 30}}
 	f := RenderFrame(s, u, 80, 24)
-	if !strings.Contains(f.Lines[0], "42s") || !strings.Contains(f.Lines[0], "~") {
+	if !strings.Contains(f.Lines[0], "42s") || strings.Contains(f.Lines[0], "~") || strings.Contains(f.Lines[len(f.Lines)-1], "累計") || !strings.Contains(f.Lines[len(f.Lines)-1], "文脈 —") {
 		t.Fatal("known/partial metrics lost")
 	}
 	s.Connected = false
 	s.Status = "disconnected"
 	s.OfflineSince = time.Unix(90, 0)
 	f = RenderFrame(s, u, 80, 24)
-	if strings.Contains(f.Lines[0], "42s") || !strings.Contains(f.Lines[0], "unknown") || !strings.Contains(f.Lines[0], "~") {
+	if strings.Contains(f.Lines[0], "42s") || !strings.Contains(f.Lines[0], "切断") || strings.Contains(f.Lines[len(f.Lines)-1], "累計") || !strings.Contains(f.Lines[len(f.Lines)-1], "文脈 —") {
 		t.Fatal("offline metrics stale/unknown")
 	}
 	u.Busy = true
@@ -303,8 +287,8 @@ func TestLiveToolTargetsUseRealSchemasAndSpawnFinish(t *testing.T) {
 	u.Viewer.Rows[1].Finish = &viewer.Finish{Status: "completed"}
 	s.Entries = []Entry{{Role: "agent", Calls: []Receipt{{Name: "SubagentStart", Target: "task", Operations: []operation.ID{"op-0"}, Status: operation.StatusReady}}}}
 	text := frameText(RenderFrame(s, u, 80, 24))
-	if !strings.Contains(text, "! spawn") || !strings.Contains(text, "finished: completed") {
-		t.Fatal("spawn inferred success from Finish: " + text)
+	if strings.Count(text, "[ ✓ [A] Task 0 ]") != 1 || strings.Contains(text, "spawn") {
+		t.Fatal("spawn Finish not translated to a completed launch chip: " + text)
 	}
 }
 
@@ -331,7 +315,7 @@ func TestLivePhase3ChildLanesRailFocusAndResponsiveBounds(t *testing.T) {
 				t.Fatal("child zero noise")
 			}
 			if n > 0 && size[0] >= 120 {
-				if strings.Count(text, "child agents") != 1 {
+				if strings.Count(text, "◆ メイン") != 1 {
 					t.Fatal("rail absent")
 				}
 				for _, id := range []string{"child-0000", "child-0001"} {
@@ -340,10 +324,10 @@ func TestLivePhase3ChildLanesRailFocusAndResponsiveBounds(t *testing.T) {
 					}
 				}
 			}
-			if n == 1 && size[0] == 80 && !strings.Contains(text, "child ▸ child-0000") {
+			if n == 1 && size[0] == 80 && !strings.Contains(text, "子  [A]▸") {
 				t.Fatal("single child lane: " + text)
 			}
-			if n == 9 && size[0] == 80 && (!strings.Contains(text, "9 running") || !strings.Contains(text, "hidden")) {
+			if n == 9 && size[0] == 80 && (!strings.Contains(text, "作業中 9") || !strings.Contains(text, "[I]▸")) {
 				t.Fatal("hidden child counts: " + text)
 			}
 		}
@@ -391,17 +375,12 @@ func TestLivePhase3ChildUnknownFinishObservationAndIDs(t *testing.T) {
 	s.OfflineSince = time.Unix(90, 0)
 	f := RenderFrame(s, u, 120, 30)
 	text := frameText(f)
-	if strings.Contains(text, " running") || !strings.Contains(text, "unknown") || !strings.Contains(text, "finished: success") || !strings.Contains(text, "finished: completed") {
+	if strings.Contains(text, "稼働中") || !strings.Contains(text, "切断") || !strings.Contains(text, "不明") || strings.Contains(text, "終了 ✓") {
 		t.Fatal("offline inferred outcome: " + text)
 	}
-	ids := laneIDs([]viewer.Row{{ID: "prefix-aaaaaaaaaaaaaaaa-1-suffix"}, {ID: "prefix-aaaaaaaaaaaaaaaa-2-suffix"}}, Theme{})
-	if ids["prefix-aaaaaaaaaaaaaaaa-1-suffix"] == ids["prefix-aaaaaaaaaaaaaaaa-2-suffix"] {
-		t.Fatal("ambiguous IDs")
-	}
-	for _, id := range ids {
-		if strings.Count(id, "…") > 1 {
-			t.Fatal("multiple ellipses")
-		}
+	marks := childMarks([]viewer.Row{{ID: "prefix-aaaaaaaaaaaaaaaa-1-suffix", ParentID: "parent"}, {ID: "prefix-aaaaaaaaaaaaaaaa-2-suffix", ParentID: "parent"}})
+	if marks["prefix-aaaaaaaaaaaaaaaa-1-suffix"] != "A" || marks["prefix-aaaaaaaaaaaaaaaa-2-suffix"] != "B" {
+		t.Fatal("ambiguous marks")
 	}
 }
 
@@ -413,7 +392,7 @@ func TestLivePhase3ChildHistoryAndTallMetadata(t *testing.T) {
 	r.Generation = "g"
 	r.ProjectInstructions = &projectinstructions.Metadata{SourceKind: projectinstructions.SourceWorkspaceAgents, SourcePath: "AGENTS.md", ByteLength: 123, Digest: "12345678FULLDIGEST"}
 	text := frameText(RenderFrame(s, u, 100, 40))
-	if !strings.Contains(text, "project") || !strings.Contains(text, "12345678") || strings.Contains(text, "FULLDIGEST") {
+	if strings.Contains(text, "指示書") || strings.Contains(text, "12345678") || strings.Contains(text, "FULLDIGEST") {
 		t.Fatal("Tall project metadata: " + text)
 	}
 	if strings.Contains(frameText(RenderFrame(s, u, 100, 24)), "12345678") {
@@ -421,7 +400,7 @@ func TestLivePhase3ChildHistoryAndTallMetadata(t *testing.T) {
 	}
 	u.Viewer.Transcript = &host.HistoryPage{Items: []host.HistoryItem{{Sequence: 1, Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{Response: llm.Response{Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Text: "child canonical response"}}}}}}}, NextAfter: 1, More: true}
 	text = frameText(RenderFrame(s, u, 100, 30))
-	if !strings.Contains(text, "child canonical response") || !strings.Contains(text, "/child-next") || strings.Contains(text, "project") {
+	if !strings.Contains(text, "child canonical response") || !strings.Contains(text, "/child-next") || strings.Contains(text, "指示書") {
 		t.Fatal("history didn't replace focus: " + text)
 	}
 }
@@ -434,7 +413,7 @@ func TestLivePhase2DraftCanonicalReplacementAndEpochs(t *testing.T) {
 	}
 	u := plainUI()
 	f := RenderFrame(m.Snapshot(), u, 80, 24)
-	if !strings.Contains(frameText(f), "⋮ **temporary** 猫") || strings.Count(frameText(f), "generating") != 1 {
+	if !strings.Contains(frameText(f), "⋮ **temporary** 猫") || strings.Count(frameText(f), "生成中") != 1 {
 		t.Fatal(frameText(f))
 	}
 	v.Revision = 2
@@ -453,7 +432,7 @@ func TestLivePhase2DraftCanonicalReplacementAndEpochs(t *testing.T) {
 		t.Fatal("next epoch rejected")
 	}
 	f = RenderFrame(m.Snapshot(), u, 80, 24)
-	if !strings.Contains(frameText(f), "retrying (attempt 2)") {
+	if !strings.Contains(frameText(f), "再試行中（2回目）") {
 		t.Fatal(frameText(f))
 	}
 	m.progress(host.Event{Generation: "g", Revision: 5, Progress: &host.Progress{TurnID: "turn", Epoch: 2, Attempt: 1, Mode: "streaming", Text: "old attempt"}})
@@ -461,7 +440,7 @@ func TestLivePhase2DraftCanonicalReplacementAndEpochs(t *testing.T) {
 		t.Fatal("old attempt accepted")
 	}
 	m.status("disconnected", false)
-	if m.Snapshot().Progress != nil || strings.Contains(frameText(RenderFrame(m.Snapshot(), u, 80, 24)), "retrying") {
+	if m.Snapshot().Progress != nil || strings.Contains(frameText(RenderFrame(m.Snapshot(), u, 80, 24)), "再試行中") {
 		t.Fatal("offline draft/pulse")
 	}
 }
@@ -470,7 +449,7 @@ func TestLivePhase2PulsePrioritiesAndStates(t *testing.T) {
 	cases := []struct {
 		p    *host.Progress
 		want string
-	}{{&host.Progress{Attempt: 2}, "retrying (attempt 2)"}, {&host.Progress{Mode: "streaming", Text: "draft"}, "generating"}, {&host.Progress{Mode: "streaming"}, "thinking"}, {&host.Progress{Mode: "completed_response"}, "waiting for completed response"}}
+	}{{&host.Progress{Attempt: 2}, "再試行中（2回目）"}, {&host.Progress{Mode: "streaming", Text: "draft"}, "生成中"}, {&host.Progress{Mode: "streaming"}, "考え中"}, {&host.Progress{Mode: "completed_response"}, "応答待ち"}}
 	for _, c := range cases {
 		s := idleSnapshot()
 		s.Progress = c.p
@@ -481,7 +460,7 @@ func TestLivePhase2PulsePrioritiesAndStates(t *testing.T) {
 	}
 	s := idleSnapshot()
 	s.Operations = []operation.Operation{{ToolName: "edit", Status: operation.StatusReady}, {ToolName: "SubagentStart", Status: operation.StatusReady}}
-	if !strings.Contains(frameText(RenderFrame(s, plainUI(), 80, 24)), "running edit") {
+	if !strings.Contains(frameText(RenderFrame(s, plainUI(), 80, 24)), "edit 実行中") {
 		t.Fatal("tool phase")
 	}
 	s.Operations = s.Operations[1:]
@@ -494,29 +473,29 @@ func TestLivePhase2PulsePrioritiesAndStates(t *testing.T) {
 	}
 	s.Running = false
 	f := RenderFrame(s, plainUI(), 80, 24)
-	if strings.Contains(frameText(f), "thinking") || !strings.Contains(f.Lines[0], "stopped") || !strings.Contains(frameText(f), "/resume continues this session") {
+	if strings.Contains(frameText(f), "考え中") || !strings.Contains(f.Lines[0], "停止") || len(stateDock(s, plainUI(), makeLayout(80, 24))) != 0 {
 		t.Fatal(frameText(f))
 	}
 	s.Failure = strings.Repeat("failure detail ", 30)
 	f = RenderFrame(s, plainUI(), 80, 24)
-	if !strings.Contains(f.Lines[0], "failed") || len(stateDock(s, plainUI(), makeLayout(80, 24))) > 3 {
+	if !strings.Contains(f.Lines[0], "失敗") || len(stateDock(s, plainUI(), makeLayout(80, 24))) != 0 || !strings.Contains(frameText(f), "応答を取得できませんでした") {
 		t.Fatal("failed state")
 	}
 	s.Connected = false
 	s.Status = "disconnected"
 	s.OfflineSince = time.Unix(99, 0)
 	f = RenderFrame(s, plainUI(), 80, 24)
-	if !strings.Contains(f.Lines[0], "reconnecting") || strings.Contains(frameText(f), "state is unknown until") {
+	if !strings.Contains(f.Lines[0], "再接続中") || strings.Contains(frameText(f), "Host が応答するまで") {
 		t.Fatal("short disconnect")
 	}
 	s.OfflineSince = time.Unix(95, 0)
 	f = RenderFrame(s, plainUI(), 80, 24)
-	if !strings.Contains(f.Lines[0], "disconnected") || !strings.Contains(f.Lines[0], "unknown") || !strings.Contains(frameText(f), "reconnecting") {
+	if !strings.Contains(f.Lines[0], "切断") || !strings.Contains(frameText(f), "再接続中") || !strings.Contains(frameText(f), "再接続を待っています") {
 		t.Fatal("sustained disconnect")
 	}
 	s.Status = "gap/disconnect; resyncing"
 	f = RenderFrame(s, plainUI(), 80, 24)
-	if !strings.Contains(frameText(f), "rebuilding the view from canonical history") {
+	if !strings.Contains(frameText(f), "履歴から表示を作り直しています") {
 		t.Fatal("resync state")
 	}
 }
@@ -545,22 +524,22 @@ func TestLivePhase2ToolsStayAtStepAndCollapseOnlyCompleted(t *testing.T) {
 	}
 	f := RenderFrame(m.Snapshot(), plainUI(), 80, 30)
 	text := frameText(f)
-	for _, want := range []string{"2 tool calls: read 2", "edit  three.go", "failed", "revision mismatch", "spawn  child task"} {
+	for _, want := range []string{"[ ✓ read one.go ] [ ✓ read two.go ]", "[ ✗ edit three.go 失敗 ]", "revision mismatch", "[ ▸ SubagentStart child task ]"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %q: %s", want, text)
 		}
 	}
-	if strings.Contains(text, "hidden-op") || strings.Contains(text, "SECRET") || strings.Count(text, "spawn  child task") != 1 || strings.Count(text, "edit  three.go") != 1 {
+	if strings.Contains(text, "hidden-op") || strings.Contains(text, "SECRET") || strings.Count(text, "SubagentStart child task") != 1 || strings.Count(text, "edit three.go") != 1 {
 		t.Fatal(text)
 	}
-	if strings.Index(text, "tool calls") < strings.Index(text, "I will inspect") {
+	if strings.Index(text, "✓ read") < strings.Index(text, "I will inspect") {
 		t.Fatal("receipt before step")
 	}
 	op := ops[2]
 	op.Status = operation.StatusCanceled
 	s := m.Snapshot()
 	s.Operations[2] = op
-	if !strings.Contains(frameText(RenderFrame(s, plainUI(), 80, 30)), "canceled") {
+	if !strings.Contains(frameText(RenderFrame(s, plainUI(), 80, 30)), "取消") {
 		t.Fatal("canceled hidden")
 	}
 }
@@ -586,15 +565,15 @@ func TestLivePhase1IdleResponsiveAndResize(t *testing.T) {
 	for _, size := range [][2]int{{80, 24}, {60, 20}, {44, 14}, {120, 30}, {160, 40}, {40, 6}, {19, 5}, {1, 1}, {0, 0}} {
 		f := RenderFrame(s, u, size[0], size[1])
 		bounds(t, f, size[0], size[1])
-		if size[0] >= 40 && ((!strings.Contains(f.Lines[0], "connected") && !strings.Contains(f.Lines[0], "⇄")) || !strings.Contains(f.Lines[0], "running")) {
+		if size[0] >= 40 && !strings.Contains(f.Lines[0], "入力待ち") {
 			t.Fatalf("header state lost: %q", f.Lines[0])
 		}
 	}
 	f := RenderFrame(s, u, 80, 24)
-	if len(f.Lines) != 24 || f.ConversationHeight < 15 || f.Lines[1] != "" || f.Lines[21] != strings.Repeat("─", 79) || !strings.Contains(f.Lines[20], "^D detach") || !strings.Contains(f.Lines[22], "you ›") {
+	if len(f.Lines) != 24 || f.ConversationHeight < 15 || f.Lines[1] != "" || f.Lines[21] != strings.Repeat("─", 79) || !strings.Contains(f.Lines[20], "^D detach") || !strings.Contains(f.Lines[22], "› Ask, or type / for commands") {
 		t.Fatalf("idle layout: %#v", f)
 	}
-	for _, word := range []string{"child", "/login", "help", "thinking", "generating"} {
+	for _, word := range []string{"child", "/login", "help", "考え中", "生成中"} {
 		if strings.Contains(frameText(f), word) {
 			t.Fatalf("idle noise: %s", word)
 		}

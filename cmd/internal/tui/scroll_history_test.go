@@ -224,7 +224,7 @@ func TestScrollDoesNotJumpOnStreamingAndCanonicalReplacement(t *testing.T) {
 	lo, hi := visibleEntryRange(out)
 	progress := &host.Progress{Epoch: 1, TurnID: "next", Mode: "streaming", Text: strings.Repeat("streaming draft line\n", 40)}
 	f.events <- host.Event{Generation: "g", Revision: 1, Kind: "progress", Progress: progress}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "generating") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "生成中") })
 	// The pulse takes one row. The first visible original line stays anchored;
 	// the last row may move by that one row rather than jumping to the draft.
 	if a, b := visibleEntryRange(out); a != lo || b != hi-1 {
@@ -236,7 +236,7 @@ func TestScrollDoesNotJumpOnStreamingAndCanonicalReplacement(t *testing.T) {
 	f.view.Progress = &host.Progress{Epoch: 1, TurnID: "next", Mode: "complete", Done: true}
 	f.mu.Unlock()
 	f.events <- host.Event{Generation: "g", Revision: 2, Kind: "history"}
-	waitFor(t, func() bool { return !strings.Contains(out.text(), "generating") })
+	waitFor(t, func() bool { return !strings.Contains(out.text(), "生成中") })
 	if a, b := visibleEntryRange(out); a != lo || b != hi {
 		t.Fatal("canonical replacement moved the scroll anchor", lo, hi, a, b)
 	}

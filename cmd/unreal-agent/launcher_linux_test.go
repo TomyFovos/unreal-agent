@@ -156,7 +156,7 @@ func TestRealUnrealLauncherTTYDetachAndReattach(t *testing.T) {
 					time.Sleep(time.Millisecond)
 				}
 			}
-			readUntil("⇄ connected")
+			readUntil("入力待ち")
 			owner, err := launcherPeerPID(f.o.socket)
 			if err != nil {
 				t.Fatal(err)

@@ -23,8 +23,13 @@ type frame struct {
 	IsReplay bool `json:"isReplay"`
 
 	// system/init
-	Model        string `json:"model"`
-	APIKeySource string `json:"apiKeySource"`
+	Model           string `json:"model"`
+	APIKeySource    string `json:"apiKeySource"`
+	CompactMetadata *struct {
+		Trigger    string `json:"trigger"`
+		PreTokens  int64  `json:"pre_tokens"`
+		PostTokens *int64 `json:"post_tokens"`
+	} `json:"compact_metadata"`
 
 	// system/permission_denied
 	ToolName           string `json:"tool_name"`
@@ -44,6 +49,10 @@ type usage struct {
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 	OutputTokens             int64 `json:"output_tokens"`
+}
+
+func (u usage) inputTokens() int64 {
+	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
 }
 
 type message struct {

@@ -100,7 +100,17 @@ func fakeCLI(scenario string, args []string) int {
 		_ = os.WriteFile(path, []byte(strings.Join(args, "\n")), 0o600)
 	}
 	resume := slices.Contains(args, "--resume")
-	if scenario == "in_use" && !resume {
+	if scenario == "login_delayed" {
+		_ = os.Stdout.Close()
+		time.Sleep(20 * time.Millisecond)
+		fmt.Fprintln(os.Stderr, "Please run /login")
+		return 1
+	}
+	if (scenario == "in_use" || scenario == "in_use_delayed") && !resume {
+		if scenario == "in_use_delayed" {
+			_ = os.Stdout.Close()
+			time.Sleep(20 * time.Millisecond)
+		}
 		fmt.Fprintln(os.Stderr, "Error: Session ID 0000 is already in use.")
 		return 1
 	}
@@ -145,7 +155,7 @@ func fakeCLI(scenario string, args []string) int {
 				break
 			}
 		}
-	case "missing", "in_use", "echo", "stale":
+	case "missing", "in_use", "in_use_delayed", "echo", "stale":
 		mode := "fresh"
 		if resume {
 			mode = "resumed"
@@ -154,6 +164,14 @@ func fakeCLI(scenario string, args []string) int {
 		f.result(mode + ":" + prompt)
 	case "login":
 		f.emit(map[string]any{"type": "result", "subtype": "success", "is_error": true, "result": "Not logged in · Please run /login"})
+	case "multiple_steps":
+		f.step(100, 1000, 10, 20, "First")
+		f.step(200, 2000, 20, 30, "Second")
+		f.batch("batch-multi", cwd, map[string]any{"tool_name": "Read", "tool_input": map[string]any{"file_path": "sample.txt"}, "tool_use_id": "toolu_multi", "tool_response": "sample"})
+		f.step(30, 3000, 30, 40, "Third")
+		f.step(40, 4000, 40, 50, "Fourth")
+		f.text("msg_final", "Done.")
+		f.result("Done.")
 	case "edit":
 		path := os.Getenv("CLAUDEAGENT_FILE")
 		f.step(100, 1000, 10, 20, "Editing")

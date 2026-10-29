@@ -4,16 +4,14 @@ package mutation
 
 import (
 	"context"
-	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/unreallabsai/unreal-agent/harness/operation"
 )
 
 func service(t *testing.T) *Service {
@@ -261,49 +259,6 @@ func TestCrashWindowsRecoverIndeterminate(t *testing.T) {
 		})
 	}
 }
-func TestSerializableOperationAndRecovery(t *testing.T) {
-	s := service(t)
-	req := request("a", Revision{}, "value")
-	spec, err := Spec(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	original := operation.Operation{ID: "op", Type: spec.Type, Version: spec.Version, State: spec.State, MaxOutputLength: spec.MaxOutputLength, Status: operation.StatusReady}
-	wire, err := json.Marshal(original)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var restored operation.Operation
-	if err = json.Unmarshal(wire, &restored); err != nil {
-		t.Fatal(err)
-	}
-	handler, _ := NewHandler(t.Context(), s, "session")
-	manager := operation.NewLocalOperationManager(t.Context(), handler)
-	if err = manager.Add(restored); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case got := <-manager.Updates():
-		if got.Status != operation.StatusCompleted {
-			t.Fatal(got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("operation blocked")
-	}
-	// Even the original ready checkpoint can safely be redispatched after restart.
-	recovered, _ := NewHandler(t.Context(), s, "session")
-	if err = recovered.AddRemoteJob(original); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case got := <-recovered.RemoteJobUpdates():
-		if got.Status != operation.StatusCompleted {
-			t.Fatal(got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("recovery blocked")
-	}
-}
 func BenchmarkMutationPrecondition(b *testing.B) {
 	s, err := New(Config{Root: b.TempDir(), StateDir: filepath.Join(b.TempDir(), "state"), Authorize: func(context.Context, string, bool) error { return nil }})
 	if err != nil {
@@ -316,5 +271,20 @@ func BenchmarkMutationPrecondition(b *testing.B) {
 		if s.Apply(b.Context(), req).Code != Stale {
 			b.Fatal("wrong result")
 		}
+	}
+}
+
+func TestRequestsAndSnapshotsBeyondFormerLimits(t *testing.T) {
+	data := strings.Repeat("x", (16<<20)+1)
+	got, err := ReadBounded(strings.NewReader(data))
+	if err != nil || string(got) != data {
+		t.Fatal("snapshot truncated", len(got), err)
+	}
+	r := Request{Version: Version}
+	for i := range 129 {
+		r.Changes = append(r.Changes, Change{Path: fmt.Sprint(i)})
+	}
+	if err := r.Validate(); err != nil {
+		t.Fatal("target count refused", err)
 	}
 }

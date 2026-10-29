@@ -24,7 +24,7 @@ func TestRunSelectsToolsFromStartupConfiguration(t *testing.T) {
 		want       []string
 	}{
 		{name: "no integrations", want: []string{"Bash", "ViewImage"}},
-		{name: "valid skill", skill: "---\nname: review\ndescription: Review code.\n---\n", want: []string{"Bash", "ViewImage", "SkillUse"}},
+		{name: "valid skill", skill: "---\nname: review\ndescription: Review code.\n---\n", want: []string{"Bash", "SkillUse", "ViewImage"}},
 		{name: "disallowed SkillUse", skill: "---\nname: review\ndescription: Review code.\n---\n", disallowed: []string{"SkillUse"}, want: []string{"Bash", "ViewImage"}},
 		{name: "disallowed ViewImage", disallowed: []string{"ViewImage"}, want: []string{"Bash"}},
 		{name: "malformed skill", skill: "invalid", want: []string{"Bash", "ViewImage"}},

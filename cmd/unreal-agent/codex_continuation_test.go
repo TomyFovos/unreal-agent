@@ -190,11 +190,7 @@ func TestDockerOAuthMultiToolContinuationFailureAndResume(t *testing.T) {
 			}
 			key, detach := control.AcquireControl()
 			rev := control.Snapshot().Revision
-			challenge, err := control.PrepareFull(key, rev)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = control.SetMode(key, rev, permission.FullAccess, challenge); err != nil {
+			if err := control.SetMode(key, rev, permission.FullAccess); err != nil {
 				t.Fatal(err)
 			}
 			detach()
@@ -287,8 +283,10 @@ func TestDockerOAuthMultiToolContinuationFailureAndResume(t *testing.T) {
 				}
 				return responseCount(after) == len(steps)+1
 			})
-			if after.Permissions.Mode != permission.ReadOnly || len(after.Operations) != len(ops) {
-				t.Fatal("resume retained escalation or replayed operations")
+			// The selected mode survives resume (U20); completed work is
+			// never replayed.
+			if after.Permissions.Mode != permission.FullAccess || len(after.Operations) != len(ops) {
+				t.Fatal("resume changed the mode or replayed operations")
 			}
 			for _, op := range after.Operations {
 				data, _ := json.Marshal(op)

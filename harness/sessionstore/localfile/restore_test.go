@@ -41,13 +41,10 @@ func newRestoreFixture(t *testing.T) (*Store, session.ID, *os.File) {
 	return s, id, owner
 }
 func TestRestoreViewLifetimeAndIsolation(t *testing.T) {
-	s, id, owner := newRestoreFixture(t)
-	v, err := s.OpenRestoreView(t.Context(), id, owner)
+	s, id, _ := newRestoreFixture(t)
+	v, err := s.OpenRestoreView(t.Context(), id)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if v.FormatVersion() != formatVersion {
-		t.Fatal("wrong format")
 	}
 	if _, err = v.Items(t.Context(), "wrong", 0, 1); err == nil {
 		t.Fatal("cross-session access")
@@ -92,7 +89,7 @@ func TestRestoreViewLifetimeAndIsolation(t *testing.T) {
 	if _, err = v.Items(t.Context(), id, 0, 1); !errors.Is(err, ErrRestoreViewClosed) {
 		t.Fatal("closed view readable", err)
 	}
-	next, err := s.OpenRestoreView(t.Context(), id, owner)
+	next, err := s.OpenRestoreView(t.Context(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,68 +97,11 @@ func TestRestoreViewLifetimeAndIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-func TestRestoreViewWriterBinding(t *testing.T) {
-	s, id, owner := newRestoreFixture(t)
-	if _, err := s.OpenRestoreView(t.Context(), id, nil); err == nil {
-		t.Fatal("nil writer")
-	}
-	other, err := s.AcquireWriter("other")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer other.Close()
-	if _, err = s.OpenRestoreView(t.Context(), id, other); err == nil {
-		t.Fatal("wrong session writer")
-	}
-	stranger, err := os.OpenFile(s.sessionPath(id)+".lock", os.O_RDWR, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer stranger.Close()
-	if _, err = s.OpenRestoreView(t.Context(), id, stranger); !errors.Is(err, ErrWriterOwned) {
-		t.Fatal("unowned writer accepted", err)
-	}
-	v, err := s.OpenRestoreView(t.Context(), id, owner)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = s.OpenRestoreView(t.Context(), id, owner); err == nil {
-		t.Fatal("overlapping view accepted")
-	}
-	if err = owner.Close(); err != nil {
-		t.Fatal(err)
-	}
-	fresh, err := New(s.directory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = fresh.AcquireWriter(id); !errors.Is(err, ErrWriterOwned) {
-		t.Fatal("view lost its writer lease", err)
-	}
-	if err = v.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = s.OpenRestoreView(t.Context(), id, owner); err == nil {
-		t.Fatal("closed owner reused")
-	}
-	lease, err := fresh.AcquireWriter(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lease.Close()
-	next, err := fresh.OpenRestoreView(t.Context(), id, lease)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = next.Close(); err != nil {
-		t.Fatal(err)
-	}
-}
-func TestRestoreViewDetectsExternalChange(t *testing.T) {
+func TestRestoreViewKeepsSnapshotAfterExternalChange(t *testing.T) {
 	for _, mode := range []string{"same-size-restored-mtime", "replace-inode", "torn-append", "replace-lock"} {
 		t.Run(mode, func(t *testing.T) {
-			s, id, owner := newRestoreFixture(t)
-			v, err := s.OpenRestoreView(t.Context(), id, owner)
+			s, id, _ := newRestoreFixture(t)
+			v, err := s.OpenRestoreView(t.Context(), id)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -214,11 +154,12 @@ func TestRestoreViewDetectsExternalChange(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, err = v.Items(t.Context(), id, 0, 1); !errors.Is(err, ErrRestoreViewChanged) {
-				t.Fatal("external change hidden", err)
+			page, err := v.Items(t.Context(), id, 0, 1)
+			if err != nil || !bytes.Contains(page.Items[0].Data.(inbox.Input).Payload, []byte("synthetic")) {
+				t.Fatal("external change affected decoded snapshot", err)
 			}
-			if err = v.Close(); !errors.Is(err, ErrRestoreViewChanged) {
-				t.Fatal("Close hid changed boundary", err)
+			if err = v.Close(); err != nil {
+				t.Fatal(err)
 			}
 			if v.state != nil || s.restoreView.Load() != nil {
 				t.Fatal("stale view retained state")
@@ -227,9 +168,9 @@ func TestRestoreViewDetectsExternalChange(t *testing.T) {
 	}
 }
 func TestRestoreViewCancelReleasesState(t *testing.T) {
-	s, id, owner := newRestoreFixture(t)
+	s, id, _ := newRestoreFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
-	v, err := s.OpenRestoreView(ctx, id, owner)
+	v, err := s.OpenRestoreView(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +188,7 @@ func TestRestoreViewCancelReleasesState(t *testing.T) {
 func TestRestoreViewPreservesTornTailAndCorruptionErrors(t *testing.T) {
 	for _, mode := range []string{"torn-tail", "committed-corruption"} {
 		t.Run(mode, func(t *testing.T) {
-			s, id, owner := newRestoreFixture(t)
+			s, id, _ := newRestoreFixture(t)
 			path := s.sessionPath(id)
 			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 			if err != nil {
@@ -261,7 +202,7 @@ func TestRestoreViewPreservesTornTailAndCorruptionErrors(t *testing.T) {
 				t.Fatal(err)
 			}
 			f.Close()
-			v, err := s.OpenRestoreView(t.Context(), id, owner)
+			v, err := s.OpenRestoreView(t.Context(), id)
 			if mode == "committed-corruption" {
 				if err == nil {
 					v.Close()
@@ -286,8 +227,8 @@ func TestRestoreViewPreservesTornTailAndCorruptionErrors(t *testing.T) {
 	}
 }
 func TestRestoreViewClosesOnFailedAppendAttempt(t *testing.T) {
-	s, id, owner := newRestoreFixture(t)
-	v, err := s.OpenRestoreView(t.Context(), id, owner)
+	s, id, _ := newRestoreFixture(t)
+	v, err := s.OpenRestoreView(t.Context(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,11 +250,11 @@ func TestRestoreViewClosesOnFailedAppendAttempt(t *testing.T) {
 	}
 }
 func TestRestoreViewDoesNotBlockIndependentSession(t *testing.T) {
-	s, id, owner := newRestoreFixture(t)
+	s, id, _ := newRestoreFixture(t)
 	if _, err := s.Create(t.Context(), "independent"); err != nil {
 		t.Fatal(err)
 	}
-	v, err := s.OpenRestoreView(t.Context(), id, owner)
+	v, err := s.OpenRestoreView(t.Context(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +276,7 @@ func TestRestoreClonePreservesExactOpaqueValuesAndDetachesMetadata(t *testing.T)
 	original := sessionstore.Item{Kind: sessionstore.ItemToolCallStatus, Data: sessionstore.ToolCallStatus{
 		CallID: "synthetic", Status: tool.CallStatus{}, Operations: []operation.Operation{{
 			ID: "operation", State: append(jsontext.Value(nil), raw...),
-			Execution:   &operation.ExecutionMetadata{ExecutionBasis: append(jsontext.Value(nil), raw...), RecoveryBasis: []operation.UncertainEffect{{ID: "uncertain", Basis: append(jsontext.Value(nil), raw...)}}, Dependencies: []operation.ID{"dependency"}},
+			Execution:   &operation.ExecutionMetadata{Dependencies: []operation.ID{"dependency"}},
 			Idempotence: &operation.IdempotencyMetadata{Idempotency: append(jsontext.Value(nil), raw...)},
 		}},
 	}}
@@ -345,12 +286,10 @@ func TestRestoreClonePreservesExactOpaqueValuesAndDetachesMetadata(t *testing.T)
 	}
 	op := copy.Data.(sessionstore.ToolCallStatus).Operations[0]
 	op.State[0] = '!'
-	op.Execution.ExecutionBasis[0] = '!'
-	op.Execution.RecoveryBasis[0].Basis[0] = '!'
 	op.Execution.Dependencies[0] = "changed"
 	op.Idempotence.Idempotency[0] = '!'
 	old := original.Data.(sessionstore.ToolCallStatus).Operations[0]
-	if !bytes.Equal(old.State, raw) || !bytes.Equal(old.Execution.ExecutionBasis, raw) || !bytes.Equal(old.Execution.RecoveryBasis[0].Basis, raw) || !bytes.Equal(old.Idempotence.Idempotency, raw) || old.Execution.Dependencies[0] != "dependency" {
+	if !bytes.Equal(old.State, raw) || !bytes.Equal(old.Idempotence.Idempotency, raw) || old.Execution.Dependencies[0] != "dependency" {
 		t.Fatal("clone aliases canonical metadata")
 	}
 	for _, value := range [][]operation.Operation{nil, {}} {

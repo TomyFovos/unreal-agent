@@ -59,17 +59,17 @@ func TestBuilderOmitsEmptyProjectInstructions(t *testing.T) {
 	}
 }
 
-func TestBuilderRejectsInconsistentProjectInstructions(t *testing.T) {
+func TestBuilderUsesPersistedInstructionContent(t *testing.T) {
 	snapshot, err := projectinstructions.FromContent([]byte("A"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	snapshot.Content = "B"
 	current := NewBuilder()
-	if err = current.SetProjectInstructions(snapshot); err == nil {
-		t.Fatal("tampered snapshot was accepted")
+	if err = current.SetProjectInstructions(snapshot); err != nil {
+		t.Fatal(err)
 	}
-	if text := systemText(t, current); text != preamble {
-		t.Fatalf("rejected snapshot changed context: %q", text)
+	if text := systemText(t, current); !strings.Contains(text, "B") {
+		t.Fatal("persisted content missing", text)
 	}
 }

@@ -45,10 +45,6 @@ func TestProjectInstructionsPublicProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var canonicalDecode sessionstore.Item
-	if err := json.Unmarshal(publicBytes, &canonicalDecode); err == nil {
-		t.Fatal("public metadata accepted as a canonical snapshot")
-	}
 	var publicDecode HistoryItem
 	if err := json.Unmarshal(publicBytes, &publicDecode); err != nil {
 		t.Fatal(err)

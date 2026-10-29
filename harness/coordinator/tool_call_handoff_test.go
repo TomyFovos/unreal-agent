@@ -48,17 +48,11 @@ func TestToolCallHandoffPreservesCanonicalValueAndMetadata(t *testing.T) {
 			t.Run(state.name+map[bool]string{false: "/plain", true: "/inherited"}[inherited], func(t *testing.T) {
 				op := operation.Operation{ID: "synthetic-operation", Type: operation.TypeValue, Version: operation.VersionValue, Status: operation.StatusReady}
 				if inherited {
-					op = operation.WithExecutionBasis(op, jsontext.Value(`{"synthetic":1}`))
-					op = operation.WithRecoveryBasis(op, []operation.UncertainEffect{{ID: "synthetic-A", Basis: jsontext.Value(`{"synthetic":2}`)}})
 					op = operation.WithDependencies(op, []operation.ID{"synthetic-dependency"})
 					op = operation.WithIdempotency(op, jsontext.Value(`{"synthetic":3}`))
 				}
 				canonical := sessionstore.ToolCallStatus{TurnID: "synthetic-turn", CallID: "synthetic-call", Status: state.call, Operations: []operation.Operation{op}}
-				if inherited {
-					parent := op
-					parent.ID, parent.Status = "synthetic-parent", operation.StatusCompleted
-					canonical = sessionstore.WithInheritedFacts(canonical, []sessionstore.HistoricalOperation{sessionstore.HistoricalOperation(parent)})
-				}
+
 				item := sessionstore.Item{Kind: sessionstore.ItemToolCallStatus, Data: canonical}
 				before, err := json.Marshal(item)
 				if err != nil {
@@ -73,11 +67,9 @@ func TestToolCallHandoffPreservesCanonicalValueAndMetadata(t *testing.T) {
 				// snapshot. The compact handoff does not bypass that copy.
 				worker := operation.CloneExecutionMetadata(handoff.Operations[0])
 				if inherited {
-					worker.ExecutionBasis()[2] = 'X'
-					worker.RecoveryBasis()[0].Basis[2] = 'X'
 					worker.DependencyIDs()[0] = "other-dependency"
 					worker.Idempotency()[2] = 'X'
-				} else if worker.Execution != nil || worker.Idempotence != nil || canonical.Inheritance != nil {
+				} else if worker.Execution != nil || worker.Idempotence != nil {
 					t.Fatal("ordinary handoff acquired recovery metadata")
 				}
 				after, err := json.Marshal(item)

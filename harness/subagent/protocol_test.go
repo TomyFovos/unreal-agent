@@ -32,7 +32,7 @@ func TestFramesPartialCombinedAndBounds(t *testing.T) {
 	if err != nil || len(frames) != 2 {
 		t.Fatal(frames, err)
 	}
-	if _, err = readFrame(bytes.NewReader([]byte{255, 255, 255, 255})); err == nil {
+	if _, err = readFrame(bytes.NewReader([]byte{0, 4, 0, 1})); err == nil {
 		t.Fatal("oversized frame")
 	}
 	d = frameDecoder{}
@@ -142,6 +142,9 @@ func TestLostAckRetryRejectsChangedPayload(t *testing.T) {
 		if writes == 1 {
 			return nil
 		} // Receiver committed but the ACK was lost.
+		if string(f.Input.Payload) != `"original"` {
+			return ep.accept(frame{Version: 1, Connection: "one", Sender: "child", Target: "parent", Kind: "ack", ID: f.ID, Error: "conflict"})
+		}
 		return ep.accept(frame{Version: 1, Connection: "one", Sender: "child", Target: "parent", Kind: "ack", ID: f.ID, Receipt: &host.Receipt{ID: f.ID, Sequence: 42}})
 	}
 	first := inbox.Input{ID: "one", Kind: inbox.InputExternal, Payload: jsontext.Value(`"original"`)}
@@ -156,7 +159,7 @@ func TestLostAckRetryRejectsChangedPayload(t *testing.T) {
 		t.Fatal("changed retry admitted", err)
 	}
 	receipt, err := ep.send(t.Context(), first)
-	if err != nil || receipt.Sequence != 42 || writes != 2 {
+	if err != nil || receipt.Sequence != 42 || writes != 3 {
 		t.Fatal(receipt, err, writes)
 	}
 }

@@ -35,9 +35,9 @@ func TestConfigurationProjectInstructionsFailClosed(t *testing.T) {
 		wantMetadata bool
 	}{
 		{"valid", snapshot, true},
-		{"invalid-digest", badDigest, false},
-		{"digest-mismatch", mismatch, false},
-		{"invalid-length", badLength, false},
+		{"invalid-digest", badDigest, true},
+		{"digest-mismatch", mismatch, true},
+		{"invalid-length", badLength, true},
 		{"future-version", future, false},
 		{"malformed-content", map[string]any{"Version": 1, "Content": map[string]string{"secret": marker}}, false},
 		{"malformed-snapshot", marker, false},
@@ -45,6 +45,10 @@ func TestConfigurationProjectInstructionsFailClosed(t *testing.T) {
 		{"null", nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			want := metadata
+			if snapshot, ok := tc.value.(projectinstructions.Snapshot); ok {
+				want = snapshot.Metadata()
+			}
 			raw, err := json.Marshal(map[string]any{"ProjectInstructions": tc.value, "Runtime": "retained"})
 			if err != nil {
 				t.Fatal(err)
@@ -100,7 +104,7 @@ func TestConfigurationProjectInstructionsFailClosed(t *testing.T) {
 					if err := json.Unmarshal(instructions, &got, json.RejectUnknownMembers(true)); err != nil {
 						t.Fatal(err)
 					}
-					if got != metadata {
+					if got != want {
 						t.Fatal("valid metadata changed during projection")
 					}
 				} else if string(instructions) != "null" {

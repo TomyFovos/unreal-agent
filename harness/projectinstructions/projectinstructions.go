@@ -18,9 +18,6 @@ const Version = 1
 // FileName is the only surface discovered: the workspace root AGENTS.md.
 const FileName = "AGENTS.md"
 
-// MaxBytes bounds AGENTS.md. Larger files fail; they are never truncated.
-const MaxBytes = 64 << 10
-
 type SourceKind string
 
 const (
@@ -55,9 +52,6 @@ func None() Snapshot { return Snapshot{Version: Version, SourceKind: SourceNone}
 
 // FromContent validates AGENTS.md bytes and returns their snapshot.
 func FromContent(content []byte) (Snapshot, error) {
-	if len(content) > MaxBytes {
-		return Snapshot{}, &Error{Code: CodeOversized, Path: FileName, Err: fmt.Errorf("file exceeds %d bytes", MaxBytes)}
-	}
 	if bytes.IndexByte(content, 0) >= 0 {
 		return Snapshot{}, &Error{Code: CodeBinary, Path: FileName, Err: errors.New("file contains NUL bytes")}
 	}
@@ -79,7 +73,7 @@ func digest(content []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// Validate rejects snapshots whose content does not match their identity.
+// Validate checks the persisted instruction schema.
 func (s Snapshot) Validate() error {
 	if s.Version != Version {
 		return fmt.Errorf("unsupported project instructions version %d", s.Version)
@@ -92,13 +86,6 @@ func (s Snapshot) Validate() error {
 	case SourceWorkspaceAgents:
 		if s.SourcePath != FileName {
 			return fmt.Errorf("unsupported project instructions path %q", s.SourcePath)
-		}
-		want, err := FromContent([]byte(s.Content))
-		if err != nil {
-			return err
-		}
-		if s.Digest != want.Digest || s.ByteLength != want.ByteLength {
-			return errors.New("project instructions digest or length mismatch")
 		}
 	default:
 		return fmt.Errorf("unsupported project instructions source %q", s.SourceKind)
@@ -117,11 +104,8 @@ func (m Metadata) Validate() error {
 			return errors.New("metadata without a source carries content identity")
 		}
 	case SourceWorkspaceAgents:
-		if m.SourcePath != FileName || m.ByteLength < 0 || m.ByteLength > MaxBytes || len(m.Digest) != len("sha256:")+64 || m.Digest[:len("sha256:")] != "sha256:" {
+		if m.SourcePath != FileName {
 			return errors.New("invalid project instruction metadata")
-		}
-		if _, err := hex.DecodeString(m.Digest[len("sha256:"):]); err != nil {
-			return fmt.Errorf("invalid project instruction digest: %w", err)
 		}
 	default:
 		return fmt.Errorf("unsupported project instruction metadata source %q", m.SourceKind)

@@ -43,7 +43,7 @@ func TestLoginStoreAdapterLogoutEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := credential.NewManager(backend, nil)
+	manager := credential.NewManager(backend)
 	registry, err := provider.New(provider.Defaults(map[string][]provider.Model{"openai": {{ID: "explicit-test-model"}}})...)
 	if err != nil {
 		t.Fatal(err)
@@ -119,7 +119,7 @@ func TestEntitlementDenialAndPolicyTransport(t *testing.T) {
 	defer server.Close()
 	store, _ := credential.OpenLocal(dir)
 	registry, _ := provider.New(provider.Defaults(map[string][]provider.Model{"openai": {{ID: "model"}}})...)
-	config := provider.BuildConfig{Selection: provider.Selection{Version: 1, Provider: "openai", Model: provider.Model{ID: "model"}, Endpoint: server.URL, Auth: credential.Reference{Provider: "openai", ID: "work", Method: credential.APIKey}, MaxAttempts: 1, Source: "test"}, Resolver: credential.NewManager(store, nil)}
+	config := provider.BuildConfig{Selection: provider.Selection{Version: 1, Provider: "openai", Model: provider.Model{ID: "model"}, Endpoint: server.URL, Auth: credential.Reference{Provider: "openai", ID: "work", Method: credential.APIKey}, MaxAttempts: 1, Source: "test"}, Resolver: credential.NewManager(store)}
 	client, _, err := registry.Build(config)
 	if err != nil {
 		t.Fatal(err)

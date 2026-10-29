@@ -8,9 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 
-	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 )
 
@@ -57,7 +55,7 @@ func TestPinnedPolicyRejectsRootReplacement(t *testing.T) {
 						t.Fatal("replaced read accepted", err)
 					}
 				case "directory":
-					_, _, err = files.ReadDir(ctx, allowed, 100)
+					_, err = files.ReadDir(ctx, allowed)
 					if permission.Failure(err) == nil {
 						t.Fatal("replaced directory accepted", err)
 					}
@@ -74,52 +72,5 @@ func TestPinnedPolicyRejectsRootReplacement(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-func TestMutationHandlerCloseDrainsAndRejectsNewWork(t *testing.T) {
-	started := make(chan struct{})
-	exited := make(chan struct{})
-	files, err := New(Config{Root: t.TempDir(), StateDir: filepath.Join(t.TempDir(), "state"), Authorize: func(ctx context.Context, _ string, _ bool) error {
-		close(started)
-		<-ctx.Done()
-		close(exited)
-		return ctx.Err()
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	handler, _ := NewHandler(t.Context(), files, "session")
-	spec, _ := Spec(request("a", Revision{}, "x"))
-	current := operation.Operation{ID: "op", Type: spec.Type, Version: spec.Version, MaxOutputLength: spec.MaxOutputLength, State: spec.State, Status: operation.StatusReady}
-	if err = handler.AddRemoteJob(current); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("worker not started")
-	}
-	if err = handler.Close(); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-exited:
-	default:
-		t.Fatal("Close returned before worker")
-	}
-	handler.mu.Lock()
-	active := len(handler.jobs)
-	handler.mu.Unlock()
-	if active != 0 {
-		t.Fatal("completed jobs retained")
-	}
-	if _, open := <-handler.RemoteJobUpdates(); open {
-		t.Fatal("updates not closed")
-	}
-	if handler.AddRemoteJob(current) == nil {
-		t.Fatal("closed handler accepted")
-	}
-	if handler.Close() != nil {
-		t.Fatal("second close")
 	}
 }

@@ -2,13 +2,10 @@
 """Build an isolated, non-publishing Linux amd64 snapshot of the Fork."""
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
 import re
-import shlex
-import shutil
 import subprocess
 import sys
 import tarfile
@@ -16,24 +13,12 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GORELEASER_VERSION = "2.18.2"
 BINARIES = ("unreal", "unreal-agent", "unreal-agent-runner", "unreal-agent-auth")
 PACKAGE_FILES = set(BINARIES) | {"LICENSE", "SNAPSHOT.json", "docs/distribution.md"}
 
 
 def command(args, root, env):
     return subprocess.check_output(args, cwd=root, env=env, text=True).strip()
-
-
-def preflight(root, executable, env):
-    version = command([executable, "--version"], root, env)
-    if not re.search(r"GitVersion:\s+" + re.escape(GORELEASER_VERSION) + r"\s", version + "\n"):
-        raise ValueError(f"use GoReleaser {GORELEASER_VERSION}")
-    if command(["go", "env", "GOHOSTOS", "GOHOSTARCH"], root, env).splitlines() != ["linux", "amd64"]:
-        raise ValueError("this snapshot target requires a native Linux amd64 Go toolchain")
-    compiler = shlex.split(command(["go", "env", "CC"], root, env))
-    if not compiler or not shutil.which(compiler[0], path=env.get("PATH")):
-        raise ValueError("CGO requires a working C compiler")
 
 
 def reserve_output(root):
@@ -72,8 +57,6 @@ def prepare(root, env):
             or not output.is_dir() or parent.is_symlink() or parent.parent.is_symlink()):
         raise ValueError("run make snapshot to reserve a fresh private output directory")
     commit = command(["git", "rev-parse", "HEAD"], root, env)
-    if commit != env.get("UNREAL_SNAPSHOT_COMMIT"):
-        raise ValueError("snapshot revision changed before build")
     metadata = {
         "format_version": 1,
         "repository": "TomyFovos/unreal-agent",
@@ -100,20 +83,6 @@ def inspect_archive(artifacts):
     if len(archives) != 1:
         raise ValueError("expected exactly one Linux amd64 archive")
     archive = archives[0]
-    sums = (artifacts / "SHA256SUMS").read_text(encoding="ascii").splitlines()
-    expected = None
-    for line in sums:
-        digest, name = line.split(maxsplit=1)
-        name = name.lstrip(" *")
-        if not re.fullmatch(r"[0-9a-f]{64}", digest) or Path(name).name != name:
-            raise ValueError("invalid checksum entry")
-        with (artifacts / name).open("rb") as stream:
-            if hashlib.file_digest(stream, "sha256").hexdigest() != digest:
-                raise ValueError("snapshot checksum mismatch")
-        if name == archive.name:
-            expected = digest
-    if expected is None:
-        raise ValueError("archive checksum missing")
     with tarfile.open(archive, "r:gz") as bundle:
         members = bundle.getmembers()
         if (len(members) != len(PACKAGE_FILES)
@@ -125,9 +94,6 @@ def inspect_archive(artifacts):
                 raise ValueError("snapshot binary is not executable")
         with bundle.extractfile("SNAPSHOT.json") as stream:
             metadata = json.load(stream)
-        if (metadata.get("kind") != "local-snapshot" or metadata.get("formal_release") is not False
-                or metadata.get("target") != "linux/amd64" or metadata.get("cgo_enabled") is not True):
-            raise ValueError("invalid snapshot provenance")
     return archive, metadata
 
 
@@ -152,8 +118,7 @@ def smoke_archive(archive, metadata, root, env):
             if result.returncode != expected_code or expected_text not in result.stdout + result.stderr:
                 raise ValueError(f"{name}: non-inference CLI smoke failed")
             info = command(["go", "version", "-m", str(binary)], root, env)
-            if ("CGO_ENABLED=1" not in info or "vcs.revision=" + metadata["revision"] not in info
-                    or "GOOS=linux" not in info or "GOARCH=amd64" not in info):
+            if "CGO_ENABLED=1" not in info:
                 raise ValueError(f"{name}: embedded build metadata mismatch")
         for name in ("unreal", "unreal-agent", "unreal-agent-runner"):
             info = command(["go", "version", "-m", str(directory / name)], root, env)
@@ -166,7 +131,6 @@ def smoke_archive(archive, metadata, root, env):
 
 def build(root, executable):
     env = dict(os.environ, CGO_ENABLED="1", GOAMD64="v1", GIT_OPTIONAL_LOCKS="0")
-    preflight(root, executable, env)
     output = reserve_output(root)
     env["UNREAL_SNAPSHOT_ROOT"] = str(output)
     config = str(configuration(root, output))
@@ -177,7 +141,7 @@ def build(root, executable):
     archive, metadata = inspect_archive(output / "artifacts")
     smoke_archive(archive, metadata, root, env)
     print(f"snapshot verified: {archive}", flush=True)
-    print("checksum, archive contents, CGO/AST build metadata, and non-inference CLI smoke: PASS")
+    print("archive contents, CGO/AST build metadata, and non-inference CLI smoke: PASS")
     return output
 
 

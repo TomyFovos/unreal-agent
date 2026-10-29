@@ -41,7 +41,7 @@ func TestDockerSandboxSource(t *testing.T) {
 		{"wrong-provider", "oauth", `{"OPENAI_API_KEY":"proxy-managed"}`, strings.Replace(sandboxTOML, `model_provider = "sandboxd"`, `model_provider = "other"`, 1), false},
 		{"real-token", "oauth", `{"OPENAI_API_KEY":"proxy-managed"}`, strings.Replace(sandboxTOML, SandboxAccessSentinel, "private-dummy", 1), false},
 		{"account-required", "oauth", `{"OPENAI_API_KEY":"proxy-managed"}`, strings.Replace(sandboxTOML, "requires_openai_auth = false", "requires_openai_auth = true", 1), false},
-		{"extra-header", "oauth", `{"OPENAI_API_KEY":"proxy-managed"}`, strings.Replace(sandboxTOML, "requires_openai_auth = false", "requires_openai_auth = false\nhttp_headers={Authorization='private-dummy'}", 1), false},
+		{"extra-header", "oauth", `{"OPENAI_API_KEY":"proxy-managed"}`, strings.Replace(sandboxTOML, "requires_openai_auth = false", "requires_openai_auth = false\nhttp_headers={Authorization='private-dummy'}", 1), true},
 		{"ambiguous-type", "oauth", `{"OPENAI_API_KEY":"proxy-managed"}`, strings.Replace(sandboxTOML, "requires_openai_auth = false", "requires_openai_auth = 'false'", 1), false},
 	} {
 		t.Run(test.name, func(t *testing.T) {

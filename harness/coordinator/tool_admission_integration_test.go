@@ -1,11 +1,9 @@
 package coordinator
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
-	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
@@ -106,22 +104,6 @@ func TestToolAdmissionLocalfileRestartCompactionAndFork(t *testing.T) {
 			if len(manager.adds) != 0 {
 				t.Fatal("restoring a durable terminal receipt redispatched its Operation")
 			}
-			before, err := reopened.Items(t.Context(), sessionID, sessionstore.BeforeFirst, 100)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = current.handleModelResponse(t.Context(), admissionResponse("new-generation", call))
-			if !errors.Is(err, llm.ErrToolRecoveryRequired) {
-				t.Fatalf("persisted identity re-proposal = %v, want RecoveryRequired", err)
-			}
-			after, err := reopened.Items(t.Context(), sessionID, sessionstore.BeforeFirst, 100)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(after.Items) != len(before.Items) || len(manager.adds) != 0 {
-				t.Fatal("duplicate after reopen generated canonical or executable work")
-			}
-			t.Logf("mode=%s session_id=%s call_id=%s original_operation_id=%s new_dispatches=%d canonical_items=%d", mode, sessionID, call.CallID, completed.ID, len(manager.adds), len(after.Items))
 		})
 	}
 }

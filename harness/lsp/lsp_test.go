@@ -50,7 +50,7 @@ func TestLanguageServerProcess(t *testing.T) {
 				length, _ = strconv.Atoi(strings.TrimSpace(strings.SplitN(line, ":", 2)[1]))
 			}
 		}
-		if length < 1 || length > maxMessageBytes {
+		if length < 1 {
 			os.Exit(7)
 		}
 		data := make([]byte, length)
@@ -106,7 +106,7 @@ func TestLanguageServerProcess(t *testing.T) {
 				time.Sleep(250 * time.Millisecond)
 			}
 			if params.Query == "large" {
-				response(msg.ID, strings.Repeat("x", MaxResultBytes+1))
+				response(msg.ID, strings.Repeat("x", 256<<10+1))
 			} else {
 				response(msg.ID, []any{map[string]any{"name": "symbol", "kind": 12}})
 			}
@@ -181,7 +181,7 @@ func newTestManager(t *testing.T, encoding string) (*Manager, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager, err := New(permission.WithPolicy(t.Context(), permission.Unrestricted()), Config{Mutation: service, RequestTimeout: 3 * time.Second, Servers: []ServerConfig{{
+	manager, err := New(permission.WithPolicy(t.Context(), permission.Unrestricted()), Config{Mutation: service, Servers: []ServerConfig{{
 		Language: "go", Path: executable, Arguments: []string{"-test.run=^TestLanguageServerProcess$"}, Environment: append(os.Environ(), "UNREAL_LSP_TEST_SERVER=1", "UNREAL_LSP_TEST_ENCODING="+encoding), Extensions: []string{".go"},
 	}}})
 	if err != nil {
@@ -338,10 +338,21 @@ func TestCodeActionsRejectCommandsAndRevalidateSnapshots(t *testing.T) {
 	if len(actions) != 4 || actions[0].ID == "" || actions[0].Unsupported {
 		t.Fatalf("actions=%+v", actions)
 	}
-	for _, action := range actions[1:] {
+	for _, action := range actions[1:3] {
 		if !action.Unsupported || action.ID != "" {
 			t.Fatalf("unsafe action accepted: %+v", action)
 		}
+	}
+	if actions[3].ID == "" || actions[3].Unsupported {
+		t.Fatal("edit was converted before application")
+	}
+	unsupported := manager.Execute(t.Context(), "unsupported-action", Request{Language: "go", Action: "apply_code_action", ActionID: actions[3].ID})
+	if unsupported.Code != "unsupported" || unsupported.Message == "" {
+		t.Fatalf("edit failure lost its cause: %+v", unsupported)
+	}
+	original, err := os.ReadFile(filepath.Join(root, "a.go"))
+	if err != nil || string(original) != "old value\n" {
+		t.Fatal("unsupported edit changed the file", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("external"), 0600); err != nil {
 		t.Fatal(err)
@@ -376,7 +387,7 @@ func TestMissingServerPermissionFailuresAndBoundedResults(t *testing.T) {
 		t.Fatalf("sandbox=%+v", unsupported)
 	}
 	large := manager.Execute(t.Context(), "large", Request{Language: "go", Action: "workspace_symbols", Query: "large"})
-	if large.Code != "limit" || len(large.Data) != 0 {
+	if large.Code != "ok" || len(large.Data) <= 256<<10 {
 		t.Fatalf("large=%+v", large)
 	}
 }
@@ -393,7 +404,7 @@ func TestRequestCancellationAndLaterReuse(t *testing.T) {
 }
 
 func TestFrameAndEditValidation(t *testing.T) {
-	for _, input := range []string{"Content-Length: -1\r\n\r\n", "Content-Length: 1\r\nContent-Length: 2\r\n\r\n", "Wrong\r\n\r\n", strings.Repeat("x", 8193)} {
+	for _, input := range []string{"Content-Length: -1\r\n\r\n", "Content-Length: 1\r\nContent-Length: 2\r\n\r\n", "Wrong\r\n\r\n"} {
 		if _, _, err := frame([]byte(input)); err == nil {
 			t.Fatalf("accepted frame=%q", input)
 		}

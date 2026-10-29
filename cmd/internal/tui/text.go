@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"github.com/unreallabsai/unreal-agent/internal/usertext"
 	"regexp"
 	"strings"
 	"unicode"
@@ -62,6 +63,8 @@ func (l line) paint(t Theme) string {
 			b.WriteString(g.link.Open())
 			link = g.link
 		}
+		// Compare the entire style, including bg: changing only a background
+		// must reset the previous section before applying the next SGR.
 		if g.style != current && !t.Plain {
 			if current != normal {
 				b.WriteString("\x1b[0m")
@@ -104,6 +107,20 @@ func middle(text string, width int, t Theme) string {
 		n -= l[start].width
 	}
 	return left.plain() + mark + line(l[start:]).plain()
+}
+
+// tail truncates prose, titles and commands at grapheme boundaries. Reserve
+// middle for paths and IDs, where retaining the end is useful.
+func tail(text string, width int, t Theme) string {
+	l := textLine(strings.ReplaceAll(SafeText(terminaltext.Clean(text)), "\n", " "), normal)
+	if l.width() <= width {
+		return l.plain()
+	}
+	if width <= 0 {
+		return ""
+	}
+	mark := t.symbol("…", "~")
+	return l.clip(width-textLine(mark, normal).width()).plain() + mark
 }
 
 const noStart = "、。，．）」』】〉》！？ー"
@@ -185,7 +202,6 @@ func markdown(s string) line {
 	unsafeLinks := clean != s
 	s = clean
 	var out line
-	bareLinks := 0
 	for len(s) > 0 {
 		if s[0] == '`' {
 			if end := strings.Index(s[1:], "`"); end >= 0 {
@@ -217,11 +233,7 @@ func markdown(s string) line {
 		}
 		if len(s) >= 7 && strings.EqualFold(s[:7], "http://") || len(s) >= 8 && strings.EqualFold(s[:8], "https://") {
 			if match := webURLPattern.FindStringIndex(s); match != nil && match[0] == 0 {
-				part := textLine(s[:match[1]], normal)
-				if bareLinks < maxBareLinksPerLine {
-					part = webTextLine(s[:match[1]], normal)
-				}
-				bareLinks++
+				part := webTextLine(s[:match[1]], normal)
 				if len(out) > 0 && !webBoundary(out[len(out)-1].text) {
 					clearLinks(part)
 				}
@@ -252,6 +264,9 @@ func entryBody(e Entry, width int, t Theme) []bodyLine {
 	var result []bodyLine
 	code := false
 	text := e.Text
+	if e.Role == "error" && e.Code != "user_message" {
+		text = usertext.Failure(e.Code, e.Text, "")
+	}
 	if e.PeerID != "" {
 		text = e.PeerID + " [" + e.PeerKind + "] " + text
 	}
@@ -317,19 +332,5 @@ func entryBody(e Entry, width int, t Theme) []bodyLine {
 			result = append(result, bodyLine{text: p})
 		}
 	}
-	if hint := failureHint(e.Code); hint != "" {
-		for _, p := range wrapLine(textLine(hint, meta), width, false, 0) {
-			result = append(result, bodyLine{text: p})
-		}
-	}
 	return result
-}
-func failureHint(code string) string {
-	switch code {
-	case "external_reauth_required":
-		return "Renew the login with Codex CLI (codex login) outside this TUI; the next request rereads the file."
-	case "writer_owned":
-		return "Another client owns the writer; /resume cannot acquire it until that owner releases it."
-	}
-	return ""
 }

@@ -2,6 +2,7 @@ package filesearch
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -14,26 +15,32 @@ type ignoreRule struct {
 	negate, directory, anchored bool
 }
 
-func readRules(root *os.Root, name, base string, limit int) ([]ignoreRule, int, error) {
+func readRules(root *os.Root, name, base string) ([]ignoreRule, int, error) {
 	info, err := root.Lstat(filepath.FromSlash(name))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, 0, nil
 	}
-	if err != nil || !info.Mode().IsRegular() || info.Size() > int64(limit) {
+	if err != nil {
+		return nil, 0, err
+	}
+	if !info.Mode().IsRegular() {
 		return nil, 0, errIgnore
 	}
 	f, err := openIgnore(root, filepath.FromSlash(name))
 	if err != nil {
-		return nil, 0, errIgnore
+		return nil, 0, err
 	}
 	defer f.Close()
 	opened, err := f.Stat()
-	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+	if err != nil {
+		return nil, 0, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
 		return nil, 0, errIgnore
 	}
-	data, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
-	if err != nil || len(data) > limit {
-		return nil, 0, errIgnore
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, 0, err
 	}
 	rules, err := parseRules(string(data), base)
 	return rules, len(data), err
@@ -68,15 +75,12 @@ func parseRules(data, base string) ([]ignoreRule, error) {
 		s = strings.TrimSuffix(s, "/")
 		r.anchored = strings.HasPrefix(s, "/") || strings.Contains(s, "/")
 		s = strings.TrimPrefix(s, "/")
-		if s == "" || len(s) > 4096 {
+		if s == "" {
 			return nil, errIgnore
 		}
 		for _, component := range strings.Split(s, "/") {
-			if component == ".." {
-				return nil, errIgnore
-			}
 			if _, err := path.Match(component, ""); err != nil {
-				return nil, errIgnore
+				return nil, fmt.Errorf("pattern %q: %w", s, err)
 			}
 		}
 		r.pattern = s

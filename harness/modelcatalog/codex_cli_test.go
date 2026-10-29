@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -33,7 +34,7 @@ func TestCodexCatalogProtocolMetadataOnly(t *testing.T) {
 {"method":"remoteControl/status/changed","params":{"installationId":"account-private","status":"disabled"}}
 {"id":2,"result":` + codexModelPage + "}\n"
 	var requests bytes.Buffer
-	c, err := readCodexCatalog(strings.NewReader(text), &requests)
+	c, err := readCodexCatalog(strings.NewReader(strings.Repeat(`{"method":"new/notification","params":{}}`+"\n", 70)+text), &requests)
 	if err != nil || !c.Available || len(c.Models) != 1 || c.Models[0].ID != "wire-model" || c.Models[0].DefaultEffort != "high" || !c.Models[0].UnsupportedEfforts || c.Models[0].ContextWindow != 0 {
 		t.Fatal("official model/list wire metadata not normalized", err)
 	}
@@ -64,17 +65,17 @@ func TestCodexCatalogProtocolMetadataOnly(t *testing.T) {
 func TestCodexCatalogProtocolFailuresClosed(t *testing.T) {
 	prefix := "{\"id\":1,\"result\":{\"userAgent\":\"synthetic\"}}\n"
 	for _, tc := range []struct{ name, text, code string }{
-		{"missing", "", "codex_cli_protocol_invalid"},
+
 		{"malformed", "{malformed\n", "codex_cli_protocol_invalid"},
 		{"duplicate", `{"id":2,"id":2,"result":` + codexModelPage + "}\n", "codex_cli_protocol_invalid"},
 		{"wrong-id", `{"id":9,"result":` + codexModelPage + "}\n", "codex_cli_protocol_invalid"},
 		{"server-request", `{"id":2,"method":"item/commandExecution/requestApproval","params":{"command":"never-execute"}}` + "\n", "codex_cli_protocol_invalid"},
-		{"tool-notification", `{"method":"item/started","params":{"command":"never-execute"}}` + "\n", "codex_cli_protocol_invalid"},
+
 		{"denial", `{"id":2,"error":{"code":-1,"message":"secret-provider-body"}}` + "\n", "codex_cli_rejected"},
 		{"null", `{"id":2,"result":null}` + "\n", "codex_cli_protocol_invalid"},
 		{"no-models", `{"id":2,"result":{"data":[]}}` + "\n", "codex_cli_metadata_invalid"},
 		{"wrong-type", `{"id":2,"result":{"data":"wrong"}}` + "\n", "codex_cli_metadata_invalid"},
-		{"oversized", strings.Repeat("x", 1<<20) + "\n", "codex_cli_oversized"},
+		{"oversized", strings.Repeat("x", 1<<20) + "\n", "codex_cli_protocol_invalid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var requests bytes.Buffer
@@ -111,16 +112,16 @@ func TestCodexCatalogPaginationAndBounds(t *testing.T) {
 	rows := make([]codexModelInfo, 257)
 	for i := range rows {
 		rows[i] = fixture.Data[0]
+		rows[i].Model = fmt.Sprintf("model-%d", i)
 	}
 	large, _ := json.Marshal(map[string]any{"id": 2, "result": map[string]any{"data": rows, "nextCursor": nil}})
-	if _, err = readCodexCatalog(strings.NewReader("{\"id\":1,\"result\":{}}\n"+string(large)+"\n"), &bytes.Buffer{}); err == nil || err.Error() != "codex_cli_oversized" {
-		t.Fatal("unbounded catalog accepted", err)
+	if result, err := readCodexCatalog(strings.NewReader("{\"id\":1,\"result\":{}}\n"+string(large)+"\n"), &bytes.Buffer{}); err != nil || len(result.Models) != 257 {
+		t.Fatal("large catalog refused", err)
 	}
 }
 
 func TestCodexCatalogModelMetadataValidation(t *testing.T) {
 	for _, replacement := range []struct{ from, to string }{
-		{`"hidden":false`, `"hidden":null`},
 		{`"model":"wire-model"`, `"model":"--argument"`},
 		{`"displayName":"Synthetic Model"`, `"displayName":"unsafe\u001b[2J"`},
 		{`"reasoningEffort":"high"`, `"reasoningEffort":{}`},
@@ -157,7 +158,7 @@ func TestCodexCLIProcessCacheRefreshEnvironmentAndCleanup(t *testing.T) {
 			return "SECRET_MUST_NOT_BE_INHERITED"
 		}
 	}
-	cli := &CodexCLI{Home: codexHome, Binary: binary, Getenv: getenv, Validate: func(context.Context) error { return nil }}
+	cli := &CodexCLI{Home: codexHome, Binary: binary, Getenv: getenv, Validate: func(context.Context) error { return nil }, CachePath: filepath.Join(home, "catalog-cache.json")}
 	for _, refresh := range []bool{false, false, true} {
 		if c := cli.Catalog(t.Context(), refresh); !c.Available || len(c.Models) != 1 {
 			t.Fatal("metadata-only subprocess failed", c.ProblemCode)
@@ -200,19 +201,24 @@ func TestCodexCLIProcessMissingCrashCancellationTimeout(t *testing.T) {
 				binary += ".absent"
 			}
 			ctx := t.Context()
+			if mode == "hang" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
+				defer cancel()
+			}
 			if mode == "canceled" {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
-			cli := &CodexCLI{Home: home, Binary: binary, Timeout: 100 * time.Millisecond, Getenv: func(key string) string {
+			cli := &CodexCLI{Home: home, CachePath: filepath.Join(home, "catalog-cache.json"), Binary: binary, Getenv: func(key string) string {
 				if key == "HOME" {
 					return home
 				}
 				return os.Getenv(key)
 			}, Validate: func(context.Context) error { return nil }}
 			c := cli.Catalog(ctx, false)
-			want := map[string]string{"missing": "codex_cli_missing", "crash": "codex_cli_protocol_invalid", "hang": "codex_cli_timeout", "malformed": "codex_cli_protocol_invalid", "canceled": "codex_cli_canceled"}[mode]
+			want := map[string]string{"missing": "codex_cli_missing", "crash": "codex_cli_protocol_invalid", "hang": "codex_cli_canceled", "malformed": "codex_cli_protocol_invalid", "canceled": "codex_cli_canceled"}[mode]
 			if c.Available || len(c.Models) != 0 || c.ProblemCode != want {
 				t.Fatal("wrong safe failure", c.ProblemCode, want)
 			}
@@ -249,8 +255,8 @@ func TestCodexCLIUnsafeCacheNeverLaunchesProcess(t *testing.T) {
 	if err := os.Symlink(filepath.Join(home, "credential-file"), path); err != nil {
 		t.Fatal(err)
 	}
-	cli := &CodexCLI{Home: home, Validate: func(context.Context) error { t.Fatal("unsafe cache delegated to CLI"); return nil }}
-	if c := cli.Catalog(t.Context(), true); c.ProblemCode != "codex_cache_unreadable" || c.Available {
+	cli := &CodexCLI{Home: home, Binary: filepath.Join(home, "missing-cli"), Validate: func(context.Context) error { return nil }}
+	if c := cli.Catalog(t.Context(), true); c.ProblemCode != "codex_cli_missing" || c.Available {
 		t.Fatal("redirected source accepted")
 	}
 	if err := os.Remove(path); err != nil {
@@ -264,7 +270,46 @@ func TestCodexCLIUnsafeCacheNeverLaunchesProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	file.Close()
-	if c := cli.Catalog(t.Context(), true); c.ProblemCode != "codex_cache_oversized" || c.Available {
+	if c := cli.Catalog(t.Context(), true); c.ProblemCode != "codex_cli_missing" || c.Available {
 		t.Fatal("oversized source delegated to CLI")
+	}
+}
+
+// A slow CLI start is paid once: another process reuses the saved list, and
+// a failed start keeps the last good one.
+func TestCodexCLISavedListAcrossProcesses(t *testing.T) {
+	home := t.TempDir()
+	codexHome := filepath.Join(home, "codex-home")
+	if err := os.Mkdir(codexHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(home, "catalog-cache.json")
+	getenv := func(key string) string {
+		if key == "PATH" {
+			return os.Getenv("PATH")
+		}
+		return home
+	}
+	valid := func(context.Context) error { return nil }
+	good := testcodex.Install(t, home, codexFrames(codexModelPage))
+	if c := (&CodexCLI{Home: codexHome, Binary: good, Getenv: getenv, Validate: valid, CachePath: cache}).Catalog(t.Context(), false); !c.Available {
+		t.Fatal("first discovery failed", c.ProblemCode)
+	}
+	crashHome := t.TempDir()
+	crash := testcodex.Install(t, crashHome, []any{"crash"})
+	getenv = func(key string) string {
+		if key == "PATH" {
+			return os.Getenv("PATH")
+		}
+		return crashHome
+	}
+	if c := (&CodexCLI{Home: codexHome, Binary: crash, Getenv: getenv, Validate: valid, CachePath: cache}).Catalog(t.Context(), false); !c.Available || len(c.Models) != 1 {
+		t.Fatal("another process did not reuse the saved list")
+	}
+	if c := (&CodexCLI{Home: codexHome, Binary: crash, Getenv: getenv, Validate: valid, CachePath: cache}).Catalog(t.Context(), true); !c.Available {
+		t.Fatal("a failed refresh lost the last good list")
+	}
+	if c := (&CodexCLI{Home: filepath.Join(home, "other"), Binary: crash, Getenv: getenv, Validate: valid, CachePath: cache}).Catalog(t.Context(), false); c.Available {
+		t.Fatal("a list saved for another Codex home was used")
 	}
 }

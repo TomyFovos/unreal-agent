@@ -95,3 +95,13 @@ func TestChildCodexPathMustBeAbsolute(t *testing.T) {
 		t.Fatalf("relative child auth path accepted: %v", err)
 	}
 }
+
+func TestLateCodexSourceDoesNotBlockAnotherProvider(t *testing.T) {
+	lookups := 0
+	resolver := withCodexDiscoveryCredentials(credential.ResolverFunc(func(context.Context, credential.Reference) (credential.Material, error) {
+		return credential.Material{}, nil
+	}), "", func(string) string { lookups++; return "" })
+	if _, err := resolver.Resolve(t.Context(), credential.Reference{Provider: "other"}); err != nil || lookups != 0 {
+		t.Fatal("unused Codex source inspected", err, lookups)
+	}
+}

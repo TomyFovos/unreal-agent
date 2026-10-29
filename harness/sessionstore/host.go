@@ -4,6 +4,7 @@ import (
 	"encoding/json/jsontext"
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 )
 
@@ -17,9 +18,8 @@ type HostRecord struct {
 	Finish              *FinishRecord                 `json:",omitzero"`
 	Inputs              []inbox.ID                    `json:",omitzero"`
 	ProjectInstructions *projectinstructions.Snapshot `json:",omitzero"`
+	Context             *ContextRecord                `json:",omitzero"`
 	Selection           *RuntimeSelection             `json:",omitzero"`
-	Conversation        *ConversationEpoch            `json:",omitzero"`
-	ModelRequestFailure *ModelRequestFailure          `json:",omitzero"`
 }
 
 const HostProjectInstructions = "project_instructions"
@@ -36,23 +36,12 @@ func (r HostRecord) Validate() error {
 	if r.Kind != HostRuntimeSelection && r.Kind != HostRuntimeApplied && r.Selection != nil {
 		return fmt.Errorf("unexpected runtime selection")
 	}
-	if r.Kind != HostConversationEpoch && r.Conversation != nil {
-		return fmt.Errorf("unexpected model conversation epoch")
-	}
-	if r.Kind != HostModelRequestFailure && r.ModelRequestFailure != nil {
-		return fmt.Errorf("unexpected model request failure")
-	}
 	switch r.Kind {
-	case HostModelRequestFailure:
-		if r.ModelRequestFailure == nil || len(r.Configuration) != 0 || r.Finish != nil || len(r.Inputs) != 0 || r.ProjectInstructions != nil || r.Selection != nil || r.Conversation != nil {
-			return fmt.Errorf("invalid model request failure record")
-		}
-		return r.ModelRequestFailure.Validate()
-	case HostConversationEpoch:
-		if r.Conversation == nil || len(r.Configuration) != 0 || r.Finish != nil || len(r.Inputs) != 0 || r.ProjectInstructions != nil || r.Selection != nil {
-			return fmt.Errorf("invalid model conversation epoch record")
-		}
-		return r.Conversation.Validate()
+	case HostContext:
+		return nil
+	case "model_conversation_epoch", "model_request_failure":
+		// Retired Native records carry no current execution or scheduling policy.
+		return nil
 	case HostRuntimeSelection, HostRuntimeApplied:
 		if r.Selection == nil || r.Selection.Revision == 0 || r.Selection.RequestID == "" || len(r.Configuration) != 0 || r.Finish != nil || len(r.Inputs) != 0 || r.ProjectInstructions != nil {
 			return fmt.Errorf("invalid runtime selection record")
@@ -87,4 +76,29 @@ func (r HostRecord) Validate() error {
 		return fmt.Errorf("unsupported host record kind %q", r.Kind)
 	}
 	return nil
+}
+
+const HostContext = "context"
+
+// ContextRecord logs a model view change; original evidence is never replaced.
+// Unit IDs are deterministic insertion identities reconstructed by canonical replay.
+type ContextRecord struct {
+	Conversation    *llm.ConversationRecord `json:",omitzero"`
+	Header          string                  `json:",omitzero"`
+	Usage           *llm.Usage              `json:",omitzero"`
+	Kind            string
+	UnitID          string              `json:",omitzero"`
+	Projections     []ContextProjection `json:",omitzero"`
+	PrunedTokens    int64               `json:",omitzero"` // estimated net input tokens removed at this boundary
+	From, Through   string              `json:",omitzero"`
+	Items           []llm.Item          `json:",omitzero"`
+	Text            string              `json:",omitzero"`
+	Provider, Model string              `json:",omitzero"`
+}
+
+// ContextProjection lets one prune boundary replace multiple result bodies.
+// The older UnitID/Items representation remains readable.
+type ContextProjection struct {
+	UnitID string
+	Items  []llm.Item
 }

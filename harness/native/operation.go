@@ -22,17 +22,16 @@ func Spec(request Request) (operation.Spec, error) {
 }
 
 type Handler struct {
-	ctx          context.Context
-	cancel       context.CancelFunc
-	workers      sync.WaitGroup
-	closed       bool
-	closeOnce    sync.Once
-	executor     Executor
-	namespace    string
-	mu           sync.Mutex
-	jobs         map[operation.ID]context.CancelFunc
-	updates      chan operation.Operation
-	preparations chan operation.PreparationRequest
+	ctx       context.Context
+	cancel    context.CancelFunc
+	workers   sync.WaitGroup
+	closed    bool
+	closeOnce sync.Once
+	executor  Executor
+	namespace string
+	mu        sync.Mutex
+	jobs      map[operation.ID]context.CancelFunc
+	updates   chan operation.Operation
 }
 
 func NewHandler(ctx context.Context, executor Executor, sessionID string) (*Handler, error) {
@@ -40,7 +39,7 @@ func NewHandler(ctx context.Context, executor Executor, sessionID string) (*Hand
 		return nil, errors.New("native handler requires file service and stable session ID")
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	return &Handler{ctx: ctx, cancel: cancel, executor: executor, namespace: sessionID, jobs: make(map[operation.ID]context.CancelFunc), updates: make(chan operation.Operation), preparations: make(chan operation.PreparationRequest)}, nil
+	return &Handler{ctx: ctx, cancel: cancel, executor: executor, namespace: sessionID, jobs: make(map[operation.ID]context.CancelFunc), updates: make(chan operation.Operation)}, nil
 }
 func (h *Handler) RemoteJobPlanType() operation.RemoteJobPlanType       { return PlanType }
 func (h *Handler) RemoteJobPlanVersion() operation.RemoteJobPlanVersion { return Version }
@@ -65,12 +64,7 @@ func (h *Handler) AddRemoteJobWithContext(parent context.Context, current operat
 		return operation.ErrUnsupported
 	}
 	var request Request
-	var preparation *registeredPreparation
-	if current.RequiresPreparation() {
-		request, preparation, err = prepareRegisteredPlan(current, state)
-	} else {
-		err = json.Unmarshal(state.Plan.Data, &request)
-	}
+	err = json.Unmarshal(state.Plan.Data, &request)
 	if err != nil {
 		return err
 	}
@@ -89,20 +83,13 @@ func (h *Handler) AddRemoteJobWithContext(parent context.Context, current operat
 	h.workers.Add(1)
 	h.mu.Unlock()
 	go func() {
-		var err error // Worker-local; registration errors never cross goroutines.
 		defer stop()
 		defer h.workers.Done()
 		defer func() { h.mu.Lock(); delete(h.jobs, current.ID); h.mu.Unlock() }()
 		defer cancel()
-		result := preparationFailure(ctx, request, context.Canceled)
+		result := Result{Version: Version, Code: "canceled", Path: request.Path}
 		if current.Status != operation.StatusCanceling {
-			var executionContext context.Context
-			current, executionContext, err = h.prepareWorkerWithRegisteredPlan(ctx, current, preparation)
-			if err != nil {
-				result = preparationFailure(ctx, request, err)
-			} else {
-				result = h.executor.Execute(executionContext, h.namespace+"/"+string(current.ID), request)
-			}
+			result = h.executor.Execute(ctx, h.namespace+"/"+string(current.ID), request)
 		}
 		current.Denial = result.Denial
 		state.Handle = EncodeResult(result)
@@ -136,7 +123,6 @@ func (h *Handler) Close() error {
 		h.mu.Unlock()
 		h.workers.Wait()
 		close(h.updates)
-		close(h.preparations)
 	})
 	return nil
 }

@@ -24,7 +24,7 @@ func TestNativeCodexRouteDetection(t *testing.T) {
 		{name: "api-kit", mode: "apikey", proxy: "http://host.docker.internal:3128", auth: `{"OPENAI_API_KEY":"proxy-managed"}`, config: sandboxTOML, refused: true},
 		{name: "mixed-credentials", mode: "oauth", proxy: "http://host.docker.internal:3128", auth: `{"OPENAI_API_KEY":"proxy-managed","tokens":{}}`, config: sandboxTOML, refused: true},
 		{name: "sandbox-routing-external-auth", auth: `{"tokens":{"access_token":"synthetic-private"}}`, config: sandboxTOML, refused: true},
-		{name: "unknown-routing", auth: `{"tokens":{}}`, config: `model_provider="custom"`, refused: true},
+		{name: "unknown-routing", auth: `{"tokens":{}}`, config: `model_provider="custom"`},
 		{name: "malformed-routing", auth: `{"tokens":{}}`, config: `model_provider=[`, refused: true},
 		{name: "malformed-auth", auth: `{"tokens":`, refused: true},
 		{name: "no-files-external-validator-required"},

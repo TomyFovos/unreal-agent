@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"math/rand/v2"
 	"net/http"
@@ -28,7 +29,11 @@ func (adapter *adapter) exchange(ctx context.Context, body []byte, cacheKey stri
 		ctx = context.WithValue(ctx, attemptKey{}, uint64(attempt))
 		request := adapter.remoteRequest(body, cacheKey)
 		result := adapter.exchangeAttempt(ctx, request, events)
-		if !result.retry || attempt >= adapter.maxAttempts {
+		limit := adapter.maxAttempts
+		if result.status >= http.StatusOK && result.status < http.StatusMultipleChoices {
+			limit = adapter.maxStreamAttempts
+		}
+		if !result.retry || attempt >= limit {
 			stage := "stream_error"
 			reason := "unknown"
 			switch {
@@ -46,6 +51,12 @@ func (adapter *adapter) exchange(ctx context.Context, body []byte, cacheKey stri
 		}
 		now := time.Now()
 		delay := responseRetryDelay(request.RetryPolicy, attempt, result.apiError, result.headers, now, rand.Float64())
+		diagnostic, _ := Diagnose(result.err)
+		if result.apiError != nil {
+			diagnostic.Reason = safeFailureReason(result.apiError.Code)
+		}
+		slog.WarnContext(ctx, "responses API retry scheduled", "attempt", attempt, "next_attempt", attempt+1,
+			"status", result.status, "reason", diagnostic.Reason, "delay", delay)
 		primitives.ScheduleTimer(ctx, primitives.TimerRequest{
 			Source: request.Source, CorrelationID: request.CorrelationID + ":backoff",
 			Deadline: now.Add(delay),

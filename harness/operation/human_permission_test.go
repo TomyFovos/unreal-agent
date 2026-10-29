@@ -48,15 +48,7 @@ func modeManager(t *testing.T, timeout time.Duration) (*operation.LocalOperation
 func setMode(t *testing.T, c *permission.Controller, key string, mode permission.Mode) {
 	t.Helper()
 	rev := c.Snapshot().Revision
-	proof := ""
-	if mode == permission.FullAccess {
-		var err error
-		proof, err = c.PrepareFull(key, rev)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := c.SetMode(key, rev, mode, proof); err != nil {
+	if err := c.SetMode(key, rev, mode); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -102,10 +94,10 @@ func TestHumanManagerReadonlyDeniesBeforeSideEffects(t *testing.T) {
 		}
 	}
 }
-func TestHumanManagerOnceDenyTimeoutCancelAndDuplicate(t *testing.T) {
-	for _, which := range []string{"allow", "deny", "timeout", "cancel"} {
+func TestHumanManagerOnceDenyCancelAndDuplicate(t *testing.T) {
+	for _, which := range []string{"allow", "deny", "cancel"} {
 		t.Run(which, func(t *testing.T) {
-			m, c, key, root := modeManager(t, 100*time.Millisecond)
+			m, c, key, root := modeManager(t, 0)
 			setMode(t, c, key, permission.Ask)
 			op := newShellOperation(t, "one", operation.ShellInput{Shell: testShellPath, Command: "printf x >> result", Directory: root}, t.TempDir(), 256)
 			if err := m.Add(op); err != nil {

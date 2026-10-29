@@ -8,7 +8,7 @@ explicit request/environment model as a one-entry catalog, so server-rejected
 model names return a normalized invalid-request result without fallback.
 
 Registry.Build resolves a versioned, non-secret Selection and returns it for
-Host metadata. Persist that result and call ValidateResume before resuming.
+Host metadata. Persist that result alongside the Session configuration.
 Selection includes endpoint, credential reference, retry bound, declared model
 family/capabilities and the source of selection. Configured defaults are explicit.
 Credential material is resolved for each logical model request, then used by an
@@ -21,6 +21,6 @@ by RemoteClient). Redirects are disabled for authenticated clients. Session-loca
 belongs to the client. No authentication state belongs to a Session/Operation.
 
 Validation: five real existing adapters with local SSE server and normalized
-tool calls; request-time rotation; catalog and resume incompatibility; isolated
+tool calls; request-time rotation; catalog incompatibility; isolated
 configuration; redacted errors; cancellation; redirect refusal and injected
 transport denial. Real hosted inference is not needed for these contract tests.

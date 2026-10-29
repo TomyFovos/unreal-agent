@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/session"
@@ -20,7 +21,7 @@ func TestProgressBoundResetLateAndFallback(t *testing.T) {
 		late = o.Progress
 		o.Progress(llm.Progress{Attempt: 1, Delta: strings.Repeat("猫", 30000)})
 		v, _ := s.Inspect(0, 1)
-		if v.Progress == nil || len(v.Progress.Text) > maxProgressBytes || !v.Progress.Truncated {
+		if v.Progress == nil || v.Progress.Text != strings.Repeat("猫", 30000) || v.Progress.Truncated {
 			t.Fatal("unbounded progress")
 		}
 		o.Progress(llm.Progress{Attempt: 2, Reset: true})
@@ -125,6 +126,60 @@ func TestProgressToolContinuationGetsItsOwnEphemeralEpoch(t *testing.T) {
 		return nil, nil
 	}})
 	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProgressSteeringContinuationKeepsStreaming(t *testing.T) {
+	s := progressSession()
+	a := s.withProgress(modelFunc(func(ctx context.Context, _ llm.Request, o llm.RequestOptions) (llm.Response, error) {
+		o.Progress(llm.Progress{Attempt: 1, Delta: "before steering"})
+		before, _ := s.Inspect(0, 10)
+		if inputs, err := o.Steering(ctx); err != nil || len(inputs) != 1 {
+			t.Fatal("steering callback", inputs, err)
+		}
+		o.Progress(llm.Progress{Attempt: 1, Delta: "answering the user"})
+		after, _ := s.Inspect(0, 10)
+		if after.Progress == nil || after.Progress.TurnID != "steered" || after.Progress.Epoch <= before.Progress.Epoch || after.Progress.Text != "answering the user" {
+			t.Fatal("steering lost streaming", after.Progress)
+		}
+		return llm.Response{}, nil
+	}))
+	_, err := a.Respond(t.Context(), llm.Request{}, llm.RequestOptions{Steering: func(context.Context) ([]string, error) {
+		s.mu.Lock()
+		s.rememberItem(sessionstore.Item{Kind: sessionstore.ItemTurn, Data: session.Turn{ID: "steered", PreviousTurnID: "turn1", ToolContinuation: "turn1"}}, false)
+		s.mu.Unlock()
+		return []string{"answer me"}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProgressPreservesUTF8AcrossEveryByteBoundary(t *testing.T) {
+	const text = "こんにちは。猫👩🏽‍💻é"
+	s := progressSession()
+	a := s.withProgress(modelFunc(func(_ context.Context, _ llm.Request, o llm.RequestOptions) (llm.Response, error) {
+		for i := range len(text) {
+			o.Progress(llm.Progress{Attempt: 1, Delta: text[i : i+1]})
+			v, _ := s.Inspect(0, 1)
+			if !utf8.ValidString(v.Progress.Text) || !strings.HasPrefix(text, v.Progress.Text) {
+				t.Fatalf("split byte %d: %q", i, v.Progress.Text)
+			}
+		}
+		v, _ := s.Inspect(0, 1)
+		if v.Progress.Text != text {
+			t.Fatalf("lost UTF-8: %q", v.Progress.Text)
+		}
+		o.Progress(llm.Progress{Attempt: 1, Delta: "\xe3"})
+		o.Progress(llm.Progress{Attempt: 2, Reset: true, Delta: "再試行"})
+		v, _ = s.Inspect(0, 1)
+		if v.Progress.Text != "再試行" {
+			t.Fatal("retry retained incomplete UTF-8", v.Progress.Text)
+		}
+		return llm.Response{}, nil
+	}))
+	if _, err := a.Respond(t.Context(), llm.Request{}, llm.RequestOptions{}); err != nil {
 		t.Fatal(err)
 	}
 }

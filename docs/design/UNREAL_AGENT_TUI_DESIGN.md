@@ -1,20 +1,20 @@
 # Unreal Agent TUI Design Specification
 
 対象: `bin/unreal-agent attach` の対話型ターミナルUI（Linux / macOS / WSL）
-性質: デザイン仕様書のみ。実装方法・コード・API変更は含まない。
+性質: 実装済みの表示仕様（2026-10-28）。表示の根拠と検証方法を含む。
 前提: TUIは Host の disposable projection。表示する値はすべて既存の projection（tui Snapshot / host.View / viewer Row）から得られるものに限定する（付録A参照）。
 
 ---
 
 ## 0. 読み方
 
-- UI上の文言（コピー）は英語で定義する（現行UIと同じ）。本文は日本語。
+- 見出し・状態語は日本語。キー操作・コマンド名・ツール名は英語。日本語にする範囲は7.2に示す。
 - モックアップ中の記号の意味:
   - `█` = 端末のハードウェアカーソル位置
   - 行頭が `…` だけの行 = 省略された行
   - モックアップは色を表現できないため、スタイルは各節の表（7.2〜7.5）で定義する
-- 幅・高さは「列×行」。全モックアップは右端1列を空けている（7.6 の安全余白規則）。
-- 幅広モックアップ（120/160列）は、Markdownビューアでの桁ずれを避けるため英語の会話例を使う。実際の日本語表示は 7.7 の規則（CJK=2セル）に従う。
+- 幅・高さは「列×行」。実画面は右端1列を空ける（7.6）。構成図は領域の関係を示す。
+- 日本語表示は7.7の規則（CJK=2セル）に従う。
 
 ---
 
@@ -22,22 +22,22 @@
 
 | # | 目標 | 意味 |
 |---|---|---|
-| G1 | 会話が主役 | 典型状態の80x24で、会話領域が画面行の60%以上を占める。 |
+| G1 | 会話が主役 | 会話と稼働中の作業を優先し、裏の作業は件数、終了した子はビーズにまとめる。 |
 | G2 | 「今」を一目で | ライブ状態（AIの作業・ツール・child・接続）は常に決まった位置に出る。読まなくても位置と記号で分かる。 |
-| G3 | 平常は静か、異常は明確 | 正常状態は dim / 記号のみに圧縮してよい。異常状態は必ず単語で書き、太字＋色で出す。 |
+| G3 | 平常は静か、異常は明確 | 平常は件数・記号に圧縮し、失敗・動きなし・要確認は状態の語と強い色で示す。 |
 | G4 | canonical と temporary を視覚的に分離 | ストリーミング中のドラフト、送信中表示、通知は、canonical historyと見間違えない形で出す。 |
-| G5 | 並列エージェントは「レーン」 | child は位置が動かない行（レーン）として並び、並列に進んでいることが自然に分かる。 |
+| G5 | 並列エージェントはカード | 子は系統順のカードで示す。A、B、C…の目印を、起動チップ・カード・裏の作業の行で共用する。 |
 | G6 | キーボードのみで発見可能 | `/` で始めればコマンド候補が出る。キーヒントは文脈で変わり、Ctrl-C の「今の意味」を常に示す。 |
-| G7 | 端末ネイティブ・幅安全 | 箱・カード・背景色を使わない。空白と字下げで構造を作る。CJK・曖昧幅・NO_COLOR・ASCIIでも崩れない。 |
-| G8 | projection として誠実 | 分からない値は「unknown / ? / 非表示」。推測で補わない。UIは状態を所有しない。 |
+| G7 | 形と色・幅安全 | 色帯と記号で状態、バーと活動の棒で量を示す。前景色と背景色を組にし、truecolor・256色・16色・NO_COLOR・Plain・ASCIIに対応する。 |
+| G8 | projection として誠実 | 不明な値は `—`・`?`・非表示にする。推測で補わず、「動きなし 8分」のように観測した事実だけを書く。UIはcanonicalな状態を所有しない。 |
 
-非目標: マウス操作、Web的カードUI、新しいbackendデータ、既存コマンド/ショートカットの意味変更。
+非目標: Host・Session・Operation・Permissionの意味変更、既存コマンド/ショートカットの意味変更。追加する値は表示用のprojectionだけにする。
 
 ---
 
 ## 2. Current-state observations
 
-現行 `Render` / `Panel.Render` と `CURRENT_TUI_SAMPLE.txt` から観察した事実。
+再設計の出発点となった `Render` / `Panel.Render` と `CURRENT_TUI_SAMPLE.txt` の観察。以下は改善対象で、表示仕様は§7に定める。
 
 ### 2.1 課題
 
@@ -50,7 +50,7 @@
 7. **Child panelが常時コマンド一覧を出す。** child 0件でも `Children: /child ID /child-history ...` が1行を占める。
 8. **親セッション行がプロンプトに見える。** サンプル最終行 `> codex-smoke-1 | runtime: running | ...` は「選択中」マーカー `>` だが、入力プロンプトと紛らわしい。しかもセッションの elapsed / usage はこの行にしか無い。
 9. **結果・エラー・ヒントが1つのstatus文字列を共有。** `/help` も長い1行として最大6行に折り返される。
-10. **フッターが固定文言。** Ctrl-C は「鍵入力の取消 → 待機の取消 → セッション停止」と文脈で意味が変わるのに、表示は常に `Ctrl-C stop`。
+10. **フッターが固定文言。** Ctrl-C は「待機の取消 → セッション停止」と文脈で意味が変わるのに、表示は常に `Ctrl-C stop`。
 11. **入力欄は最終行だけ表示。** 貼り付けで複数行になると内容が見えない。カーソルは文字列に挿入した `▏` で、端末カーソルは非表示のまま。日本語IMEの変換窓がキャレット位置に出ない可能性があり、`▏` 自体も East Asian Ambiguous 幅。
 12. **高さ不足時は本文の古い側から切り捨てるだけ。** スクロールバックは無い（docsに明記）。
 13. **毎フレーム全消去して再描画。** ストリーミング中（最大約33回/秒）にちらつきうる。
@@ -59,8 +59,8 @@
 
 - 外部テキストの制御文字除去（SafeText）、grapheme単位の編集と幅計算
 - bracketed paste は入力テキスト扱いで、`/` コマンドを実行せず、改行で送信もしない
-- 資格情報のマスク入力と別経路送信
-- 表示上限（1,024エントリ、1エントリ4 KiB）と、canonical historyは別に保持されるという明示
+- サブスクのログイン手順の案内（資格情報を入力・保存しない）
+- 表示上限（1,024エントリ、1エントリ64 KiB、ページ全体2 MiB）と、canonical historyは別に保持されるという明示
 - gap / 世代変更 / 切断時の可視的なresync
 - 描画と購読受信の分離、resizeでセッション状態を変えない
 
@@ -76,7 +76,7 @@
 |---|---|---|
 | A. Ledger | 時間軸（会話ストリームの中） | すべては時系列ログの1行 |
 | B. Switchboard | 空間（常設の固定ペイン） | 状態は場所で決まるダッシュボード |
-| C. Live Dock | 注意の位置（入力欄の直上、動いている間だけ） | 今動いているものだけが入力欄の上に浮かぶ |
+| C. Live Dock | 会話と作業カード、狭い幅では入力欄の上のドック | 会話を保ちながら今の作業を図で示す |
 
 ### A. Ledger（時系列ログ一体型）
 
@@ -94,214 +94,51 @@
 
 ### C. Live Dock（会話＋ライブドック型）
 
-会話はcanonicalな記録として主役。ツール呼び出しは会話の中に1行のレシートとして出る。ストリーミング中のドラフトは `⋮` の縦線で区別する。入力欄の直上の「ドック」には、稼働中のchildレーンとセッション状態だけが出て、何も動いていなければドックは0行になる。幅120以上でchildが存在すれば、childレーンは右側の「レール」に移る。
+会話を主役に、ツールは呼び出し位置のチップ、ドラフトは `⋮` で示す。広い画面は会話と作業カードのSplit、狭い画面は子の目印と件数の1行ドックにする。ヘッダーの色帯・要確認の帯・下段のゲージを共用する。
 
-- 長所: 平常時は会話と入力だけで静か。作業中だけ情報が増える。並列childは位置が動かないレーンとして見える。
-- 短所: レイアウト規則（優先度・行数予算）が多い。ドックの高さが変わるため、規則で動きを抑える必要がある。
+- 長所: 会話を保ちながら、動いている作業と異常を図として見られる。終了した子はビーズにまとまる。
+- 短所: 幅と高さに応じた省略・行数予算が必要。
 
 ---
 
 ## 4. ASCII mockups
 
-同じ場面を3案で描く。ユーザーが子エージェント表示の整理を依頼し、エージェントが3つのchildを起動し、1つが完了、2つが実行中、親エージェントはドラフトを生成中。
+### 4.1 Split の構成
 
-### 4.1 A. Ledger — 80x24
+色付き区画を `[ ]` で示す。カードは通常2行で、孫は2セル字下げする。
 
-<!-- mockup 80x24 -->
 ```text
-unreal agent  codex-work-1
-
-12:03:58    you   viewer の子エージェント表示を整理して、テストも追加して。
-12:04:02  agent   了解しました。まず現在の描画処理を確認します。
-12:04:03   tool   ✓ read harness/viewer/panel.go
-12:04:03   tool   ✓ read harness/viewer/render.go
-12:04:04   tool   ✓ grep "RenderRows" harness/viewer
-12:04:09  agent   描画を3つの作業に分けて、子エージェントに並行して任せます。
-12:04:10  child   ▸ child-7f3a started: Refactor RenderRows into columns
-12:04:10  child   ▸ child-91b2 started: Add panel rendering tests
-12:04:10  child   ▸ child-0c4e started: Update viewer README
-12:05:12  child   child-0c4e: README の Panel 節を更新しました。
-12:05:12  child   ✓ child-0c4e finished: success
-12:06:40  child   child-91b2: panel_test.go に3ケースを追加しました。
-12:07:31  agent ⋮ 待つ間に既存テストの構成を確認します。panel_test.go は
-                ⋮ Render の出力文字列を直接比較しているため、列の変更には
-                ⠹ generating  6s
-
-
-
-
-── ⇄ connected  running  4m12s  in 48.2k out 3.1k  child 2 running ──────────
-› █
-  ⏎ send  / commands  ^C stop session  ^D detach
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ [jh] [● 稼働中 7h45m] [Full Access] [Claude Opus 5.5 · max]                                                                    │
+├ チャット（左） / 作業ペイン（右） ─────────────────────────────────────────────────────────────────────────────────────────────┤
+│▎ 実装とレビューを進めて                                                │▌◆ メイン                                 7h45m        │
+│                                                                        │▌    考え中 6s                            ▂▃▅▃▂▁▂▃▅▃   │
+│● 作業を渡しました。                                                    │                                                       │
+│  [✓ Read AGENTS.md]                                                    │▌[A] 表示の実装           gpt-6.1-sol·xhigh 1h12m       │
+│  [▸ [A] 表示の実装]                                                    │▌    Bash go test ./…                     ▂▃▅▇▅▃▂▅▇▅   │
+│                                                                        │  ▌[B] 独立レビュー       gpt-6.1-sol·high 58m         │
+│  ┄ 裏の作業  2ターン · ツール3回 · 報告 [A][C]                         │  ▌    応答待ち                           ▁▂▃▂▁▂▃───   │
+│                                                                        │▌[C] 調査                  gpt-6.1-sol·high 40m        │
+│● 【要確認】失敗の扱いを確認してください。                              │▌    動きなし 8分                         ▅▃────────   │
+│⠁ 考え中 6s                                                             │▌[F] Issueの整理           gpt-6.1-sol·high ✗ 失敗     │
+│                                                                        │▌                                                      │
+│                                                                        │終了 ✓✓✗✓✓  ほか 795                                   │
+├ 要確認の帯（必要なときだけ、全幅） ────────────────────────────────────────────────────────────────────────────────────────────┤
+│ ▲ 要確認  失敗の扱いを確認してください。  ↑ 会話で確認                                                                         │
+├ キーバー（高さ16行以上） ──────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  ⏎ send   / commands   ^C stop session   ^D detach                                                                             │
+├ 罫線 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│› Ask, or type / for commands                                                                                                   │
+├ ゲージ（1行） ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│文脈 ▕█████░░░░░░░▏394k (39%) · 速度 ▂▃▅▇▆▅ ~69.0 tok/s · キャッシュ ▕██████████▏98.37%                                   │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.2 A. Ledger — 120x30
+### 4.2 Chat / Orchestration
 
-<!-- mockup 120x30 -->
-```text
-unreal agent  codex-work-1
-
-12:01:15    you   viewer のテストを実行して、失敗があれば教えて。
-12:01:16   tool   ✓ Bash go test ./harness/viewer/...
-12:01:31  agent   harness/viewer の 14 テストはすべて成功しました。client_test.go の 1 秒タイムアウトは環境によって
-                  不安定になる可能性があります。
-12:03:58    you   viewer の子エージェント表示を整理して、テストも追加して。
-12:04:02  agent   了解しました。まず現在の描画処理を確認します。
-12:04:03   tool   ✓ read harness/viewer/panel.go
-12:04:03   tool   ✓ read harness/viewer/render.go
-12:04:04   tool   ✓ grep "RenderRows" harness/viewer
-12:04:09  agent   描画を3つの作業に分けて、子エージェントに並行して任せます。
-12:04:10  child   ▸ child-7f3a started: Refactor RenderRows into columns
-12:04:10  child   ▸ child-91b2 started: Add panel rendering tests
-12:04:10  child   ▸ child-0c4e started: Update viewer README
-12:04:41  child   child-7f3a: RenderRows を列単位の組み立てに分割しています。
-12:05:12  child   child-0c4e: README の Panel 節を更新しました。
-12:05:12  child   ✓ child-0c4e finished: success
-12:06:40  child   child-91b2: panel_test.go に3ケースを追加しました。
-12:07:31  agent ⋮ 待つ間に既存テストの構成を確認します。panel_test.go は Render の出力文字列を直接比較しているため、
-                ⋮ 列の変更にはテストの期待値更新が必要です。
-                ⠹ generating  6s
-
-
-
-
-
-── ⇄ connected  running  4m12s  in 48.2k out 3.1k  child 2 running, 1 done ────────────────────────────────────────────
-› █
-  ⏎ send  / commands  ^C stop session  ^D detach
-```
-
-### 4.3 B. Switchboard — 80x24
-
-<!-- mockup 80x24 -->
-```text
-unreal agent  codex-work-1       ⇄ connected  running  4m12s  in 48.2k out 3.1k
-── conversation ───────────────────────────────────────────────────────────────
-   you   viewer の子エージェント表示を整理して、テストも追加して。
- agent   描画を3つの作業に分けて、子エージェントに並行して任せます。
-       ⋮ 待つ間に既存テストの構成を確認します。
-       ⠹ generating  6s
-── operations ───────────────────────────────── 1 running  6 done  0 failed ──
-  ▸ op-0012  edit  harness/viewer/render.go                                0:04
-  ✓ op-0011  read  harness/viewer/panel_test.go                            0:00
-  ✓ op-0010  grep  "RenderRows"                                            0:01
-── child agents ────────────────────────────────────────── 2 running  1 done ──
-  ID          STATUS   ELAPSED  TOKENS      ACTIVITY
-  child-7f3a  running  3m40s    12.1k/1.2k  edit render.go
-  child-91b2  running  3m38s    ?           ?
-  child-0c4e  success  1m02s    3.2k/0.3k   README updated
-── selected: child-7f3a ───────────────────────────────────────────────────────
-  Refactor RenderRows into columns
-  ▸ edit harness/viewer/render.go 12s   ✓ read 4   ✓ grep 1
-  usage in 12.1k out 1.2k   finish: none yet
-───────────────────────────────────────────────────────────────────────────────
-› █
-───────────────────────────────────────────────────────────────────────────────
-/help  /stop  /resume  /retry  /child ID  /child-send TEXT  /child-cancel
-^C stop session  ^D detach  /login  /logout  /credentials  /methods
-```
-
-### 4.4 B. Switchboard — 120x30
-
-<!-- mockup 120x30 -->
-```text
-unreal agent  codex-work-1                                               ⇄ connected  running  4m12s  in 48.2k out 3.1k
-── conversation ──────────────────────────────────────────────   ── operations ─────────────────── 1 running  6 done ──
-   you   Run the viewer tests and tell me what fails.              ▸ op-0012  edit  harness/viewer/render.go     0:04
- agent   All 14 tests in harness/viewer pass. The 1s timeout       ✓ op-0011  read  harness/viewer/panel_test.go 0:00
-         in client_test.go may be flaky on slow machines.          ✓ op-0010  grep  "RenderRows"                 0:01
-                                                                   ✓ op-0009  read  harness/viewer/render.go     0:00
-   you   Clean up how the viewer panel shows child agents, and
-         add tests.                                              ── child agents ───────────────── 2 running  1 done ──
-                                                                   ID          STATUS   ELAPSED  TOKENS
- agent   I'll read the current rendering code first.               child-7f3a  running  3m40s    12.1k/1.2k
-         Splitting this into three parallel child agents:          child-91b2  running  3m38s    ?
-         layout, tests, and docs.                                  child-0c4e  success  1m02s    3.2k/0.3k
-
- agent ⋮ While the children work, I'm checking how               ── selected: child-7f3a ──────────────────────────────
-       ⋮ panel_test.go asserts on rendered output. It compares     Refactor RenderRows into columns
-       ⋮ full strings, so column changes will need updated         ▸ edit harness/viewer/render.go          12s
-       ⠹ generating  6s                                            ✓ read 4   ✓ grep 1
-                                                                   usage in 12.1k out 1.2k    finish: none yet
-
-
-
-
-
-
-
-───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-› █
-───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-/help  /stop [idle]  /resume  /retry  /child ID  /child-history  /child-send TEXT  /child-cancel  /child-resume
-^C stop session  ^D detach  /login PROVIDER ID  /logout PROVIDER ID  /credentials  /methods
-```
-
-### 4.5 C. Live Dock — 80x24（推薦案）
-
-<!-- mockup 80x24 -->
-```text
-unreal agent  codex-work-1       ⇄ connected  running  4m12s  in 48.2k out 3.1k
-
-   you   viewer の子エージェント表示を整理して、テストも追加して。
-
- agent   了解しました。まず現在の描画処理を確認します。
-         ✓ 3 tool calls: read 2, grep 1
-
-         描画を3つの作業に分けて、子エージェントに並行して任せます。
-         ▸ spawn  child-7f3a  Refactor RenderRows into columns
-         ▸ spawn  child-91b2  Add panel rendering tests
-         ✓ spawn  child-0c4e  Update viewer README
-
-       ⋮ 待つ間に既存テストの構成を確認します。panel_test.go は Render の出力文
-       ⋮ 字列を直接比較しているため、列の変更には期待値の更新が必要になります。
-       ⋮ 既存の比較方式を活かしつつ、
-       ⠹ generating  6s
-
- child   2 running, 1 done                                   /child ID to focus
-       ▸ child-7f3a  Refactor RenderRows into columns    3m40s  edit render.go
-       ▸ child-91b2  Add panel rendering tests           3m38s
-       ✓ child-0c4e  Update viewer README                1m02s  success
-───────────────────────────────────────────────────────────────────────────────
-   you › █
-         ⏎ send   / commands   ^C stop session   ^D detach
-```
-
-### 4.6 C. Live Dock — 120x30（推薦案、レールあり）
-
-<!-- mockup 120x30 -->
-```text
-unreal agent  codex-work-1                                               ⇄ connected  running  4m12s  in 48.2k out 3.1k
-
-   you   Run the viewer tests and tell me what fails.                              child agents       2 running, 1 done
-
- agent   ✓ Bash  go test ./harness/viewer/...                                        ▸ child-7f3a                 3m40s
-                                                                                       Refactor RenderRows into columns
-         All 14 tests in harness/viewer pass. The 1s timeout in client_test.go         edit render.go
-         may be flaky on slow machines.
-                                                                                     ▸ child-91b2                 3m38s
-   you   Clean up how the viewer panel shows child agents, and add tests.              Add panel rendering tests
-
- agent   I'll read the current rendering code first.                                 ✓ child-0c4e                 1m02s
-         ✓ 3 tool calls: read 2, grep 1                                                Update viewer README
-                                                                                       finished: success
-         Splitting this into three parallel child agents: layout, tests, and
-         docs.                                                                       /child ID to focus a child
-         ▸ spawn  child-7f3a  Refactor RenderRows into columns
-         ▸ spawn  child-91b2  Add panel rendering tests
-         ✓ spawn  child-0c4e  Update viewer README
-
-       ⋮ While the children work, I'm checking how panel_test.go asserts on
-       ⋮ rendered output. It compares full strings, so column changes will need
-       ⋮ updated expectations. I'll keep the existing
-       ⠹ generating  6s
-
-
-
-───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-   you › █
-         ⏎ send   / commands   ^C stop session   ^D detach   PgUp/PgDn scroll
-```
+- Chat: 会話を表示する。120列以上で子がいれば右側にも同じカードを出す。右ペインがない幅では子のドックを1行にする。
+- Orchestration: 会話の領域を作業カードに使う。子のモデルとeffortは全ビュー共通で1行目の経過の前に出す。PgUp / PgDnでスクロールする。
+- Split: 120列以上で会話と作業カードを並べる。120列未満ではChatに切り替わり、幅が戻ればSplitに戻る。
 
 ---
 
@@ -311,31 +148,29 @@ unreal agent  codex-work-1                                               ⇄ con
 
 | 観点 | A. Ledger | B. Switchboard | C. Live Dock |
 |---|---|---|---|
-| 会話の読みやすさ | △ ツール/childイベントが割り込む | × 80x24で会話3〜4行 | ◎ 会話が主役、ツールは1行レシート |
+| 会話の読みやすさ | △ ツール/childイベントが割り込む | × 80x24で会話3〜4行 | ◎ 会話が主役、ツールはチップ |
 | AIの作業中状態 | ○ 末尾に出るが流れる | ◎ | ◎ pulse行が常に同じ位置 |
 | ツールの見え方 | △ 全件が行として残る | ○ 表で常時 | ◎ 実行中は個別、完了は畳む |
-| 並列childの理解 | × イベントが散在、今が分からない | ◎ 一覧表 | ◎ 位置が動かないレーン |
-| アイドル時の静けさ | ○ | × 空ペインと全コマンド | ◎ 会話と入力だけ |
+| 並列childの理解 | × イベントが散在、今が分からない | ◎ 一覧表 | ◎ 系統順のカードと共通の目印 |
+| アイドル時の静けさ | ○ | × 空ペインと全コマンド | ◎ 裏の作業と終了した子を圧縮 |
 | 80x24 での成立 | ○ | × | ○ ドック予算で制御 |
 | narrow（<70） | ◎ | × | ○ 圧縮規則あり |
 | 既存projectionとの整合 | ○ | △ 未観測childの値が `?` だらけ | ◎ 親側Operationの状態を主に使う |
 | NO_COLOR / ASCII | ◎ | ○ | ◎ 記号＋単語＋位置で成立 |
 | 実装リスク | 低 | 中（ペインのサイズ計算） | 中（優先度と予算の規則） |
-| 独自性（他CLIとの差） | 低 | 中 | 高（ガターラベル、⋮ドラフト、レーン、レール） |
+| 独自性（他CLIとの差） | 低 | 中 | 高（2列ガター、チップ、カード、ビーズ） |
 
 ---
 
 ## 6. Recommended design
 
-**推薦: C. Live Dock**
+**採用: C. Live Dockを基盤とするSplit・カード型。起動時はSplit。**
 
-理由:
-
-1. **conversation first と低ノイズを同時に満たすのはCだけ。** Aは会話がイベントに押し流され、Bは会話を削ってダッシュボードにする。Cは平常時に会話と入力だけを残し、作業中だけ情報を足す。
-2. **並列childがこの製品の要であることに最も素直。** childは開始順に並ぶ「レーン」で、行の位置が動かない。何本並走しているか、どれが終わったかが、読まずに形で分かる。幅があればレールに昇格して詳細が増える。
-3. **projectionとしての誠実さを保てる。** レーンの状態は、常に取得できる親側のSubagentStart Operation状態とcanonical Finishを使い、未観測childのactivityやtokensを要求しない。Bのように欠損値の表を並べずに済む。
-4. **canonical / temporary の分離を形で表現できる。** ドラフトは `⋮`、送信中表示と通知はドック、canonical historyだけが会話領域の通常行になる。
-5. **既存のコマンドとキーの意味を変えずに、発見性を上げられる。** `/` 入力時の候補、Tab補完、文脈依存キーバーはすべてUIローカルで、Hostへの影響が無い。
+1. 会話と稼働中の作業を主役にし、裏の作業は件数の1行、終了した子はビーズにまとめる。
+2. 子は系統順のカードにし、共通の目印で会話中の起動や報告と結び付ける。
+3. 状態は色の帯と記号、量はバーと活動の棒で示す。失敗・動きなし・要確認を強調する。
+4. ドラフトは `⋮`、送信中表示と通知はドックに分ける。表示はcanonical historyを書き換えない。
+5. 不明な値は補わず、色なし・ASCIIでも記号・語・位置で読めるようにする。
 
 ---
 
@@ -343,173 +178,179 @@ unreal agent  codex-work-1                                               ⇄ con
 
 ### 7.1 Screen anatomy
 
-上から下への領域構成。各領域は条件を満たさないときは0行になる（ヘッダー、罫線、入力欄を除く）。
+領域の一覧。空のドックと要確認の帯は0行になる。
 
 | 領域 | 行数 | 表示条件 | 内容 |
 |---|---|---|---|
-| R1 Header | 1 | 常時 | ブランド、セッションID、接続状態、ランタイム状態、elapsed、tokens |
-| R2 Transcript | 可変（残り全部） | 常時 | canonical history（発話・ツール行・host行・child行）＋ドラフト |
-| R3 Pulse | 0〜1 | エージェントの作業フェーズがあるとき（7.10） | Transcript領域の最終行に固定。スピナー＋フェーズ名＋経過 |
-| R4 Dock | 0〜可変 | 中身があるとき | 上から: シート（コマンド候補 / help / child focus / コマンド出力）またはchildレーン → セッション状態行 → 通知行 |
-| R5 Rule | 1 | 常時 | 入力欄の上の罫線。入力モードのラベルを左に、補助タグを右に埋め込める |
-| R6 Composer | 1〜可変 | 常時 | ガターラベル（you / cmd / key）、区切り `›`、入力テキスト |
-| R7 Keybar | 0〜1 | 高さ16行以上 | 文脈依存のキーヒント |
-| R8 Rail | 右列 | 幅120以上かつchildが1つ以上 | childレーン（詳細版）と focus ブロック。R2〜R4 の右側に並ぶ |
+| R1 Header | 1 | 常時 | セッション名、状態、権限、モデルの色帯 |
+| R2 Transcript | 可変（残り全部） | Chat / Split | 発話、ツールチップ、裏の作業の要約、制御入力、ドラフト |
+| R3 Pulse | 0〜1 | 作業フェーズがあるとき（7.10） | 会話領域の最終行。スピナー＋フェーズ名＋経過 |
+| R4 Dock | 0〜可変 | 中身があるとき | 子の要約またはfocus、シート、接続・設定の状態行、通知 |
+| R5 Rule | 1 | 常時 | 入力欄の上の罫線。入力モードやスクロール位置 |
+| R6 Composer | 1〜可変 | 常時 | `›` と入力テキスト。コマンドには `cmd` チップ |
+| R7 Keybar | 0〜1 | 高さ16行以上 | 文脈依存のキーヒント。Ruleの直上 |
+| R8 Work pane | 右列または会話領域 | Split / Orchestration、または120列以上のChatで子がいるとき | メインと子のカード、終了のビーズ |
+| R9 Attention | 0〜1 | 失敗・承認待ち・要確認があるとき | 全幅の帯。Keybarの直上（7.10） |
+| R10 Gauges | 1 | 常時 | 入力欄の下。文脈、速度、キャッシュ（7.10） |
 
-**contextual help** は単独の領域を持たず、Keybar（R7）、Ruleラベル（R5）、入力欄プレースホルダー（R6）、`/` 候補とhelpシート（R4）に分散させる。
+通常の下段は、要確認の帯 → Keybar → Rule → Composer → Gaugesの順。ヘルプはKeybar、Rule、プレースホルダー、シートに分散させる。
 
-#### ガターと縦の軸（全領域共通）
+#### ガターと縦の軸
 
-Standard幅以上では、すべての行が同じ縦の軸に揃う。
+会話はすべて2列ガター（記号1列＋空白）、本文は3列目から。本文の最大幅は100セル。
 
 ```text
-col: 1-6     7   8      9   10-
-     label   sp  seam   sp  text
-     "   you"    " "        viewer の子エージェント表示を…   ← canonical
-     " agent"    "⋮"        待つ間に既存テストの…           ← ドラフト
-     "      "    "⠹"        generating  6s                ← pulse
-     " child"    " "        2 running, 1 done            ← ドック見出し
-     "      "    "▸"        child-7f3a  …                ← レーン
-     "   you"    "›"        █                            ← 入力欄
+▎ あなたの発言（全行に▎、本文の幅まで背景）
+● agentの連続する発言の先頭
+⋮ ドラフト（全行）
+⠁ 考え中 6s
+✗ エラー本文
+· 停止要求
+  ✓ Read AGENTS.md （ツールチップ）
 ```
 
-- **label**（1〜6列）: 右寄せの役割ラベル。`you` `agent` `child` `peer` `host` `error` `help` `cmd` `key`。
-- **seam**（8列）: 1文字の状態溝。canonicalは空白、ドラフトは `⋮`、pulseはスピナー、レーンと実行中ツールは状態記号、入力欄は `›`。
-- **text**（10列〜）: 本文。折り返し行も必ずこの列から始まる（ハンギングインデント）。
-- ツール行はtext列から始まり、状態記号を本文側の先頭に置く（例: `         ✓ read  …`）。
+入力欄は左端の `›` から始め、通常は役割ラベルを出さない。`cmd` チップがあるときは、その幅だけ入力位置を右へずらす。カードとヘッダーは会話のガターを使わない。
 
 ### 7.2 Visual hierarchy
 
 | レベル | 見せ方 | 対象 |
 |---|---|---|
-| L1 強 | bold（＋色） | 役割ラベル、異常状態の単語（disconnected / failed / stopped / error）、選択中のchild ID、入力欄ラベル、ブランド |
-| L2 通常 | normal | 発話本文、実行中のツール行、レーンのIDとラベル、pulseのフェーズ名、失敗したツール行 |
-| L3 弱 | faint (dim) | elapsed・tokens・時刻、完了したツール行と畳んだ要約、レーンのactivity、キーバー、罫線、プレースホルダー、host行、ヒント |
-| 通常時は隠す | 表示しない | op ID、generation / revision、history cursor、input ID、project instructions のdigest（focusのTall時のみ表示）、コマンド一覧、正常な接続の単語（狭い幅では記号のみ） |
+| L1 強 | 色帯・記号・必要な強調 | ヘッダー、要確認の帯、失敗、動きなし |
+| L2 通常 | normal、チップとカードの面 | 会話本文、子の題名、ツール名と対象、pulseの語 |
+| L3 弱 | dim / faint | 経過、活動、ゲージの数値、裏の作業、制御入力、キーのヒント |
+| 通常時は隠す | 表示しない | 子のID、op ID、revision、turn、observed、Hostの標語、操作ノード |
 
-原則:
+- 同じ子はチップ・カード・裏の作業の行で同じ目印を使う。
+- 終了した子はビーズにし、失敗は7.9の条件でカードに残す。
+- 色だけに意味を持たせず、記号・語・位置を併用する。
 
-- 1画面で最も目立つのは「最新のエージェント発話」と「異常がある場合はその異常」。
-- 色は意味を補強するだけで、単独では使わない（7.3）。
-- 完了したものは時間とともに弱くなる（実行中 L2 → 完了 L3 → 畳まれる）。
+#### 日本語にする範囲
+
+| 日本語 | 英語のまま |
+|---|---|
+| ヘッダーの状態、カード、ビーズ、ゲージ、要確認の帯、チップの状態語、裏の作業、通常の制御入力、pulse、状態ドック、focusの見出し | キーバー、罫線のラベル、入力欄のプレースホルダー、通知、ピッカー、`/help`、コマンド名と説明、ツール名・モデル名・権限名 |
+
+provider・gateway・Claude Code のエラーは「何が起きたか＋次の操作」の日本語1行にする。内部コード・stage・status・パス・元の理由はログと `/analyze` に残す。ツールの失敗理由は取得した文面をサニタイズして出す。
 
 ### 7.3 Color system
 
-ANSI 16色の前景色と属性のみを使う。背景色は使わない（反転表示を除く）。
+色は役割で指定し、端末の色深度に合わせてSGRへ変換する。帯・チップ・カードの面は前景色と背景色を組にする。カードとあなたの発言の面は端末既定の前景色を明示する。
 
-| 役割 | 色（16色） | 使う場所 | NO_COLOR時 | 属性なし（plain）時 |
-|---|---|---|---|---|
-| text | 端末既定の前景色 | 本文 | 同じ | 同じ |
-| meta | faint (SGR 2) | 7.2のL3すべて | faint | 区別なし（位置と語で判別） |
-| you | cyan + bold | `you` ラベル、入力欄の `you ›` | bold | ラベル文字 |
-| agent / brand | magenta + bold | `agent` ラベル、ブランド | bold | ラベル文字 |
-| live | magenta | pulseスピナー、実行中記号 `▸` | 記号のみ | 記号のみ |
-| success | green | `✓` | 記号のみ | 記号のみ |
-| failure | red + bold | `✗`、`error` ラベル、`failed` / `disconnected` | bold＋記号＋単語 | 記号＋単語 |
-| warning | yellow + bold | `!`、`?`、`reconnecting` / `resyncing` / `unknown` / `partial` | bold＋記号＋単語 | 記号＋単語 |
-| neutral end | 既定色 | `⊘ canceled`、`▪ stopped` | 同じ（stoppedはbold） | 記号＋単語 |
-| command | 既定色 + bold | `cmd` ラベル | bold | ラベル文字 |
-| selection | reverse (SGR 7) | コマンド候補の選択行 | reverse | 行頭 `›` マーカー |
-| private | reverse + bold | `key` ラベル | reverse | ラベル文字＋Ruleラベル `private` |
+表の色は truecolor / 256色番号 / 16色SGR の順。
 
-色の使用規則:
+| 役割 | 前景 | 背景 | 用途 |
+|---|---|---|---|
+| band.session | #EEEDFE / 255 / 97 | #3C3489 / 55 / 45 | セッション名 |
+| band.ok | #E1F5EE / 194 / 30 | #085041 / 23 / 42 | 稼働中・裏で作業中 |
+| band.warn | #FAEEDA / 230 / 30 | #633806 / 94 / 43 | Full Access、接続中・再接続中・再同期中、要確認 |
+| band.bad | #FCEBEB / 224 / 97 | #791F1F / 88 / 41 | 失敗・切断 |
+| band.neutral | #D3D1C7 / 252 / 97 | #2C2C2A / 236 / 100 | モデル、入力待ち、停止、Ask、Read Only |
+| chip | #D3D1C7 / 252 / 97 | #24242A / 235 / 100 | ツールと入力モードのチップ |
+| chip.bad | #FCEBEB / 224 / 97 | #501313 / 52 / 41 | 失敗したツール |
+| card | 端末既定 | #1F1F25 / 235 / なし | カードの面 |
+| card.alt | 端末既定 | #232329 / 236 / なし | 間隔を詰めたカードの交互の面 |
+| youBlock | 端末既定 | #22222A / 235 / なし | あなたの発言 |
+| badge | #F1EFE8 / 255 / 97 | #444441 / 238 / 100 | 目印 A、B、C… |
+| s.run | #5DCAA5 / 79 / 36 | — | 作業中の帯・記号・活動の棒 |
+| s.stall | #FAC775 / 222 / 33 | — | 動きなし・取消中・承認待ち・不明 |
+| s.bad | #F09595 / 210 / 31 | — | 失敗 |
+| s.done | #97C459 / 149 / 32 | — | 完了・キャッシュのバー |
+| s.main | #AFA9EC / 147 / 35 | — | メイン、agentの●、速度の棒 |
+| s.you | #85B7EB / 111 / 36 | — | あなたの▎、入力欄の› |
+| dim | #86847C / 244 / faint | — | メタ情報 |
 
-- **blue（34）と bright black（90）を文字色に使わない。** テーマによって背景と同化する（例: Solarized系の bright black）。
-- 黄色は明るい背景で読みにくいため、黄色の部分には必ず単語を添える。
-- 色の段階は「状態が変わったこと」を示す。平常の `connected` `running` は faint で、色を付けない。
-- 256色・truecolorは不要。将来使う場合も上表の役割に写像する。
+#### 色深度と代替
 
-色モードの選択:
-
-| 条件 | モード |
+| 条件 | 表示 |
 |---|---|
-| `NO_COLOR` が設定され空でない | NO_COLOR: 色SGRを出さない。bold / faint / reverse は使う |
-| `TERM=dumb`、または属性が使えない端末 | plain: SGRを一切出さない |
-| それ以外 | color |
+| `COLORTERM=truecolor` / `24bit` | 24bit色 |
+| それ以外で `TERM` が `256color` を含む | 256色 |
+| それ以外 | 16色。カードとあなたの発言の面は塗らない |
+| `NO_COLOR` が空でない | 色SGRなし。bold / faint / reverseは使う |
+| `TERM=dumb` または `UNREAL_AGENT_TUI_PLAIN=1` | Plain。SGRなし |
+
+- NO_COLOR / Plainでは色帯とチップを `[ ]` で囲み、背景を塗らない。目印の `[A]`、カードの `▌`、状態の記号と語は残す。
+- `paint` は背景色だけが変わる場合もリセットして次のSGRを出す。区画の塗りは測定した幅までで、端末の行末まで延ばさない。
+- ASCIIの記号への置き換えは7.5。色深度とは独立して選べる。
 
 ### 7.4 Typography treatment
 
-| 扱い | 使う | 使わない |
-|---|---|---|
-| bold | 役割ラベル、ヘッダーのセッションID、異常状態の単語、選択中child ID、Markdown見出し、`**強調**`、レールの節見出し | 本文全体、ヒント |
-| faint | メタ情報、完了済み、キーバー、罫線、プレースホルダー、host行、activity | 本文（ドラフトを含む）、エラー本文 |
-| normal | 発話本文、ドラフト本文、実行中ツール、レーンのID/ラベル | — |
-| reverse | コマンド候補の選択行、`key` ラベル | 広い面積の塗り |
-| symbol | 状態の1文字（7.5）。必ず単語か位置と組み合わせる | 装飾目的の記号 |
-| underline / italic / blink | 使わない | — |
+| 扱い | 用途 |
+|---|---|
+| bold | Markdownの見出し・強調、エラーや警告、focusの見出し |
+| dim / faint | 経過、現在の操作、裏の作業、制御入力、ヒント、罫線、プレースホルダー |
+| normal | 発話本文、ドラフト本文、カードの題名、チップのツール名と対象 |
+| reverse | コマンド候補・ピッカーの選択 |
+| 色帯・背景 | ヘッダー、要確認、チップ、カード、あなたの発言 |
 
-補足:
-
-- ドラフト本文は faint にしない（長文を読むため）。ドラフトであることは seam の `⋮` で示す。
-- 数値は桁を揃えない（表にしない）。右寄せするのはレーンの elapsed だけ。
+ドラフト本文は薄くせず、`⋮` で一時表示と分かるようにする。カードの経過は右寄せする。
 
 ### 7.5 Symbols
 
-状態記号はすべて1セル。East Asian Width（EAW）が N（Neutral）の文字を選び、曖昧幅（A）の文字は罫線と省略記号に限定する（10.4）。
+| 意味 | Unicode | ASCII | 色の役割 |
+|---|---|---|---|
+| 作業中 / 取消中 | `▸` | `>` | s.run / s.stall |
+| 完了 | `✓` | `+` | s.done |
+| 失敗 | `✗` | `x` | s.bad |
+| 取消 | `⊘` | `-` | dim |
+| 終了 / 停止 | `▪` | `#` | dim / band.neutral |
+| 承認待ち / 不明 | `!` / `?` | 同じ | s.stall |
+| メイン / agent | `◆` / `●` | `*` | s.main |
+| カードの左端 | `▌` | `\|` | 状態色 |
+| あなたの発言 | `▎` | `\|` | s.you |
+| ドラフト | `⋮` | `:` | dim |
+| 入力欄 | `›` | `>` | s.you |
+| 活動の棒 | `▁▂▃▅▇` | `.:-=#` | s.run / s.main |
+| ゲージ | `█░` | `#-` | 値に応じた色 |
+| 罫線 / 切り詰め | `─` / `…` | `-` / `~` | dimまたは本文の色 |
 
-| 意味 | Unicode | ASCII | EAW | 色の役割 | 添える単語 |
-|---|---|---|---|---|---|
-| queued（待機） | `◌` | `.` | N | meta | `queued` |
-| running（静止表示） | `▸` | `>` | N | live | 経過時間 |
-| スピナー（アニメーション） | `⠁ ⠈ ⠐ ⠠ ⢀ ⡀ ⠄ ⠂`（1点が周回、約120ms/コマ） | `\| / - \` | N | live | フェーズ名 |
-| completed | `✓` | `+` | N | success | （不要） |
-| failed | `✗` | `x` | N | failure | `failed` 必須 |
-| canceled | `⊘` | `-` | N | neutral | `canceled` 必須 |
-| attention（要確認） | `!` | `!` | Na | warning | 内容 |
-| unknown | `?` | `?` | Na | warning | `unknown`（ヘッダー） |
-| session stopped | `▪` | `#` | N | neutral | `stopped` 必須 |
-| link connected | `⇄` | （省略） | N | meta | `connected`（狭い幅では省略可） |
-| ドラフトの溝 | `⋮` | `:` | N | meta | — |
-| 入力欄の区切り | `›` | `>` | N | you / command | — |
-| 選択中child | `›` | `*` | N | bold | — |
-| コード折り返し継続 | `↪` | `>` | N | meta | — |
-| Enter / Tab | `⏎` / `⇥` | `enter` / `tab` | N | meta | — |
-| Ctrl | `^C` `^D` | 同じ | Na | meta | — |
-| 罫線 | `─` | `-` | **A** | meta | — |
-| 切り詰め | `…` | `~` | **A** | meta | — |
-
-規則:
-
-- 異常・終端状態（failed / canceled / stopped / unknown）は記号だけで終わらせず、必ず単語を伴う。
-- アニメーションは画面全体で最大2つ: エージェントのpulse（または代替のreconnecting表示）と、ローカル操作（送信中・接続中）。ツール行とレーンは静止記号＋経過時間の更新で生きていることを示す。
-- ASCIIモードは、ロケールがUTF-8でないとき、または利用者が明示的に選んだときに使う（選択手段の名前は実装側で決める）。ASCIIモードで置き換えるのはUIの装飾（chrome）だけで、会話本文はそのまま表示する。
+- スピナーは `⠁ ⠈ ⠐ ⠠ ⢀ ⡀ ⠄ ⠂`、ASCIIでは `| / - \`。約120msごとに進む。
+- ツールチップと子のカードは静止記号。メインカードの子待機はスピナー。活動の棒は観測値、速度の棒は生成の計測値で更新する。
+- `UNREAL_AGENT_TUI_ASCII=1`、またはUTF-8でないロケールでASCIIの記号を使う。本文や日本語の見出しは翻訳しない。
+- 速度の棒は7段階（`▁▂▃▄▅▆▇`）、ASCIIでは `.:--==#` にする。
 
 ### 7.6 Responsive rules
 
-詳細は §8。要点:
+| 幅 | レイアウト |
+|---|---|
+| <120列 | SplitはChatとして表示。右ペインなし。子のドックは1行 |
+| 120〜159列 | Splitの右ペインは `clamp(幅×0.3, 34, 44)` 列。Chatで子がいるときは `clamp(幅×0.3, 34, 48)` 列 |
+| ≥160列 | Splitの右ペインは `clamp(幅×0.3, 48, 60)` 列。Chatの右ペインは48列 |
 
-| 幅クラス | 列数 | レイアウト |
-|---|---|---|
-| Tiny | < 50 | ラベルを本文の上に積む。ヘッダーは最小。ドックはchild要約1行のみ |
-| Narrow | 50–69 | ガターあり。ヘッダーからブランド・単語を落とす。レーンはactivity列なし |
-| Standard | 70–119 | 基準レイアウト（4.5）。childはドックのレーン |
-| Wide | 120–159 | childが1つ以上ならレール（幅 = 列数×0.3、34〜48）。ドックにレーンは出さない |
-| XWide | ≥ 160 | レール48列。レーンは3行表示。本文幅は最大100セル |
-
-共通規則:
-
-- **右端1列は書かない（安全余白）。** 曖昧幅文字が2セルで描かれても行が折り返さないようにする。
-- 本文（text列）の最大幅は100セル。それ以上の幅は右側の余白またはレールに使う。
-- resize は次のフレームでクラスを再判定するだけで、選択中child・入力内容・カーソル位置・スクロール位置（下端からの距離）を保つ。
+- Orchestrationはどの幅でも会話の領域をカードに使う。
+- 右端1列を空け、描画幅は最大511セル。左右のペイン間は空白3列。
+- 会話の本文幅は `min(100, 会話列の幅−2)`。2列ガターは狭い画面でも変えない。
+- 省略はgrapheme単位で行い、CJKは2セルとして数える。resizeでSessionの状態を変えない。
 
 ### 7.7 Conversation rendering
 
-#### 役割ラベル
+#### 話者と区切り
 
-| ラベル | 対象（canonical history） | 本文スタイル |
+| 対象 | ガター | 本文 |
 |---|---|---|
-| `you` | 外部入力（このターミナルからのプロンプト） | normal、逐語表示 |
-| `agent` | モデル応答のメッセージ | normal、軽量Markdown |
-| `child` | 既知のchildから届いたpeer入力 | normal。本文の先頭に送信元IDをbold、種別タグをfaintで付ける |
-| `peer` | 送信元が既知のchildでないpeer入力 | normal |
-| `host` | 制御入力（stop要求など）、crash記録 | faint、1行 |
-| `error` | モデル応答の失敗（provider error） | 7.12 |
+| あなたの発言 | 全行に `▎`（s.you） | youBlockの背景を本文幅まで塗る。逐語表示 |
+| agentの発言 | 同じ話者の連続の先頭行だけ `●`（s.main） | normal、軽量Markdown |
+| ドラフト | 全行に `⋮`（dim） | normal、逐語表示 |
+| エラー | 先頭行に `✗`（s.bad） | 何が起きたか＋次の操作 |
+| 制御入力 | 先頭行に `·`（dim） | `停止要求` / `中断要求` / `子をすべて取消` / `操作の取消` / `推論の深さを変更: high` |
+| 子・peerと裏の応答 | 本文側に `┄`（dim） | 連続する裏の作業を件数の1行にまとめる |
 
-- **ラベルは発話の連続（run）の先頭にだけ付ける。** 同じ話者の連続するエントリは、空行を挟んでラベルなしで続ける（4.5の2つ目のagent発話）。
-- runの先頭行が画面の上に流れて見えなくなった場合は、表示領域の最初の行にそのrunのラベルを再表示する（8.3）。
-- 本文の無いモデル応答（ツール呼び出しだけ）も同じ扱いで、ラベル行にツール行を置く（4.6の `agent   ✓ Bash …`）。
-- 話者が変わるときは空行1行を入れる。エージェント発話とそのツール行の間には空行を入れない。
-- ドラフトは直前の話者が `agent` ならラベルなし、そうでなければ `agent` ラベルから始める。
+- 発話の前には空行を入れ、あなたの発言の後にも空行を入れる。
+- ツールのみの応答と起動チップは、直前のagentの発言に空行なしで続ける。
+- heartbeatは出さない。`dispatch_operation` は制御文字列を出さず、ツールのReceiptに変換する（7.8）。
+- crash記録は会話に短く表示する。HostRecord の configuration / project_instructions / runtime_selection / runtime_applied / context の種別は会話に出さない。モデル・effort・権限モードの変更は日本語の1行通知で示す。effort の制御入力は日本語の会話行にする。初期の文脈上限を結び付ける内部のモデル記録も会話には出さない。元の記録は履歴と診断に残す。
+
+#### 裏の作業
+
+```text
+┄ 裏の作業  21ターン · ツール47回 · 報告 [A][C][D]
+```
+
+- 子・peerの発言と終了通知、それに続くagentの応答・起動を連続する1行にまとめる。`ready` 通知は出さない。
+- ターン数は空でないTurnIDの重複を除いた数。ツール回数はReceiptの数。報告の目印は送信元の子で、起動した子の数ではない。
+- 行全体はdim、目印はbadge。目印は最大8個で、幅に入らない分も `+N` にまとめる。
+- 【報告】【要確認】で始まるagentの発言とエラーは全文を出し、そこでまとまりを区切る。あなたの発言でも区切る。表示上限は長文の規則に従う。
+- 最後のまとまりは、新しい応答が届くたびに同じ1行の件数を更新する。裏のターンの応答待ち・生成中・ツール実行中は、先頭の `┄` をスピナーに置き換える。終了後は `┄` に戻す。
 
 #### 折り返し
 
@@ -520,23 +361,27 @@ ANSI 16色の前景色と属性のみを使う。背景色は使わない（反�
 
 #### 長文
 
-- 発話は省略しない。既存の表示上限（1エントリ4 KiB）で切られたエントリは、末尾に faint で `[clipped for display; canonical history retained]` を付ける。
-- 表示ウィンドウ（直近1,024エントリ）より古い側に達したら、会話領域の最上部に faint で `earlier entries are not kept on this screen; the host retains the full history` を1行出す。
+- 発話は省略しない。表示上限（1エントリ64 KiB）で切られたエントリは、末尾に faint で `[表示を省略。全文は履歴に残っています]` を付ける。
+- 起動・再接続の初回表示は末尾128 canonicalアイテムから作る。1往復に複数のイベントがあるため数ページ分を目安とし、Session全体の大きさに比例する取得・投影を避ける。接続後の再接続は既存のforward cursorから差分だけを取得し、読込済みの範囲を維持する。
+- 古い履歴があれば、`前の会話があります。PgUp で読み込めます` を先頭に出す。PgUp・入力が空の↑・ホイールで先頭に近づくと、前の128アイテムを昇順で先頭に足す。読込中の先頭行は `古い履歴を読み込み中`、全件読込後は `ここが会話の始まり`。表示のためにcanonicalデータを削除しない。
+- Host/gatewayの `InspectBefore(before, limit)` はbeforeより前のN件を返す（before=0は末尾）。`Older` は未読の前半、従来の `More` / `NextAfter` は後半の差分を表す。ページ閲覧は購読cursor・generation・revisionを動かさない。forward取得だけの旧Readerでは従来の表示ページ（最大1,024エントリ・2 MiB）を維持する。
+- 現在のモデル・作業状態・使用量・直近8生成の速度・最後のユーザー入力時刻はHostの本文を含まない要約から復元する。ページ先頭の裏作業モード・境界をまたぐ裏作業の集計・未回答の要確認の先頭行と、そのページ内のツール呼出しに対する最新receiptも渡す。目印・子一覧・カードはviewerと現在のOperation、要確認の帯は質問の要約と現在のPermissionから作り、本文の読込範囲に依存させない。
+- `/copy`・`/export` は従来どおりcanonical全文を必要時に読む。`/analyze` は初めて開く際に全文から集計を再構成し、以後は差分で更新する。
 - 会話領域は下端追従。スクロールバック中（7.11、PgUp）を除き、最新の内容が常に見える。
 
 #### コードブロック（agent発話のみ）
 
 <!-- snippet 80 -->
 ~~~text
- agent   変更後の呼び出し側は次のとおりです。
-         ```go
-         for _, r := range rows {
-             line := renderRow(r, selected, width)
-             fmt.Fprintf(&b, "%s\n", clipLine(line, width)) // clip by columns,
-       ↪     never by bytes
-         }
-         ```
-         列幅は width から計算し、grapheme を分割しません。
+● 変更後の呼び出し側は次のとおりです。
+  ```go
+  for _, r := range rows {
+      line := renderRow(r, selected, width)
+      fmt.Fprintf(&b, "%s\n", clipLine(line, width)) // clip by columns,
+↪     never by bytes
+  }
+  ```
+  列幅は width から計算し、grapheme を分割しません。
 ~~~
 
 - フェンス行（```` ```go ```` と ```` ``` ````）は faint で残す。境界がはっきりし、コピーしたとき元の形に近い。
@@ -560,422 +405,369 @@ ANSI 16色の前景色と属性のみを使う。背景色は使わない（反�
 
 ### 7.8 Tool activity
 
-**方針: ツールは会話の中に、呼び出された位置で1行のレシートとして出す。実行中は個別に、完了したら畳む。失敗は畳まない。**
-
-#### ツール行の形
+呼び出した位置に1回のツール呼び出しを1チップで出す。チップ間は空白1つ、本文幅で折り返す。1チップは最大40セル。
 
 ```text
-         {記号} {tool}  {target}                                  {経過 / 状態語}
-         ▸ edit   harness/viewer/render.go                                  4s
-         ◌ read   harness/viewer/panel_test.go                          queued
-         ✓ grep   "RenderRows" harness/viewer
-         ✗ edit   harness/viewer/render.go                              failed
-                  old_string not found in file
+  ✓ Read AGENTS.md   ✓ Bash ×3   ▸ Bash go test ./… 12s
+  ✗ Edit render.go 失敗
+  old_string not found in file
+  ! Bash rm -rf … 承認待ち
 ```
 
-- `tool` はOperationのツール名をそのまま表示する。例外として SubagentStart は `spawn` と表示する。
-- `target` は呼び出し引数から主対象を1つだけ選ぶ:
+#### ツール名と対象
+
+- チップの面はchip、失敗はchip.bad、記号は状態色にする。
+- `claude_code` はTargetの先頭語（Bash / Read / Writeなど）をツール名として展開する。pulseとカードの今の操作にも同じヘルパーを使う。
+- targetは `viewer.SafeToolTarget` が許可した表示引数だけ。生の引数・状態・ツール出力は出さない。
 
 | ツール | target |
 |---|---|
 | read / write / edit / ViewImage | ファイルパス |
-| grep | パターン（引用符付き）＋パス |
-| glob | パターン |
+| grep / glob | パターンとパス / globパターン |
 | Bash | コマンドの1行目 |
-| AST / LSP / DAP | 操作名＋ファイル（または対象シンボル） |
+| ast_grep / ast_edit | 最初の対象パス |
+| LSP / DAP | 操作と対象パス・query・programなど |
 | SkillUse | スキル名 |
-| SubagentStart | child ID＋タスクラベル |
-| 判定できない | 名前のみ |
+| SubagentStart | 対応する子の目印と題名 |
+| 判定できないもの | ツール名のみ |
 
-- targetは長すぎる場合、中央を `…` で切り詰める（パスは末尾のファイル名を残す）。
-- 経過時間はOperationの経過が分かるときだけ、faint で右寄せ。実行中は毎秒更新。完了は5秒以上かかったものだけ表示。
-- failed / canceled は状態語を右に、理由がOperation snapshotにあれば次の行に faint で1行。
-- op ID は表示しない。
+- パスはファイル名を残してディレクトリを中央省略する。ファイル名自体が長ければ中央省略する。コマンドと文章は末尾を `…` で切る（ASCIIは `~`）。
+- 状態語・経過の幅を先に確保してから、名前と対象を切り詰める。
+- 作業中は経過が分かるときだけ付ける。完了に経過は付けない。1分以上の経過は秒を省く。
+- 失敗理由があれば、次の行にdimで先頭1行を出す。
 
-#### 状態の対応
+#### 状態の対応（チップ・カード共通）
 
-| Operation状態 | 記号 | 表示 |
-|---|---|---|
-| Awaiting | `◌` | `queued`（付録B-1） |
-| Ready（実行中） | `▸` | 経過時間 |
-| Completed | `✓` | （なし） |
-| Failed | `✗` | `failed` ＋理由 |
-| Canceled | `⊘` | `canceled` |
-| 不明（切断中・resync中） | `?` | faint |
+表示用の状態型から記号・語・色を作る。
 
-#### 畳み込み
+| 状態 | 条件 | 記号 | 語 | 色 |
+|---|---|---|---|---|
+| 作業中 | 操作がawaiting / ready。ツールのawaitingは承認待ちを除く | ▸ | 作業中 | s.run |
+| 取消中 | canceling | ▸ | 取消中 | s.stall |
+| 承認待ち | ツールがawaitingで、対応するOperation IDが `Permissions.Pending` にある | ! | 承認待ち | s.stall |
+| 完了 | 操作がcompleted、または子のFinishがsuccess / completed | ✓ | 完了 | s.done |
+| 失敗 | 操作がfailed、または子のFinishがfailure / failed / error | ✗ | 失敗 | s.bad |
+| 取消 | 操作がcanceled | ⊘ | 取消 | dim |
+| 終了 | 子の親側操作がcompletedでFinishがない | ▪ | 終了 | dim |
+| 不明 | 切断、子の再同期が必要、未対応の状態 | ? | 不明 | s.stall |
 
-- 1つのモデル応答から出たツール行を「ステップ」とする。
-- ステップ内の全ツールが Completed で2件以上なら、1行に畳む: `✓ 3 tool calls: read 2, grep 1`（faint）。
-- 1件だけの完了ツールは畳まず faint で残す。
-- failed / canceled を含むステップでは、完了分だけを要約行にし、失敗・取消は個別行で残す。
-- `spawn` 行は畳まない（childは重要情報のため）。
-- 実行中・待機中の行は常に個別に表示する。
+作業中のチップは記号と経過、完了は記号だけ、それ以外は状態語を添える。子の状態の優先順は7.9に示す。
+
+#### 畳み込みと子の起動
+
+- 1つの応答で同じツールの完了が3回以上あれば `✓ Bash ×3` にまとめる。展開後のツール名で数える。2回以下・実行中・失敗・取消・SubagentStartは個別に残す。
+- `dispatch_operation` のOperationIntentからToolNameとOperationIDをReceiptにする。直前のagent発言に続けて表示する。
+- SubagentStartはOperationIDと子のParentOperationIDを照合し、`▸ [A] 表示の実装` のチップにする。目印はbadge、題名はLabelの1行目、記号は子の状態に従う。
+- 裏の作業に属する起動は、7.7の件数にまとめる。
 
 #### Pulseとの関係
 
-- pulse（7.10）は実行中ツールを1語で要約する: `running edit`、`running 3 tools`。
-- ツール行は静止記号、動くのはpulseのスピナーだけ。
+pulseは `Bash 実行中` / `ツール3件 実行中` と要約する。チップは静止記号、pulseはスピナーを使う。
 
 ### 7.9 Child agents
 
 #### 状態の決め方（優先順）
 
-1. canonical Finish がある → Finish.Status で決める（`success` は `✓`、`failure` / `failed` / `error` は `✗`、それ以外は `!` ＋状態語をそのまま）。Finishは履歴上の記録なので接続断中も変えない
-2. 親との接続が切れている、またはresyncが必要 → `?`（unknown、faint）
-3. 親側 SubagentStart Operation が終端 → Completed は `▪ ended (no Finish)`、Failed は `✗ failed`、Canceled は `⊘ canceled`
-4. 親側 Operation が非終端 → Awaiting は `◌ queued`、Ready は `▸ running`
+1. 親との接続が切れている、または子のNeedsResyncが立っている → `? 不明`。Finishがあってもこの判定を先に使う。
+2. Finishがある → success / completedは完了、failure / failed / errorは失敗、それ以外は不明。
+3. Finishがなく、親側SubagentStart Operationがcompleted → `▪ 終了`。
+4. それ以外 → 7.8のOperation状態に従う。awaiting / readyはどちらも作業中。
 
-- childのruntime livenessはsnapshotのため常に unknown。UIは「生きている」と主張せず、親側Operationの状態を「running」として表示する（親側Operationが実行状態の正）。
-- 経過時間: 親側Operationの経過が分かればそれ、なければchildセッションの経過が分かればそれ、どちらも無ければ表示しない。
-- activity と usage は、そのchildが観測済み（選択されたことがある）のときだけ表示する。選択中以外は最後に観測した値で、faint。未観測なら表示しない。
+- runtimeの生存を推測しない。状態は親側Operationとcanonical Finishから表示する。
+- 経過は親側Operationの値を優先し、なければ子のセッションの値を使う。不明なら出さない。カードでは `6s` / `12m` / `1h15m` とし、1分以上は秒を出さない。
+- Activity・操作・活動の棒は観測済み（Generationが空でない、またはCursor > 0）の子だけに出す。
 
-#### 件数ごとの表示（Standard幅、ドック内）
+#### 共通の目印
 
-**0件:** child関連の表示は一切出さない（ドック・レール・キーバーとも）。child系コマンドは `/` 候補とhelpにだけ出る。
+全ての子をCreatedAt順、同時刻ならID順に並べ、A〜Z、AA〜ZZ、AAA…を振る。同じ行集合ならreattach後も同じ文字になる。各フレームで計算し、目印を永続化しない。未観測でCreatedAtが分からないときは時刻を推測しない。
 
-**1件:** 見出しなしで、レーン1行にラベル `child` を付ける。
+#### 作業カード
 
-<!-- snippet 80 -->
 ```text
- child ▸ child-7f3a  Refactor RenderRows into columns    3m40s  edit render.go
+▌[A] 表示の実装           gpt-6.1-sol·xhigh 1h12m
+▌    Bash go test ./harness/…  ▂▃▅▇▅▃▂▅▇▅
+  ▌[B] 独立レビュー        gpt-6.1-sol·high 58m
+  ▌    応答待ち               ▁▂▃▂▁▂▃───
 ```
 
-**2件以上:** 見出し行（件数の要約）＋レーン。
+| 行 | 内容 |
+|---|---|
+| 1行目 | 目印、Labelの1行目、右寄せのモデル·effortと経過（例: `gpt-6.1-sol·xhigh 12m`）。失敗は経過の代わりに `✗ 失敗`。メインのモデルはヘッダーに出す |
+| 2行目 | 今の操作またはActivity、右側に直近10分の活動の棒 |
 
-<!-- snippet 80 -->
+- 左端の `▌` は状態色。メインはs.main、作業中はs.run、失敗はs.bad。面はcard。
+- 今の操作は子の未終了OperationのうちSequenceが最大のもののTool＋Target。なければActivityから `tool: ` を外し、`input: ` は `受信: ` にする。どちらもなければ空。
+- 作業中でLastActivityAtから5分以上たつと、左端をs.stall、2行目を `動きなし N分` にする。時刻が不明なら判定しない。
+- 孫は深さ1ごとに2セル字下げし、左端も一緒に下げる。系統の罫線は引かない。
+- 高さが足りればカード間に空行1行。足りなければ空行をなくし、cardとcard.altの面を交互にする。
+- カードは全ビューで2行。幅不足ではモデル·effortと経過を残し、題名から先に末尾省略する。今の操作も末尾省略する。ID・revision・turn・observed・Hostの標語・Operationノードは出さない。
+
+#### 活動の棒
+
+直近10分を1分ずつ10セルに分け、canonical itemのRecordedAtを数える。
+
+| 件数 | 0 | 1 | 2 | 3〜4 | 5〜7 | ≥8 |
+|---|---|---|---|---|---|---|
+| 棒 | `─`（dim） | ▁ | ▂ | ▃ | ▅ | ▇ |
+
+子の作成より前の区間は空白。未観測の子には棒を出さない。値はviewerが保持する最新256件の範囲内の観測数。
+
+#### 並べ方と終了のビーズ
+
+1. メインのカード `◆ メイン`。2行目はpulseと同じフェーズ、または `待機中（子 N件 作業中）`。観測済みなら活動の棒も出す。
+2. 未終了の子を系統順に並べる。同じ親の子どうしはCreatedAt順、同時刻ならID順。
+3. 失敗した子は、作業中・取消中の子孫がいるか、Finishがあなたの最後の発言より後なら赤いカードで残す。失敗した親は稼働中の子孫の直前に置く。独立した失敗は稼働中の系統の後に置く。
+4. その他の終了した子は `終了 ✓✓✗✓⊘  ほか N` のビーズにする。完了はs.done、失敗はs.bad、取消・報告なしの終了はdim。Finish.RecordedAt順で右ほど新しい。不明な時刻は活動時刻で補わず、同時刻はID順。
+5. 幅に入る直近のビーズだけを残し、隠れた件数を `ほか N` にする。カードとして残した失敗はビーズに重複させない。
+6. SplitとChatの右ペインは、入りきらないカードを `＋N 件  /view orchestration` にまとめる。Orchestrationはカードとビーズをスクロールする。
+
+カードの描画はSplit・Orchestration・Chatの右ペインで共通にする。
+
+#### 右ペインがない幅のドック
+
 ```text
- child   2 running, 1 done                                   /child ID to focus
-       ▸ child-7f3a  Refactor RenderRows into columns    3m40s  edit render.go
-       ▸ child-91b2  Add panel rendering tests           3m38s
-       ✓ child-0c4e  Update viewer README                1m02s  success
+子  [A]▸ [B]▸ [C]! [F]✗   作業中 3 · 失敗 1
 ```
 
-**予算を超える場合:** ドックのchild行数（見出し込み）は `clamp(floor(高さ/6), 1, 6)`（24行→4、30行→5、20行→3、16行→2）。
-
-- 非終端のレーンを優先して表示し、残りの行に直近で終わったものを入れる。入らない分は見出しの件数にだけ反映する（例: `5 running, 3 done, 1 failed  (4 hidden)`）。
-- 1行しか無いときは見出し行だけ（`child   5 running, 3 done, 1 failed`）。
-
-#### レーンの規則
-
-- **並び順は安定させる。** viewerの行順（ID順）を保ち、activityや状態が変わっても並べ替えない。終わったレーンもその位置で `✓` に変わり、予算が足りなくなった時だけ見出しに畳む。
-- 孫child（Depth ≥ 2）は、深さ1ごとにIDを2セル字下げする。
-- レーンの列: 状態記号（seam列）→ ID → タスクラベル（SubagentStartの計画テキスト）→ 経過（右寄せ）→ activity / Finish状態（faint）。
-- IDは切り詰めない（コマンド入力に使うため）。12セルを超えるIDは、表示中のレーン間で一意になる範囲で中央を `…` で切り詰め、Tab補完で全IDを入力できるようにする。
-- `Problem` / `NeedsResync` があるレーンは、末尾に `! resync required` などを warning で出す。
-- 親側の観測問題（Panelの problem）はドック見出しの右に `! observation: …` として1行。
+- 通常は1行。完了・取消・報告なしの終了は除き、作業中・取消中・失敗を出す。不明な子も残し、件数に `不明 N` を添える。
+- 目印はbadge、記号は状態色。動きなしは `!`。入りきらない目印は `+N` にする。対象がなければ0行。
+- 右ペインがあるときはドックを重ねて出さない。
 
 #### 選択（focus）
 
-`/child ID` で選択したchildはレーンの選択マーカー `›` と bold で示し、ドックにfocusシートを出す（Wideではレールのfocusブロック）。
+`/child ID` で選択した子はfocusシートに表示する。通常のID表示は目印と題名に置き換える。
 
-<!-- snippet 80 -->
 ```text
- child › child-7f3a  Refactor RenderRows into columns            running  3m40s
-         activity  edit harness/viewer/render.go
-         ops       ✓ read 4   ✓ grep 1   ▸ edit render.go  12s
-         usage     in 12.1k out 1.2k
-         finish    not recorded yet
-         others    ▸ child-91b2 3m38s   ✓ child-0c4e success
-         /child-send TEXT  /child-cancel  /child-history  /child codex-work-1
-─ focus child-7f3a ────────────────────────────────────────────────────────────
-   you › █
-         ⏎ send to codex-work-1   /child-send TEXT   ^C stop session
+› 子 [A] 表示の実装  作業中  12m
+    活動  tool: Read AGENTS.md
+    操作  ✓ Read 4  ▸ Bash 作業中 12s
+    使用量  in 12.1k out 1.2k
+    終了報告  未記録
+    ほか  ▸ [B] 独立レビュー 作業中
+    /child-send TEXT  /child-cancel  /child-history  /child ID
 ```
 
-- focusシートの行: 状態と経過、activity、ops（完了は種類ごとの件数、実行中は個別）、usage、finish（Finishがあれば状態と要約1行、ChangedFiles / Tests / Blockers の件数）、others（他のレーンを1行に要約）、そのchildに使えるコマンド。
-- Tall（35行以上）のときだけ project instructions のメタデータ（source、bytes、digest先頭8文字）を `project` 行に出す。本文は出さない。
-- **プロンプトは常に親セッションに送られる。** focus中はキーバーとプレースホルダーでそれを明示する（`⏎ send to codex-work-1`）。
-- focusの解除は既存のとおり `/child <親セッションID>`。シート最終行にその形をそのまま示し、Tab補完の候補先頭にも親IDを `(this session)` として出す。
-- `/child-history` を実行すると、focusシートの中身を履歴ページに置き換える:
-
-<!-- snippet 80 -->
-```text
- child › child-7f3a  history after 0, 6 items          more: /child-next
-         1  input  Refactor RenderRows into columns. Keep the public API.
-         2  agent  I'll start with render.go and keep the RenderRows signature.
-         3  tool   read harness/viewer/render.go
-         4  tool   read harness/viewer/panel.go
-         5  agent  The row format mixes fields; I'll build columns first.
-         6  tool   edit harness/viewer/render.go
-```
-
-#### 会話中のchild
-
-- 起動: 親のツール行 `▸ spawn  child-7f3a  Refactor RenderRows into columns`。状態記号はレーンと同じ規則。
-- childから親へのpeer入力: ラベル `child`、本文先頭に送信元ID（bold）。
-- `/child-send` などの操作結果は会話に出さず、通知行（7.12）に出す。canonicalな反映はchildの履歴とレーンで見る（楽観的に表示を変えない）。
-
-#### Wide / XWide のレール
-
-- 幅120以上でchild行が1つ以上あるとき、右側にレールを出す。以後、child行がある限り出し続ける（出たり消えたりして会話が再折り返しされるのを防ぐ）。
-- レールとの間は空白3列。縦線は引かない。
-- レールの構成: 見出し `child agents` ＋件数（右寄せ）→ レーンブロック（1行目: 選択マーカー、記号、ID、経過右寄せ / 2行目: タスクラベル / 3行目: activity または `finished: STATUS`、faint）→ focusブロック（選択時）。
-- 行が足りないときは、非選択レーンを1行（記号・ID・経過）に縮め、次に終端レーンを見出しの件数に畳む。
-- レールがあるときドックにはレーンを出さない（重複させない）。
+- focusの見出しは日本語。Activity、操作、使用量、キャッシュ、Finishの要約と変更・テスト・支障の件数、他の子、コマンドを出す。
+- 指示書の内部種別・パス・bytes・digest、子と操作のIDは通常のfocusシートに出さない。診断で確認する。
+- 狭幅のChatはドック内、120列以上のChatは右ペインの下部にfocusを出す。SplitとOrchestrationのカードには選択マーカーを付けない。
+- `/child-history` で履歴の件数とページを表示し、続きがあれば `/child-next` を案内する。
+- 通常のプロンプトは親セッションへ送る。focus中も送信先は変わらず、Keybarとプレースホルダーで示す。コマンドの結果は通知行に出し、canonicalな反映を待つ。
 
 ### 7.10 Progress
 
-canonicalな応答の前の一時状態は、**pulse行**（フェーズ）と**ドラフト**（ストリーミング本文）の2つで表す。
+#### ヘッダーの色帯
 
-#### フェーズの決め方（上から順に最初に当てはまるもの）
+左から次の区画を空白1つで並べる。
 
-| # | 条件（既存projectionで判定） | pulse表示 |
+| 区画 | 内容 | 役割 |
 |---|---|---|
-| 1 | 親との接続が切れている | pulseなし（7.12の接続表示に置き換え） |
-| 2 | Progressあり、Attempt ≥ 2、本文が空 | `⠹ retrying (attempt 2)` |
-| 3 | Progressあり、Mode = streaming、本文あり | `⠹ generating`（Attempt ≥ 2なら `generating (attempt 2)`）＋ドラフト |
-| 4 | Progressあり、Mode = streaming、本文が空 | `⠹ thinking` |
-| 5 | Progressあり、Mode ≠ streaming | `⠹ waiting for completed response` |
-| 6 | Progressなし、SubagentStart以外の非終端Operationあり | `⠹ running edit` / `⠹ running 3 tools` |
-| 7 | Progressなし、ランタイムがrunningで、最新のcanonicalエントリが「このターミナルの入力」または「終端したツール結果」で、その後にモデル応答が無い | `⠹ thinking` |
-| 8 | それ以外 | pulseなし（idle） |
+| セッション | セッション名（Snapshot.ID） | band.session |
+| 状態 | メイン応答中: `● 稼働中 7h45m`。メイン待機中で子が作業中、または裏のターンが動作中: `⠹ 裏で作業中 子N 7h45m`。何もしていない: `入力待ち 7h45m`。停止: `▪ 停止`、失敗: `✗ 失敗` | 応答中・裏の作業はband.ok、入力待ち・停止はband.neutral、失敗はband.bad |
+| 権限 | `Full Access` / `Ask` / `Read Only` | Full Accessだけband.warn、ほかはband.neutral |
+| モデル | Provider、モデル名、effort（例: `Claude Opus 5.5 · max`） | band.neutral |
 
-- 経過時間（faint）: フェーズ6は実行中Operationの最長経過、それ以外は最新のcanonicalエントリの記録時刻からの経過。記録時刻が無ければ出さない。
-- pulseは会話領域の最終行に固定し、スクロールバック中も見える。
-- 親がidleでchildだけ動いているときはpulseを出さない。状況はレーン（またはレール）で分かる。
+- 正常な接続の語は出さない。接続異常時は状態区画を `接続中` / `再接続中` / `再同期中`（スピナー＋band.warn）、または `✗ 切断`（band.bad）に置き換える。
+- 停止・失敗・接続異常ではヘッダーの経過を出さない。権限が無効なら権限区画は出さない。
+- ブランド・ビュー名・トークン数・`Permissions:` は出さない。
+- 幅不足では、モデル → 経過 → 権限の短縮（FULL / ASK / RO）→ セッション名の中央省略の順にする。
 
-#### ドラフト
+#### Pulseとドラフト
 
-- Progress本文を会話の末尾（全canonicalエントリの後）に、seam `⋮` 付きで逐語表示する。本文は normal（dimにしない）。
-- 末尾が見えるように下端追従する。pulse行を押し出さない。
-- **canonical応答が届いた時点でドラフトを消し、同じ位置に確定メッセージを通常行で出す。** ドラフトと確定メッセージが同時に見えるフレームを作らない。
-- 新しいattemptの開始（リセット）でドラフトを消し、フェーズ2に戻る。
-- 切断時はドラフトを消す（現行どおり）。再接続後にProgressが続いていれば再表示する。
-- 古い世代・epochのProgressは表示しない（現行どおり）。
+一時状態は会話末尾のドラフトと、会話領域の最終行に固定するpulseで示す。未接続・停止・失敗ではpulseを出さない。
 
-<!-- snippet 80 -->
+| 優先順 | 条件 | 語 |
+|---|---|---|
+| 1 | Progressあり、Attempt ≥2、本文が空 | `再試行中（N回目）` |
+| 2 | Progressあり、streamingで本文あり | `生成中`。再試行なら `生成中（N回目）` |
+| 3 | Progressあり、streamingで本文なし | `考え中` |
+| 4 | Progressあり、それ以外 | `応答待ち` |
+| 5 | Progressなし、SubagentStart以外の非終端Operationあり | `Bash 実行中` / `ツールN件 実行中` |
+| 6 | Progressなし、WaitingForModel | `考え中` |
+| 7 | 子だけが作業中 | `裏で作業中 子N`（裏のターン中も、上のフェーズより優先） |
+| 8 | それ以外 | 会話のpulseなし |
+
+- pulseはs.mainのスピナー、語はnormal、経過はfaint。実行中Operationは分かるものの最長経過、それ以外はLatestAtから測る。不明なら出さない。会話のpulseの経過も1分以上は秒を省く。
+- メインが待機中で子だけが作業中、または裏のターンが応答待ち・生成中・ツール実行中なら、ヘッダーと会話末尾のpulseにスピナー付きの `裏で作業中 子N` を出す。狭幅のChatでも同じ。メインのカードの `待機中（子 N件 作業中）` にもスピナーを付ける。カードのフェーズ経過は `duration` の書式（分未満は秒、1時間未満は分秒、1時間以上は時分）。
+- Orchestrationでは会話のpulseを出さず、メインのカードで示す。
+- ドラフトはProgress本文を `⋮` 付きで逐語表示する。本文はnormal。履歴ページの閲覧中は出さない。
+- canonical応答でドラフトを置き換え、新しいattempt・切断時は消す。古い世代・epochのProgressは出さない。
+- `/stop main` の記録でメインのProgressとWaitingForModelを消す。停止したツールの遅い終端receiptで応答待ちを復活させない。次のユーザー入力から通常の表示を再開する。子だけが動いている場合の表示は継続する。
+
+#### 要確認の帯
+
+Keybarの直上に全幅1行。次の順で最初の1件を出す。
+
+| 優先順 | 条件 | 文言 | 役割 |
+|---|---|---|---|
+| 1 | セッション失敗 | `✗ {利用者向けの原因と次の操作}` | band.bad |
+| 2 | 承認待ちがあり、承認ピッカーが開いていない | `▲ 承認待ち N件  /permissions` | band.warn |
+| 3 | 最後のあなたの発言より後に【要確認】で始まるagent発言がある | `▲ 要確認  {本文の1行目}  ↑ 会話で確認` | band.warn |
+
+- 複数あれば末尾に `+N`。承認待ちの複数件は1つの通知に数え、【要確認】は発言ごとに数える。
+- 通知がなければ0行。停止はヘッダー、セッション失敗はヘッダーとこの帯で示す。
+- 状態ドックには `履歴から表示を作り直しています`、`再接続中 12s · 再接続を待っています`、`次のターンから: …` を出す。
+
+#### 下段のゲージ
+
+入力欄の下に1行。メインのモデル名とeffortはヘッダー、子のモデル名とeffortはカードの1行目に出す。累計はゲージに出さず `/analyze` で見る。
+
 ```text
-       ⋮ 待つ間に既存テストの構成を確認します。panel_test.go は Render の出力文
-       ⋮ 字列を直接比較しているため、
-       ⠹ generating  6s
+文脈 ▕█████░░░░░░░▏394k (39%) · 速度 ▂▃▅▇▆▅ ~69.0 tok/s · キャッシュ ▕██████████▏98.37%
 ```
-↓ canonical応答の到着後
 
-<!-- snippet 80 -->
-```text
-         待つ間に既存テストの構成を確認します。panel_test.go は Render の出力文
-         字列を直接比較しているため、列の変更には期待値の更新が必要です。
-```
+| 項目 | 値と描き方 |
+|---|---|
+| 文脈 | 今の入力トークン数を `394k (39%)` の形で出し、Selection.ContextWindowに対する割合を括弧に添える。12セルのバー。70%未満はs.main、70%以上90%未満はs.stall、90%以上はs.bad。Claudeでは最後のmessage_startのinput + cache_read + cache_creationを使い、区切りの間の入力合計にはしない |
+| 文脈の上限が不明 | ContextWindowが0ならバーを出さず `文脈 394k`。入力も不明なら `文脈 —` |
+| 速度 | 最大8件のOutputTPSを、表示中の最大値に対する比で7段階の棒にする。現在の値を小数1桁のtok/sで添える。provider_api以外には `~` |
+| キャッシュ | CacheLatestの割合を10セルのバーと小数第2位までの%（例: `キャッシュ 98.37%`）で出す。不明なら `キャッシュ —` |
+
+- キャッシュ率と `/analyze` の累計は、区切りの間の呼び出しを合計したUsageを使う。文脈用の値とは分ける。
+- 現在の生成統計はProgress.Statisticsを優先し、なければLastGeneration。統計のない未完了Progressや、選択中モデルと統計のモデルが違う場合は数値を出さない。
+- 速度の履歴は新しいcanonical応答ごとに追加し、永続化しない。同じ計測値の別生成も別件として数える。Progressに統計があれば表示時に加え、直近8件に絞る。
+- Operation・承認を待つ時間を速度のタイマーに加えない。
+- 幅不足では、キャッシュ → 速度の棒 → 文脈のバーの順に落とす。速度と文脈の数値は残す。
 
 ### 7.11 Input
 
 #### 入力欄の形
 
 ```text
-───────────────────────────────────────────────────────────────────────────────
-   you › 入力テキスト█
-         ⏎ send   / commands   ^C stop session   ^D detach
+  ⏎ send   / commands   ^C stop session   ^D detach
+────────────────────────────────────────────────────────
+› 入力テキスト█
+文脈 — · 速度 —
 ```
 
-- ガターラベルは「Enterで何が起きるか」を示す:
-
-| ラベル | 条件 | Enterの結果 |
+| モード | 表示 | Enterの結果 |
 |---|---|---|
-| `you` | 通常（貼り付けで始まる `/` を含む） | 親セッションへのプロンプト送信 |
-| `cmd` | 入力の先頭がキー入力された `/` | ローカルコマンドの実行 |
-| `key` | `/login` 後の秘匿入力中 | 資格情報の保存（別経路） |
+| 通常 | `›` | 親セッションへのプロンプト送信 |
+| コマンド | cmdチップ＋ `›` | ローカルコマンドの実行 |
 
-- **貼り付けた `/stop` は `you` のまま。** Ruleに `pasted: sent as text, not as a command` を出す（既存の安全規則を見える形にする）。
-- 端末のハードウェアカーソルをキャレット位置に表示する。日本語IMEの変換表示がキャレット位置に出る。`▏` のような文字は挿入しない。
-- 入力欄の高さは内容の行数（貼り付けの改行と折り返し）に応じて伸び、最大 `clamp(floor(高さ/5), 1, 8)` 行（24行→4、30行→6、40行→8）。超える分はキャレット周辺を表示し、Ruleの右側に `+12 lines` を出す。
-- 入力量が上限64 KiBの75%を超えたら、Ruleの右側に `49 KB of 64 KB` を出す。
+- コマンドの表示は、入力の先頭が `/` で、貼り付けでないとき。
+- 貼り付け自体では実行・送信しない。貼り付け中は候補を出さず、Ruleに `pasted: Enter submits; registered commands run` を出す。Enter時には登録済みコマンドをコマンドとして扱う。
+- キャレットは端末のハードウェアカーソル。文字のカーソルを本文に挿入しない。
+- 入力欄は最大 `clamp(floor(高さ/5), 1, 8)` 行。超える分はキャレット周辺を表示し、Ruleに `+N lines` を出す。
 
-#### Ruleラベル（入力モードの表示）
+#### RuleとKeybar
 
-罫線の左に1つだけ埋め込む。優先順: private → pasted → commands → scrollback → focus。
+Ruleはprivate、pasted、commands、Orchestrationのスクロール位置、会話のscrollback、Splitの狭幅表示、focusなどを状況に応じて出す。ラベルとプレースホルダーは英語のまま。
 
-| ラベル | 条件 |
+| 状況 | Keybarの主な文言 |
 |---|---|
-| `─ private: API key for openai/primary ─…` | 秘匿入力中 |
-| `─ pasted: sent as text, not as a command ─…` | 貼り付けを含む |
-| `─ commands ─…` | `/` 候補を表示中 |
-| `─ scrollback: 42 lines below; PgDn returns ─…` | スクロールバック中 |
-| `─ focus child-7f3a ─…` | childを選択中 |
+| 通常 | `⏎ send   / commands   ^C stop session   ^D detach` |
+| コマンド候補 | `↑↓ select` / `⇥ complete` / `⏎ choose` |
+| 送信待ち | `^C cancel waiting   ^D detach` |
+| focus | 親への送信先と `/child-send TEXT` |
+| 未接続 | `⏎ send (fails until reconnected)   ^D detach` |
+| 停止 / 失敗 | `/resume` と `^D detach` |
+| スクロールバック | `PgUp/PgDn scroll` / `⏎ send and return to live` |
 
-#### 状態ごとの表示
+#### 送信待ちとログイン案内
 
-| 状態 | ラベル | プレースホルダー（空のとき、faint） | Keybar |
-|---|---|---|---|
-| idle | `you` | `Ask, or type / for commands` | `⏎ send   / commands   ^C stop session   ^D detach` |
-| エージェント作業中 | `you` | `Ask, or type / for commands` | 同上（送信は可能） |
-| コマンド入力中 | `cmd` | — | `⇥ complete   ⏎ run   ^C stop session   ^D detach` |
-| 送信待ち（pending） | `you` | — | `^C cancel waiting   ^D detach` |
-| 秘匿入力 | `key`（reverse） | `Type or paste the key; it stays masked` | `⏎ store key   ^C cancel entry` |
-| focus中 | `you` | `Message codex-work-1, or /child-send TEXT for child-7f3a` | `⏎ send to codex-work-1   /child-send TEXT   ^C stop session` |
-| 接続中・オフライン | `you` | `Offline; you can keep typing` | `⏎ send (fails until reconnected)   ^D detach` |
-| stopped | `you` | `Session stopped; /resume continues it` | `/resume continue   ^D detach` |
-| failed | `you` | `Session failed; see above` | `/resume   ^D detach` |
-| スクロールバック中 | `you` | — | `PgUp/PgDn scroll   ⏎ send and return to live` |
+- Enterで入力欄を空にし、通知行にoutboxを出す。成功時は消し、canonicalな入力は購読経由で会話に現れる。
+- 失敗は `/retry` の説明付きで通知する。待機中も入力欄は編集できるが、Enterでは再送せず待機中の通知を出す。
+- `/login` は外部CLIでのサブスクログイン手順をシートに出す。APIキーやIDの入力経路は持たない。
+- ログイン案内を表示中も、会話とドックは更新を続ける。
 
-#### 送信待ち（busy）
+#### キー
 
-- Enterで入力欄は空になり（現行どおり）、ドックの通知行に送信中表示（outbox）を出す。送信テキストは1行に切り詰める。秘匿入力の値は決して出さない。
+| キー | 動作 |
+|---|---|
+| Enter | 送信 / コマンド実行 |
+| Ctrl-A | 入力欄の全文を選択（反転）。複数行・貼り付けマーカーを含む |
+| 文字入力 / bracketed paste（選択中） | 選択した全文を置き換える |
+| Backspace / Delete（選択中） | 選択した全文を消す |
+| ← → ↑ ↓ Home End / Esc（選択中） | 選択を解除。Homeは入力先頭へ移動 |
+| ← → Home End Backspace Delete | grapheme単位の編集 |
+| Ctrl-C | 送信待ちの取消 → セッション停止 |
+| Ctrl-D | detach |
+| bracketed paste | 入力へ挿入。貼り付け自体では実行・送信しない |
+| Tab | コマンド・IDなどの補完 |
+| PgUp / PgDn | 会話またはOrchestrationのスクロール |
 
-<!-- snippet 80 -->
-```text
-       ⠹ sending  viewer の子エージェント表示を整理して、テストも追加して。
-───────────────────────────────────────────────────────────────────────────────
-   you › █
-         ^C cancel waiting   ^D detach
-```
+全選択中のキーバーと罫線は、入力・貼り付けで置換、Backspace/Deleteで削除、Esc/矢印で解除できることを示す。通常のキーバーは `^A select all`（狭幅では `^A all`）を示す。秘匿入力の表示経路では選択状態でも伏字を維持する。
 
-- 成功: outboxを消すだけ（`input committed` は出さない）。canonicalな `you` エントリは購読経由で会話に現れる。
-- 失敗: 通知行をエラーにする（7.12）。
-- 待機中のEnter: 通知 `request pending; ^C cancels waiting`。
-- 待機中も入力欄の編集はできる（現行どおり）。
+入力が空のHomeまたはCtrl+Homeは、未読の古いページを必要時に読み、会話の始まりへ移動する。End/Ctrl+Endは最新に戻す。
 
-#### 秘匿入力（/login）
-
-<!-- snippet 80 -->
-```text
-─ private: API key for openai/primary ─────────────────────────────────────────
-    key › ****************█
-         ⏎ store key   ^C cancel entry   masked; never sent to the agent
-```
-
-- 表示するのは `*` のみ（最大64個、現行どおり）。値・長さの正確な数・一部の文字は出さない。
-- この間 `/` 候補は開かない。会話とドックは通常どおり更新される。
-- 取消時の通知: `key entry canceled`。保存後: `API key stored; it is checked on the next provider request`。
-
-#### キー一覧
-
-| キー | 動作 | 区分 |
-|---|---|---|
-| Enter | 送信 / コマンド実行 / 鍵の保存 | 既存（不変） |
-| ← → Home End Backspace | grapheme単位の編集 | 既存（不変） |
-| Ctrl-C | 秘匿入力の取消 → 送信待ちの取消 → セッションのhard stop | 既存（不変） |
-| Ctrl-D | detach | 既存（不変） |
-| bracketed paste | テキストとして挿入。実行・送信しない | 既存（不変） |
-| Tab | `/` コマンドとchild IDの補完 | 新規、UIローカル |
-| PgUp / PgDn | 会話領域のスクロール | 新規、UIローカル |
-
-- Tab: 候補が1つならそれに確定（引数を取るコマンドは後ろに空白を付ける）。複数なら共通接頭辞まで補完し、続けて押すと候補を順に選ぶ。
-- PgUp / PgDn: 会話領域を1画面分動かす。最下端に戻ると自動追従を再開する。Enterで送信すると最下端に戻る。
+最下端に戻ると会話の追従を再開する。通常の入力を送信すると最新の会話に戻る。
 
 ### 7.12 Errors
 
-| 種類 | 表示場所 | 形 | 持続 | 次の行動の提示 |
-|---|---|---|---|---|
-| provider error（モデル応答の失敗） | 会話（canonical） | `error` ラベル（red bold）＋メッセージ＋既知コードのヒント（faint） | 履歴として残る | コードごとのヒント |
-| 送信の失敗（ACK不明） | 通知行 | `✗ not confirmed: {err}` ＋ `/retry` の説明 | 次のEnterまで | `/retry resends it with the same input ID` |
-| 待機の取消 | 通知行 | `! stopped waiting; the input may already be committed and will appear above if so` | 次のEnterまで | — |
-| 接続断 | ヘッダー＋ドックの状態行 | 7.12の接続表示 | 復帰まで | `^D` でdetach可能 |
-| resync | ヘッダー＋ドックの状態行（faint） | `rebuilding the view from canonical history` | 完了まで | — |
-| session stopped | ヘッダー＋ドックの状態行 | `▪ session stopped; /resume continues this session` | 停止中ずっと | `/resume` |
-| session failed | ヘッダー＋ドックの状態行（red） | `✗ session failed: {failure}`（最大3行） | 失敗中ずっと | `/resume`（付録B-2） |
-| tool failure | 会話のツール行 | `✗ edit  path  failed` ＋理由1行 | 畳まない | — |
-| child failure | レーン／focus | `✗` ＋状態語。focusでBlockersを表示 | 状態が変わるまで | `/child ID` |
-| childコマンドの失敗 | 通知行 | `✗ child request failed: {err}; /child-retry reuses its input ID` | 次のEnterまで | `/child-retry` |
-| 使い方の誤り・不明コマンド | 通知行（warning） | 既存の `usage: …` 文言、`unknown command /foo; type / or /help` | 次のEnterまで | — |
+| 種類 | 表示場所 | 形 | 持続・次の行動 |
+|---|---|---|---|
+| provider error | 会話 | `✗` ＋メッセージ＋既知コードのヒント | canonical historyに残る |
+| 送信の失敗（ACK不明） | 通知 | `✗ {利用者向けの原因と次の操作}` と `/retry` の説明 | 次のEnterまで。同じInputIDで再送 |
+| 待機の取消 | 通知 | `! stopped waiting; the input may already be committed and will appear above if so` | 次のEnterまで |
+| セッション停止 | ヘッダー | `▪ 停止` | 停止中。Keybarとプレースホルダーで `/resume` を案内 |
+| セッション失敗 | ヘッダー＋要確認の帯 | `✗ 失敗`、`✗ {利用者向けの原因と次の操作}` | 失敗中 |
+| tool failure | 会話のチップ | `✗ Edit path 失敗` ＋理由1行 | 畳まない |
+| child failure | カード・ビーズ・focus | `✗`、カードは `失敗`、focusは支障も表示 | カードに残す条件は7.9 |
+| childコマンドの失敗 | 通知 | `✗ child request failed: {err}; /child-retry reuses its input ID` | 次のEnterまで |
+| 使い方の誤り | 通知 | `usage: …` / `unknown command /foo; type / or /help` | 次のEnterまで |
 
-#### provider error の例
+#### provider error
 
-<!-- snippet 80 -->
-```text
- error   external_reauth_required: Codex credential file is missing or expired
-         Renew the login with Codex CLI (codex login) outside this TUI; the
-         next request rereads the file.
-```
+メッセージは表示用に変換し、コードを画面に出さない。元の原因は診断に残す。認証・接続先の失敗は要確認の帯にもログインコマンドと `/model` の切替案内を出す。停止中でも `/model` で選択し、`/resume` で再開できる。
 
-- 1行目はメッセージをそのまま（サニタイズ済み）。既知のコードだけ2行目以降にヒントを出す。未知のコードにヒントは付けない。
-- 既知ヒント（docsに記載のもの）: `external_reauth_required`（Codex CLIで再ログイン）、`writer_owned`（他のクライアントがwriterを所有中、`/resume` は使えない）。
+| コード | ヒント |
+|---|---|
+| external_reauth_required | Codex: `codex login`、Claude: `claude` を起動して `/login`。`/model` で切り替えて `/resume` も可能 |
+| writer_owned | 別の画面で使用中。その画面を閉じてから `/resume` |
 
 #### 接続の表示
 
-接続断は短い途切れと継続的な断で見せ方を変える。
+| 状態 | 条件 | ヘッダー | 状態ドック |
+|---|---|---|---|
+| 接続中 | 初回接続 | スピナー＋接続中 | なし |
+| 再接続中 | 断から2秒未満 | スピナー＋再接続中 | なし |
+| 切断 | 断から2秒以上 | `✗ 切断` | `再接続中 12s · 再接続を待っています` |
+| 再同期中 | gap・再同期 | スピナー＋再同期中 | `履歴から表示を作り直しています` |
 
-| 状態 | 条件 | ヘッダー | ドックの状態行 | その他 |
-|---|---|---|---|---|
-| reconnecting（短い） | 断から2秒未満 | `⠹ reconnecting`（yellow） | なし | ドラフト消去、runtime `? unknown` |
-| disconnected（継続） | 断から2秒以上 | `✗ disconnected`（red bold） | `⠹ reconnecting  12s  session state is unknown until the host answers` | レーンはすべて `?`、elapsedを隠す、tokensは faint のまま残す |
-| resyncing | gap・世代変更 | `⠹ resyncing`（yellow） | `rebuilding the view from canonical history`（faint） | 会話の表示は消さない |
+- 接続異常ではドラフトとpulseを出さず、会話は残す。子はFinishがあっても不明にする。接続状態と別にruntimeの語は出さない。
+- 再接続の動作は変えず、2秒の閾値は表示上の区別だけに使う。
 
-- 再接続の試行（250 ms間隔）は内部の動きで、表示は点滅させない。
-- 2秒の閾値は表示上の区別で、再接続の動作は変えない。
+#### 通知行
 
-#### 通知行の規則
-
-- ドックの最下段（Ruleの直上）に1つだけ。最大2行。
-- 成功・情報は faint で、次のEnterまたは8秒で消える。警告・エラーは次のEnterまで残る。
-- 通知は会話（canonical history）に書き込まない。
+- ドックの最下段。通常は最大2行、ヒント付きは本文とヒントを1行ずつ出す。
+- 成功・情報は次のEnterまたは8秒で消え、警告・エラーは次のEnterまで残る。
+- 通知をcanonical historyへ書き込まない。
 
 ### 7.13 Help / commands
 
-**普段の画面にコマンド一覧を出さない。** 発見の経路は3つ: キーバーの `/ commands`、`/` 入力時の候補、`/help` シート。
+普段はコマンド一覧を出さず、Keybarの `/ commands`、`/` 候補、`/help` から使う。
 
 #### `/` 候補（コマンドメニュー）
 
-キー入力で先頭に `/` を打つと、Ruleの上に候補を出す。前方一致で絞り込む。空白を打った後は、そのコマンドの使い方1行に切り替わる。
+- 先頭の `/` から前方一致で絞り込む。選択行はreverseとマーカーで示し、Tabで補完する。
+- コマンドを選んでから選択肢を出す。`/view` はChat / Orchestration / Split、`/stop` は子・メイン・両方・Session、`/export` と `/copy` は対象を選ぶ。
+- `/child` 系などエージェント用のコマンドはメニューに出さない。登録済みコマンドは直接入力できる。
+- 貼り付け中は候補を出さない。ピッカーや解析シートは子のドックより優先する。
 
-<!-- snippet 80 -->
-```text
-       › /child ID                       focus a child agent
-         /child-history [after] [limit]  load a page of its history
-         /child-next                     load the next history page
-         /child-send TEXT                send a message to the focused child
-         /child-cancel                   cancel the focused child
-         /child-resume                   confirm ownership of the focused child
-         /child-retry                    retry the last uncertain child request
-─ commands ────────────────────────────────────────────────────────────────────
-    cmd › /ch█
-         ⇥ complete   ⏎ run   ^C stop session   ^D detach
-```
+#### シートと通知
 
-- 選択行は reverse（plainでは `›` マーカー）。Tabで選択行に補完する。
-- 候補の行数は `clamp(floor(高さ/3), 3, 10)`。それを超える場合は最終行に `+3 more` を出す。
-- 候補を出している間、ドックのレーンは見出し1行に縮める。
-- 貼り付けた `/…` と秘匿入力中は候補を出さない。
-- 引数入力中の使い方表示の例: `/login PROVIDER ID   then enter the key privately`。
+`/help`、コマンドの一覧出力、解析結果はドックのシートに出し、会話に書き込まない。ラベルと説明は英語のまま。入力や閉じる操作、ページ送りはKeybarとRuleで案内する。
 
-#### `/help` シート
+#### コマンドの主な表示
 
-<!-- snippet 80 -->
-```text
-  help   session  /stop   /stop idle   /resume   /retry   /detach
-         auth     /login PROVIDER ID   /logout PROVIDER ID
-                  /credentials   /methods
-         child    /child ID   /child-history [after] [limit]   /child-next
-                  /child-send TEXT   /child-cancel   /child-resume
-                  /child-retry
-         keys     ⏎ send   ⇥ complete   PgUp/PgDn scroll   ^D detach
-                  ^C cancels key entry or waiting; otherwise stops the session
-         Type / to search commands. This closes on the next Enter.
-───────────────────────────────────────────────────────────────────────────────
-   you › █
-         ⏎ send   / commands   ^C stop session   ^D detach
-```
+| コマンド | 表示・用途 |
+|---|---|
+| `/model` | Provider・モデル・effortの選択。未利用の接続先を選ぶとログインとモデル一覧を再検出 |
+| `/model refresh` | 外部CLIの認証・モデル一覧を再検出し、利用可能になった接続先を登録 |
+| `/login` | Codex: `codex login`。Claude: `claude` を起動して `/login`。ログイン後は `/model refresh`。キー・IDを要求しない |
+| `/permissions` | Read Only: 読むだけ / Ask: 書き込みと実行の前に確認 / Full Access: 確認なし。OSの隔離ではない。承認画面はツール名と対象を主にし、IDは診断へ |
+| `/view` | Chat / Orchestration / Split |
+| `/stop` | 子・メイン・両方・Sessionの停止対象 |
+| `/export` | 会話全体・応答の書き出し |
+| `/copy` | 発言のピッカー。先頭は「すべて」、以降は新しい順に話者と本文の先頭1行。↑↓で移動、Enterでコピー、Spaceで複数選択してEnter。複数発言は会話順にコピー |
+| `/analyze` | 読み取り専用のSession解析 |
+| `/resume` / `/detach` | 再開 / TUIから離れる |
+| `/help` | コマンドとキー |
 
-- ドックにシートとして出し、会話には書き込まない。次のEnterで閉じる。閉じるためにCtrl-Cを押させない（Ctrl-Cは停止になりうるため）。
-- 幅100以上では「コマンド＋説明」の2列表示にしてよい。
-- 高さが足りないときは `keys` → `child` → `auth` → `session` の順に残し、入らない分は `+N more; type / to search` にする。
+`/copy` の発言はユーザーとagentの公開本文だけ。ツール行、peer本文、裏の作業の発言は並べない。裏のターンでも `【報告】` / `【要確認】` でユーザーに示した発言は対象にする。秘匿値の除外とSafeText、OSC 52によるコピー方式は従来どおり。選択時はcanonical履歴から本文を読み直す。直接指定の `/copy all` と `/copy last` も維持する。
+| `/child ID`など | 直接入力でfocus・履歴・子への操作 |
 
-#### コマンド出力
-
-`/methods`、`/credentials` の結果は、現行の1行連結をやめ、helpと同じシートに1項目1行で出す（`openai/api_key   supported` の形。状態語は既存の支援表をそのまま使う）。次のEnterで閉じる。
-
-#### コマンド一覧（既存、意味は変更しない）
-
-| グループ | コマンド | 候補の説明文 |
-|---|---|---|
-| session | `/stop` | hard stop this session |
-| | `/stop idle` | stop when the agent is idle |
-| | `/resume` | resume this stopped session |
-| | `/retry` | resend the last uncertain input (same input ID) |
-| | `/detach` | leave; the session keeps running |
-| auth | `/login PROVIDER ID` | store an API key (masked entry) |
-| | `/logout PROVIDER ID` | remove a stored credential |
-| | `/credentials` | list stored credentials |
-| | `/methods` | show supported authentication methods |
-| child | `/children` | how to select a child |
-| | `/child ID` | focus a child agent |
-| | `/child-history [after] [limit]` | load a page of its history |
-| | `/child-next` | load the next history page |
-| | `/child-send TEXT` | send a message to the focused child |
-| | `/child-cancel` | cancel the focused child |
-| | `/child-resume` | confirm ownership of the focused child |
-| | `/child-retry` | retry the last uncertain child request |
-| other | `/help` | show commands and keys |
+再設計はコマンドとキーの意味を変えず、表示を共通の2列ガターとチップに合わせる。
 
 ### 7.14 Interaction states
 
@@ -987,138 +779,62 @@ canonicalな応答の前の一時状態は、**pulse行**（フェーズ）と**
 
 ### 8.1 幅クラス別の規則
 
-| 要素 | Tiny <50 | Narrow 50–69 | Standard 70–119 | Wide 120–159 | XWide ≥160 |
-|---|---|---|---|---|---|
-| ガター | なし。ラベルを本文の上の行に積み、本文は2セル字下げ。seamは1列目 | 9セル | 9セル | 9セル | 9セル |
-| 本文幅 | 幅−3 | 幅−10 | 幅−10（最大100） | 会話列−9 | 会話列−9（最大100） |
-| ヘッダー | ID＋記号＋elapsed | ブランドなし、`⇄` 記号のみ、tokens短縮 `48.2k/3.1k` | 全項目 | 全項目 | 全項目 |
-| childの場所 | ドック要約1行 | ドック（activity列なし） | ドック | レール34〜44列 | レール48列 |
-| ツール行 | ステップを1行要約 | 通常 | 通常 | 通常 | 通常 |
-| Keybar | 高さ16以上で短縮形 | 短縮形 `⏎ send  / cmds  ^C stop  ^D detach` | 標準 | 標準＋`PgUp/PgDn scroll` | 標準＋`PgUp/PgDn scroll` |
+| 要素 | <50列 | 50〜69列 | 70〜119列 | ≥120列 |
+|---|---|---|---|---|
+| ガター | 2セル | 2セル | 2セル | 2セル |
+| 本文 | 最大100セル、会話幅−2 | 同左 | 同左 | 左ペイン幅−2、最大100セル |
+| 子 | 1行ドック。focusは省略 | 1行ドック | 1行ドック | 共通のカード描画 |
+| ツール | 40セル以内のチップを本文幅で折り返す | 同左 | 同左 | 同左 |
+| Keybar | 短縮形 | 短縮形 | 標準 | 標準＋スクロール案内 |
 
-ヘッダーの項目は、入らない場合に次の順で落とす（常に残すもの: 接続状態、異常時のランタイム状態）:
-
-1. ブランド `unreal agent`
-2. tokensのラベル（`in 48.2k out 3.1k` → `48.2k/3.1k`）
-3. elapsed
-4. tokens
-5. 正常時の `running` の単語
-6. セッションIDの中央切り詰め（最小8セル）
-7. 正常時の `connected` の単語（記号 `⇄` のみ）
+- ヘッダーは7.10の省略順に従う。ゲージも幅に応じて部品を落とし、数値を優先する。
+- SplitとChatの右ペインの幅は7.6に従う。全ビューでカードは2行とする。
 
 ### 8.2 高さクラス別の規則
 
-| 要素 | Short <20 | Standard 20–34 | Tall ≥35 |
+| 要素 | <20行 | 20〜34行 | ≥35行 |
 |---|---|---|---|
-| ヘッダー下の空行 | なし | あり | あり |
-| 会話とドックの間の空行 | なし | 24行以上であり | あり |
-| ドックのchild行数 | `clamp(floor(H/6),1,6)` | 同左 | 同左（Wideではレール） |
-| focusシート | 見出し＋activityの2行 | 最大7行 | 最大10行（project行を含む） |
-| Keybar | 16行未満は隠し、入力欄右端に `^C stop` だけ出す | あり | あり |
-| 会話領域の最小行数 | 3 | `floor(H×0.4)` | `floor(H×0.4)` |
+| ヘッダー下の空行 | なし | あり（SplitではChat見出し） | 同左 |
+| 子のドック | 通常1行 | 通常1行 | 通常1行 |
+| focusシート | 最大2行 | 最大7行 | 最大10行 |
+| Keybar | 16行未満では入力欄右側の短いヒントへ | あり | あり |
+| 会話領域の最小行数 | 3 | 高さの40% | 高さの40% |
 
-- シート・レーン・状態行は、会話領域の最小行数を割らない範囲でしか伸びない。入らない分は `+N more` に畳む。
-- 20x6 未満では、1行目に状態記号だけ（`⇄ ▸` など）、最終行に入力欄だけを出し、他は省略する。
+- シート・ドックは会話の最小行数を確保した残りを使う。承認ピッカーは会話より優先する。
+- カード間の空行・省略件数は7.9に従う。
+- 幅20列未満または高さ6行未満では、ヘッダー・入力・ゲージを優先して描く。
 
 ### 8.3 Narrow — 60x20
 
-<!-- mockup 60x20 -->
+右ペインを出さず、2列ガターと子の1行ドックを使う。
+
 ```text
-codex-work-1                  ⇄  running  4m12s  48.2k/3.1k
+[jh] [● 稼働中 12m] [Full Access]
+▎実装とテストを進めて
 
-   you   viewer の子エージェント表示を整理して、テストも追
-         加して。
-
- agent   描画を3つの作業に分けて、子エージェントに並行して
-         任せます。
-         ▸ spawn  child-7f3a  Refactor RenderRows into co…
-         ▸ spawn  child-91b2  Add panel rendering tests
-         ✓ spawn  child-0c4e  Update viewer README
-
-       ⋮ 待つ間に既存テストの構成を確認します。
-       ⋮ panel_test.go は Render の出力文字列を直接比較して
-       ⠹ generating  6s
- child   2 running, 1 done                        /child ID
-       ▸ child-7f3a  Refactor RenderRows into…   3m40s
-       ▸ child-91b2  Add panel rendering tests   3m38s
+● 作業を渡しました。
+  [▸ [A] 表示の実装] [▸ [B] 独立レビュー]
+⠁ 考え中 6s
+子  [A]▸ [B]▸   作業中 2 · 失敗 0
+  ⏎ send  / cmds  ^C stop  ^D detach
 ───────────────────────────────────────────────────────────
-   you › █
-         ⏎ send  / cmds  ^C stop  ^D detach
+› █
+文脈 394k (39%) · 速度 ~69.0 tok/s
 ```
 
 ### 8.4 Tiny — 44x14
 
-<!-- mockup 44x14 -->
-```text
-codex-work-1               ⇄ running  4m12s
-you
-  viewer の子エージェント表示を整理して、テ
-  ストも追加して。
-agent
-  描画を3つの作業に分けて、子エージェントに
-  並行して任せます。
-  ▸ 3 spawns: 2 running, 1 done
+会話のガターは2列のまま。Keybarを隠し、入力欄の右側に `^C stop`、送信待ちでは `^C cancel waiting` を出す。
 
-⋮ 待つ間に既存テストの構成を確認します。
-⠹ generating  6s
-child  2 running, 1 done
-───────────────────────────────────────────
-› █                                 ^C stop
-```
+### 8.5 XWide — 160x40
 
-- Tinyでは入力欄のラベル（you / cmd / key）を出さず、入力モードはRuleラベルで示す。
-
-### 8.5 XWide — 160x40（レール＋focus）
-
-<!-- mockup 160x40 -->
-```text
-unreal agent  codex-work-1                                                                                       ⇄ connected  running  4m12s  in 48.2k out 3.1k
-
-   you   Run the viewer tests and tell me what fails.                                                          child agents                   2 running, 1 done
-
- agent   ✓ Bash  go test ./harness/viewer/...                                                                  › ▸ child-7f3a                             3m40s
-                                                                                                                   Refactor RenderRows into columns
-         All 14 tests in harness/viewer pass. The 1s timeout in client_test.go may be flaky on slow                edit harness/viewer/render.go
-         machines.
-                                                                                                                 ▸ child-91b2                             3m38s
-   you   Clean up how the viewer panel shows child agents, and add tests.                                          Add panel rendering tests
-
- agent   I'll read the current rendering code first.                                                             ✓ child-0c4e                             1m02s
-         ✓ 3 tool calls: read 2, grep 1                                                                            Update viewer README
-                                                                                                                   finished: success
-         RenderRows mixes identity, status and usage in one pipe-separated string. Splitting this into three
-         parallel child agents: layout, tests, and docs.                                                       focus  child-7f3a
-         ▸ spawn  child-7f3a  Refactor RenderRows into columns                                                   state      running (parent operation ready)
-         ▸ spawn  child-91b2  Add panel rendering tests                                                          activity   edit harness/viewer/render.go
-         ✓ spawn  child-0c4e  Update viewer README                                                               ops        ✓ read 4   ✓ grep 1
-                                                                                                                            ▸ edit  render.go               12s
- child   child-0c4e  README updated; the Panel section now documents focus and lanes.                            usage      in 12.1k out 1.2k
-                                                                                                                 finish     not recorded yet
- agent   While the children work, I'm checking how panel_test.go asserts on rendered output.                     project    AGENTS.md  2,148 B  3f9a1c0e
-         ✓ read   harness/viewer/panel_test.go
-                                                                                                                 /child-send TEXT   /child-cancel
-         It compares whole frames, so the column change needs new expectations. I'll add a helper that           /child-history     /child-resume
-         renders one row at a time so the tests stay readable:                                                   /child codex-work-1  ends focus
-         ```go
-         func renderRow(r Row, selected session.ID, width int) string
-         ```
-
-       ⋮ Next I'll ask child-91b2 to use renderRow in the new tests once child-7f3a lands the refactor, so
-       ⋮ both changes
-       ⠹ generating  4s
-
-
-
-─ focus child-7f3a ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-   you › █
-         ⏎ send to codex-work-1   /child-send TEXT   ⇥ complete   PgUp/PgDn scroll   ^C stop session   ^D detach
-```
+Splitは48列、Chatの右ペインも48列。Splitではカードと省略件数、Chatでfocusを選んだときは同じカードの下にfocusを出す。Orchestrationに切り替えると全幅でカードをスクロールできる。
 
 ### 8.6 resize
 
 - 次のフレームで幅・高さクラスを再判定し、全領域を組み直す。セッション状態には触れない（現行どおり）。
 - 下端追従中なら新しいサイズでも最新内容が見える。スクロールバック中なら「下端からの行数」を保つ。
-- Wide↔Standardの境界を跨いだとき、childの表示場所（レール↔ドック）を即座に切り替える。選択中childは保つ。
+- 120列の境界でカードの右ペインと1行ドックを切り替える。Splitの選択と選択中childは保つ。
 - 入力欄の内容とキャレット位置は保つ。
 
 ---
@@ -1127,214 +843,52 @@ unreal agent  codex-work-1                                                      
 
 ### 9.1 状態×領域の差分表
 
-| 状態 | Header | Transcript / Pulse | Dock | Rule / Composer / Keybar |
+| 状態 | Header | Transcript / Pulse | Dock / Attention | 入力まわり |
 |---|---|---|---|---|
-| connecting | `⠹ connecting`。runtime・elapsed・tokensなし | faint `connecting to the host` 1行 | なし | プレースホルダー `Connecting to the host`。Keybar `⏎ send   ^D detach` |
-| connected（idle） | `⇄ connected  running  9s  in 1,053 out 11`（faint） | 会話のみ。pulseなし | なし | 標準 |
-| model thinking | 同上 | pulse `⠹ thinking  3s` | 変化なし | 標準 |
-| model streaming | 同上 | ドラフト `⋮` ＋pulse `⠹ generating  6s` | 変化なし | 標準 |
-| waiting（非ストリーミング） | 同上 | pulse `⠹ waiting for completed response  8s` | 変化なし | 標準 |
-| retrying | 同上 | ドラフト消去、pulse `⠹ retrying (attempt 2)` | 変化なし | 標準 |
-| tool running | 同上 | ツール行 `▸`＋経過、pulse `⠹ running edit  4s` | 変化なし | 標準 |
-| child running | 同上 | `spawn` 行 | レーン（Wideではレール） | 標準 |
-| request pending | 同上 | 変化なし | 通知行にoutbox `⠹ sending …` | Keybar `^C cancel waiting   ^D detach` |
-| reconnecting（<2秒） | `⠹ reconnecting`（yellow）、runtime `? unknown` | ドラフトとpulseを消す | なし | 標準 |
-| disconnected（≥2秒） | `✗ disconnected`（red bold）、`? unknown`、elapsedなし | ドラフトとpulseを消す、表示中の会話は残す | 状態行 `⠹ reconnecting  12s  session state is unknown until the host answers`。レーンは `?` | プレースホルダー `Offline; you can keep typing`。Keybar `⏎ send (fails until reconnected)   ^D detach` |
-| resyncing | `⠹ resyncing`（yellow）、runtime `? unknown`、elapsedなし | 会話は残す | 状態行 `rebuilding the view from canonical history`（faint） | 標準 |
-| stopped | `⇄ connected  ▪ stopped`、elapsedなし | pulseなし。停止要求があれば `host` 行 | 状態行 `▪ session stopped; /resume continues this session` | プレースホルダー `Session stopped; /resume continues it`。Keybar `/resume continue   ^D detach` |
-| failed | `⇄ connected  ✗ failed`（red bold） | pulseなし | 状態行 `✗ session failed: {failure}`（最大3行、red） | プレースホルダー `Session failed; see above`。Keybar `/resume   ^D detach` |
-| private entry | 変化なし | 変化なし | 変化なし | Ruleラベル `private: …`、ラベル `key`、Keybar `⏎ store key   ^C cancel entry` |
-| command menu / help | 変化なし | 変化なし | シート（レーンは見出し1行に縮める） | Ruleラベル `commands`（menu時）、ラベル `cmd` |
-| child focus | 変化なし | 変化なし | focusシート（Wideではレールのfocus） | Ruleラベル `focus child-…`、送信先を示すKeybar |
-| scrollback | 変化なし | 過去を表示、pulseは最終行に固定 | 変化なし | Ruleラベル `scrollback: N lines below; PgDn returns` |
+| connecting | 接続中の帯 | `connecting to the host` | なし | `Connecting to the host` |
+| connected（idle） | 入力待ち・権限・モデルの帯 | 会話。pulseなし | 子が動けば裏で作業中に切替 | 標準 |
+| model thinking | 同上 | `考え中` | 変化なし | 標準 |
+| streaming | 同上 | `⋮` のドラフト＋ `生成中` | 変化なし | 標準 |
+| waiting | 同上 | `応答待ち` | 変化なし | 標準 |
+| retrying | 同上 | ドラフト消去、`再試行中（N回目）` | 変化なし | 標準 |
+| tool running | 同上 | 個別チップ、`Bash 実行中` | 変化なし | 標準 |
+| idle compaction | スピナー＋会話を圧縮中 | メインのカードもスピナー＋会話を圧縮中 | 次のユーザー入力・子の知らせで中断 | 入力・送信可能 |
+| child running | スピナー＋裏で作業中 子N | 起動チップまたは裏の作業の件数、スピナー付きpulse | カードまたは1行ドック | 標準 |
+| request pending | 同上 | 変化なし | outbox | `^C cancel waiting` |
+| disconnected | 切断の帯 | 会話は残し、ドラフトとpulseなし | 再接続の経過、子は不明 | `Offline; you can keep typing` |
+| resyncing | 再同期中の帯 | 会話は残す | 履歴から表示を作り直しています | 標準 |
+| stopped | 停止の帯 | pulseなし、制御入力は `停止要求` | 停止の重複行なし | `/resume` の案内 |
+| failed | 失敗の帯 | pulseなし | セッション失敗の帯 | `/resume` の案内 |
+| 承認待ち | 変化なし | 承認待ちのチップ | ピッカーが閉じていれば承認待ちの帯 | 承認ピッカー |
+| 【要確認】 | 変化なし | 本文を全文表示 | 要確認の帯 | 次のあなたの発言で対象を区切る |
+| child focus | 変化なし | 変化なし | Chatのfocusシート | 親への送信先を案内 |
+| scrollback | 変化なし | 過去の会話、pulseは下端 | 帯は現在の会話を基準にする | scrollbackラベル |
 
-### 9.2 状態別の画面
+### 9.2 状態別の表示例
 
-#### connecting
-
-<!-- snippet 80 -->
 ```text
-unreal agent  codex-work-1                                       ⠹ connecting
-
-         connecting to the host
-…
-───────────────────────────────────────────────────────────────────────────────
-   you › █ Connecting to the host
-         ⏎ send   ^D detach
+⋮ 描画を整理しています。
+⠁ 生成中 6s
 ```
 
-#### connected（idle）— 80x24 全画面
-
-<!-- mockup 80x24 -->
 ```text
-unreal agent  codex-smoke-1           ⇄ connected  running  9s  in 1,053 out 11
-
-   you   「Codex TUI smoke test OK」とだけ返してください。
-
- agent   Codex TUI smoke test OK
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-───────────────────────────────────────────────────────────────────────────────
-   you › █ Ask, or type / for commands
-         ⏎ send   / commands   ^C stop session   ^D detach
+[▲ 承認待ち 1件  /permissions +1]
+  ⏎ send   / commands   ^C stop session   ^D detach
+────────────────────────────────────────────────────────
+› █
+文脈 394k (39%) · 速度 ~69.0 tok/s
 ```
 
-スタイル注記（上の画面）:
-
-| 行 | 要素 | スタイル |
-|---|---|---|
-| 1 | `unreal agent` | magenta bold |
-| 1 | `codex-smoke-1` | bold |
-| 1 | `⇄ connected  running  9s  in 1,053 out 11` | faint |
-| 3 | `you` | cyan bold |
-| 5 | `agent` | magenta bold |
-| 22 | 罫線 | faint |
-| 23 | `you ›` | cyan bold、プレースホルダーは faint |
-| 24 | キーバー | faint（`⏎` `/` `^C` `^D` はnormal） |
-
-#### model thinking
-
-<!-- snippet 80 -->
 ```text
-   you   panel.go の Render を列揃えにして。
-
-       ⠹ thinking  3s
-───────────────────────────────────────────────────────────────────────────────
-   you › █
-         ⏎ send   / commands   ^C stop session   ^D detach
+[jh] [✗ 失敗] [Full Access]
+[✗ セッション失敗: provider returned an error  /resume]
+  /resume   ^D detach
+────────────────────────────────────────────────────────
+› Session failed; see above
+文脈 — · 速度 —
 ```
 
-#### model streaming / waiting / retrying
-
-<!-- snippet 80 -->
-```text
- agent ⋮ RenderRows を列単位に分けます。まず各列の幅を width から計算し、
-       ⋮ 残りを activity に割り当てます。
-       ⠹ generating  6s
-```
-
-<!-- snippet 80 -->
-```text
-       ⠹ waiting for completed response  8s
-```
-
-<!-- snippet 80 -->
-```text
-       ⠹ retrying (attempt 2)  1s
-```
-
-#### tool running / tool failure
-
-<!-- snippet 80 -->
-```text
- agent   render.go の列幅計算を修正します。
-         ✓ read   harness/viewer/render.go
-         ▸ edit   harness/viewer/render.go                                  4s
-         ◌ read   harness/viewer/panel_test.go                          queued
-       ⠹ running edit  4s
-```
-
-<!-- snippet 80 -->
-```text
-         ✓ read   harness/viewer/render.go
-         ✗ edit   harness/viewer/render.go                              failed
-                  old_string not found in file
-```
-
-#### child running
-
-4.5（Standard）と 4.6（Wide）を参照。
-
-#### request pending → 失敗 → /retry
-
-<!-- snippet 80 -->
-```text
-       ✗ not confirmed: connection refused
-         /retry resends it with the same input ID; it cannot be committed twice
-───────────────────────────────────────────────────────────────────────────────
-   you › █
-         ⏎ send   / commands   ^C stop session   ^D detach
-```
-
-#### disconnected（2秒以上）
-
-<!-- snippet 80 -->
-```text
-unreal agent  codex-work-1         ✗ disconnected  ? unknown  in 48.2k out 3.1k
-…
- child   2 unknown, 1 done
-       ? child-7f3a  Refactor RenderRows into columns
-       ? child-91b2  Add panel rendering tests
-       ✓ child-0c4e  Update viewer README                1m02s  success
-       ⠹ reconnecting  12s  session state is unknown until the host answers
-───────────────────────────────────────────────────────────────────────────────
-   you › █ Offline; you can keep typing
-         ⏎ send (fails until reconnected)   ^D detach
-```
-
-- Finishが記録済みのレーン（child-0c4e）はcanonicalなのでそのまま。それ以外は `?`（faint）。
-
-#### resyncing
-
-<!-- snippet 80 -->
-```text
-unreal agent  codex-work-1            ⠹ resyncing  ? unknown  in 48.2k out 3.1k
-…
-         rebuilding the view from canonical history
-───────────────────────────────────────────────────────────────────────────────
-```
-
-#### stopped
-
-<!-- snippet 80 -->
-```text
-unreal agent  codex-work-1            ⇄ connected  ▪ stopped  in 48.2k out 3.1k
-…
-  host   stop requested from this terminal
-…
-       ▪ session stopped; /resume continues this session
-───────────────────────────────────────────────────────────────────────────────
-   you › █ Session stopped; /resume continues it
-         /resume continue   ^D detach
-```
-
-#### failed
-
-<!-- snippet 80 -->
-```text
-unreal agent  codex-work-1             ⇄ connected  ✗ failed  in 48.2k out 3.1k
-…
-       ✗ session failed: provider returned an unrecoverable error after 2
-         attempts
-───────────────────────────────────────────────────────────────────────────────
-   you › █ Session failed; see above
-         /resume   ^D detach
-```
-
-#### scrollback
-
-<!-- snippet 80 -->
-```text
-…
-       ⠹ generating  6s
-─ scrollback: 42 lines below; PgDn returns ────────────────────────────────────
-   you › █
-         PgUp/PgDn scroll   ⏎ send and return to live
-```
+図の `[ ]` はNO_COLOR / Plainの区画。実際の描画では7.3の役割色を使う。
 
 ---
 
@@ -1344,41 +898,33 @@ unreal agent  codex-work-1             ⇄ connected  ✗ failed  in 48.2k out 3
 
 | モード | 出すもの | 意味の伝え方 |
 |---|---|---|
-| color | 前景色16色＋bold / faint / reverse | 色＋記号＋単語＋位置 |
-| NO_COLOR | bold / faint / reverse のみ | 記号＋単語＋位置。強調は bold、弱は faint |
-| plain | SGRなし | 記号＋単語＋位置のみ |
+| color | truecolor / 256色 / 16色と属性 | 帯・記号・語・位置 |
+| NO_COLOR | bold / faint / reverseのみ | 帯とチップの `[ ]`、左端、記号、語 |
+| Plain | SGRなし | 同じ記号・語・位置 |
 
-すべてのモードで成立させるための規則:
-
-- **状態はすべて「記号＋単語」または「記号＋固定位置」で読める。** 色は補強のみ。
-- 異常状態（disconnected / reconnecting / resyncing / unknown / stopped / failed / error / canceled）は常に単語を出す。
-- 選択はreverseに加えて `›`（ASCIIでは `*`）マーカーを出す。
-- ドラフトは `⋮` / `:` の溝、pulseはseam列のスピナーで、色なしでもcanonicalと区別できる。
-- 入力モードはガターラベル（you / cmd / key）とRuleラベルで区別できる。
+- 目印は常に `[A]` などの文字で出す。カードの状態は左端の色だけに頼らず、失敗・動きなし・不明などの語も出す。
+- ドラフトは `⋮`、入力は `›`、コマンド入力はcmdチップで区別する。
 
 ### 10.2 明暗テーマ
 
-- 背景色を設定しないため、明るいテーマ・暗いテーマの両方で同じ見た目の階層になる。
-- 白・黒・bright black を文字色に使わない。
+帯・チップは前景色と背景色を組にし、区画ごとにリセットする。カードとあなたの発言は端末既定の前景色を明示する。16色ではその面を塗らず、左端と記号を残す。
 
 ### 10.3 動きの抑制
 
-- 画面上のアニメーションは最大2つ（7.5）。それ以外の「生きている」表示は経過時間の更新で行う。
-- スピナーを止める利用者設定を用意する場合、静止記号 `▸` / `>` と経過時間で同じ情報を伝える（付録B-8）。
+`UNREAL_AGENT_TUI_NO_ANIMATION=1` ではスピナーを静止記号 `▸` / `>` にする。経過・活動の棒・速度は観測値に応じて更新する。
 
 ### 10.4 幅の安全（CJK・曖昧幅）
 
-- 全幅文字（CJK）は2セルとして計算する。grapheme単位で幅を測る（現行どおり）。
-- 状態記号は East Asian Width が N の文字から選んでいる（7.5）。曖昧幅（A）は罫線 `─` と切り詰め `…` だけ。
-- `…` は1行に最大1つ。右端1列の安全余白があるため、曖昧幅を2セルで描く端末でも行が折り返さない。
-- 罫線は曖昧幅を2セルで描く端末では長さが倍になる。こうした端末ではASCIIモードを使う（選択手段は付録B-7）。
-- 入力キャレットはハードウェアカーソルで示し、日本語IMEの変換表示がキャレット位置に出るようにする。
+- CJKは2セル、grapheme単位で計測・折り返し・切り詰めを行う。
+- 右端1列を空け、色なしの区画の括弧も幅に含める。切り詰めはチップ・カードなどの区画ごとに行う。
+- 曖昧幅の記号を2セルで描く端末では `UNREAL_AGENT_TUI_ASCII=1` を使う。
+- 新しい表示の文章・題名・コマンドは末尾を `…`（ASCIIは `~`）で切る。パスとIDは中央省略し、パスのファイル名を優先する。通知・outboxには既存の中央省略も残る。
+- 入力キャレットはハードウェアカーソルで示す。
 
 ### 10.5 安全性の不変条件（表示面）
 
 - provider / tool / user / child の文字列はすべてサニタイズ後に表示する。制御文字・エスケープ・双方向制御文字は端末に届かない（現行どおり）。
-- 秘匿入力の値は画面のどこにも出ない（マスク `*` のみ）。資格情報は `provider/ID` の参照名だけを表示する。
-- 貼り付けは `cmd` ラベルにならず、実行されない。
+- 貼り付け自体では実行・送信しない。登録済みコマンドの実行はEnter時に行う（7.11）。
 - 一時progress（ドラフト・pulse）、送信中表示、通知、シートは、canonical historyの行と同じ見た目にならない。
 
 ---
@@ -1390,143 +936,181 @@ unreal agent  codex-work-1             ⇄ connected  ✗ failed  in 48.2k out 3
 ### レイアウトと境界
 
 - AC-01 どのサイズでもフレームが端末の行数・列数を超えず、右端1列に文字が書かれない。
-- AC-02 80x24・idle・child 0件では、ヘッダー1行、空行、会話、罫線、入力欄、キーバーのみが表示され、コマンド一覧やchild関連の文字が無い。
-- AC-03 動いているものが無いとき、会話と罫線の間に何も無い（ドック0行）。
+- AC-02 80x24・Chat・idle・child 0件では、入力待ちのヘッダー、会話、キーバー、罫線、入力、ゲージが表示され、コマンド一覧と子のドックが無い。
+- AC-03 子の要約・シート・接続や設定の通知・送信待ちが無いとき、ドックは0行。
 - AC-04 会話が溢れたとき、スクロールバック中を除き最新の内容が見えている。
 - AC-05 resize後の最初のフレームで新しい幅クラスのレイアウトになり、入力内容・キャレット位置・選択中childが保たれている。
 
 ### ヘッダー
 
-- AC-06 幅40以上で、セッションID・接続状態・ランタイム状態が常に表示されている。
+- AC-06 ヘッダーがセッション・状態・権限・モデルの区画になり、幅不足では7.10の順で省略される。
 - AC-07 異常状態はヘッダーで単語として表示されている（記号だけにならない）。
-- AC-08 値が不明なとき0や古い値を現在値として表示しない（elapsedは隠す、runtimeは `unknown`、tokensの部分集計は `~` 付き）。
+- AC-08 不明な文脈・速度・キャッシュは `—`、不明な子は `?`。不明な経過を0として表示しない。
 
 ### 会話
 
-- AC-09 話者の連続の先頭にラベルがあり、折り返し行を含む本文がすべてtext列から始まっている。
+- AC-09 会話は2列ガター。あなたの発言は全行に▎、agentは連続の先頭に●があり、本文が同じ列から始まる。
 - AC-10 英単語は行幅より長い場合を除き途中で切れず、CJKの行が `、。」）` などで始まっていない。
 - AC-11 コードブロックはフェンスが faint で表示され、コード行が空白で折り返されず、継続行に `↪` がある。
-- AC-12 4 KiBで切られたエントリに `[clipped for display; canonical history retained]` が付いている。
+- AC-12 64 KiBで切られたエントリに `[表示を省略。全文は履歴に残っています]` が付く。
 - AC-13 ユーザー発話がMarkdown変換されず逐語で表示されている。
 
 ### ドラフトとPulse
 
 - AC-14 Progress本文がある間、会話末尾に各行 `⋮` 付きのドラフトが出ている。
 - AC-15 canonical応答の到着でドラフトが消え、同じ内容が `⋮` 無しで表示される。両方が同時に見えるフレームが無い。
-- AC-16 作業フェーズがあるとき、pulseが会話領域の最終行にちょうど1つあり、フェーズ名が §7.10 の語（thinking / generating / waiting for completed response / retrying (attempt N) / running TOOL / running N tools）のいずれかである。
-- AC-17 アニメーションしている記号が画面上に2つを超えない。ツール行とレーンは静止記号である。
+- AC-16 会話の作業フェーズがあるときpulseが1行あり、語が7.10の日本語になっている。Orchestrationではメインのカードで示す。
+- AC-17 ツールチップと子のカードは静止記号を使い、活動の棒は観測値に応じて更新される。
 
 ### ツール
 
-- AC-18 各ツール呼び出しが会話の中に1回だけ、呼び出したステップの直下に状態記号付きで表示される。
-- AC-19 全件完了したステップ（2件以上）が `✓ N tool calls: …` の1行に畳まれ、failed / canceled の行は畳まれず状態語を伴う。
+- AC-18 各ツール呼び出しが呼び出した位置のチップになり、最大40セルで折り返される。
+- AC-19 同じ応答の同じツールの完了3回以上だけが `✓ Bash ×3` にまとまり、実行中・失敗・取消は個別に残る。
 - AC-20 op IDがメイン画面に表示されない。
-- AC-21 `spawn` 行は畳まれない。
+- AC-21 SubagentStartがParentOperationIDで子に対応し、目印・題名・子の状態を出す。
 
 ### Child agents
 
-- AC-22 child 0件のとき、ドック・レール・キーバーにchild関連の表示が無い。
-- AC-23 child 1件のとき、ラベル `child` 付きのレーン1行で表示される。
-- AC-24 child 2件以上のとき、件数の見出しとレーンが表示され、行数予算で隠れたchildが見出しの件数に含まれている。
-- AC-25 childの状態や activity が変わってもレーンの並び順が変わらない。
-- AC-26 親との接続が切れている間、Finish記録済みのレーン以外は running を表示せず `?` になっている。
-- AC-27 幅120以上かつchildが1件以上でレールが表示され、ドックにレーンが重複して出ていない。
-- AC-28 `/child ID` の後、該当レーンに `›` が付き、focusシート（またはレールのfocus）が表示され、キーバーがプロンプトの送信先が親セッションであることを示している。
+- AC-22 子が0件のとき子のドックと終了のビーズが無い。Split / Orchestrationにはメインのカードを出す。
+- AC-23 右ペインがないとき、未終了・失敗の子が目印と件数の1行ドックになる。完了・取消・終了は除く。
+- AC-24 カードは全ビューで2行、子のモデル·effortを1行目の経過の前に出す。終了した子はビーズになり、表示しない件数が正しい。
+- AC-25 目印はCreatedAt・ID順で決まり、カードは系統順、同じ親の子はCreatedAt順になる。
+- AC-26 親との切断・子の再同期中はFinishの有無にかかわらず子が不明になる。
+- AC-27 Splitは120列以上で右ペインを出す。Chatも120列以上で子がいればカードを出し、ドックと重複させない。
+- AC-28 `/child ID` のfocusシートが目印と題名・日本語の見出しを使い、通常の入力の送信先は親のまま。
 - AC-29 未観測のchildにactivityやusageが表示されていない。
 
 ### 入力
 
-- AC-30 入力ラベルが、通常は `you`、キー入力の `/` で始まると `cmd`、秘匿入力中は `key` になる。貼り付けで始まる `/` は `you` のままで、Ruleに `pasted` ラベルが出る。
+- AC-30 通常は `›`、コマンド入力ではcmdチップを出す。貼り付け自体ではコマンドを実行しない。
 - AC-31 端末カーソルが入力欄のキャレット位置に表示されている。
 - AC-32 複数行の入力が入力欄の最大行数まで見えており、超過分がRuleに `+N lines` で示されている。
-- AC-33 秘匿入力中は `*`（最大64個）だけが表示され、入力値はどの領域・どのフレームにも現れない。
+- AC-33 `/login` はサブスクのログイン手順を示し、キーやIDを要求しない。
 - AC-34 送信待ちの間、通知行にoutboxが出て、キーバーが `^C cancel waiting` を示している。
 
 ### コマンドとヘルプ
 
-- AC-35 先頭に `/` をキー入力すると候補が出て、前方一致で絞り込まれ、Tabで補完される。貼り付けと秘匿入力では候補が出ない。
+- AC-35 先頭に `/` をキー入力すると候補が出て、前方一致で絞り込まれ、Tabで補完される。貼り付けでは候補が出ない。
 - AC-36 `/help` の結果がドックのシートとして表示され、会話には追加されず、次のEnterで閉じる。
-- AC-37 キーバーのCtrl-Cの説明が、その時点の動作（cancel entry / cancel waiting / stop session）と一致している。
+- AC-37 キーバーのCtrl-Cの説明が、その時点の動作（cancel waiting / stop session）と一致している。
 
 ### エラーと状態
 
-- AC-38 provider errorが会話に `error` ラベルで残り、既知コードにはヒントが付いている。
+- AC-38 provider errorが会話に✗付きの原因と次の操作として残り、内部コードは診断に保持する。
 - AC-39 送信失敗の通知が `/retry` の説明付きで、次のEnterまで残る。
-- AC-40 断が2秒以上続くと、ヘッダーに `disconnected`、ドックに再接続の経過、ランタイムに `unknown` が出て、ドラフトが消えている。
-- AC-41 停止中はヘッダーに `stopped`、ドックに `/resume` の案内があり、pulseが無い。
-- AC-42 失敗時はヘッダーに `failed`、ドックに失敗内容（最大3行）が表示されている。
+- AC-40 断が2秒以上続くとヘッダーが切断、ドックが再接続の経過になり、ドラフトとpulseが無い。
+- AC-41 停止中はヘッダーが停止、Keybarとプレースホルダーが `/resume` を案内し、停止のドック行とpulseが無い。
+- AC-42 失敗時はヘッダーが失敗、全幅の要確認の帯に利用者向けの原因と復帰操作が出る。
 
 ### 色・NO_COLOR・ASCII
 
 - AC-43 `NO_COLOR` 設定時、色のSGRが出力されず、すべての状態が記号と単語で区別できる。
 - AC-44 plainモードでSGRが一切出力されず、それでも全状態が区別できる。
-- AC-45 ASCIIモードでは、UIの装飾にASCII以外の文字が使われていない（会話本文は除く）。
-- AC-46 反転表示以外の背景色が使われていない。
+- AC-45 ASCIIモードで7.5の記号がASCIIの代替になる。本文・日本語の見出しは変えない。
+- AC-46 帯・チップ・カード・発言の背景が区画を越えず、NO_COLOR / Plainでは塗りが無い。
 
 ### 安全性と描画品質
 
 - AC-47 外部テキスト由来の制御文字・エスケープ・双方向制御文字が端末に出力されない。
-- AC-48 資格情報の値が表示されず、参照名（provider/ID）のみ表示される。
+- AC-48 認証情報を入力・表示する経路がない。診断では secretguard を適用する。
 - AC-49 ストリーミング中（約33回/秒の更新）に、画面全体が空白になるフレームが見えない（ちらつかない）。
-- AC-50 PgUp / PgDn以外の新規キーが追加されておらず、既存コマンドとショートカットの結果が変わっていない（表示文言を除く）。
+- AC-50 再設計でコマンドとキーの意味を変えず、表示だけを更新する。
+
+---
+
+### ビジュアル場面の検証
+
+`TestVisualWorkPaneFrames` は親1・子7・孫2、子孫が作業中の失敗、終了800件、裏の作業、要確認、承認待ち、動きなしを含むSnapshotを描く。215×50、160×40、120×30、80×24、45×20と、各ビュー・色モードの幅を確認する。
+
+`TestBackgroundActivitySpinsInHeaderChatAndMainCard` は、子だけが作業中の80列・160列と裏のターンのスピナー更新を確認する。
+
+ANSI付きの場面を書き出す場合だけ、次を実行する。
+
+```bash
+UNREAL_AGENT_WRITE_VISUAL=1 go test ./cmd/internal/tui -run '^(TestVisualWorkPaneFrames|TestBackgroundActivitySpinsInHeaderChatAndMainCard)$' -count=1
+```
+
+出力先は `cmd/internal/tui/testdata/visual/*.ans`。通常のテスト実行ではファイルを書き出さない。
 
 ---
 
 ## 付録A. 表示要素とデータの対応
 
-すべて既存のprojectionから得られる。backend / Host APIの変更は不要。
+値は表示用のprojectionから得る。Host APIやSession・Operation・Permissionの意味を変えず、描画のためにHostへsubmitしない。
 
-| UI要素 | 既存の情報源 | 備考 |
+| UI要素・値 | 情報源 | 備考 |
 |---|---|---|
-| セッションID | tui Snapshot.ID | |
-| 接続状態 | tui Model の status / Connected（connecting、connected、disconnected; reconnecting、resync required、gap/disconnect; resyncing） | 文字列を状態に対応づける。2秒閾値は表示上の区別 |
-| ランタイム状態 | Snapshot.Running、host.View.Failure | 未接続時は unknown |
-| elapsed / tokens | viewer Row（親セッション）の Elapsed、Usage（Known / Partial / Input / Output） | 現行のパネル行と同じ値 |
-| 会話エントリ | host.HistoryItem: Input（External / Peer / Control / Crash）、ModelResponse（Message / ToolCall / Failure）、ToolCallStatus、HostRecord | |
-| ツール行の状態 | 最新Operation snapshot。ToolCallStatusの CallID と Operations で呼び出しに対応づける | |
-| ツール行の経過 | viewer OperationRow.Elapsed | Known のときのみ |
-| ツールのtarget | ModelResponse の ToolCall 引数 | 引数名はツール定義に従う（付録B-5） |
-| ドラフト / pulse | Snapshot.Progress（Mode / Text / Attempt / TurnID / Epoch） | |
-| childレーン | viewer Model.Rows: ID、Label、Depth、ParentOperationStatus、Finish、Activity、Usage、Elapsed、NeedsResync、Problem | 現在は Panel が整形済み文字列を返すため、同じ Model の構造化データを使う形に表示側を組み替える（フロントエンド内部のみ） |
-| 選択中child | viewer Model.Selected / `/child ID` | |
-| childの履歴ページ | Panel の transcript（`/child-history`、`/child-next`） | |
-| project instructions | Row.ProjectInstructions（SourceKind / SourcePath / ByteLength / Digest） | 本文は表示しない |
-| 通知 | コマンド結果（commandResult の text / err）、Panel.Command の戻り文字列、Panel の problem | |
-| `/retry` 可否 | TUI の retry、Panel の retry | |
-| 秘匿入力・送信待ち | TUI の private、busy | |
+| セッション名・接続・ランタイム | Snapshot.ID / Connected / Status / OfflineSince / Running / Failure | 接続異常ではヘッダーの状態区画を置き換える |
+| モデル・effort・文脈上限 | Snapshot.Selection（RuntimeSelection） | ContextWindowが0なら不明 |
+| 経過 | メインのviewer.Row.Elapsed | Knownに従う。累計Usageは `/analyze` で見る |
+| 会話 | host.HistoryItemからEntryへ変換 | canonical historyは変更しない |
+| チップの状態・理由・経過 | Receiptと最新Operation、viewer.OperationRow.Elapsed | CallID / OperationIDで照合 |
+| ツールの対象 | viewer.SafeToolTarget | 許可した表示引数だけ |
+| 子の起動 | OperationIntent.OperationIDとRow.ParentOperationID | dispatch_operationをReceiptへ変換 |
+| 子の題名・系統・状態 | viewer.Row.Label / ParentID / Depth / ParentOperationStatus / Finish / NeedsResync | 未観測のActivityは出さない |
+| 子のCreatedAt | Row.CreatedAt（観測したSessionのCreatedAt） | 目印・同じ親の子の順・活動の開始位置 |
+| 直近の活動 | Row.RecentActivity / LastActivityAt | canonical itemのRecordedAtを最新256件の環状バッファに保持。RecentActivityは直近10分、LastActivityAtは観測した最新時刻。transientなProgress等は数えない |
+| Finishの時刻 | viewer.Finish.RecordedAt | 失敗カードの保持とビーズの順 |
+| ドラフト・pulse | Snapshot.Progress / WaitingForModel / LatestAt | 一時表示 |
+| 文脈・速度 | Progress.Statistics、LastGenerationのContextInput()とOutputTPS() | Claudeは最後の呼び出しのContextTokensを優先し、不明な計測値を補わない |
+| 速度履歴 | TUI Modelの8件の環状バッファ、Snapshot.SpeedHistory | 新しいcanonical応答で追加。ページの再読では増やさず、永続化しない |
+| キャッシュ | Snapshot.CacheLatest | 直近の使用量 |
+| 承認待ち | Snapshot.Permissions.Pending | チップの判定と要確認の帯 |
+| 要確認 | 現在のSnapshot.Entries | 最後のあなたの発言以降の【要確認】 |
+| 選択中child・履歴 | viewer.PanelSnapshot.Selected / Transcript | `/child ID` / `/child-history` / `/child-next` |
+| Project Instructions | Row.ProjectInstructions | source・bytes・digestのみ。本文は出さない |
+| 通知・再送 | コマンド結果、TUI / Panelのretry | 表示をcanonical historyに追加しない |
+| 送信待ち | TUIのbusy / outbox | 資格情報の値を出さない |
 
 ## 付録B. 前提と未確定事項
 
 | # | 内容 | 本書での扱い |
 |---|---|---|
-| B-1 | Operation状態 Awaiting / Ready と queued / running の対応 | Awaiting = queued、Ready = running と仮定（viewerがReadyから経過を数えるため）。コード上の意味と違えば対応表だけ直す |
-| B-2 | session failed 後に有効な次の操作 | `/resume` を案内すると仮定。不可なら案内を `/detach` のみにする |
+| B-1 | Operation状態と表示 | awaiting / readyは作業中。ツールの承認待ちはPendingとの照合で判定（7.8） |
+| B-2 | session failed後の案内 | ヘッダーと要確認の帯に失敗を示し、`/resume` を案内する |
 | B-3 | stopped中のプロンプト送信の可否 | 送れるとは約束せず `/resume` を案内する |
-| B-4 | provider / model 名の表示 | 既存Viewにruntime identityがあれば、Wide以上でヘッダー右側に faint で出す。無ければ出さない |
-| B-5 | ツール引数の項目名 | target の選び方（7.8）はツール定義に合わせて実装側で決める |
-| B-6 | Ctrl-Cの即時hard stop | 既存動作のため変更しない。キーバーで常に意味を示すことで誤操作を減らす。確認ステップの追加は将来の検討事項 |
-| B-7 | 曖昧幅を2セルで描く端末の扱い | ASCIIモードを明示的に選べるようにする。設定名は実装側で決める |
-| B-8 | スピナー停止の設定 | 任意。用意する場合は 10.3 に従う |
-| B-9 | 畳んだツール行の展開 | v1では行わない。将来、スクロールバック中の展開などを検討 |
-| B-10 | Finish.Status の語彙 | `success` 以外はそのまま表示する（7.9） |
+| B-4 | provider / model名 | ヘッダーのモデル区画。幅不足では区画ごと省略（7.10） |
+| B-5 | ツール引数の項目名 | viewer.SafeToolTargetで表示する項目を限定（7.8） |
+| B-6 | Ctrl-C | 入力・待機の取消、またはSession停止。Keybarで現在の意味を示す |
+| B-7 | 曖昧幅を2セルで描く端末 | `UNREAL_AGENT_TUI_ASCII=1`（10.4） |
+| B-8 | スピナー停止 | `UNREAL_AGENT_TUI_NO_ANIMATION=1`（10.3） |
+| B-9 | 畳んだチップの展開 | 同じツールの完了件数を表示し、個別展開はしない |
+| B-10 | Finish.Statusの語彙 | success / completedは完了、failure / failed / errorは失敗、それ以外は不明（7.9） |
 
 ## 付録C. UI文言一覧
 
 | 場所 | 文言 |
 |---|---|
-| ヘッダー（接続） | `connecting` / `connected` / `reconnecting` / `disconnected` / `resyncing` |
-| ヘッダー（ランタイム） | `running` / `stopped` / `failed` / `unknown` |
-| pulse | `thinking` / `generating` / `waiting for completed response` / `retrying (attempt {n})` / `running {tool}` / `running {n} tools` |
-| ドック状態行 | `session stopped; /resume continues this session` / `session failed: {failure}` / `reconnecting {since}  session state is unknown until the host answers` / `rebuilding the view from canonical history` |
-| outbox | `sending  {text}` / `storing key for {provider}/{id}` |
-| 通知 | `not confirmed: {err}` ＋ `/retry resends it with the same input ID; it cannot be committed twice` |
+| ヘッダー（接続） | `接続中` / `再接続中` / `切断` / `再同期中`。正常な接続の語は出さない |
+| ヘッダー（ランタイム） | `稼働中` / `裏で作業中 子N` / `入力待ち` / `停止` / `失敗` |
+| pulse | `考え中` / `生成中` / `応答待ち` / `再試行中（N回目）` / `Bash 実行中` / `ツールN件 実行中` |
+| ドック状態行 | `履歴から表示を作り直しています` / `再接続中 12s · 再接続を待っています` / `次のターンから: …` |
+| 要確認の帯 | `{利用者向けの原因と次の操作}` / `承認待ち N件  /permissions` / `要確認  …  ↑ 会話で確認` |
+| ゲージ | `文脈` / `速度` / `キャッシュ` |
+| 裏の作業 | `┄ 裏の作業  Nターン · ツールN回 · 報告 [A][B]` |
+| outbox | `sending  {text}` / （キー登録経路なし） |
+| 通知 | `{利用者向けの原因と次の操作}` ＋ `/retry で安全に再送できます（重複して送信されません）` |
 | 通知 | `stopped waiting; the input may already be committed and will appear above if so` |
 | 通知 | `request pending; ^C cancels waiting` / `no uncertain input to retry` |
-| 通知 | `key entry canceled` / `API key stored; it is checked on the next provider request` / `credential removed` |
 | 通知 | `unknown command {cmd}; type / or /help` / 既存の `usage: …` 文言 |
 | 通知（child） | `sent to {child}; its state updates as it runs` / `child request failed: {err}; /child-retry reuses its input ID` / `parent ownership confirmed; child recovery is owned by the host` |
-| 会話 | `[clipped for display; canonical history retained]` / `earlier entries are not kept on this screen; the host retains the full history` / `connecting to the host` |
-| レーン | `queued` / `running` / `finished: {status}` / `failed` / `canceled` / `ended (no Finish)` / `resync required` |
-| ドック見出し | `{n} running, {n} done, {n} failed  ({n} hidden)` / `/child ID to focus` |
-| プレースホルダー | `Ask, or type / for commands` / `Connecting to the host` / `Offline; you can keep typing` / `Session stopped; /resume continues it` / `Session failed; see above` / `Type or paste the key; it stays masked` / `Message {session}, or /child-send TEXT for {child}` |
-| Ruleラベル | `private: API key for {provider}/{id}` / `pasted: sent as text, not as a command` / `commands` / `scrollback: {n} lines below; PgDn returns` / `focus {child}` / `+{n} lines` / `{n} KB of 64 KB` |
+| 会話 | `[表示を省略。全文は履歴に残っています]` / `前の会話があります。PgUp で読み込めます` / `古い履歴を読み込み中` / `ここが会話の始まり` / `connecting to the host` |
+| カード・チップの状態 | `作業中` / `取消中` / `承認待ち` / `完了` / `失敗` / `取消` / `終了` / `不明` |
+| カード | `◆ メイン` / `動きなし N分` / `⠹ 待機中（子 N件 作業中）` / `＋N 件  /view orchestration` |
+| ビーズ | `終了 ✓✓✗✓⊘  ほか N` |
+| 子のドック | `子 [A]▸ [B]✗  作業中 N · 失敗 N`。不明な子があれば `不明 N` |
+| プレースホルダー | `Ask, or type / for commands` / `Connecting to the host` / `Offline; you can keep typing` / `Session stopped; /resume continues it` / `Session failed; see above` / `Message {session}, or /child-send TEXT for {child}` |
+| Ruleラベル | `pasted: Enter submits; registered commands run` / `commands` / `scrollback: {n} lines below; PgDn returns` / `focus {child}` / `+{n} lines` |
+
+
+### ログイン・診断の追加受入
+
+- `/login` はサブスクのログイン方法を示し、APIキー・IDを要求しない。
+- 起動できない場合は接続先別に `codex login` / `claude` → `/login` を案内する。
+  CLIがなければ Codex CLI / Claude Code のインストールが必要と示す。
+- `/model refresh` と未利用側の選択で再検出し、Host再起動なしで選択可能になる。
+- 認証・接続先の失敗後は停止中でも `/model` → `/resume` で復帰できる。
+- 子だけが作業中・裏のターンの応答待ち/生成/ツール実行中はヘッダーとpulseが動く。
+  裏のターン中は最後の「裏の作業」の先頭、子待機中はメインカードにもスピナーがある。
+- 何もしていなければ band.neutral の「入力待ち」。経過時間の省略規則は従来どおり。
+- 通常画面から省いた内部コード・原因は、資格情報を除去してログ・`/analyze` に残る。

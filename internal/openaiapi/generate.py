@@ -113,11 +113,6 @@ def prepare_spec(spec: dict) -> dict:
 
 
 def main() -> None:
-    if yaml.__version__ != "6.0.3":
-        raise SystemExit(
-            "OpenAPI generation requires PyYAML==6.0.3; "
-            "see third_party/openai-openapi/README.md for the isolated environment."
-        )
     directory = Path(__file__).resolve().parent
     source = directory / "../../third_party/openai-openapi/openapi.yaml"
     with source.open() as original:

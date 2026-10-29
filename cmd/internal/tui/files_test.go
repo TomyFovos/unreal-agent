@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/tui/filesearch"
-	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
@@ -64,9 +63,8 @@ func TestFileMentionAndInsertionUnicodeQuotesMultilineAndSuffix(t *testing.T) {
 	var e Editor
 	e.Apply(Key{Text: strings.Repeat("x", 65530) + " @"})
 	m, _ := mentionAt(e.Text(), e.cursor)
-	before := e.Text()
-	if insertFileMention(&e, m, "too-long-to-fit.txt") || e.Text() != before {
-		t.Fatal("composer limit not atomic")
+	if !insertFileMention(&e, m, "too-long-to-fit.txt") || !strings.HasSuffix(e.Text(), " too-long-to-fit.txt ") {
+		t.Fatal("long composer lost inserted path")
 	}
 }
 
@@ -137,7 +135,7 @@ func TestFileCompletionCancelStaleResultsQueryGenerationAndReconnect(t *testing.
 	}
 	// New query starts a new scan; the previous generation's result is ignored.
 	f.scan = func(ctx context.Context, r string) (filesearch.Result, error) {
-		return filesearch.Scan(ctx, r, filesearch.DefaultLimits())
+		return filesearch.Scan(ctx, r)
 	}
 	e.Apply(Key{Text: "b"})
 	f.sync(s, &u, &e)
@@ -197,7 +195,7 @@ func TestFileCompletionPastePrivateModalBusyAndMissingWorkspace(t *testing.T) {
 	if !f.key(Key{Name: "enter"}, &u, &e, 80, 24) || e.Text() != "@" {
 		t.Fatal("unavailable file picker fell through to submit")
 	}
-	for _, state := range []UIState{{Busy: true}, {Private: &credential.Reference{}}, {Sheet: &Sheet{}}, {Picker: &Picker{Kind: "view"}}} {
+	for _, state := range []UIState{{Busy: true}, {Sheet: &Sheet{}}, {Picker: &Picker{Kind: "view"}}} {
 		u = state
 		f.sync(s, &u, &e)
 		if f.picker != nil || u.Picker != nil && u.Picker.Kind == "file" {
@@ -206,7 +204,7 @@ func TestFileCompletionPastePrivateModalBusyAndMissingWorkspace(t *testing.T) {
 	}
 }
 
-func TestFilePickerTinyConfirmationAndCandidateReplacementAreFailClosed(t *testing.T) {
+func TestFilePickerInsertsIndexedNameAfterCandidateReplacement(t *testing.T) {
 	root := t.TempDir()
 	fileFixture(t, root, "safe.txt")
 	var e Editor
@@ -217,11 +215,8 @@ func TestFilePickerTinyConfirmationAndCandidateReplacementAreFailClosed(t *testi
 	f.mention, _ = mentionAt(e.Text(), e.cursor)
 	f.picker = &Picker{Kind: "file", Options: []string{"safe.txt"}}
 	u.Picker = f.picker
-	if !f.key(Key{Name: "enter"}, &u, &e, 16, 8) || e.Text() != "@safe" || f.picker == nil {
-		t.Fatal("Tiny blind confirmation")
-	}
-	if !f.key(Key{Name: "tab"}, &u, &e, 80, 24) || e.Text() != "safe.txt " || u.Picker != nil {
-		t.Fatal("resized confirmation", e.Text())
+	if !f.key(Key{Name: "enter"}, &u, &e, 16, 8) || e.Text() != "safe.txt " || u.Picker != nil {
+		t.Fatal("small terminal failed to insert", e.Text())
 	}
 	e.replace("@safe")
 	f.mention, _ = mentionAt(e.Text(), e.cursor)
@@ -233,8 +228,8 @@ func TestFilePickerTinyConfirmationAndCandidateReplacementAreFailClosed(t *testi
 	if err := os.Symlink(filepath.Join(t.TempDir(), "outside"), filepath.Join(root, "safe.txt")); err != nil {
 		t.Fatal(err)
 	}
-	if !f.key(Key{Name: "enter"}, &u, &e, 80, 24) || e.Text() != "@safe" || len(u.Picker.Options) != 0 {
-		t.Fatal("stale symlink inserted")
+	if !f.key(Key{Name: "enter"}, &u, &e, 80, 24) || e.Text() != "safe.txt " {
+		t.Fatal("indexed filename was not inserted")
 	}
 }
 
@@ -267,23 +262,17 @@ func TestFileCompletionWorkerDetachAndSearchDeadline(t *testing.T) {
 	f.picker = &Picker{Kind: "file"}
 	u.Picker = f.picker
 	f.search = func(ctx context.Context, _ filesearch.Index, _ string) ([]filesearch.Match, error) {
-		if _, ok := ctx.Deadline(); !ok {
-			return nil, errors.New("missing deadline")
+		if _, ok := ctx.Deadline(); ok {
+			return nil, errors.New("unexpected fixed deadline")
 		}
 		return nil, context.DeadlineExceeded
 	}
 	f.startSearch()
 	f.apply(<-f.events)
-	if len(u.Picker.Options) != 0 || !strings.Contains(u.Picker.Hint, "limit reached") {
+	if len(u.Picker.Options) != 0 || !strings.Contains(u.Picker.Hint, "search failed") {
 		t.Fatal(u.Picker)
 	}
-	expired, stop := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
-	defer stop()
-	f.deliver(expired, fileEvent{id: f.searchID, err: context.DeadlineExceeded})
-	f.apply(<-f.events)
-	if !strings.Contains(u.Picker.Hint, "limit reached") {
-		t.Fatal("search timeout vanished")
-	}
+
 }
 
 func TestFileDecoderBracketedPasteDoesNotConfirmBeforeEnter(t *testing.T) {
@@ -342,7 +331,7 @@ func startFileUXRun(t *testing.T, root string) *fileUXRun {
 			t.Error("file search prevented detach")
 		}
 	})
-	waitFor(t, func() bool { return strings.Contains(r.visible(), "running") })
+	waitFor(t, func() bool { return strings.Contains(r.visible(), "入力待ち") })
 	return r
 }
 
@@ -388,7 +377,7 @@ func TestFileComposerSlashCommandPasteEscapeAndResizeSplit(t *testing.T) {
 	r := startFileUXRun(t, root)
 	r.keys <- Key{Text: "/view split"}
 	r.keys <- Key{Name: "enter"}
-	waitFor(t, func() bool { return strings.Contains(r.visible(), "Orchestration") })
+	waitFor(t, func() bool { return strings.Contains(r.visible(), "◆ メイン") })
 	r.keys <- Key{Text: "/children start worker -- inspect\n@src/ma", Paste: true}
 	waitFor(t, func() bool { return strings.Contains(r.visible(), "Enter/Tab insert path") })
 	r.keys <- Key{Name: "down"}
@@ -449,5 +438,19 @@ func TestFilePickerResponsivePlainASCIIAndRightEdge(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestComposerPreservesInputBeyondFormerLimits(t *testing.T) {
+	text := strings.Repeat("x", (4<<20)+1)
+	var editor Editor
+	editor.Apply(Key{Text: text, Paste: true})
+	if got := editor.Expanded(); got != text {
+		t.Fatalf("paste lost input: got %d bytes", len(got))
+	}
+	var typed Editor
+	typed.Apply(Key{Text: strings.Repeat("x", 65537)})
+	if len(typed.Text()) != 65537 {
+		t.Fatal("typed input lost")
 	}
 }

@@ -54,7 +54,8 @@ class CommonDevelopmentTests(unittest.TestCase):
                 return json.dumps(reply).encode(),0
             return original(argv, env, **kwargs)
         original = pilot.bounded_probe
-        with patch.dict(os.environ, self.env, clear=True), patch.object(pilot, "bounded_probe", side_effect=probe), contextlib.redirect_stdout(io.StringIO()):
+        self.install_output = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=True), patch.object(pilot, "bounded_probe", side_effect=probe), contextlib.redirect_stdout(self.install_output):
             common.install(self.args, self.package, self.meta)
         return common.read_settings(self.home)
 
@@ -89,9 +90,6 @@ class CommonDevelopmentTests(unittest.TestCase):
         for p, data in first.items(): self.assertEqual(p.read_bytes(), data)
         self.assertEqual(sentinel.read_bytes(), b"PRIVATE_DO_NOT_READ")
         self.assertEqual(old_state.read_bytes(), b"KEEP_HISTORY")
-        self.assertTrue(s["TrustManagedPolicy"])
-        self.assertFalse(s["PolicyAudited"])
-        self.assertEqual(s["TrustSource"], "install-consent")
         self.assertEqual(s["CodexRoute"], "external")
         self.assertNotIn("Model", s); self.assertNotIn("Effort", s)
         self.assertEqual(common.settings_path(self.home).stat().st_mode & 0o777, 0o600)
@@ -115,6 +113,78 @@ class CommonDevelopmentTests(unittest.TestCase):
                 with patch.object(pilot, "bounded_probe", return_value=(json.dumps(reply).encode(), 0)), self.assertRaises(pilot.PilotError):
                     common.preflight(settings)
 
+    def test_subagent_launcher_keeps_path_and_updates_target(self):
+        settings = self.install()
+        command = self.home / ".local/bin/unreal-agent"
+        first = command.read_bytes()
+        self.assertEqual(first, common.agent_wrapper(Path(settings["BinaryDirectory"])))
+        # Publish a new kit identity through the actual install path.
+        (self.package / "SHA256SUMS").write_bytes(b"new kit identity\n")
+        updated = self.install()
+        self.assertNotEqual(settings["BinaryDirectory"], updated["BinaryDirectory"])
+        self.assertEqual(command.read_bytes(), common.agent_wrapper(Path(updated["BinaryDirectory"])))
+        self.assertEqual(command.stat().st_mode & 0o777, 0o700)
+        target = Path(updated["BinaryDirectory"]) / "unreal-agent"
+        target.write_text('#!/bin/bash\nprintf "%s\\n" "$@"\n')
+        target.chmod(0o700)
+        result = subprocess.run([str(command), "subagent", "show", "child id"], capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.splitlines(), ["subagent", "show", "child id"])
+
+    def test_install_keeps_current_previous_and_running_version(self):
+        previous = Path(self.install()["BinaryDirectory"])
+        base = previous.parent
+        running = base / ("b" * 7 + "-" + "b" * 16)
+        obsolete = base / ("c" * 7 + "-" + "c" * 16)
+        running.mkdir(); obsolete.mkdir()
+        (obsolete / "unused").write_bytes(b"obsolete kit\n" * 1000)
+        freed = common.allocated_bytes(obsolete)
+        script = running / "launcher.py"
+        script.write_text("import time\ntime.sleep(60)\n")
+        process = subprocess.Popen([sys.executable, str(script)])
+        try:
+            (self.package / "SHA256SUMS").write_bytes(b"updated kit\n")
+            current = Path(self.install()["BinaryDirectory"])
+            self.assertEqual({p for p in base.iterdir() if p.is_dir()}, {previous, running, current})
+            self.assertIn(f"旧版を削除: {obsolete.name}（{freed / 1e6:.0f} MB 解放）", self.install_output.getvalue())
+            self.assertEqual(common.read_settings(self.home)["PreviousBinaryDirectory"], str(previous))
+            # Reinstalling the same kit must not discard its rollback version.
+            self.install()
+            self.assertTrue(previous.is_dir())
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+    def test_cleanup_preserves_executable_mapping_and_does_not_follow_symlinks(self):
+        current = Path(self.install()["BinaryDirectory"])
+        base = current.parent
+        running = base / ("d" * 7 + "-" + "d" * 16)
+        running.mkdir()
+        executable = running / "sleeper"
+        shutil.copy2(shutil.which("sleep"), executable)
+        outside = self.home / "outside"; outside.mkdir()
+        (outside / "keep").write_text("keep")
+        alias = base / ("e" * 7 + "-" + "e" * 16)
+        alias.symlink_to(outside, target_is_directory=True)
+        # Supply a different argv[0], so only /proc/PID/exe identifies the kit.
+        process = subprocess.Popen(["kit-sleeper", "60"], executable=str(executable))
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                common.prune_versions(self.home, current, None)
+            self.assertTrue(running.is_dir())
+            self.assertTrue(alias.is_symlink())
+            self.assertEqual((outside / "keep").read_text(), "keep")
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+    def test_previous_version_can_come_from_workspace_choice(self):
+        installed = self.home / ".local/opt/unreal-agent-pilot/common/new"
+        prior = installed.parent / "old"
+        choice = self.home / ".config" / common.NAMESPACE / "repos/r-test/current.json"
+        choice.parent.mkdir(parents=True)
+        choice.write_text(json.dumps({"BinaryDirectory": str(prior)}))
+        self.assertEqual(common.previous_version(self.home, installed, None), prior)
+
     def test_unrelated_command_alias_function_and_symlink_preserved(self):
         for kind in ("command", "symlink", "alias", "function"):
             with self.subTest(kind=kind):
@@ -131,7 +201,7 @@ class CommonDevelopmentTests(unittest.TestCase):
                 if kind in ("command", "symlink"): command.unlink()
                 else: (self.home / ".bashrc").unlink()
 
-    def test_owned_update_requires_optin_private_backup_and_config_preservation(self):
+    def test_owned_update_needs_no_optin_or_backup_and_preserves_config(self):
         s = self.install(); root = self.repo()
         p = common.prepare_repo(s, root, "default")
         config = {"Runtime": {"Workspace": str(root)}, "Launcher": {"Version": 1}}
@@ -139,28 +209,20 @@ class CommonDevelopmentTests(unittest.TestCase):
         p["config"].write_text(json.dumps(config)); p["config"].chmod(0o600)
         original = p["config"].read_bytes()
         self.args.docker_sandbox_oauth = True
-        with self.assertRaises(pilot.PilotError): self.install()
-        self.args.replace_pilot_launcher = True
         new = self.install()
         self.assertTrue(new["DockerOAuth"])
         self.assertEqual(p["config"].read_bytes(), original)
         backups = common.settings_path(self.home).parent / "backups"
-        self.assertTrue(list(backups.glob("*.json")))
-        for f in backups.iterdir(): self.assertEqual(f.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(backups.exists())
 
-    def test_audit_alone_is_not_trust_and_installation_never_fabricates_audit(self):
+    def test_obsolete_audit_flags_do_not_block_or_reach_native(self):
         self.args.policy_audited, self.args.trust_managed_policy = True, False
-        with patch.dict(os.environ, self.env, clear=True), patch.object(pilot, "bounded_probe") as probe, self.assertRaises(pilot.PilotError):
-            common.install(self.args, self.package, self.meta)
-        probe.assert_not_called()
-        self.args.policy_audited = self.args.trust_managed_policy = True
-        s = self.install()
-        self.assertTrue(s["PolicyAudited"] and s["TrustManagedPolicy"])
-        self.assertEqual(s["TrustSource"], "legacy-opt-in")
+        settings = self.install()
+        for key in ("PolicyAudited", "TrustManagedPolicy", "TrustSource", "CommandHash"):
+            self.assertNotIn(key, settings)
         self.assertNotIn("--claude-policy-audited", self.preflight_calls[-1])
-        self.assertNotIn("legacy-opt-in", self.preflight_calls[-1])
 
-    def test_exact_legacy_daily_wrapper_requires_optin_and_keeps_history(self):
+    def test_legacy_daily_wrapper_updates_without_optin_and_keeps_history(self):
         old_directory = self.home / "old-kit"
         old = daily.wrapper(old_directory)
         settings = {"Version": 1, "Sandbox": "asp", "Home": str(self.home),
@@ -176,13 +238,9 @@ class CommonDevelopmentTests(unittest.TestCase):
         history = self.home / ".local/state/unreal-agent-dev/asp/old-session"
         history.parent.mkdir(parents=True); history.write_bytes(b"KEEP_OLD_CANONICAL_HISTORY")
         before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (history, daily.settings_path(self.home, "asp"))}
-        with self.assertRaises(pilot.PilotError): self.install()
-        self.assertEqual(command.read_bytes(), old)
-        self.args.replace_pilot_launcher = True
         self.install()
         self.assertNotEqual(command.read_bytes(), old)
-        backup = common.settings_path(self.home).parent / "backups" / (hashlib.sha256(old).hexdigest() + ".sh")
-        self.assertEqual(backup.read_bytes(), old)
+        self.assertFalse((common.settings_path(self.home).parent / "backups").exists())
         self.assertEqual({p: (p.read_bytes(), p.stat().st_mtime_ns) for p in before}, before)
 
     def test_quickstart_pty_launches_without_enter_or_generated_approval(self):
@@ -206,6 +264,8 @@ class CommonDevelopmentTests(unittest.TestCase):
                 except OSError: break
         self.assertEqual(process.wait(timeout=10), 0)
         self.assertIn(b"Quick Start", output)
+        self.assertIn("Full Access は OS の隔離ではありません。".encode(), output)
+        self.assertNotIn("Git公開".encode(), output)
         self.assertNotIn("[Enterで起動]".encode(), output)
         self.assertNotIn(b"# Unreal Agent", output, "detailed README must not display automatically")
         p = common.repo_paths(self.home, root, "read-instructions")
@@ -255,10 +315,10 @@ class CommonDevelopmentTests(unittest.TestCase):
                 common.launch(args, self.package)
             execute.assert_not_called(); prompt.assert_not_called(); setattr(args, mode, False)
 
-    def test_opaque_bad_metadata_and_package_redirect_are_not_accepted(self):
+    def test_invalid_instance_and_package_io_report_causes(self):
         with self.assertRaises(pilot.PilotError): common.repo_paths(self.home, self.home / "repo", "../old")
-        (self.package / "KIT.json").write_text('{}')
-        with self.assertRaises(pilot.PilotError): common.package(self.package)
+        (self.package / "KIT.json").unlink()
+        with self.assertRaises(FileNotFoundError): common.package(self.package)
 
     def configure(self, *, docker=False, external=False, disabled=False, trust=False, disable_claude=False):
         self.args.configure_providers = True
@@ -275,7 +335,6 @@ class CommonDevelopmentTests(unittest.TestCase):
         settings = self.install()
         self.assertEqual(settings["CodexRoute"], "external")
         self.assertIn("--codex-auto", self.preflight_calls[-1])
-        self.assertFalse(settings["PolicyAudited"])
         settings=self.configure(docker=True,trust=True)
         self.assertEqual(settings["CodexRoute"],"docker")
         self.assertEqual(settings["ClaudeDecision"],"enabled")
@@ -290,7 +349,6 @@ class CommonDevelopmentTests(unittest.TestCase):
         self.assertEqual(common.settings_path(self.home).read_bytes(),before)
         settings=self.configure(external=True,disable_claude=True)
         self.assertFalse(settings["DockerOAuth"])
-        self.assertFalse(settings["TrustManagedPolicy"])
         self.assertEqual(settings["ProviderStatus"][1]["Reason"],"operator_disabled")
         # Decisions belong to this HOME; an unchanged setup is idempotent.
         kept=(common.settings_path(self.home).read_bytes(),common.settings_path(self.home).stat().st_mtime_ns)
@@ -304,9 +362,6 @@ class CommonDevelopmentTests(unittest.TestCase):
         prompt.assert_not_called()
         with patch.object(common,"provider_choices",return_value=choices): settings=self.install()
         self.assertEqual(settings["CodexRoute"],"external")
-        self.assertFalse(settings["PolicyAudited"])
-        self.assertTrue(settings["TrustManagedPolicy"])
-        self.assertEqual(settings["TrustSource"], "install-consent")
         self.assertNotIn("install-consent",self.preflight_calls[-1])
         self.assertNotIn("--claude-policy-audited",self.preflight_calls[-1])
 
@@ -335,13 +390,12 @@ class CommonDevelopmentTests(unittest.TestCase):
                 before={p:(p.read_bytes(),p.stat().st_mtime_ns) for p in (paths["config"],history)}
                 settings=self.configure(docker=True,trust=True)
                 self.assertFalse((paths["root"] / "current.json").exists())
-                # A changed profile starts a new instance without a question,
-                # also without a terminal, and leaves the old one intact.
+                # Configuration changes keep the workspace's instance and files.
                 selected=common.select_repo(settings,root,None)
-                self.assertNotEqual(selected["config"],paths["config"])
-                self.assertNotEqual(selected["state"],paths["state"])
-                self.assertNotEqual(selected["socket"],paths["socket"])
-                self.assertFalse(selected["config"].exists()) # native bootstrap remains sole runtime writer
+                self.assertEqual(selected["config"],paths["config"])
+                self.assertEqual(selected["state"],paths["state"])
+                self.assertEqual(selected["socket"],paths["socket"])
+                self.assertTrue(selected["config"].exists())
                 repeated=common.select_repo(settings,root,None)
                 self.assertEqual(repeated,selected)
                 self.assertEqual({p:(p.read_bytes(),p.stat().st_mtime_ns) for p in before},before)
@@ -351,8 +405,30 @@ class CommonDevelopmentTests(unittest.TestCase):
                 argv=common.command_for(settings,root,selected,"same-session-name")
                 self.assertIn("--bootstrap-codex-docker-oauth",argv); self.assertNotIn("--bootstrap-claude-trust-source",argv)
                 choice=common.read_workspace_choice(paths["root"] / "current.json",root)
-                self.assertEqual(choice["Previous"][0]["Instance"],"default")
-                self.assertEqual(choice["Previous"][0]["ConfigHash"],hashlib.sha256(before[paths["config"]][0]).hexdigest())
+                self.assertEqual(choice["Instance"], "default")
+                self.assertNotIn("Previous", choice)
+                self.assertNotIn("ConfigHash", choice)
+
+    def test_build_update_keeps_the_instance_and_restarts_its_host(self):
+        settings=self.configure(external=True,trust=True);root=self.repo()
+        one=common.select_repo(settings,root,None)
+        route=settings.get("CodexRoute","docker" if settings["DockerOAuth"] else "external")
+        config={"Launcher":{"Version":1,"CodexDockerSandboxOAuth":settings["DockerOAuth"],"CodexAuto":route=="auto","CodexDisabled":route=="disabled",
+                            "ClaudeDisabled":settings.get("ClaudeDecision")=="disabled","ClaudeBinary":settings["ClaudeBinary"]},
+                "Runtime":{"Workspace":str(root),"Provider":{}},"Providers":{}}
+        one["config"].parent.mkdir(parents=True,exist_ok=True)
+        one["config"].write_text(json.dumps(config));one["config"].chmod(0o600)
+        self.assertEqual(common.select_repo(settings,root,None),one)
+        stopped=[]
+        original=common.stop_old_host;common.stop_old_host=lambda paths: stopped.append(paths["config"])
+        try:
+            updated=dict(settings,Revision="f"*40)
+            self.assertEqual(common.select_repo(updated,root,None),one)
+        finally:
+            common.stop_old_host=original
+        self.assertEqual(stopped,[one["config"]])
+        choice=common.read_workspace_choice(one["root"] / "current.json",root)
+        self.assertEqual(choice["Revision"],"f"*40)
 
     def test_workspace_profile_fresh_idempotent_and_availability_not_identity(self):
         settings=self.configure(external=True,trust=True);root=self.repo()
@@ -377,15 +453,13 @@ class CommonDevelopmentTests(unittest.TestCase):
         with self.assertRaises(pilot.PilotError):
             common.validate_status([{"ID":"openai-codex","Availability":"available","Reason":""},{"ID":"claude-native","Availability":"available","Reason":""}])
 
-    def test_effective_profile_compares_the_claude_executable(self):
-        settings=self.configure(external=True,trust=True)
-        config={"Runtime":{"Provider":{"provider":"claude"}},"Providers":{},"Launcher":{"Version":1}}
-        self.assertTrue(common.effective_profile_matches(config,settings))
-        config["Launcher"]["ClaudeBinary"]="/opt/claude"
-        self.assertFalse(common.effective_profile_matches(config,settings),"a different Claude executable is a different instance")
-        self.assertTrue(common.effective_profile_matches(config,dict(settings,ClaudeBinary="/opt/claude")))
+    def test_provider_profile_ignores_retired_audit_settings(self):
+        settings = self.configure(external=True, trust=True)
+        changed = dict(settings, PolicyAudited=True, TrustManagedPolicy=False, TrustSource="old")
+        self.assertEqual(common.provider_profile(changed), common.provider_profile(settings))
+        self.assertNotEqual(common.provider_profile(dict(settings, ClaudeBinary="/opt/claude")), common.provider_profile(settings))
 
-    def test_native_config_capture_is_idempotent_and_changed_config_starts_a_new_instance(self):
+    def test_changed_native_config_keeps_the_same_instance(self):
         settings=self.configure(external=True,trust=True);root=self.repo()
         paths=common.select_repo(settings,root,None)
         paths["config"].parent.mkdir(parents=True,exist_ok=True)
@@ -402,58 +476,43 @@ class CommonDevelopmentTests(unittest.TestCase):
         paths["config"].write_text(json.dumps(config))
         old=(paths["config"].read_bytes(),paths["config"].stat().st_mtime_ns)
         changed=common.select_repo(settings,root,None)
-        self.assertNotEqual(changed["config"],paths["config"])
-        self.assertEqual(common.read_workspace_choice(choice,root)["Previous"][0]["Instance"],"default")
+        self.assertEqual(changed["config"],paths["config"])
+        self.assertEqual(common.read_workspace_choice(choice,root)["Instance"],"default")
         self.assertEqual((paths["config"].read_bytes(),paths["config"].stat().st_mtime_ns),old)
 
-    def test_v1_v2_migration_preserves_route_reject_and_instance_without_audit_claim(self):
-        for version in (1, 2):
-            for trusted in (False, True):
-                with self.subTest(version=version, trusted=trusted):
-                    self.args.policy_audited = self.args.trust_managed_policy = trusted
-                    self.args.replace_pilot_launcher = True
-                    saved = self.install()
-                    old = {k: saved[k] for k in (common.KEYS if version == 1 else common.CONFIGURED_KEYS)}
-                    old.update(Version=version, PolicyAudited=trusted, TrustManagedPolicy=trusted)
-                    path = common.settings_path(self.home)
-                    old_bytes = (json.dumps(old, indent=2) + "\n").encode()
-                    path.write_bytes(old_bytes)
-                    root = self.repo("workspace/v%d-%s" % (version, trusted))
-                    paths = common.select_repo(old, root, None)
-                    choice = paths["root"] / "current.json"
-                    before = (choice.read_bytes(), choice.stat().st_mtime_ns)
-                    self.args.policy_audited = self.args.trust_managed_policy = False
-                    self.args.configure_providers = True
-                    with patch("builtins.input", side_effect=AssertionError("no setup questions")):
-                        migrated = self.install()
-                    self.assertEqual(migrated["Version"], 3)
-                    self.assertEqual(migrated["CodexRoute"], old.get("CodexRoute", "external"))
-                    self.assertEqual(migrated["TrustManagedPolicy"], trusted)
-                    self.assertEqual(migrated["TrustSource"], "legacy-opt-in" if trusted else "")
-                    self.assertNotIn("--claude-policy-audited", self.preflight_calls[-1])
-                    self.assertEqual(common.select_repo(migrated, root, None), paths)
-                    self.assertEqual((choice.read_bytes(), choice.stat().st_mtime_ns), before)
-                    backup = path.parent / "backups" / (hashlib.sha256(old_bytes).hexdigest() + ".json")
-                    self.assertEqual(backup.read_bytes(), old_bytes)
+    def test_legacy_settings_and_workspace_choice_remain_readable(self):
+        saved = self.install()
+        root = self.repo()
+        paths = common.prepare_repo(saved, root, "p-existing")
+        paths["config"].parent.mkdir(parents=True, exist_ok=True)
+        config = {"Runtime": {"Workspace": str(root)}, "Launcher": {"Version": 1}}
+        paths["config"].write_text(json.dumps(config)); paths["config"].chmod(0o600)
+        default = common.prepare_repo(saved, root, "default")
+        current = default["root"] / "current.json"
+        old_choice = {"Version": 1, "Workspace": str(root), "Instance": "p-existing",
+                      "Profile": "a"*64, "ConfigHash": "b"*64, "Previous": [{}]*40,
+                      "Revision": saved["Revision"], "BinaryDirectory": saved["BinaryDirectory"]}
+        current.write_text(json.dumps(old_choice)); current.chmod(0o600)
+        for version in (1, 2, 3):
+            old = dict(saved, Version=version, PolicyAudited=False, TrustManagedPolicy=True,
+                       TrustSource="legacy-value", CommandHash="outdated")
+            common.settings_path(self.home).write_text(json.dumps(old))
+            restored = common.read_settings(self.home)
+            self.assertEqual(restored["Version"], version)
+            with patch.object(common, "stop_old_host"):
+                self.assertEqual(common.select_repo(restored, root, None), paths)
+            self.assertEqual(json.loads(paths["config"].read_bytes()), config)
+        # Reformatting runtime.json never selects another history directory.
+        paths["config"].write_text(json.dumps(config, indent=4))
+        self.assertEqual(common.select_repo(saved, root, None), paths)
 
-    def test_binding_copy_wrong_provenance_redirect_and_concurrent_update_fail_closed(self):
-        saved = self.install(); path = common.settings_path(self.home)
-        original = path.read_bytes()
-        for update in ({"Home": "/other-sandbox"}, {"TrustSource": "policy-audited"},
-                       {"PolicyAudited": True}, {"TrustSource": ""}, {"CodexRoute": "docker"}):
-            with self.subTest(update=update):
-                path.write_text(json.dumps(dict(saved, **update)))
-                with self.assertRaises(pilot.PilotError): common.read_settings(self.home)
-                path.write_bytes(original)
-        target = self.home / "copied-binding"; target.write_bytes(original); target.chmod(0o600)
+    def test_private_settings_redirect_remains_protected(self):
+        self.install()
+        path = common.settings_path(self.home)
+        target = self.home / "copied-binding"
+        target.write_bytes(path.read_bytes()); target.chmod(0o600)
         path.unlink(); path.symlink_to(target)
         with self.assertRaises(OSError): common.read_settings(self.home)
-        path.unlink(); path.write_bytes(original); path.chmod(0o600)
-        with patch.dict(os.environ, self.env, clear=True), patch.object(common, "read_settings", side_effect=[saved, dict(saved, TrustManagedPolicy=False)]), self.assertRaises(pilot.PilotError):
-            common.install(self.args, self.package, self.meta)
-        self.assertEqual(path.read_bytes(), original)
-
-
 
 @unittest.skipUnless(os.environ.get("UNREAL_COMMON_KIT_DIRECTORY"),
                      "set UNREAL_COMMON_KIT_DIRECTORY for final common-archive installer/doctor checks")
@@ -527,3 +586,48 @@ class CommonSnapshotTests(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
+
+class InstallGuidanceTests(unittest.TestCase):
+    def test_four_login_states(self):
+        for codex, claude in ((True, False), (False, True), (False, False), (True, True)):
+            with self.subTest(codex=codex, claude=claude):
+                statuses = [{"ID": provider, "Availability": "available" if ready else "unavailable", "Reason": "" if ready else "auth_required"}
+                            for provider, ready in (("openai-codex", codex), ("claude", claude))]
+                output = io.StringIO()
+                with patch.object(common, "shell_masks_unreal", return_value=False), contextlib.redirect_stdout(output):
+                    common.print_install_result({"ProviderStatus": statuses}, Path("/tmp/synthetic-home"))
+                text = output.getvalue()
+                self.assertTrue(text.startswith("インストール完了\n"))
+                self.assertIn("Codex: " + ("利用できます" if codex else "ログインが必要です"), text)
+                self.assertIn("Claude: " + ("利用できます" if claude else "ログインが必要です"), text)
+                self.assertEqual("codex login" in text, not codex)
+                self.assertEqual("claude を起動して /login" in text, not claude)
+                self.assertEqual("使うにはどちらかの準備" in text, not codex and not claude)
+                self.assertEqual("Claude の操作は" in text, claude)
+                for hidden in ("auth_required", "unavailable", "aliases/functions", "NOTE:"):
+                    self.assertNotIn(hidden, text)
+
+    def test_missing_clis_and_actual_shadow_only(self):
+        settings = {"ProviderStatus": [{"ID": p, "Availability": "unavailable", "Reason": "cli_missing_or_unsupported"}
+                                      for p in ("openai-codex", "claude")]}
+        for masked in (True, False):
+            output = io.StringIO()
+            with patch.object(common, "shell_masks_unreal", return_value=masked), contextlib.redirect_stdout(output):
+                common.print_install_result(settings, Path("/tmp/synthetic-home"))
+            text = output.getvalue()
+            for word in ("をインストールしてから", "Codex CLI", "Claude Code", "unreal を起動"):
+                self.assertIn(word, text)
+            self.assertEqual("type -a unreal" in text, masked)
+        with patch.object(pilot, "bounded_probe", return_value=(b"UNREAL_MASKED:no\n", 0)) as probe:
+            self.assertFalse(common.shell_masks_unreal(Path("/tmp/synthetic-home")))
+            self.assertIn("type -a unreal", probe.call_args.args[0][-3])
+        with patch.object(pilot, "bounded_probe", return_value=(b"UNREAL_MASKED:yes\n", 0)):
+            self.assertTrue(common.shell_masks_unreal(Path("/tmp/synthetic-home")))
+
+    def test_kit_readme_matches_current_updates(self):
+        text = (Path(__file__).parent / "pilot/common-README.md").read_text()
+        for word in ("どちらか一方", "codex login", "claude", "/login", "再起動", "会話と設定を引き継"):
+            self.assertIn(word, text)
+        for old in ("別instanceで新規Session", "wait`", "--timeout 60s", "子に渡したらターンを終え"):
+            self.assertNotIn(old, text)

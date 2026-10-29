@@ -2,8 +2,10 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
@@ -11,15 +13,23 @@ import (
 )
 
 func children(u UIState, s Snapshot) []viewer.Row {
+	if u.index != nil {
+		return u.index.children
+	}
 	var rows []viewer.Row
+	parents := make(map[session.ID]viewer.Liveness, len(u.Viewer.Rows))
 	parentResync := false
 	for _, r := range u.Viewer.Rows {
+		parents[r.ID] = r.Runtime
 		if r.ID == s.ID && r.NeedsResync {
 			parentResync = true
 		}
 	}
 	for _, r := range u.Viewer.Rows {
 		if r.ID != s.ID && r.ParentID != "" {
+			if runtime := parents[r.ParentID]; runtime != "" {
+				r.ParentRuntime = runtime
+			}
 			if parentResync {
 				r.NeedsResync = true
 			}
@@ -40,6 +50,8 @@ func focus(u UIState, s Snapshot) session.ID {
 	return ""
 }
 func observed(r viewer.Row) bool { return r.Generation != "" || r.Cursor > 0 }
+
+// Legacy chat receipts migrate with the chat redesign; cards and docks use visualState.
 func childState(r viewer.Row, s Snapshot, t Theme) (string, string, style, bool) {
 	if f := r.Finish; f != nil {
 		switch f.Status {
@@ -54,6 +66,12 @@ func childState(r viewer.Row, s Snapshot, t Theme) (string, string, style, bool)
 	}
 	if !s.Connected || r.NeedsResync {
 		return "?", "unknown", warningStyle, false
+	}
+	switch childVisualState(r, s) {
+	case stateEnded:
+		return t.symbol("▪", "#"), "ended (no Finish)", meta, true
+	case stateCanceled:
+		return t.symbol("⊘", "-"), "canceled", normal, true
 	}
 	switch r.ParentOperationStatus {
 	case operation.StatusCompleted:
@@ -77,171 +95,59 @@ func childElapsed(r viewer.Row, s Snapshot, u UIState) string {
 		if p.ID == r.ParentID {
 			for _, op := range p.Operations {
 				if op.ID == r.ParentOperationID && op.Elapsed.Known {
-					return duration(op.Elapsed.Value)
+					return coarseDuration(op.Elapsed.Value)
 				}
 			}
 		}
 	}
 	if r.Elapsed.Known {
-		return duration(r.Elapsed.Value)
+		return coarseDuration(r.Elapsed.Value)
 	}
 	return ""
 }
-func childCounts(rows []viewer.Row, s Snapshot, t Theme, hidden int) string {
-	running, done, failed := 0, 0, 0
-	for _, r := range rows {
-		_, word, _, end := childState(r, s, t)
-		if strings.Contains(word, "failed") || strings.Contains(word, "failure") || strings.Contains(word, "error") {
-			failed++
-		} else if end {
-			done++
-		} else {
-			running++
-		}
-	}
-	// "running" here counts active parent operations only while connected.
-	activeWord := "running"
-	if !s.Connected {
-		activeWord = "unknown"
-	}
-	value := fmt.Sprintf("%d %s, %d done, %d failed", running, activeWord, done, failed)
-	if hidden > 0 {
-		value += fmt.Sprintf("  (%d hidden)", hidden)
-	}
-	return value
-}
-func laneIDs(rows []viewer.Row, t Theme) map[session.ID]string {
-	ids := map[session.ID]string{}
-	for _, r := range rows {
-		w := 12
-		id := SafeText(string(r.ID))
-		candidate := middle(id, w, t)
-		for {
-			unique := true
-			for _, other := range rows {
-				if other.ID != r.ID && middle(SafeText(string(other.ID)), w, t) == candidate {
-					unique = false
-					break
-				}
-			}
-			if unique {
-				break
-			}
-			w++
-			candidate = middle(id, w, t)
-		}
-		ids[r.ID] = candidate
-	}
-	return ids
-}
-func pickLanes(rows []viewer.Row, s Snapshot, u UIState, limit int) []viewer.Row {
-	chosen := map[session.ID]bool{}
-	if id := focus(u, s); id != "" && limit > 0 {
-		chosen[id] = true
-	}
-	for _, r := range rows {
-		_, _, _, end := childState(r, s, u.Theme)
-		if len(chosen) < limit && !end {
-			chosen[r.ID] = true
-		}
-	}
-	terminal := append([]viewer.Row(nil), rows...)
-	sort.SliceStable(terminal, func(i, j int) bool {
-		if terminal[i].Finish == nil {
-			return false
-		}
-		if terminal[j].Finish == nil {
-			return true
-		}
-		return terminal[i].Finish.RecordedAt.After(terminal[j].Finish.RecordedAt)
-	})
-	for _, r := range terminal {
-		if len(chosen) < limit {
-			chosen[r.ID] = true
-		}
-	}
-	var out []viewer.Row
-	for _, r := range rows {
-		if chosen[r.ID] {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-func lane(r viewer.Row, s Snapshot, u UIState, l layout, label, id string) line {
-	mark, word, st, _ := childState(r, s, u.Theme)
-	selected := r.ID == focus(u, s)
-	idStyle := normal
-	if selected {
-		mark = u.Theme.symbol("›", "*")
-		idStyle = strong
-	}
-	indent := strings.Repeat(" ", max(0, r.Depth-1)*2)
-	base := indent + id
-	end := word
-	if elapsed := childElapsed(r, s, u); elapsed != "" {
-		end += "  " + elapsed
-	}
-	activity := ""
-	if l.main >= 69 && observed(r) && r.Finish == nil {
-		activity = r.Activity
-	}
-	if activity != "" {
-		end += "  " + activity
-	}
-	if r.NeedsResync || r.Problem != "" {
-		end += "  ! resync required"
-	}
-	room := max(0, l.text-textLine(base, normal).width()-textLine(end, normal).width()-4)
-	labelText := r.Label
-	if r.Selection != nil {
-		labelText = r.Selection.Provider + " / " + r.Selection.Model + " / " + string(r.Selection.Effort)
-	}
-	task := middle(labelText, room, u.Theme)
-	if strings.Contains(id, u.Theme.symbol("…", "~")) {
-		task = textLine(labelText, normal).clip(room).plain()
-	}
-	left := joined(textLine(base, idStyle), textLine("  "+task, normal))
-	suffix := textLine("  "+end, meta)
-	if strings.Contains(end, "unknown") || strings.Contains(end, "failed") || r.NeedsResync {
-		suffix = textLine("  "+end, st)
-	}
-	if left.width()+suffix.width() > l.text {
-		suffix = suffix.clip(max(0, l.text-left.width()))
-	}
-	return l.gutter(label, mark, joined(left, textLine(strings.Repeat(" ", max(0, l.text-left.width()-suffix.width())), normal), suffix))
-}
 
+// coarseDuration drops seconds past the first minute: cards show how long
+// work has run, not a stopwatch.
+func coarseDuration(d time.Duration) string {
+	if d < time.Hour && d >= time.Minute {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return duration(d)
+}
 func focusRows(r viewer.Row, rows []viewer.Row, s Snapshot, u UIState, l layout) []line {
-	_, state, st, _ := childState(r, s, u.Theme)
-	value := SafeText(string(r.ID)) + "  " + state
+	state := childVisualState(r, s)
+	_, word, st := state.presentation(u.Theme)
+	marks := marksFor(u, s)
+	identity := "[" + marks[r.ID] + "] " + childTitle(r)
+	value := identity + "  " + word
 	if r.Selection != nil {
 		value += "  " + selectionLabel(*r.Selection, u.Theme)
 	}
 	if elapsed := childElapsed(r, s, u); elapsed != "" {
 		value += "  " + elapsed
 	}
-	out := []line{l.gutter("child", u.Theme.symbol("›", "*"), textLine(middle(value, l.text, u.Theme), strong))}
+	out := []line{l.gutter("子", u.Theme.symbol("›", "*"), textLine(tail(value, l.text, u.Theme), strong))}
 	add := func(label, text string, style style) {
-		out = append(out, l.gutter("", "", joined(textLine(label+"  ", meta), textLine(middle(text, max(0, l.text-len(label)-2), u.Theme), style))))
+		out = append(out, l.gutter("", "", joined(textLine(label+"  ", meta), textLine(tail(protectedCardText(text), max(0, l.text-textLine(label, meta).width()-2), u.Theme), style))))
 	}
 	if page := u.Viewer.Transcript; page != nil && u.Viewer.Selected == r.ID {
-		more := "end of history"
+		more := "履歴の末尾"
 		if page.More {
-			more = "more: /child-next"
+			more = "続き: /child-next"
 		}
-		out[0] = l.gutter("child", u.Theme.symbol("›", "*"), textLine(middle(fmt.Sprintf("%s history after %d, %d items  %s", r.ID, u.Viewer.TranscriptAfter, len(page.Items), more), l.text, u.Theme), strong))
+		out[0] = l.gutter("子", u.Theme.symbol("›", "*"), textLine(tail(fmt.Sprintf("%s 履歴 %d件  %s", identity, len(page.Items), more), l.text, u.Theme), strong))
 		for _, item := range page.Items {
 			for _, entry := range entriesFor(item) {
 				if entry.Text != "" {
-					add(fmt.Sprint(item.Sequence), entry.Role+"  "+strings.Join(strings.Fields(entry.Text), " "), normal)
+					add(fmt.Sprint(item.Sequence), focusRole(entry.Role)+"  "+strings.Join(strings.Fields(entry.Text), " "), normal)
 				}
 				for _, c := range entry.Calls {
 					name := c.Name
 					if name == "SubagentStart" {
 						name = "spawn"
 					}
-					add(fmt.Sprint(item.Sequence), "tool  "+name+" "+c.Target, normal)
+					name, target := displayTool(name, c.Target)
+					add("操作", name+" "+target, normal)
 				}
 			}
 		}
@@ -249,17 +155,19 @@ func focusRows(r viewer.Row, rows []viewer.Row, s Snapshot, u UIState, l layout)
 	}
 	if observed(r) {
 		if r.Activity != "" {
-			add("activity", r.Activity, normal)
+			add("活動", r.Activity, normal)
 		}
 		if len(r.Operations) > 0 {
 			counts := map[string]int{}
 			var active []string
 			for _, op := range r.Operations {
-				m, w, _, _ := childOpState(op, u.Theme)
+				m, w, _ := toolVisualState(Receipt{Status: op.Status, Operations: []operation.ID{op.ID}}, s).presentation(u.Theme)
 				if op.Status == operation.StatusCompleted {
-					counts[op.Tool]++
+					name, _ := displayTool(op.Tool, op.Target)
+					counts[name]++
 				} else {
-					value := m + " " + op.Tool + " " + w
+					name, _ := displayTool(op.Tool, op.Target)
+					value := m + " " + name + " " + w
 					if op.Elapsed.Known && s.Connected {
 						value += " " + duration(op.Elapsed.Value)
 					}
@@ -276,40 +184,49 @@ func focusRows(r viewer.Row, rows []viewer.Row, s Snapshot, u UIState, l layout)
 				parts = append(parts, fmt.Sprintf("%s %s %d", u.Theme.symbol("✓", "+"), k, counts[k]))
 			}
 			parts = append(parts, active...)
-			add("ops", strings.Join(parts, "  "), normal)
+			add("操作", strings.Join(parts, "  "), normal)
 		}
 		if value := usage(r.Usage); value != "" {
-			add("usage", value, meta)
+			add("使用量", value, meta)
+			add("キャッシュ", strings.TrimPrefix(viewer.CacheLabel(r.LastUsage), "cache ")+" / "+strings.TrimPrefix(viewer.CacheLabel(r.Usage), "cache ")+" 累計", meta)
 		}
 	}
 	if f := r.Finish; f != nil {
-		add("finish", fmt.Sprintf("%s: %s  %d files, %d tests, %d blockers", f.Status, f.Summary, len(f.ChangedFiles), len(f.Tests), len(f.Blockers)), st)
+		add("終了報告", fmt.Sprintf("%s: %s  変更%d件, テスト%d件, 支障%d件", word, f.Summary, len(f.ChangedFiles), len(f.Tests), len(f.Blockers)), st)
 		if len(f.Blockers) > 0 {
-			add("blocker", f.Blockers[0], warningStyle)
+			add("支障", f.Blockers[0], warningStyle)
 		}
 	} else {
-		add("finish", "not recorded yet", meta)
+		add("終了報告", "未記録", meta)
 	}
 	var other []string
 	for _, row := range rows {
 		if row.ID != r.ID {
-			m, state, _, _ := childState(row, s, u.Theme)
-			other = append(other, m+" "+string(row.ID)+" "+state)
+			m, word, _ := childVisualState(row, s).presentation(u.Theme)
+			other = append(other, m+" ["+marks[row.ID]+"] "+childTitle(row)+" "+word)
 		}
 	}
 	if len(other) > 0 {
-		add("others", strings.Join(other, "  "), meta)
+		add("ほか", strings.Join(other, "  "), meta)
 	}
-	if l.height >= 35 && r.ProjectInstructions != nil {
-		p := r.ProjectInstructions
-		add("project", fmt.Sprintf("%s %s  %d bytes  %s", p.SourceKind, p.SourcePath, p.ByteLength, SafeText(p.Digest)[:min(8, len(SafeText(p.Digest)))]), meta)
-	}
-	add("", "/child-send TEXT  /child-cancel  /child-history  /child "+string(s.ID), meta)
+	add("", "/child-send TEXT  /child-cancel  /child-history  /child ID", meta)
 	return out
 }
-func childOpState(op viewer.OperationRow, t Theme) (string, string, style, bool) {
-	m, w, s := stateMark(op.Status, t)
-	return m, w, s, terminalStatus(op.Status)
+func focusRole(role string) string {
+	switch role {
+	case "you":
+		return "あなた"
+	case "agent":
+		return "応答"
+	case "error":
+		return "エラー"
+	case "host":
+		return "制御"
+	case "peer":
+		return "子"
+	default:
+		return role
+	}
 }
 
 func childDock(s Snapshot, u UIState, l layout, compact bool) []line {
@@ -317,16 +234,11 @@ func childDock(s Snapshot, u UIState, l layout, compact bool) []line {
 	if len(rows) == 0 || l.rail > 0 {
 		return nil
 	}
-	budget := max(1, min(6, l.height/6))
-	if l.tiny || compact {
-		budget = 1
-	}
 	if id := focus(u, s); id != "" && !compact && !l.tiny {
 		limit := 7
 		if l.height < 20 {
 			limit = 2
-		}
-		if l.height >= 35 {
+		} else if l.height >= 35 {
 			limit = 10
 		}
 		for _, r := range rows {
@@ -343,108 +255,85 @@ func childDock(s Snapshot, u UIState, l layout, compact bool) []line {
 			}
 		}
 	}
-	if len(rows) == 1 && budget > 1 || len(rows) == 1 && !l.tiny && !compact {
-		ids := laneIDs(rows, u.Theme)
-		return []line{lane(rows[0], s, u, l, "child", ids[rows[0].ID])}
+	marks := marksFor(u, s)
+	// Finished children leave the dock; only failures stay in view.
+	rows = slices.DeleteFunc(slices.Clone(rows), func(r viewer.Row) bool {
+		state := childVisualState(r, s)
+		return state.ended() && state != stateFailed
+	})
+	if len(rows) == 0 {
+		return nil
 	}
-	picked := pickLanes(rows, s, u, max(0, budget-1))
-	text := childCounts(rows, s, u.Theme, len(rows)-len(picked))
-	if u.Viewer.Problem != "" {
-		text += "  ! observation: " + u.Viewer.Problem
+	sort.Slice(rows, func(i, j int) bool {
+		if !rows[i].CreatedAt.Equal(rows[j].CreatedAt) {
+			return rows[i].CreatedAt.Before(rows[j].CreatedAt)
+		}
+		return rows[i].ID < rows[j].ID
+	})
+	working, failed, unknown := 0, 0, 0
+	for _, r := range rows {
+		switch childVisualState(r, s) {
+		case stateWorking, stateCanceling:
+			working++
+		case stateFailed:
+			failed++
+		case stateUnknown:
+			unknown++
+		}
 	}
-	seam := ""
-	if l.tiny && focus(u, s) != "" {
-		seam = u.Theme.symbol("›", "*")
+	summary := fmt.Sprintf("   作業中 %d · 失敗 %d", working, failed)
+	if u.Theme.ASCII {
+		summary = strings.ReplaceAll(summary, " · ", " / ")
 	}
-	out := []line{l.gutter("child", seam, textLine(middle(text, l.text, u.Theme), meta))}
-	ids := laneIDs(picked, u.Theme)
-	for _, r := range picked {
-		out = append(out, lane(r, s, u, l, "", ids[r.ID]))
+	if unknown > 0 {
+		summary += fmt.Sprintf("  不明 %d", unknown)
 	}
-	return out
+	right := textLine(summary, visualStyle(dimColor))
+	prefix := textLine("子  ", strong)
+	var badges line
+	for i, r := range rows {
+		mark, _, color := childVisualState(r, s).presentation(u.Theme)
+		if childStalled(r, s, u.Now) {
+			mark, color = "!", visualStyle(stateStall)
+		}
+		badge := joined(textLine("["+marks[r.ID]+"]", visualStyle(badgeColor)), textLine(mark, color))
+		if len(badges) > 0 {
+			badge = joined(textLine(" ", normal), badge)
+		}
+		remainder := ""
+		if i+1 < len(rows) {
+			remainder = fmt.Sprintf(" +%d", len(rows)-i-1)
+		}
+		if prefix.width()+badges.width()+badge.width()+len(remainder)+right.width() > l.main {
+			badges = joined(badges, textLine(fmt.Sprintf(" +%d", len(rows)-i), visualStyle(dimColor)))
+			break
+		}
+		badges = append(badges, badge...)
+	}
+	return []line{joined(prefix, badges, right).clip(l.main)}
 }
 
 func childRail(s Snapshot, u UIState, l layout, height int) []line {
-	rows := children(u, s)
-	if len(rows) == 0 || height < 1 {
+	if len(children(u, s)) == 0 || height <= 0 {
 		return nil
 	}
-	width := l.rail
-	count := fmt.Sprint(len(rows))
-	title := joined(textLine("child agents", strong), textLine(strings.Repeat(" ", max(1, width-len("child agents")-len(count)))+count, meta))
-	out := []line{title.clip(width)}
-	ids := laneIDs(rows, u.Theme)
-	selected := focus(u, s)
-	focusLimit := 0
-	if selected != "" {
-		focusLimit = min(10, max(2, height/2))
-	}
-	budget := max(0, height-1-focusLimit)
-	block := 3
-	if len(rows)*3 > budget {
-		block = 1
-	}
-	picked := pickLanes(rows, s, u, budget/max(1, block))
-	for _, r := range picked {
-		mark, state, st, _ := childState(r, s, u.Theme)
-		prefix := ""
-		idStyle := normal
-		if r.ID == selected {
-			prefix = u.Theme.symbol("›", "*") + " "
-			idStyle = strong
-		}
-		left := joined(textLine(prefix, normal), textLine(mark+" ", st), textLine(ids[r.ID], idStyle))
-		elapsed := childElapsed(r, s, u)
-		rightText := elapsed
-		if block == 1 && state != "running" {
-			rightText = state
-			if elapsed != "" && left.width()+len(state)+len(elapsed)+3 <= width {
-				rightText += " " + elapsed
-			}
-		}
-		if block == 1 && (r.NeedsResync || r.Problem != "") {
-			rightText = state + " ! resync required"
-		}
-		right := textLine(rightText, meta)
-		out = append(out, joined(left, textLine(strings.Repeat(" ", max(1, width-left.width()-right.width())), normal), right).clip(width))
-		if block == 3 {
-			label := r.Label
-			if r.Selection != nil {
-				label = r.Selection.Provider + " / " + r.Selection.Model + " / " + string(r.Selection.Effort)
-			}
-			out = append(out, textLine(middle(label, width, u.Theme), normal))
-			value := state
-			if observed(r) && r.Activity != "" && r.Finish == nil {
-				value = r.Activity
-			}
-			out = append(out, textLine(middle(value, width, u.Theme), meta))
-		}
-		if block == 3 && (r.NeedsResync || r.Problem != "") {
-			i := len(out) - 1
-			out[i] = textLine(middle(state+"  ! resync required", width, u.Theme), warningStyle)
-		}
-	}
-	if hidden := len(rows) - len(picked); hidden > 0 {
-		if len(out) < height-focusLimit {
-			out = append(out, textLine(childCounts(rows, s, u.Theme, hidden), meta).clip(width))
-		} else {
-			out[0] = textLine(middle(fmt.Sprintf("child agents %d (%d hidden)", len(rows), hidden), width, u.Theme), strong)
-		}
-	}
-	if selected != "" {
-		for _, r := range rows {
-			if r.ID == selected {
-				small := layout{width: width, main: width, text: width - 2, height: l.height, tiny: true}
-				focused := focusRows(r, rows, s, u, small)
-				for _, row := range focused[:min(len(focused), focusLimit)] {
-					out = append(out, row.clip(width))
-				}
+	var detail []line
+	if id := focus(u, s); id != "" {
+		for _, r := range children(u, s) {
+			if r.ID == id {
+				small := layout{width: l.rail, main: l.rail, text: l.rail - 2, height: l.height, tiny: true}
+				detail = focusRows(r, children(u, s), s, u, small)
+				detail = detail[:min(len(detail), min(10, height/2))]
 				break
 			}
 		}
 	}
-	if u.Viewer.Problem != "" && len(out) < height {
-		out = append(out, textLine(middle("! observation: "+u.Viewer.Problem, width, u.Theme), warningStyle))
+	var snapshot OrchestrationSnapshot
+	if u.cache != nil {
+		snapshot.cards, snapshot.beads = u.cache.workCards(s, u)
+	} else {
+		snapshot.cards, snapshot.beads = buildWorkCards(s, u.Viewer, u.Now)
 	}
-	return out[:min(len(out), height)]
+	out, _, _ := workCardPane(snapshot, u, l.rail, height-len(detail), true)
+	return append(out, detail...)
 }

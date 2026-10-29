@@ -3,6 +3,7 @@ package viewer
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -36,7 +37,7 @@ func DecodeSubagent(parent session.ID, op operation.Operation) (Child, bool, err
 	if plan.Action != "start" {
 		return Child{}, false, nil
 	}
-	return Child{ID: plan.ChildID, Label: short(plan.Text), Selection: sessionstore.SelectionFromConfiguration(plan.Configuration.Runtime)}, true, nil
+	return Child{ID: plan.ChildID, Label: short(taskTitle(plan.Text)), Selection: sessionstore.SelectionFromConfiguration(plan.Configuration.Runtime)}, true, nil
 }
 func DecodeFinish(item host.HistoryItem) (*Finish, error) {
 	if item.Kind != sessionstore.ItemHostRecord {
@@ -63,6 +64,7 @@ func DecodeFinish(item host.HistoryItem) (*Finish, error) {
 // ParentReader is restricted to a Host-owned parent and its canonical direct
 // children. Child reads never acquire writer ownership or imply runtime liveness.
 type ParentReader struct {
+	cache     *parentReadCache
 	Host      *host.Host
 	ParentID  session.ID
 	Directory string
@@ -87,6 +89,9 @@ func (r ParentReader) Inspect(ctx context.Context, id session.ID, after sessions
 	}
 	if id == r.ParentID {
 		return owner.Inspect(after, limit)
+	}
+	if r.cache != nil {
+		return r.cache.inspect(ctx, owner, r.ParentID, r.Directory, id, after, min(limit, 256))
 	}
 	latest, err := owner.Inspect(0, 1)
 	if err != nil {
@@ -184,3 +189,14 @@ func (c HostControls) ResumeChild(ctx context.Context, r ControlRequest) error {
 
 var _ Reader = ParentReader{}
 var _ Controls = HostControls{}
+
+// taskTitle is a task's first non-empty line: the parent writes a short title
+// there, and the views show it as what the child works on.
+func taskTitle(task string) string {
+	for _, line := range strings.Split(task, "\n") {
+		if line = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "#")); line != "" {
+			return line
+		}
+	}
+	return ""
+}

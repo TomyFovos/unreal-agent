@@ -15,26 +15,22 @@ type remoteJobHandlerUpdate struct {
 }
 
 type remoteJobHandlers struct {
-	handlers     []RemoteJobHandler
-	closed       []bool
-	updates      chan remoteJobHandlerUpdate
-	preparations chan remotePreparation
-	workers      sync.WaitGroup
+	handlers []RemoteJobHandler
+	closed   []bool
+	updates  chan remoteJobHandlerUpdate
+	workers  sync.WaitGroup
 }
 
 func newRemoteJobHandlers(ctx context.Context, handlers []RemoteJobHandler) *remoteJobHandlers {
 	router := &remoteJobHandlers{
-		handlers:     append([]RemoteJobHandler(nil), handlers...),
-		closed:       make([]bool, len(handlers)),
-		updates:      make(chan remoteJobHandlerUpdate),
-		preparations: make(chan remotePreparation),
+		handlers: append([]RemoteJobHandler(nil), handlers...),
+		closed:   make([]bool, len(handlers)),
+		updates:  make(chan remoteJobHandlerUpdate),
 	}
 	for index, handler := range router.handlers {
 		if handler != nil {
 			router.workers.Go(func() { router.forward(ctx, index, handler) })
-			if preparing, ok := handler.(PreparingRemoteJobHandler); ok {
-				router.workers.Go(func() { router.forwardPreparations(ctx, index, preparing) })
-			}
+
 		}
 	}
 	return router

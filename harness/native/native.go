@@ -16,9 +16,6 @@ import (
 )
 
 const Version = 1
-const MaxResults = 1000
-const MaxScanEntries = 20000
-const MaxOutputBytes = 64 << 10
 
 type Request struct {
 	Version    int                `json:"version"`
@@ -41,10 +38,10 @@ func (r Request) Validate() error {
 	if r.Version != Version {
 		return errors.New("unsupported native plan version")
 	}
-	if r.Path == "" || len(r.Path) > 4096 || strings.IndexByte(r.Path, 0) >= 0 {
+	if r.Path == "" || strings.IndexByte(r.Path, 0) >= 0 {
 		return errors.New("path is required")
 	}
-	if r.MaxBytes < 0 || r.MaxBytes > MaxOutputBytes || r.Limit < 0 || r.Limit > MaxResults || r.StartLine < 0 || r.Lines < 0 || r.Lines > 10000 {
+	if r.MaxBytes < 0 || r.Limit < 0 || r.StartLine < 0 || r.Lines < 0 {
 		return errors.New("range/output limit out of bounds")
 	}
 	switch r.Action {
@@ -56,18 +53,12 @@ func (r Request) Validate() error {
 		if err := r.Expected.Validate(); err != nil {
 			return err
 		}
-		if len(r.Content)+len(r.OldText)+len(r.NewText) > mutation.MaxFileBytes {
-			return errors.New("payload exceeds limit")
-		}
 		if r.Action == "edit" && r.OldText == "" {
 			return errors.New("old_text must be nonempty")
 		}
 	case "grep":
-		if len(r.Pattern) > 8192 {
-			return errors.New("pattern exceeds limit")
-		}
 		if _, err := regexp.Compile(r.Pattern); err != nil {
-			return errors.New("invalid regular expression")
+			return fmt.Errorf("compile regular expression: %w", err)
 		}
 	case "glob":
 	default:
@@ -197,15 +188,12 @@ func BoundText(text string, limit int) (string, bool) {
 func MatchGlob(pattern, path string) (bool, error) {
 	pattern = filepath.ToSlash(pattern)
 	path = filepath.ToSlash(path)
-	if len(pattern) > 4096 {
-		return false, errors.New("glob exceeds limit")
-	}
 	parts := strings.Split(pattern, "/")
 	names := strings.Split(path, "/")
 	for _, part := range parts {
 		if part != "**" {
 			if _, err := filepath.Match(part, ""); err != nil {
-				return false, errors.New("invalid glob")
+				return false, fmt.Errorf("invalid glob: %w", err)
 			}
 		}
 	}
@@ -240,7 +228,6 @@ func (e Executor) search(ctx context.Context, r Request) Result {
 		pattern = "**"
 	}
 	queue := []string{r.Path}
-	visited := 0
 	bytes := 0
 	for len(queue) > 0 {
 		if ctx.Err() != nil {
@@ -249,19 +236,10 @@ func (e Executor) search(ctx context.Context, r Request) Result {
 		}
 		dir := queue[0]
 		queue = queue[1:]
-		entries, overflow, err := e.Files.ReadDir(ctx, dir, MaxScanEntries-visited)
+		entries, err := e.Files.ReadDir(ctx, dir)
 		if err != nil {
 			out.Code = errorCode(ctx, err)
 			out.Denial = permission.Failure(err)
-			return out
-		}
-		if overflow {
-			out.Truncated = true
-			return out
-		}
-		visited += len(entries)
-		if visited >= MaxScanEntries {
-			out.Truncated = true
 			return out
 		}
 		for _, entry := range entries {

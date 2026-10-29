@@ -64,7 +64,7 @@ func factory(c sub.Config, model llm.Adapter) host.Factory {
 		for _, d := range registry.StaticDefinitions() {
 			builder.AddTool(d.Tool)
 		}
-		return host.Runtime{Builder: builder, LLM: model, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, manager), Close: manager.Close}, nil
+		return host.Runtime{InterruptedInput: manager.InterruptedInput, Builder: builder, LLM: model, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, manager), Close: manager.Close}, nil
 	}
 }
 func TestChildServerHelper(t *testing.T) {
@@ -377,7 +377,7 @@ func TestParentCrashHelper(t *testing.T) {
 	}
 	select {}
 }
-func TestParentCrashRecoversSameChildAndDeduplicatesReady(t *testing.T) {
+func TestParentCrashClosesUnknownStartWithoutReopeningChild(t *testing.T) {
 	dir := t.TempDir()
 	binary, _ := os.Executable()
 	command := exec.Command(binary, "-test.run=^TestParentCrashHelper$")
@@ -409,22 +409,14 @@ func TestParentCrashRecoversSameChildAndDeduplicatesReady(t *testing.T) {
 	}
 	_ = command.Wait()
 	_, s := parentAt(t, dir, "recover", host.Resume)
-	// Resume may collect an already-completed child; this fixture waits for a
-	// parent answer, so it must reopen the same identity and preserve ready ID.
+	// The start operation has no terminal receipt. Resume closes it without
+	// reopening its child or repeating the ready/task handshake.
 	p, err := sub.DecodePlan(before)
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := sub.SteerChild(ctx, s, sub.ControlRequest{ParentID: s.ID, ParentGeneration: s.Generation, OperationID: before.ID, ChildID: p.ChildID, InputID: "answer", Text: "parent answer"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	again, err := sub.SteerChild(ctx, s, sub.ControlRequest{ParentID: s.ID, ParentGeneration: s.Generation, OperationID: before.ID, ChildID: p.ChildID, InputID: "answer", Text: "parent answer"})
-	if err != nil || receipt != again {
-		t.Fatal(receipt, again, err)
-	}
 	after := awaitChild(t, s, true)
-	if after.ID != before.ID || after.Status != operation.StatusCompleted {
+	if after.ID != before.ID || after.Status != operation.StatusCanceled {
 		t.Fatal(after)
 	}
 	view, _ := s.Inspect(0, 256)
@@ -444,11 +436,11 @@ func TestParentCrashRecoversSameChildAndDeduplicatesReady(t *testing.T) {
 			}
 		}
 	}
-	if readyCount != 1 || intentCount != 1 {
+	if readyCount != 1 || intentCount != 0 {
 		t.Fatal("duplicate canonical delivery", readyCount, intentCount)
 	}
 	child, err := sub.ReadChild(ctx, dir, p.ChildID, 0, 256)
-	if err != nil || child.Finish == nil {
+	if err != nil || child.Finish != nil {
 		t.Fatal(child, err)
 	}
 	// Explicit owner loss releases the writer before a future owner opens.
@@ -463,7 +455,7 @@ func TestParentCrashRecoversSameChildAndDeduplicatesReady(t *testing.T) {
 	}
 }
 
-func TestCommittedFinishCollectedWithoutRespawn(t *testing.T) {
+func TestUnrecordedParentResultKeepsChildFinishWithoutRespawn(t *testing.T) {
 	dir := t.TempDir()
 	h, s := parentAt(t, dir, "finish", host.Create)
 	completed := awaitChild(t, s, true)
@@ -515,19 +507,18 @@ func TestCommittedFinishCollectedWithoutRespawn(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := awaitChild(t, resumed, true)
-	if result.Status != operation.StatusCompleted || result.ID != completed.ID {
+	if result.Status != operation.StatusCanceled || result.ID != completed.ID {
 		t.Fatal(result)
 	}
 	oldHandle, _ := sub.DecodeHandle(completed)
-	newHandle, _ := sub.DecodeHandle(result)
-	oldJSON, _ := json.Marshal(oldHandle.Finish)
-	newJSON, _ := json.Marshal(newHandle.Finish)
-	if !bytes.Equal(oldJSON, newJSON) {
-		t.Fatal("canonical Finish changed")
-	}
 	child, err := sub.ReadChild(t.Context(), dir, plan.ChildID, 0, 256)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || child.Finish == nil {
+		t.Fatal(child, err)
+	}
+	oldJSON, _ := json.Marshal(oldHandle.Finish)
+	newJSON, _ := json.Marshal(child.Finish)
+	if !bytes.Equal(oldJSON, newJSON) {
+		t.Fatal("canonical child Finish changed")
 	}
 	turns := 0
 	for _, item := range child.View.History.Items {

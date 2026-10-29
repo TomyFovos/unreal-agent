@@ -178,7 +178,7 @@ func TestHyperlinkSanitizationFlagInvalidatesCachedBody(t *testing.T) {
 }
 
 func TestHyperlinkCandidateLimitFallsBackWithoutTruncatingText(t *testing.T) {
-	text := strings.Repeat("https://example.com ", maxBareLinksPerLine+20)
+	text := strings.Repeat("https://example.com ", 276)
 	for _, l := range []line{webTextLine(text, normal), markdown(text)} {
 		if l.plain() != text {
 			t.Fatal("candidate bound truncated conversation text")
@@ -189,7 +189,7 @@ func TestHyperlinkCandidateLimitFallsBackWithoutTruncatingText(t *testing.T) {
 				count++
 			}
 		}
-		if count != maxBareLinksPerLine {
+		if count != 276 {
 			t.Fatal("bare link detection exceeded its per-line budget")
 		}
 	}

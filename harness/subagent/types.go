@@ -56,6 +56,10 @@ type Plan struct {
 	// Request and Allow answer a child's approval request.
 	Request string `json:",omitzero"`
 	Allow   bool   `json:",omitzero"`
+	// Notify tells the parent when the child ends, as a message that wakes
+	// it. A child started without a tool call (the subagent command) has no
+	// tool result to do that.
+	Notify bool `json:",omitzero"`
 }
 type ChildConfig struct {
 	Version                uint32
@@ -228,9 +232,6 @@ func (c ChildConfig) Validate() error {
 // ValidateWorkers checks the templates a child may start: workers that start
 // no children of their own, never at ultra effort.
 func ValidateWorkers(templates map[string]Template) error {
-	if len(templates) > 32 {
-		return fmt.Errorf("a child may have at most 32 worker templates")
-	}
 	for name, t := range templates {
 		if name == "" || len(name) > 128 {
 			return fmt.Errorf("invalid worker template name")

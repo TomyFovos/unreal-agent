@@ -11,7 +11,6 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"strings"
-	"unicode/utf8"
 )
 
 type sessionContextKey struct{}
@@ -50,12 +49,6 @@ func (s *Session) commitTextFinish(ctx context.Context, turn session.TurnID) err
 		summary := strings.TrimSpace(strings.Join(text, "\n"))
 		if summary == "" {
 			summary = "Text-only child completed without text output"
-		}
-		if len(summary) > 32768 {
-			summary = summary[:32768]
-			for !utf8.ValidString(summary) {
-				summary = summary[:len(summary)-1]
-			}
 		}
 		result := sessionstore.FinishResult{Status: "completed", Summary: summary}
 		switch r.Response.Stop {

@@ -49,3 +49,27 @@ func TestGenerationStatisticsReportedUnknownAndSource(t *testing.T) {
 		t.Fatal("changed legacy response shape")
 	}
 }
+
+func TestGenerationContextInputAndRoundtrip(t *testing.T) {
+	stats := GenerationStatistics{Tokens: TokenCounts{Input: 10_000, InputKnown: true}, ContextTokens: 4_000, ContextKnown: true}
+	encoded, err := json.Marshal(stats)
+	var restored GenerationStatistics
+	if err != nil || json.Unmarshal(encoded, &restored) != nil || restored != stats {
+		t.Fatal("context statistics did not roundtrip", restored, err)
+	}
+	if input, known := restored.ContextInput(); !known || input != 4_000 {
+		t.Fatal("context used summed input", input, known)
+	}
+	stats.ContextTokens = 0
+	if input, known := stats.ContextInput(); !known || input != 0 {
+		t.Fatal("reported zero context lost", input, known)
+	}
+	stats.ContextKnown = false
+	if input, known := stats.ContextInput(); !known || input != 10_000 {
+		t.Fatal("legacy/single-call input lost", input, known)
+	}
+	stats.Tokens.InputKnown = false
+	if _, known := stats.ContextInput(); known {
+		t.Fatal("unknown context invented")
+	}
+}

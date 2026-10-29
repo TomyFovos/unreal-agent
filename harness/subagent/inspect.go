@@ -23,6 +23,25 @@ func ReadChild(ctx context.Context, directory string, id session.ID, after sessi
 	if limit < 1 || limit > 256 {
 		return ChildView{}, fmt.Errorf("child page limit must be 1..256")
 	}
+	result, err := ReadChildSnapshot(ctx, directory, id)
+	if err != nil {
+		return ChildView{}, err
+	}
+	items := result.View.History.Items
+	start := min(uint64(after), uint64(len(items)))
+	end := min(start+uint64(limit), uint64(len(items)))
+	next := after
+	if end > start {
+		next = items[end-1].Sequence
+	}
+	result.View.History = host.HistoryPage{Items: items[start:end], NextAfter: next, More: end < uint64(len(items))}
+	return result, nil
+}
+
+// ReadChildSnapshot reads a complete committed observation once. A scoped
+// viewer may reuse it while the log's identity, size and modification time are
+// unchanged. It never acquires writer ownership or infers runtime liveness.
+func ReadChildSnapshot(ctx context.Context, directory string, id session.ID) (ChildView, error) {
 	if _, err := os.Stat(directory); err != nil {
 		return ChildView{}, err
 	}
@@ -30,50 +49,33 @@ func ReadChild(ctx context.Context, directory string, id session.ID, after sessi
 	if err != nil {
 		return ChildView{}, err
 	}
-	snapshot, err := store.Inspect(ctx, id)
+	snapshot, items, ops, err := store.ReadSnapshot(ctx, id)
 	if err != nil {
 		return ChildView{}, err
 	}
-	page, err := store.Items(ctx, id, after, limit)
-	if err != nil {
-		return ChildView{}, err
-	}
-	ops, err := store.Operations(ctx, id)
-	if err != nil {
-		return ChildView{}, err
-	}
+	page := sessionstore.Page{Items: items, NextAfter: sessionstore.Sequence(len(items))}
 	result := ChildView{View: host.View{Session: snapshot, History: host.ProjectHistoryPage(page), Operations: ops}}
-	for cursor := sessionstore.BeforeFirst; ; {
-		p, err := store.Items(ctx, id, cursor, 256)
-		if err != nil {
-			return ChildView{}, err
+	for _, item := range items {
+		if item.Kind == sessionstore.ItemFork {
+			result.Configuration = nil
+			result.Finish = nil
 		}
-		for _, item := range p.Items {
-			if item.Kind == sessionstore.ItemFork {
-				result.Configuration = nil
-				result.Finish = nil
-			}
-			if item.Kind != sessionstore.ItemHostRecord {
-				continue
-			}
-			record := item.Data.(sessionstore.HostRecord)
-			switch record.Kind {
-			case "configuration":
-				var config ChildConfig
-				if json.Unmarshal(record.Configuration, &config) == nil && config.Validate() == nil && config.ChildID == id {
-					result.Configuration = &config
-				}
-			case sessionstore.HostProjectInstructions:
-				metadata := record.ProjectInstructions.Metadata()
-				result.View.ProjectInstructions = &metadata
-			case "finish":
-				result.Finish = record.Finish
-			}
+		if item.Kind != sessionstore.ItemHostRecord {
+			continue
 		}
-		if !p.More {
-			break
+		record := item.Data.(sessionstore.HostRecord)
+		switch record.Kind {
+		case "configuration":
+			var config ChildConfig
+			if json.Unmarshal(record.Configuration, &config) == nil && config.Validate() == nil && config.ChildID == id {
+				result.Configuration = &config
+			}
+		case sessionstore.HostProjectInstructions:
+			metadata := record.ProjectInstructions.Metadata()
+			result.View.ProjectInstructions = &metadata
+		case "finish":
+			result.Finish = record.Finish
 		}
-		cursor = p.NextAfter
 	}
 	return result, nil
 }

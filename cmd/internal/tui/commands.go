@@ -31,12 +31,9 @@ var commandCatalog = []commandCandidate{
 	{"/stop now", "/stop now", "hard stop this session", noArguments},
 	{"/stop idle", "/stop idle", "stop when the agent is idle", noArguments},
 	{"/resume", "/resume", "resume this stopped session", noArguments},
-	{"/retry", "/retry", "resend the last uncertain input (same input ID)", noArguments},
+	{"/retry", "/retry", "resend the last uncertain input safely", noArguments},
 	{"/detach", "/detach", "leave; the session keeps running", noArguments},
-	{"/login", "/login PROVIDER ID", "store an API key (masked entry)", requiredArguments},
-	{"/logout", "/logout PROVIDER ID", "remove a stored credential", requiredArguments},
-	{"/credentials", "/credentials", "list stored credentials", noArguments},
-	{"/methods", "/methods", "show supported authentication methods", noArguments},
+	{"/login", "/login", "show subscription login instructions for Codex and Claude", noArguments},
 	{"/children", "/children", "how to select a child", noArguments},
 	{"/child", "/child ID", "focus a child agent", requiredArguments},
 	{"/child-history", "/child-history [after] [limit]", "load a page of its history", optionalArguments},
@@ -47,7 +44,7 @@ var commandCatalog = []commandCandidate{
 	{"/child-retry", "/child-retry", "retry the last uncertain child request", noArguments},
 	{"/children start", "/children start TEMPLATE", "start child: [PROVIDER MODEL EFFORT] -- TASK", requiredArguments},
 	{"/children retry-start", "/children retry-start", "retry an uncertain child start with the same input ID", noArguments},
-	{"/model", "/model [refresh]", "choose provider, model and effort; refresh reloads catalog", noArguments},
+	{"/model", "/model [refresh]", "choose provider, model and effort; refresh detects logins and reloads models", noArguments},
 	{"/permissions", "/permissions", "choose human-approved Session permissions; review pending operations", noArguments},
 	{"/analyze", "/analyze", "read-only session analysis", noArguments},
 	{"/view", "/view", "choose Chat / Orchestration / Split (120+ columns)", noArguments},
@@ -58,7 +55,7 @@ var commandCatalog = []commandCandidate{
 	{"/export last", "/export last", "export the latest public agent response as Markdown", noArguments},
 	{"/export all", "/export all", "export the full public conversation as Markdown", noArguments},
 	{"/export pick", "/export pick", "choose a public agent response to export as Markdown", noArguments},
-	{"/copy", "/copy", "copy the conversation or the latest response to the clipboard", noArguments},
+	{"/copy", "/copy", "choose conversation messages to copy to the clipboard", noArguments},
 	{"/copy all", "/copy all", "copy the full public conversation as Markdown to the clipboard", noArguments},
 	{"/copy last", "/copy last", "copy the latest public agent response to the clipboard", noArguments},
 	{"/help", "/help", "show commands and keys", noArguments},
@@ -89,7 +86,7 @@ func commandToken(text string) string {
 }
 
 func candidates(s Snapshot, u UIState) []commandCandidate {
-	if u.Private != nil || u.Pasted || !strings.HasPrefix(u.Input, "/") {
+	if u.Pasted || !strings.HasPrefix(u.Input, "/") {
 		return nil
 	}
 	if strings.HasPrefix(u.Input, "/child ") {
@@ -124,7 +121,7 @@ func candidates(s Snapshot, u UIState) []commandCandidate {
 // unlisted commands stay typable but the menu leaves them out: agents start
 // and steer children, /stop covers canceling them, and the Split view shows
 // what each child does; API keys are not used.
-var unlisted = []string{"/retry", "/login", "/logout", "/credentials", "/methods", "/children", "/child", "/child-history", "/child-next", "/child-send", "/child-cancel", "/child-resume", "/child-retry"}
+var unlisted = []string{"/retry", "/children", "/child", "/child-history", "/child-next", "/child-send", "/child-cancel", "/child-resume", "/child-retry"}
 
 // menuCatalog is what the command menu lists: commands, not their choices
 // (such as /view split), which appear after choosing the command.
@@ -138,7 +135,7 @@ func menuCatalog() []commandCandidate {
 	return out
 }
 func menuOptions(s Snapshot, u UIState) []commandCandidate {
-	if u.Private != nil || u.Pasted || u.Sheet != nil || u.Picker != nil || !strings.HasPrefix(u.Input, "/") {
+	if u.Pasted || u.Sheet != nil || u.Picker != nil || !strings.HasPrefix(u.Input, "/") {
 		return nil
 	}
 	if len(u.MenuOptions) > 0 {
@@ -189,7 +186,7 @@ func commandSheet(s Snapshot, u UIState, l layout) []line {
 }
 
 func commandSheetWithin(s Snapshot, u UIState, l layout, budget int) ([]line, int) {
-	if budget <= 0 || u.Private != nil || u.Pasted || u.Sheet != nil || !strings.HasPrefix(u.Input, "/") {
+	if budget <= 0 || u.Pasted || u.Sheet != nil || !strings.HasPrefix(u.Input, "/") {
 		return nil, 0
 	}
 	options := menuOptions(s, u)
@@ -268,7 +265,7 @@ func commandPrefix(candidate commandCandidate) string {
 }
 
 func (c *completion) apply(e *Editor, s Snapshot, u *UIState) {
-	if e.Pasted || u.Private != nil || !strings.HasPrefix(e.Text(), "/") {
+	if e.Pasted || !strings.HasPrefix(e.Text(), "/") {
 		c.resetMenu(u)
 		return
 	}
@@ -328,7 +325,7 @@ func (c *completion) apply(e *Editor, s Snapshot, u *UIState) {
 }
 func helpSheet(t Theme, short bool) *Sheet {
 	session := []string{"session  /stop: sub-agents, main agent, both, or the session", "         /resume  /detach"}
-	keys := []string{"keys     " + t.symbol("⏎", "enter") + " send  " + t.symbol("⇥", "tab") + " complete  " + t.symbol("↑↓", "up/down") + " menu  PgUp/PgDn scroll  ^D detach", "         ^C cancels key entry or waiting; otherwise stops the session"}
+	keys := []string{"keys     " + t.symbol("⏎", "enter") + " send  " + t.symbol("⇥", "tab") + " complete  " + t.symbol("↑↓", "up/down") + " menu  PgUp/PgDn scroll  ^D detach", "         new line: Ctrl/Shift/Alt+Enter, ^J, or \\ then Enter", "         ^A select all; type/paste replaces; Backspace/Delete erases; Esc/arrows deselect; Home start", "         ^C cancels waiting; otherwise stops the session"}
 	var lines []string
 	if short {
 		lines = append(lines, keys...)
@@ -337,9 +334,10 @@ func helpSheet(t Theme, short bool) *Sheet {
 		lines = append(lines, session...)
 		lines = append(lines, keys...)
 	}
-	lines = append(lines, "Type / to search commands. /model, /analyze, /export, /view. Enter/Esc closes.")
+	lines = append(lines, "Type / to search commands. /model, /permissions, /login, /analyze, /export, /view. Enter/Esc closes.")
 	lines = append(lines, "export   /export: latest response, full conversation, or choose a response")
-	lines = append(lines, "copy     /copy: full conversation or latest response, to the clipboard")
+	lines = append(lines, "copy     /copy: choose messages; Space selects several; /copy all or /copy last also work")
 	lines = append(lines, "view     /view: Chat, Orchestration or Split (120+ columns)")
+	lines = append(lines, "login    Codex: codex login; Claude: run claude, then /login. Afterwards: /model refresh")
 	return &Sheet{Title: "help", Lines: lines}
 }

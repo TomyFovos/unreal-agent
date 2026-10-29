@@ -51,7 +51,7 @@ func TestCommonCatalogRefreshRequiresRegisteredAuthenticatedBackend(t *testing.T
 	}
 	var reads, refreshes int
 	var signedOut bool
-	h := modelUI{owner: owner, supported: []modelcatalog.Provider{{ID: "openai-codex"}, unavailableProvider("claude-code", modelcatalog.AuthRequired)}, cache: "synthetic-cache",
+	h := modelUI{owner: owner, supported: []modelcatalog.Provider{{ID: "openai-codex"}, unavailableProvider("claude-code", modelcatalog.AuthRequired)},
 		runtime: agentrunner.RuntimeConfig{Identity: agentrunner.RuntimeIdentity{Provider: provider.Selection{Provider: "openai-codex"}},
 			Health: map[string]func(context.Context) error{"openai-codex": func(context.Context) error {
 				if signedOut {
@@ -106,7 +106,7 @@ func TestCommonProviderStatusPreflightAndUnavailableSelection(t *testing.T) {
 		{name: "codex-only", codex: true, claudeReason: modelcatalog.AuthRequired},
 		{name: "claude-only", claude: true, trust: true, codexReason: modelcatalog.AuthRequired},
 		{name: "none", codexReason: modelcatalog.AuthRequired, claudeReason: modelcatalog.AuthRequired},
-		// The Claude Code route (U21) runs under the organization's own managed
+		// The Claude Code route (U21) runs under Claude Code's own
 		// settings; it needs no managed-trust flags.
 		{name: "team-without-trust", codex: true, claude: true},
 		{name: "cli-missing", codex: true, missingCLI: true, claudeReason: modelcatalog.CLIMissing},
@@ -158,7 +158,7 @@ func TestCommonProviderStatusPreflightAndUnavailableSelection(t *testing.T) {
 			available := tc.codexReason == "" || tc.claudeReason == ""
 			if !available {
 				var failure *normalRuntimeError
-				if !errors.As(err, &failure) || !strings.Contains(failure.Error(), "openai-codex:") || !strings.Contains(failure.Error(), claudeagent.ProviderID+":") {
+				if !errors.As(err, &failure) || !strings.Contains(failure.Error(), "OpenAI Codex:") || !strings.Contains(failure.Error(), "Claude:") {
 					t.Fatal("startup lost both statuses", err)
 				}
 				return

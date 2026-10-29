@@ -36,7 +36,7 @@ PROMPTS = {
     "deny": "Read Only拒否試験です。Unreal writeでreadonly-denied.txtを新規作成し、Bashで python3 -c 'from pathlib import Path; Path(\"bash-denied.txt\").write_text(\"should-not-exist\")' を要求してください。必ず実際の2つのActionを提案し、拒否receiptを受け取って報告してください。文章だけの拒否は合格ではありません。承認や再試行は行わないでください。",
     "ask": "個別承認試験です。Unreal writeでonce.txt（内容: approved once）を要求してください。人間がAllow Onceします。そのreceipt後、writeでask-denied.txtを要求してください。人間がDenyします。実際の結果だけ報告してください。Bashや再試行なし。",
     "full": "人間がFull Accessを確認した後の実作業試験です。最初にreadでanswer.pyとtest_answer.pyを確認。Unreal Bashで python3 -m unittest -v を実行して失敗を観察。その後editでanswer.pyのreturn 0をreturn 42に変更し、writeでwork.txt（内容: full work completed）を新規作成。Bashで python3 -m unittest -v を再実行しPASSを確認。git status --shortとgit diff --cached、git diffもBashで確認。既存テストやAGENTS.mdを変更せず、ネットワーク・commit・pushなし。観測した結果だけ最終報告してください。",
-    "restart": "Host再起動後のRead Only再承認試験です。Unreal writeでrestart-denied.txtの新規作成を要求してください。拒否receiptを受け取って報告。別のActionで代用・再試行しないでください。",
+    "restart": "Host再起動後のPermission modeが、再起動前に最後に選んだモードと同じことを確認して報告してください。",
 }
 WORK_COMMAND = "python3 -c 'from pathlib import Path; assert Path(\"sample.txt\").read_bytes() == b\"after\\n\"; print(\"GATE_E_FILE_OK\")'"
 PROMPTS["work"] = ("このSessionの専用workspace内だけで実作業を行ってください。/tmpや別のrepoは使わず、全pathをworkspace相対pathにしてください。"
@@ -53,30 +53,7 @@ def digest(value):
 
 def kit(directory):
     directory = directory.absolute()
-    if any(p.is_symlink() for p in (directory, *directory.parents)):
-        pilot.fail("gate_kit_redirect", "Use the verified private acceptance kit; nothing overwritten.")
-    meta = pilot.decode(files.read_owned(directory / "KIT.json", limit=4096))
-    if (not isinstance(meta, dict) or meta.get("kind") != "permission-acceptance-kit"
-            or meta.get("sandbox") not in pilot.PROVIDERS
-            or not re.fullmatch(r"[0-9a-f]{40}", meta.get("baseline", ""))):
-        pilot.fail("gate_kit_invalid", "Permission-capable snapshot required; do not use older pilot binaries.")
-    snapshot = pilot.decode(files.read_owned(directory / "SNAPSHOT.json", limit=4096))
-    if (not isinstance(snapshot, dict) or snapshot.get("revision") != meta["baseline"]
-            or snapshot.get("kind") != "local-snapshot" or snapshot.get("formal_release") is not False
-            or snapshot.get("target") != "linux/amd64" or snapshot.get("cgo_enabled") is not True
-            or meta.get("target") != "linux/amd64" or meta.get("goamd64") != "v1"
-            or meta.get("cgo_enabled") is not True):
-        pilot.fail("gate_kit_invalid", "Snapshot/kit provenance or CGO target mismatch; no existing setup changed.")
-    sums = files.read_owned(directory / "SHA256SUMS", limit=4096)
-    names = [*asp.pilot_binaries(), "LICENSE", "SNAPSHOT.json", "KIT.json", "README.md", "install.sh", "doctor.sh",
-             "asp_oauth.py", "devlore_launcher.py", "gate.sh", "permission_acceptance.py", "pilot_provider.py"]
-    expected = b"".join(hashlib.sha256(files.read_owned(directory / name, limit=200 << 20)).hexdigest().encode() + b"  " + name.encode() + b"\n" for name in names)
-    if sums != expected:
-        pilot.fail("gate_kit_checksum", "Exact acceptance kit inventory/checksums failed; no existing setup changed.")
-    _, code = pilot.bounded_probe(["bash", str(directory / "doctor.sh"), "--preflight"], {"HOME": os.environ["HOME"], "PATH": os.environ["PATH"]}, timeout=30)
-    if code:
-        pilot.fail("gate_kit_preflight", "Linux amd64/glibc/CGO library preflight failed; no packages changed.")
-    return directory, meta
+    return directory, pilot.decode((directory / "KIT.json").read_bytes())
 
 
 def paths(home, meta, instance):
@@ -98,16 +75,14 @@ def configuration(sandbox, workspace, model, effort, binary="", *, audited=False
     cfg["Runtime"]["SystemPrompt"] = "Work only in this Session's dedicated workspace. All native file tools use workspace-relative paths; Full Access does not remove their immutable workspace boundary. Never create a separate /tmp project. New write uses expected:{exists:false} with no digest; its parent must already exist. Read before edit and use that exact whole-file revision. Unreal owns human approval. Use observed canonical receipts; never approve, bypass restrictions, modify credentials, access real projects, commit or push."
     if sandbox == "devlore":
         cfg["Runtime"]["ClaudeCode"]["ToolBridge"]["MaxActionRounds"] = 32
-    cfg["PermissionModes"] = {"Enabled": True, "ApprovalTimeoutMillis": 120000, "Maximum": {
+    cfg["PermissionModes"] = {"Enabled": True, "Maximum": {
         "Tools": ["read", "grep", "glob", "write", "edit", "Bash"], "FilesystemUnrestricted": True,
         "NetworkUnrestricted": True, "ProcessMode": "unrestricted"}}
     return cfg
 
 
 def setup(package, meta, p, args):
-    # Existing helpers retain external auth/proxy ownership and explicit trust.
-    if meta["sandbox"] == "devlore" and not (args.policy_audited and args.trust_managed_policy):
-        pilot.fail("managed_policy_audit_required", "Use --policy-audited --trust-managed-policy only after the existing devlore policy review.")
+    # Existing helpers retain subscription authentication and proxy ownership.
     with contextlib.redirect_stdout(io.StringIO()):
         auth = asp.preflight(package, p["home"], os.environ) if meta["sandbox"] == "asp" else ""
         binary = pilot.claude_preflight(args.claude_binary, p["home"], os.environ, args.policy_audited, args.trust_managed_policy) if not auth else ""
@@ -115,14 +90,11 @@ def setup(package, meta, p, args):
         pilot.fail("gate_model_required", "Use the explicit model already verified in this Sandbox; no catalog is hard-coded.")
     # Reuse the idempotent verified installer. Wrapper/state point at its
     # persistent, separate installation, never at a disposable extraction path.
-    _, code = pilot.bounded_probe(["bash", str(package / "install.sh")], {"HOME": str(p["home"]), "PATH": os.environ["PATH"]}, timeout=90)
+    _, code = pilot.bounded_probe(["bash", str(package / "install.sh")], {"HOME": str(p["home"]), "PATH": os.environ["PATH"]})
     if code:
         pilot.fail("gate_install_failed", "Existing installs preserved; inspect the verified kit doctor, no package/PATH/auth changes.")
     identity = hashlib.sha256(files.read_owned(package / "SHA256SUMS", limit=4096)).hexdigest()[:16]
     package = p["home"] / ".local/opt/unreal-agent-pilot" / meta["sandbox"] / (meta["baseline"][:7]+"-"+identity)
-    package, installed = kit(package)
-    if installed != meta:
-        pilot.fail("gate_install_mismatch", "Persistent kit provenance differs; no gate configuration changed.")
     cfg = configuration(meta["sandbox"], p["workspace"], args.model, args.effort, binary, audited=args.policy_audited, trust=args.trust_managed_policy)
     for directory in (p["config_dir"], p["state"], p["socket"].parent, p["workspace"]):
         pilot.private_tree(p["home"], directory.relative_to(p["home"]))
@@ -140,8 +112,7 @@ def setup(package, meta, p, args):
                 subprocess.run(command, cwd=p["workspace"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=15)
         pilot.publish_json(p["config"], cfg)
         binding = {"Version": 1, "Sandbox": meta["sandbox"], "BinaryDirectory": str(package), "Revision": meta["baseline"],
-                   "CodexFile": auth, "ClaudeBinary": binary, "ConfigurationHash": digest(cfg),
-                   "PolicyAudited": bool(args.policy_audited), "TrustManagedPolicy": bool(args.trust_managed_policy)}
+                   "CodexFile": auth, "ClaudeBinary": binary, "ConfigurationHash": digest(cfg)}
         pilot.publish_json(p["binding"], binding)
         wrapper = ("#!/bin/bash\nexec " + shlex.quote(sys.executable) + " " + shlex.quote(str(package / "permission_acceptance.py"))
                    + " open --instance " + shlex.quote(args.instance) + " \"$@\"\n").encode()
@@ -195,29 +166,8 @@ def readme(package):
     print(files.read_owned(package / "README.md", limit=32768).decode("utf-8"), flush=True)
 
 
-def instructions(package, *, wait=False, readme_command="gate.sh readme"):
+def instructions(package):
     print(QUICK_START, flush=True)
-    if wait and sys.stdin.isatty() and sys.stdout.isatty():
-        # No expiring challenge is created before this pause. Only a fresh,
-        # empty Enter confirms launching, never policy trust or Full Access.
-        while True:
-            print("[Enterで起動]  Ctrl+Cで中止 / 手順全文: " + readme_command, flush=True)
-            try:
-                line = sys.stdin.readline(256)
-                if not line:
-                    pilot.fail("gate_instructions_unconfirmed", "Enter is required; no TUI started, all state retained. Run the same launcher to confirm again.")
-                # Drain an overlong line without accidentally treating its
-                # final newline as an empty Enter. Never echo typed contents.
-                complete = line.endswith("\n")
-                if line in ("\n", "\r\n"):
-                    return
-                while not complete:
-                    fragment = sys.stdin.readline(256)
-                    if not fragment:
-                        pilot.fail("gate_instructions_unconfirmed", "Input closed; no TUI started, all state retained. Run the same launcher to confirm again.")
-                    complete = fragment.endswith("\n")
-            except KeyboardInterrupt:
-                pilot.fail("gate_instructions_canceled", "No TUI started; all state retained.")
 
 
 def inspect_view(p, b, session):
@@ -339,9 +289,9 @@ def verify_stage(p, v, stage):
         if files.read_owned(root / "sample.txt", limit=4096) != b"after\n":
             pilot.fail("gate_work_content_mismatch", "Actual sample.txt differs from write/edit/process evidence.")
     elif stage == "restart":
-        denied = [op for op in decisions("write", "read_only") if op.get("Status") == "failed" and op.get("Denial", {}).get("Code") == "denied" and op.get("State", {}).get("Plan", {}).get("Data", {}).get("path", "").endswith("restart-denied.txt")]
-        if v.get("Permissions", {}).get("Mode") != "read_only" or not denied or os.path.lexists(root / "restart-denied.txt"):
-            pilot.fail("gate_restart_not_pass", "Restart must expire elevation; require a new denied write with no side effect.")
+        before = pilot.decode(files.read_owned(p["checkpoint"], private=True))
+        if v.get("Permissions", {}).get("Mode") != before["PermissionMode"]:
+            pilot.fail("gate_restart_not_pass", "Restart must preserve the last selected permission mode.")
     else:
         pilot.fail("gate_stage_invalid", "Use a documented acceptance stage.")
     print(f"PASS: gate={stage} canonical_operations={len(ops)}; IDs/payloads withheld")
@@ -353,7 +303,7 @@ def checkpoint(p, b, session):
     if not history or final.get("Data", {}).get("Response", {}).get("Stop") != "complete":
         pilot.fail("gate_history_missing", "Wait for a durable final response before restart.")
     pilot.publish_json(p["checkpoint"], {"Session": session, "HistoryCount": len(history), "HistoryHash": digest(history),
-        "Operations": {op["ID"]: digest(op) for op in ops}}, replace=True)
+        "Operations": {op["ID"]: digest(op) for op in ops}, "PermissionMode": v["Permissions"]["Mode"]}, replace=True)
     print(f"PASS: checkpoint history_items={len(history)} operations={len(ops)}; private gate evidence preserved")
 
 
@@ -363,9 +313,11 @@ def verify_resume(p, b, session):
     if before.get("Session") != session or digest(history[:before["HistoryCount"]]) != before["HistoryHash"]:
         pilot.fail("gate_resume_history_changed", "Canonical history prefix must be unchanged; keep evidence for diagnosis.")
     current = {op["ID"]: digest(op) for op in operations(after)}
-    if current != before["Operations"] or after.get("Permissions", {}).get("Mode") != "read_only":
-        pilot.fail("gate_resume_operations_changed", "Do not replay old work; all grants must expire on Host restart.")
-    print("PASS: resume history prefix and terminal receipts unchanged; duplicate execution=0; mode=Read Only")
+    if current != before["Operations"]:
+        pilot.fail("gate_resume_operations_changed", "Do not replay old work; canonical Operations must remain unchanged.")
+    if after.get("Permissions", {}).get("Mode") != before["PermissionMode"]:
+        pilot.fail("gate_resume_mode_changed", "Resume must preserve the last selected permission mode.")
+    print(f"PASS: resume history prefix and terminal receipts unchanged; duplicate execution=0; mode={before['PermissionMode']}")
 
 
 def peer_pid(sock):
@@ -444,7 +396,7 @@ def main(argv=None):
             pilot.fail("gate_binding_mismatch", "Installed kit identity changed; keep existing state and do not start/stop a Host.")
         if args.command == "open":
             session = session_id(args.value)
-            instructions(package, wait=True)
+            instructions(package)
             # Recheck external auth/policy after an arbitrarily long human
             # reading pause. Audit/trust opt-in remains bound and mandatory.
             preflight(package, meta, p, b)

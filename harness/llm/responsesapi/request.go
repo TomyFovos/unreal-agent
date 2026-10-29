@@ -1,10 +1,12 @@
 package responsesapi
 
 import (
+	"cmp"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/internal/apijson"
@@ -104,6 +106,25 @@ func requestInput(items []llm.Item) (openaiapi.InputParam, error) {
 }
 
 func requestInputItem(source llm.Item) (openaiapi.InputItem, error) {
+	if source.Responses == nil {
+		return encodeInputItem(source)
+	}
+	raw, err := source.Responses.Encode(func() ([]byte, error) {
+		item, err := encodeInputItem(source)
+		if err != nil {
+			return nil, err
+		}
+		return item.MarshalJSON()
+	})
+	var item openaiapi.InputItem
+	if err != nil {
+		return item, err
+	}
+	err = item.UnmarshalJSON(raw)
+	return item, err
+}
+
+func encodeInputItem(source llm.Item) (openaiapi.InputItem, error) {
 	var item openaiapi.InputItem
 	if source.Type == llm.ItemMessage && source.ProviderID == "" {
 		message, ok := source.Data.(llm.Message)
@@ -290,6 +311,8 @@ func requestOutputMessageContent(message llm.Message) ([]openaiapi.OutputMessage
 }
 
 func requestTools(source []llm.Tool) (openaiapi.ToolsArray, error) {
+	source = slices.Clone(source)
+	slices.SortFunc(source, func(a, b llm.Tool) int { return cmp.Compare(a.Name, b.Name) })
 	tools := make(openaiapi.ToolsArray, 0, len(source))
 	for index, source := range source {
 		tool, err := requestTool(source)

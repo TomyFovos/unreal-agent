@@ -4,15 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
-	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/mutation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 )
-
-const MaxResultBytes = 256 << 10
-const MaxDocuments = 2048
-const MaxWorkspaceBytes = 16 << 20
 
 type ServerConfig struct {
 	Language    string   `json:"language"`
@@ -22,9 +17,8 @@ type ServerConfig struct {
 	Extensions  []string `json:"extensions,omitempty"`
 }
 type Config struct {
-	Mutation       *mutation.Service
-	Servers        []ServerConfig
-	RequestTimeout time.Duration
+	Mutation *mutation.Service
+	Servers  []ServerConfig
 }
 type Position struct {
 	Line      int `json:"line"`
@@ -48,7 +42,7 @@ type Request struct {
 }
 
 func (r Request) Validate() error {
-	if r.Language == "" || len(r.Language) > 128 {
+	if r.Language == "" {
 		return errors.New("LSP language is required")
 	}
 	switch r.Action {
@@ -72,9 +66,6 @@ func (r Request) Validate() error {
 	}
 	if r.Action == "rename" && (r.NewName == "" || strings.ContainsAny(r.NewName, "\r\n\x00")) {
 		return errors.New("new_name is required and must be single-line")
-	}
-	if len(r.Path) > 4096 || len(r.Query) > 4096 || len(r.NewName) > 4096 || len(r.ActionID) > 128 || len(r.Generation) > 128 {
-		return errors.New("LSP argument exceeds limit")
 	}
 	return nil
 }

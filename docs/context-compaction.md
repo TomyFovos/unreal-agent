@@ -1,343 +1,81 @@
-# Context Compaction v1
+# Codex の追記型コンテキスト
 
-Session history is the complete, append-only source of truth. Provider context
-is a temporary selection from that history. Compaction never edits or deletes
-canonical records, and does not append generated summaries or synthetic turns.
+Canonical Session history が原本。Codex の入力は `deriveItems` が記録順に導出し、
+省略・圧縮と Provider／モデル変更の境界以外では、前回の入力に末尾を追加する。
+Claude Code 自身の会話の圧縮は別の経路で行う（[Claude の経路](claude-route.md)）。
+`Respond` が返り、モデル呼び出し・未完了のツール／Operation がない待機状態で、
+直前の文脈が `Context.ClaudeCompactThresholdTokens`（既定 200,000）を超えていれば、
+同じ Claude Code 会話へ裏で `/compact` を送る。閾値は暫定で、本番の観測で見直す。
+ユーザー入力や子の知らせで次のターンが始まるときは圧縮プロセスを停止・回収し、
+圧縮前の会話から本来の入力を送る。中断を短く記録し、次の待機時にまだ閾値を
+超えていれば再試行する。同じ会話への Claude Code の起動は直列化する。
+ターン開始時に待って圧縮するのは、直前の文脈が閾値の2倍を超える場合だけ。
+ヘッダーとメインのカードにはスピナー付きで「会話を圧縮中」を表示し、入力欄は
+使えるままにする。成功時は圧縮前後のトークン数を Session に残し、Unreal の原本は
+置き換えない。
+ゲージの「文脈」も最後の `message_start` の input + cache_read + cache_creation
+を使う。区切りの間に複数回呼んでも入力を合計せず、キャッシュ率と `/analyze` の
+累計だけは従来どおり呼び出しの合計を使う。
 
-v1 runs locally and deterministically. It requires no additional model, local
-LLM, compaction service, embeddings, vector database or external retrieval
-service. The existing Claude/Codex authentication boundaries are unchanged.
+- instructions は基本文、AGENTS.md の保存済みスナップショット、モード別固定文。
+  Responses API では既存どおり先頭の system message として送る。
+  tools は名前順・決定的 JSON。指示／ツール変更は canonical context record に残す。
+- 各項目のモデル表現と Responses 表現をメモ化する。毎回の検索、途中への挿入、
+  並べ替え、リクエストごとの予算による削除、quoted 再試行は行わない。
+- 動く状態は実行中 Operation の短いメッセージとして、変化したときだけ末尾へ記録する。
+  時刻・履歴カーソルは instructions に入れない。
+- 大きなツール結果は記録時に既存の `max_output_length`（既定 40,000 文字）で
+  先頭・末尾を固定し、Unit ID による canonical history の参照を添える。
+  元の receipt／Operation／既存の出力ファイルは保持する。
+- 同じ Provider／モデルの推論は encrypted reasoning と item ID を再送する。
+  切替を記録した境界以前だけ portable 表現にする。
 
-## Previous request construction
+ツール結果は区切り（epoch）の間は追記だけで保持する。リクエスト直前の
+`PrepareContext` は、新しい結果から合計 `ToolResultKeepTokens`（既定 15,000）に
+達する結果までを直近として残す。それより古い未省略の結果を短い表現にした場合の
+差分が `ToolResultMinPruneTokens`（既定 15,000）以上たまったら、一度に省略する。
+値は既存の context 設定に置く。見積もりは既存の保守的 JSON バイト数を使い、
+実測入力がある場合は、その Turn のリクエスト見積もりとの比率でトークン量に補正する。
 
-`contextbuilder.Builder` retained one system message (harness preamble, runtime
-prompt, creation-time Project Instructions and applicable skills), the entire
-committed conversation and staged inputs/results. Every `Build` copied those
-items into the next request. There was no input budget, historical retrieval or
-active compaction algorithm. `TurnCompaction` existed as a history-codec type,
-not an implemented compaction strategy.
+直近でも、同じファイルの後の再読込・編集によって古くなった読み込みは、その区切りの
+候補に含める。`read` と単一ファイルの単純な `sed -n 'A,Bp' PATH`、`cat PATH`、
+`head`／`tail`（任意の `-n N`）、`nl -ba PATH`、これらへの `| sed -n ...` だけを
+読み込みとして判定する。展開・複数ファイル・複雑な Bash は推測しない。
+編集は `edit`／`write`／適用する `ast_edit` と、Operation が記録した実際の変更先を使う。
+失敗した再読込やプレビューは、古い読み込みを置き換えた根拠にしない。
 
-Public user messages, quoted typed peer messages, model messages/tool calls,
-and Translator-generated receipts were replayed from Session Store. Receipts
-are reconstructed by the existing Translator from canonical tool-call status
-and versioned Operation snapshots. Existing executor truncation/capture-file
-behavior predates this feature; compaction cannot restore bytes never recorded.
+一つの `prune` ContextRecord に複数 Unit の置換を保存し、保存後に使う。
+呼び出しと結果の対・call_id を保ち、結果本文だけを英語1行にする。例:
+`[Output omitted to keep the context small: Bash "sed -n '1,200p' src/foo.go" (812 lines). Run it again if you need it. Canonical Unit ID unit-….]`
+シェルの出力ファイルが記録されていれば、そのパスも添える。原本と記録時の秘密除外は
+維持する。未受領の継続、実行中 Operation の結果、推論、モデル発言、ユーザー・親入力は
+省略しない。再起動後も同じ記録から同じ導出を復元する。旧1 Unit形式の `prune` も読める。
+区切りで1回だけ入力の先頭一致が切れ、その次からまた追記になる。Codex のメイン・子に
+同じ処理を使い、Claude 経路には適用しない。
 
-Codex and Claude already shared this builder. Claude/foreign-provider history
-used portable quoted messages without private reasoning or continuation IDs.
-The same-provider Codex native tool loop retained its native call/result and
-provider replay data. Runtime changes applied only at the existing turn boundary.
-Resume reconstructed the builder through paged canonical replay. Previously,
-`/analyze Context` displayed observed response input usage, not request selection.
+圧縮の閾値は `min(0.8 × W, W − 最大出力 − 64,000)`。
+既存の明示的 InputBudget が低ければそれも使う。W が不明なら既存の既定値を使い、
+直前の実測 input tokens、未取得なら JSON バイト数による保守的見積もりで判断する。
+最大出力の指定がない場合は既存の ResponseReserve を使う。
 
-## Four layers
+通常の epoch 省略はこの閾値より前に行う。閾値を超えた場合は既存どおり、
+まず古い、受領済みの大きな結果を短い参照へ置き換える記録を作る。
+それで収まらなければ、同じ instructions・tools・導出済み入力の末尾に要約指示を
+一件足し、同じ Provider／モデル／Session の cache key で要約する。
+置換範囲と要約を canonical context record に保存し、窓の約 16% の直近履歴と
+未受領の継続に必要な呼び出し・結果を残す。過去の原本は消さない。
+文脈超過エラーでは閾値にかかわらず圧縮し、通常リクエストを一度だけ再試行する。
+要約後も必要な入力が入らなければ `required_context_exceeds_budget` を返す。
 
-```text
-Canonical Session History (unchanged)
-    -> eligible provider-neutral Context Units
-    -> deterministic selector + local lexical retriever
-    -> token-budgeted, request-local Context Package
-    -> existing provider adapter
-```
+既存の継続・受領 ACK、中断時の固定結果、秘密の除外は維持する。
+旧フィールド・チェックポイント付き Session は移行せず読める。
+新しい view の記録も復元時に順番に適用する。旧 retrieval 設定フィールドは
+既存設定の読み込み用に残すが、導出には使わない。
 
-The engine is in `harness/contextengine`. `contextbuilder` supplies public units
-and performs the final provider rendering. Host owns only disposable diagnostics
-and a private derived manifest. Neither selection nor analysis adds canonical
-memory or changes Session/Operation/Permission/RuntimeSelection ownership.
-
-### Units and preservation
-
-A unit has an insertion ID, kind, preservation class, canonical source reference,
-turn/operation/child identifiers when known, canonical timestamp, provider origin,
-tool group, exact public payload, estimated cost and content fingerprint.
-Large text parts additionally have a parent unit ID and exact byte range.
-
-| Class | Request behavior |
-| --- | --- |
-| `PIN` | Protect required current inputs/instructions/task; prioritize failure evidence. |
-| `KEEP` | Include original public data when it fits. |
-| `REFERENCE` | Include a source reference while retaining the original for retrieval. |
-| `OMIT_FROM_REQUEST` | Exclude this request projection; canonical history remains intact. |
-
-Units cover user/model messages, tool requests/results, typed child/peer results
-and public model/tool failure evidence. Instructions and structured state are
-separate protected parts of the package rather than duplicate canonical records.
-Canonical control/configuration records contribute only allowlisted metadata.
-
-The latest explicit user request remains pinned across a long response/tool loop.
-A child separately pins the initial delegated task input identified by its existing
-canonical ChildConfig. A new explicit user input replaces the previous current
-request binding; this does not infer that older user constraints were resolved.
-Older original constraints remain retrievable.
-
-### Structured state and checkpoints
-
-Structured state contains provider/model/effort/revision, tool capability,
-Unreal-enforced permission constraints, Project Instructions metadata, source
-boundary, current request/task references and observed Operation/child metadata.
-Active/failed Operation and observed-child counts are exact for the replayed
-state. Detail rows are bounded; omitted details are counted as referenced state.
-No task decision, changed file, test outcome or blocker is guessed from prose.
-
-A checkpoint has schema version, canonical source range and `ThroughSequence`,
-the structured machine state at that boundary, retained source references and
-the canonical record timestamp. It is not a summary of the older conversation.
-The package combines its checkpoint reference with current machine state,
-recent original data, retrieved original evidence and current input. Recent raw
-selection may cross the checkpoint boundary to preserve a fitting interaction.
-
-Project Instructions continue to use the original Session snapshot. Resume and
-children never substitute a fresh disk read. Parent history is not copied into a
-child: it receives its task, inherited instructions and its own history.
-
-### Retrieval and provenance
-
-The default backend is an incremental, in-memory inverted lexical index.
-Queries use the current explicit user request, with the explicitly bound child
-task as a fallback. Unrelated recent questions are not added to the query.
-There is no model query rewrite. Terms preserve filenames, symbols, error codes
-and their components; Han bigrams support CJK matching. Explicit code/path terms
-have increased weight. Exact code/path/identifier matches precede ordinary words.
-For the same identifier match, the earliest original source precedes later
-questions repeating it; parts of that source are ranked by matched context.
-Equal scores use stable insertion IDs. This is lexical ranking, not an inference
-that a source contains an answer. Selection does not depend on wall-clock time or
-Go map iteration.
-
-Each result keeps history sequence, turn, operation/child identifiers and
-timestamp when available. Large messages/receipts use 1024-byte UTF-8-safe source
-parts with 128-byte overlap. Retrieval uses the original text, not paraphrases.
-Current/staged input, the current turn and actually selected recent raw sources
-are excluded before ranking limits are applied. A recent candidate that did not
-fit remains searchable. Whole-source, repeated-content and overlapping-part
-duplication is removed before consuming retrieval slots or budget. Retrieved evidence is
-visibly quoted as historical data, not promoted to a new instruction.
-
-Successfully consumed, terminal large tool receipts may become source references. Their exact
-eligible text parts remain searchable. Recent failures are prioritized; large
-failures retain fitting first/last original parts and can retrieve the rest.
-Existing canonical Operation evidence determines failure state; v1 does not
-guess that a later conversation resolved it.
-
-`HistoryRef` and `Engine.ResolveUnit` provide the internal source/recall boundary.
-No model-facing recall tool is added. `Retriever` and `Selector` interfaces allow
-future FTS/BM25/embedding/hybrid or model-assisted strategies without rewriting
-canonical history.
-
-## Budget and rendering
-
-For each selected provider/model:
-
-```text
-input budget = min(configured InputBudget,
-                   context window - ResponseReserve
-                                  - actual schema estimate
-                                  - ProtocolReserve)
-```
-
-The default InputBudget is the largest allowed value, so the context window
-decides, as in Codex: a request may fill the model's window less the reserves.
-Set a lower InputBudget to bound requests. Trusted context-window metadata
-already recorded in RuntimeSelection is used when available. An unknown window uses the configurable conservative fallback;
-the engine does not invent a provider window or discover a catalog every turn.
-New selections also use an already available matching CLI catalog window. Resume
-preserves the canonical selection; absent metadata still uses fallback.
-
-Costs use JSON/UTF-8 byte counts plus framing margins, rather than an optimistic
-characters/4 conversion. These are estimates, not actual token measurements.
-Instructions/current input/delegated task are never silently truncated. If they
-cannot fit, a safe typed `context: required_context_exceeds_budget` failure
-occurs before inference. Configure an appropriate budget for unusually large
-instructions/input. Response reserves are planning reserves, not a guarantee of
-the backend's eventual output length. Image accounting is deliberately conservative;
-a current native image is delivered intact or fails budget validation.
-
-Priority is required instructions/current input/task and structured state, fitting
-failure evidence, a reserved recent raw suffix, retrieved historical evidence,
-then additional fitting recent data. Optional Operation detail cannot crowd out
-required input. Exact estimates are checked again after final rendering.
-
-`RetrievalReserve` protects a deterministic historical-evidence slice from a
-large `RecentReserve`. Its zero/default value is `min(2048, InputBudget/4)`;
-the reserved slice is capped at half the budget remaining after pins. Recent
-selection uses the remainder of that first pass, retrieval uses fitting candidates,
-and unused space is then filled by additional recent data. Required input and
-instructions are never evicted. An oversized source can use original indexed
-parts; evidence that still cannot fit is counted as skipped-budget, not delivered.
-
-Claude receives ordinary text context and quoted historical tool receipts with
-`Request.Tools=[]`. Safe-mode, disabled built-in tools, strict empty MCP, no Claude
-session persistence and execution-event rejection remain unchanged.
-
-Codex retains its selected native tool schemas, Translator and Operation path.
-Fitting same-provider response/receipt groups remain native and preserve the
-original reasoning/commentary/call order. Unfinished calls and fresh receipts
-are required until a later successful canonical model response consumes them.
-Building, attempting a send, or receiving new user input is not acknowledgement.
-Current read bodies, exact revisions and truncation metadata remain intact even
-above `LargeToolTokens`. If private replay exceeds the budget, a whole-group
-portable projection is tried before a typed budget refusal. Closed historical
-groups may be referenced/retrieved, with one rendering mode for both sides.
-Secret result bodies use fixed-vocabulary stubs derived from actual canonical
-states; secret arguments never retain the original native provider identity.
-The final projection is checked for preceding calls and following outputs,
-including legal running/final updates, before HTTP. Provider-neutral packages/index/checkpoints never contain
-private reasoning or provider replay IDs. The existing final Codex renderer may
-replay selected same-provider native reasoning/state, budgeted separately in
-transient provider-local memory; it cannot cross into Claude/another provider.
-
-Provider switching rebuilds the package using the new budget/capability at the
-existing `runtime_selection -> runtime_applied` boundary. It never redirects an
-in-flight request, rewrites earlier turns, or performs automatic fallback.
-
-## Configuration and comparison
-
-Existing config files need no changes: bounded v1 is the default. Optional
-top-level `Context` uses the same JSON field style as the runtime configuration:
-
-```json
-{
-  "Context": {
-    "Version": 1,
-    "Mode": "bounded",
-    "FallbackWindow": 786432,
-    "InputBudget": 16777216,
-    "ResponseReserve": 4096,
-    "ProtocolReserve": 1024,
-    "RecentReserve": 12000,
-    "RetrievalReserve": 2048,
-    "RetrievalLimit": 8,
-    "CheckpointThreshold": 128,
-    "LargeToolTokens": 2048
-  }
-}
-```
-
-This is an addition to a complete existing runtime JSON, not a standalone
-configuration. Zero/omitted fields select the defaults above. Unknown versions,
-modes, negative values and oversized limits fail validation. Threshold counts
-canonical record sequences, not conversation turns. Schema reserve is computed
-from the selected request's actual tool definitions; Claude text-only reserves
-no tool schemas. Units/counts can include additional source parts.
-
-`Mode: "legacy"` is an explicit comparison option for the previous unbounded
-selection, with the same public-data security boundary. It is not a second
-canonical memory implementation. Context strategy is outside immutable runtime
-creation identity, so old Sessions can resume without history migration.
-An existing healthy Host retains its startup config until restarted.
-
-Host and standalone runner enable the same engine. Actual child processes also
-enable bounded v1; children currently use the conservative default strategy
-parameters rather than inheriting custom parent Context tuning.
-
-## Derived files, resume and crash safety
-
-```text
-<session-directory>/context-v1/<session-ID>/derived.json
-```
-
-Directories are private 0700; the regular manifest is 0600. A pinned directory,
-temporary file, fsync and atomic rename isolate updates from canonical files.
-Unsafe/symlink/public derived locations disable persistence rather than weaken
-permissions or corrupt the Session. The engine can continue in memory.
-
-Only versioned checkpoint source references/structured metadata and body-free
-diagnostics are persisted. Original bodies, lexical terms and private replay data
-are not duplicated into derived files. The live lexical index is rebuilt from
-canonical replay on restart, even when a manifest is readable. Missing, stale,
-incompatible, corrupt and partially written manifests cannot change selection or
-make canonical history corrupt. A checkpoint/index can be discarded and rebuilt.
-
-The manifest is advisory and not a startup acceleration mechanism in v1.
-Request diagnostics are ephemeral: after restart they are `unknown` until the
-next request is prepared, instead of reusing a possibly stale previous report.
-Preparing/rebuilding context alone does not send an inference request. Existing
-resume semantics still execute a genuinely pending canonical input.
-
-## Security and analysis
-
-Eligibility accepts only public message/tool payload types and known public
-message phases. Reasoning, raw usage/provider metadata, credential controls,
-authentication/environment/configuration bodies and account identity have no
-index ingestion path. Known secret patterns exclude a whole source unit rather
-than rewriting it into apparently original evidence. Credential/environment read
-requests are ineligible, and exclusion propagates to their receipts even if the
-result has no recognizable label. Required sensitive input produces a closed
-error instead of sending it. Free-form content screening is conservative pattern
-matching, not a complete detector for arbitrary unlabelled secrets.
-
-`/analyze` -> Context (or `/analyze context`) reports last prepared package:
-provider/model/runtime revision, projected unit count, raw/pinned selection,
-retrieval/reference/omission/exclusion counts, checkpoint/source boundary,
-estimated input and budget/utilization, reserve/window source, retrieval latency
-and cache status. `Retrieved` is the number of historical units actually present
-in the final Context Package. Separate diagnostics count eligible candidates and
-skips for selected recent data, duplicates, budget and ineligible sources. These
-are counts, not returned bodies or search terms. It displays no bodies, queries or raw tool arguments. Existing
-actual provider input-usage charts remain separate, with known/partial/unknown
-semantics. JSON/Markdown analysis exports include only this safe metadata.
-Tiny/Narrow/Wide, NO_COLOR/plain/ASCII and the bottom composer are unchanged.
-
-## Performance and limits
-
-Units, lexical postings, fingerprints and rendering costs are incrementally
-updated for new records. Each request scans a budget-bounded recent suffix, not
-all historical bodies. Checkpoint references accumulate incrementally. Memory is
-proportional to eligible history/index size; v1 does not evict that local index.
-Queries on common terms can still scan/sort O(N) matching postings. Operation
-state selection scans lightweight stored metadata. Restart pays canonical replay
-cost, including the existing store's page-reading behavior.
-
-Tests cover 500/1000 turns, exact old codes/files/symbols/constraints/child results,
-provider switches, native tool groups, large receipts, active task/failure
-retention, budgeting, secrets, determinism, cache deletion/corruption/version
-changes, real Host/gateway composition and actual fake child processes.
-Lexical matching cannot infer semantic relevance, remember a decision not
-explicitly recalled, or recover output not present in canonical evidence.
-No generated summary, monetary/quota estimate, embedding or recall tool is added.
-
-## Manual smoke: user execution only
-
-Use the same existing config, Session name, state and socket as your long Session.
-No smoke command below is run by the implementation/tests. Detach, stop the
-confirmed owning serve process with SIGTERM, wait for it to exit, and use the
-updated binary. Do not remove history, socket locks or canonical state.
-
-For the existing multi-provider Team smoke store:
-
-```bash
-cd /path/to/unreal-agent
-./bin/unreal --config "$HOME/.config/unreal-agent/multi-provider-main-smoke.json" \
-  --state-directory "$HOME/.local/state/unreal-agent-claude-team-smoke" \
-  --socket "$HOME/.local/state/unreal-agent-claude-team-smoke/run/host.sock" \
-  claude-team-smoke
-```
-
-Use your actual long Session/config if it has a different name or directory;
-keep immutable runtime/policy/template values unchanged. Context defaults apply
-without changing the runtime JSON. A stopped Session resumes automatically;
-running Sessions attach. A pending real input can resume inference as before.
-
-1. Open `/analyze context`. Before the first newly prepared request, package
-   diagnostics correctly show unknown; existing measured usage remains visible.
-2. Use `/model` to select Claude -> model -> effort. Ask for the exact wording of
-   an old error code, file/symbol, constraint or child result unique to this Session.
-3. Inspect `/analyze context`: retrieved count/source boundary, estimated input
-   within budget, reference/omission counts. It should not grow with full history.
-4. Switch to Codex -> model -> effort and repeat; then reverse the switch. The
-   history is retained and only public selected context crosses providers.
-5. Ctrl-D detach and reopen the identical launcher command. After Host restart,
-   request original evidence again and compare the safe context metrics.
-6. To force derived rebuild, stop the owning Host after an idle stop/detach, and
-   remove **only** the following derived manifest. Keep every `.session.jsonl`
-   and canonical Operation/history file. Reopen the same command and ask again.
-
-```bash
-rm -- "$HOME/.local/state/unreal-agent-claude-team-smoke/sessions/context-v1/claude-team-smoke/derived.json"
-```
-
-For another store replace only the session-directory and Session ID in this
-derived path. Rebuild does not rewrite history; new user turns append normally.
-
-未来の selector/retrieval の変更も derived state の再構築だけで適用できます。
-canonical history は削除していません。生成 summary は canonical memory ではありません。
+Split の統計、Session 分析と Markdown エクスポートに、直近と累計の
+`cache NN%`（cached input / input）を表示する。未報告は `cache -`。
+Session 分析（`/analyze`）と分析・会話の Markdown エクスポートには、報告のある
+呼び出しの平均入力トークン（要約呼び出しを含む）、省略した結果数、正味の推定削減
+トークン合計、`prune` の区切り回数も出す。記録時の head/tail 制限は省略件数に数えない。
+旧 `prune` に削減量の記録がない場合、件数と区切りだけを集計する。
+95% は実機の観測で確認する目標であり、キャッシュ保持や新規入力の割合により変わる。

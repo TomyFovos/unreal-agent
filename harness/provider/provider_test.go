@@ -91,7 +91,7 @@ func TestFiveExistingProvidersResolveAtRequestTime(t *testing.T) {
 		})
 	}
 }
-func TestSelectionRejectsUnknownAndResumeChanges(t *testing.T) {
+func TestSelectionRejectsUnknownAndRetainsCatalogIsolation(t *testing.T) {
 	reg, _ := New(Defaults(map[string][]Model{"openai": {{ID: "m", Family: "family", Capabilities: []string{"tools"}}}})...)
 	base := fixtureSelection("openai", "https://api.example")
 	base.Model.ID = "m"
@@ -108,14 +108,6 @@ func TestSelectionRejectsUnknownAndResumeChanges(t *testing.T) {
 		if _, err := reg.Resolve(bad); err == nil {
 			t.Fatalf("accepted unsupported selection %+v", bad)
 		}
-	}
-	if ValidateResume(selected, selected) != nil {
-		t.Fatal("same config incompatible")
-	}
-	other := selected
-	other.Auth.ID = "other"
-	if ValidateResume(selected, other) == nil {
-		t.Fatal("credential silently switched")
 	}
 	selected.Model.Capabilities[0] = "changed"
 	again, _ := reg.Resolve(base)
@@ -187,5 +179,18 @@ func TestSecretCannotAccidentallySerialize(t *testing.T) {
 		if strings.Contains(out, s.Reveal()) {
 			t.Fatal("secret leaked")
 		}
+	}
+}
+
+func TestSelectionSourceIsOptionalAndRetriesHaveNoUpperBound(t *testing.T) {
+	registry, err := New(Defaults(map[string][]Model{"openai": {{ID: "explicit-model"}}})...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection := fixtureSelection("openai", "https://api.openai.com/v1/responses")
+	selection.Source = ""
+	selection.MaxAttempts = 11
+	if _, err := registry.Resolve(selection); err != nil {
+		t.Fatal("selection refused", err)
 	}
 }

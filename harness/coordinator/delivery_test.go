@@ -40,7 +40,7 @@ func TestCoordinatorReplaysToolResultBalance(t *testing.T) {
 		store.items = append(store.items, storedItem(sessionstore.Sequence(len(store.items)+1), step.kind, step.data))
 		t.Run(step.name, func(t *testing.T) {
 			current := newTestCoordinator(store, newTestInbox(t), newFakeOperationManager(), contextbuilder.NewBuilder(), registry)
-			if err := current.restore(t.Context()); err != nil {
+			if err := current.loadHistory(t.Context()); err != nil {
 				t.Fatal(err)
 			}
 			if got := len(current.state.toolCalls); got != step.pendingCalls {

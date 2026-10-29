@@ -39,24 +39,10 @@ func (source DockerSandboxSource) DetectRoute() (bool, error) {
 		if toml.Unmarshal(data, &config) != nil || config == nil {
 			return false, &SandboxProxyError{}
 		}
-		if name, exists := config["model_provider"]; exists {
-			switch name {
-			case "sandboxd":
-				docker = true
-			case "openai":
-			default:
-				return false, &SandboxProxyError{}
-			}
+		if config["model_provider"] == "sandboxd" || config["forced_login_method"] == "api" {
+			docker = true
 		}
-		if mode, exists := config["forced_login_method"]; exists {
-			switch mode {
-			case "api":
-				docker = true // requires complete OAuth kit validation below
-			case "chatgpt":
-			default:
-				return false, &SandboxProxyError{}
-			}
-		}
+
 	}
 	// A proxy marker without consistent kit routing cannot be used as a token.
 	// Contents are transient and remain inside the native credential owner.

@@ -3,6 +3,7 @@ package agentrunner
 import (
 	"context"
 	"github.com/unreallabsai/unreal-agent/harness/contextengine"
+	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"io"
 	"slices"
 
@@ -32,9 +33,10 @@ type ToolConfig struct {
 }
 
 type Tools struct {
-	Registry   tool.Registry
-	RemoteJobs []operation.RemoteJobHandler
-	Close      func() error
+	InterruptedInput func(operation.Operation) (*inbox.Input, error)
+	Registry         tool.Registry
+	RemoteJobs       []operation.RemoteJobHandler
+	Close            func() error
 }
 
 type ToolFactory func(context.Context, ToolConfig) (Tools, error)

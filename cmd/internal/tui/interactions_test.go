@@ -4,14 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json/v2"
-	"fmt"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/rivo/uniseg"
-	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -89,7 +87,7 @@ func (s *screenObserver) Write(p []byte) (int, error) {
 			if s.x+g.Width() <= 160 {
 				s.cells[s.y][s.x] = g.Str()
 				for n := 1; n < g.Width(); n++ {
-					s.cells[s.y][s.x+n] = ""
+					s.cells[s.y][s.x+n] = "\x00" // continuation cell, not a blank
 				}
 				s.x += g.Width()
 			}
@@ -106,6 +104,9 @@ func (s *screenObserver) text() string {
 	for _, row := range s.cells {
 		var b strings.Builder
 		for _, c := range row {
+			if c == "\x00" {
+				continue
+			}
 			if c == "" {
 				b.WriteByte(' ')
 			} else {
@@ -155,7 +156,7 @@ func TestLiveRunHelpCompletionScrollAndPastedUnknownCommand(t *testing.T) {
 	f.mu.Unlock()
 	keys <- Key{Text: "/mo"}
 	keys <- Key{Name: "tab"}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "cmd › /model") && out.cursorX() == 15 })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "[ cmd ] › /model") && out.cursorX() == 16 })
 	// Clear the completed command with existing editing keys, then feed fragmented paste.
 	for i := 0; i < len("/model"); i++ {
 		keys <- Key{Name: "backspace"}
@@ -167,7 +168,7 @@ func TestLiveRunHelpCompletionScrollAndPastedUnknownCommand(t *testing.T) {
 		}
 	}
 	waitFor(t, func() bool { return strings.Contains(out.text(), "pasted: Enter submits") })
-	if strings.Contains(out.text(), "cmd ›") {
+	if strings.Contains(out.text(), "[ cmd ] ›") {
 		t.Fatal("pasted slash acquired command mode")
 	}
 	keys <- Key{Name: "enter"}
@@ -210,7 +211,7 @@ func TestLiveRunPendingCancelWaitingAndPersistentRetry(t *testing.T) {
 			t.Fatal(err)
 		}
 	}()
-	waitFor(t, func() bool { return strings.Contains(out.text(), "connected") })
+	waitFor(t, func() bool { return strings.Contains(out.text(), "入力待ち") })
 	keys <- Key{Text: "outbox message"}
 	keys <- Key{Name: "enter"}
 	waitFor(t, func() bool {
@@ -238,52 +239,6 @@ func TestLiveRunPendingCancelWaitingAndPersistentRetry(t *testing.T) {
 	f.mu.Unlock()
 }
 
-type echoingStorage struct{ *fakeClient }
-
-func (c echoingStorage) Login(_ context.Context, _ credential.Reference, secret credential.Secret) (credential.Metadata, error) {
-	return credential.Metadata{}, fmt.Errorf("storage echo: %s", secret.Reveal())
-}
-func TestLiveRunPrivateErrorAndCredentialSheetsNeverLeakValues(t *testing.T) {
-	f := echoingStorage{newFake()}
-	keys := make(chan Key, 32)
-	out := &screenObserver{}
-	done := make(chan error, 1)
-	theme := Theme{Plain: true}
-	go func() { done <- Run(t.Context(), Config{Client: f, ID: "s", Keys: keys, Output: out, Theme: &theme}) }()
-	defer func() {
-		keys <- Key{Name: "detach"}
-		if err := <-done; err != nil {
-			t.Fatal(err)
-		}
-	}()
-	waitFor(t, func() bool { return strings.Contains(out.text(), "connected") })
-	keys <- Key{Text: "/login openai private"}
-	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "private: API key for openai/private") })
-	keys <- Key{Text: "NEVER_DISPLAY_CREDENTIAL_VALUE"}
-	keys <- Key{Name: "tab"}
-	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "credential storage failed") })
-	if strings.Contains(out.rawText(), "NEVER_DISPLAY_CREDENTIAL_VALUE") {
-		t.Fatal("credential leaked into output/error")
-	}
-	keys <- Key{Text: "/methods"}
-	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool {
-		return strings.Contains(out.text(), "openai/api_key") && strings.Contains(out.text(), "auth")
-	})
-	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool { return !strings.Contains(out.text(), "openai/api_key") })
-	keys <- Key{Text: "/credentials"}
-	keys <- Key{Name: "enter"}
-	waitFor(t, func() bool { return strings.Contains(out.text(), "no stored credentials") })
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if len(f.inputs) != 0 {
-		t.Fatal("auth sheet or secret sent to session")
-	}
-}
-
 func TestLiveWarningsAndProviderHintsStayOutsideHistory(t *testing.T) {
 	s, u := idleSnapshot(), childUI(5)
 	u.Sheet = helpSheet(u.Theme, false)
@@ -305,10 +260,21 @@ func TestLiveWarningsAndProviderHintsStayOutsideHistory(t *testing.T) {
 	u.Cursor = 0
 	u.Viewer = viewer.PanelSnapshot{}
 	text := frameText(RenderFrame(s, u, 100, 30))
-	if !strings.Contains(text, "codex login") || !strings.Contains(text, "Another client owns the writer") || !strings.Contains(text, "error") {
+	if !strings.Contains(text, "codex login") || !strings.Contains(text, "別の画面で使用中") || strings.Count(text, "✗") != 2 {
 		t.Fatal("provider hints missing: " + text)
 	}
-	if hint := failureHint("unknown_code"); hint != "" {
-		t.Fatal("invented provider recovery hint")
+}
+
+func TestScreenObserverPreservesWideGraphemes(t *testing.T) {
+	var screen screenObserver
+	text := "◆ メイン 猫👩🏽‍💻é"
+	if _, err := screen.Write([]byte("\x1b[1;1H" + text)); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.SplitN(screen.text(), "\n", 2)[0]; got != text {
+		t.Fatalf("visible wide text = %q, want %q", got, text)
+	}
+	if screen.cursorX() != uniseg.StringWidth(text) {
+		t.Fatal("wide text changed terminal cursor width")
 	}
 }

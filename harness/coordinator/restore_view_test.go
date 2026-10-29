@@ -61,7 +61,7 @@ func TestRestoreHistoryViewClosesBeforeReconciliation(t *testing.T) {
 		if store.active || store.closed != 1 {
 			t.Fatal("reconciliation wrote inside read boundary")
 		}
-		if op.Status != operation.StatusCanceling {
+		if op.Status != operation.StatusCanceled {
 			t.Fatal("cancel checkpoint changed")
 		}
 	}

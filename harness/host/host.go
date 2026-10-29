@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 	"uuid"
@@ -36,8 +38,8 @@ var (
 )
 
 type Runtime struct {
+	InterruptedInput  func(operation.Operation) (*inbox.Input, error)
 	ContextEngine     *contextengine.Engine
-	ContextCache      *contextengine.Cache
 	Selection         *sessionstore.RuntimeSelection
 	ApplySelection    func(sessionstore.RuntimeSelection) error
 	ValidateSelection func(sessionstore.RuntimeSelection) error
@@ -54,6 +56,8 @@ type Factory func(context.Context, session.ID) (Runtime, error)
 type Config struct {
 	Directory string
 	Build     Factory
+	// OnFailure observes the final cause for application-owned diagnostic logging.
+	OnFailure func(session.ID, error)
 	// PermissionMaximum opts in to ephemeral human-controlled modes. Options.Policy
 	// remains the read-only baseline; this reviewed upper bound is never a grant.
 	PermissionMaximum *permission.Policy
@@ -111,12 +115,13 @@ func (o Options) creationRecords() ([]sessionstore.HostRecord, error) {
 }
 
 type Host struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	config   Config
-	mu       sync.Mutex
-	sessions map[session.ID]*Session
-	closed   bool
+	ctx        context.Context
+	cancel     context.CancelFunc
+	config     Config
+	mu         sync.Mutex
+	sessions   map[session.ID]*Session
+	closed     bool
+	reconciled bool
 }
 type Receipt struct {
 	ID       inbox.ID
@@ -138,16 +143,18 @@ type Event struct {
 	Operation  *operation.Operation `json:",omitzero"`
 }
 type View struct {
-	Permissions permission.ModeSnapshot
-	Context     *contextengine.Diagnostics `json:",omitzero"`
-	Progress    *Progress                  `json:",omitzero"`
-	Session     sessionstore.Snapshot
-	Generation  string
-	Revision    uint64
-	History     HistoryPage
-	Operations  []operation.Operation
-	Running     bool
-	Failure     string `json:",omitzero"`
+	HistoryReceipts []HistoryReceipt `json:",omitzero"`
+	HistoryState    *HistoryState    `json:",omitzero"`
+	Permissions     permission.ModeSnapshot
+	Context         *contextengine.Diagnostics `json:",omitzero"`
+	Progress        *Progress                  `json:",omitzero"`
+	Session         sessionstore.Snapshot
+	Generation      string
+	Revision        uint64
+	History         HistoryPage
+	Operations      []operation.Operation
+	Running         bool
+	Failure         string `json:",omitzero"`
 
 	// ProjectInstructions identifies the bound snapshot without its content.
 	ProjectInstructions *projectinstructions.Metadata `json:",omitzero"`
@@ -157,39 +164,62 @@ type Subscription struct {
 	Events  <-chan Event
 	Cancel  func()
 }
+
+// ObservationVersion is a lightweight read token for an already observed Host
+// Session. It grants no authority and contains no history or Operation data.
+type ObservationVersion struct {
+	Generation string
+	Revision   uint64
+}
+
+func (s *Session) ObservationVersion() ObservationVersion {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return ObservationVersion{Generation: s.Generation, Revision: s.revision}
+}
+
 type Session struct {
-	permissions       *permission.Controller
-	ID                session.ID
-	Generation        string
-	StartAfter        sessionstore.Sequence
-	ctx               context.Context
-	cancel            context.CancelFunc
-	lock              *os.File
-	store             *localfile.Store
-	inbox             *inbox.Inbox
-	runtime           Runtime
-	lifecycle         string
-	finish            *sessionstore.FinishRecord
-	mu                sync.Mutex
-	snapshot          sessionstore.Snapshot
-	items             []sessionstore.Item
-	operations        map[operation.ID]operation.Operation
-	submissions       map[inbox.ID]*submission
-	subscribers       map[uint64]chan Event
-	nextSubscriber    uint64
-	progress          *Progress
-	contextReport     *contextengine.Diagnostics
-	instructions      *projectinstructions.Metadata
-	boundInstructions *projectinstructions.Snapshot
-	progressEpoch     uint64
-	responding        int           // model calls in flight
-	respondingChanged chan struct{} // closed when responding changes
-	revision          uint64
-	done              chan struct{}
-	running           bool
-	err               error
-	selection         *sessionstore.RuntimeSelection
-	pendingSelection  *sessionstore.RuntimeSelection
+	permissions           *permission.Controller
+	ID                    session.ID
+	Generation            string
+	StartAfter            sessionstore.Sequence
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	lock                  *os.File
+	store                 *localfile.Store
+	inbox                 *inbox.Inbox
+	runtime               Runtime
+	lifecycle             string
+	finish                *sessionstore.FinishRecord
+	mu                    sync.Mutex
+	snapshot              sessionstore.Snapshot
+	items                 []sessionstore.Item
+	historyState          HistoryState
+	historyBackground     []bool
+	historyReceipts       map[string]HistoryReceipt
+	historyWorkBefore     []*HistoryWork
+	historyWorkCurrent    *HistoryWork
+	historyWorkTurns      map[session.TurnID]bool
+	historyWorkReports    map[session.ID]bool
+	operations            map[operation.ID]operation.Operation
+	operationRevision     uint64
+	observationOperations map[operation.ID]observationOperation
+	submissions           map[inbox.ID]*submission
+	subscribers           map[uint64]chan Event
+	nextSubscriber        uint64
+	progress              *Progress
+	contextReport         *contextengine.Diagnostics
+	instructions          *projectinstructions.Metadata
+	boundInstructions     *projectinstructions.Snapshot
+	progressEpoch         uint64
+	responding            int           // model calls in flight
+	respondingChanged     chan struct{} // closed when responding changes
+	revision              uint64
+	done                  chan struct{}
+	running               bool
+	err                   error
+	selection             *sessionstore.RuntimeSelection
+	pendingSelection      *sessionstore.RuntimeSelection
 }
 
 func New(ctx context.Context, c Config) (*Host, error) {
@@ -243,7 +273,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 			lock.Close()
 		}
 	}()
-	readView, viewErr := raw.OpenRestoreView(ctx, o.ID, lock)
+	readView, viewErr := raw.OpenRestoreView(ctx, o.ID)
 	closeReadView := func() error {
 		if readView == nil {
 			return nil
@@ -258,9 +288,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		}
 	}()
 	var restored sessionstore.ResumeState
-	if errors.Is(viewErr, localfile.ErrRestoreViewUnsupported) {
-		restored, err = raw.Resume(ctx, o.ID)
-	} else if viewErr != nil {
+	if viewErr != nil {
 		err = viewErr
 	} else {
 		restored, err = readView.Resume(ctx, o.ID)
@@ -283,21 +311,10 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		}
 		restored = sessionstore.ResumeState{Snapshot: snapshot}
 		created = true
-	} else if readView == nil || readView.FormatVersion() == 2 {
-		// A migration is a write boundary. Close the old view before publishing
-		// the new header; never mix pages from either side of the migration.
-		if err = closeReadView(); err != nil {
-			return nil, err
-		}
-		if err = raw.Upgrade(ctx, o.ID); err != nil {
-			return nil, err
-		}
+
 	}
 	if readView == nil {
-		readView, err = raw.OpenRestoreView(ctx, o.ID, lock)
-		if errors.Is(err, localfile.ErrRestoreViewUnsupported) {
-			err = nil
-		}
+		readView, err = raw.OpenRestoreView(ctx, o.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -316,8 +333,15 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	var controller *permission.Controller
 	if h.config.PermissionMaximum != nil {
 		controller = permission.NewController(h.ctx, o.Policy, h.config.PermissionMaximum, h.config.ApprovalTimeout)
-		if o.PermissionMode != "" {
-			if err = controller.Follow(o.PermissionMode); err != nil {
+		mode := o.PermissionMode
+		if mode == "" && o.Lifecycle != "child" {
+			// The workspace's last selected mode survives Host restarts,
+			// updates and resume (U20); children follow their parent instead.
+			mode = h.savedPermissionMode()
+			controller.OnModeChange = h.savePermissionMode
+		}
+		if mode != "" {
+			if err = controller.Follow(mode); err != nil {
 				controller.Close()
 				return nil, err
 			}
@@ -365,7 +389,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		return nil, e
 	}
 	for _, op := range ops {
-		s.operations[op.ID] = op
+		s.setOperation(op)
 	}
 	if err = closeReadView(); err != nil {
 		return nil, err
@@ -400,9 +424,13 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	if s.runtime.Builder == nil || s.runtime.LLM == nil || s.runtime.Tools == nil || s.runtime.Operations == nil {
 		return nil, fmt.Errorf("incomplete session runtime")
 	}
-	if restored, err = s.reconcileCanonicalReceipts(cctx, restored, ops); err != nil {
-		return nil, err
+	if !h.reconciled {
+		if err = h.reconcileStoppedSessions(ctx, s); err != nil {
+			return nil, err
+		}
+		h.reconciled = true
 	}
+
 	if s.selection == nil {
 		s.selection = s.runtime.Selection
 	}
@@ -443,8 +471,8 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	}
 	pending := s.pendingStop()
 	dependencies := coordinator.Dependencies{SessionID: o.ID, Inbox: s.inbox, Restored: restored,
+		InterruptedInput: s.runtime.InterruptedInput,
 		ContextBuilt:     s.contextBuilt,
-		ModelReplayHeld:  s.modelReplayHeld,
 		BeforeTurn:       s.beginTurn,
 		BeforeGeneration: s.runtime.BeforeGeneration,
 		Sessions:         &serializedStore{s}, ContextBuilder: s.runtime.Builder, LLM: s.runtime.LLM, Tools: s.runtime.Tools,
@@ -471,6 +499,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	h.sessions[o.ID] = s
 	go func() {
 		runErr := coordinator.New(dependencies).Run(cctx)
+		interrupted := cctx.Err() != nil
 		s.mu.Lock()
 		if runErr == nil {
 			runErr = s.completeStops(context.WithoutCancel(cctx))
@@ -483,9 +512,10 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		if manager, ok := s.runtime.Operations.(interface{ Done() <-chan struct{} }); ok {
 			<-manager.Done()
 		}
+		runErr = errors.Join(runErr, s.cancelStoppedChildren(context.WithoutCancel(cctx), interrupted))
 		// No writer can be handed over until all canonical writes have stopped.
-		runErr = errors.Join(runErr, lock.Close())
 		s.mu.Lock()
+		runErr = errors.Join(runErr, lock.Close())
 		s.running = false
 		s.progress = nil
 		s.err = runErr
@@ -494,8 +524,11 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 			close(ch)
 			delete(s.subscribers, id)
 		}
-		close(s.done)
 		s.mu.Unlock()
+		if runErr != nil && h.config.OnFailure != nil {
+			h.config.OnFailure(s.ID, runErr)
+		}
+		close(s.done)
 	}()
 	return s, nil
 }
@@ -635,14 +668,31 @@ func (s *Session) Stop(ctx context.Context, generation string, mode inbox.Contro
 	payload, _ := json.Marshal(inbox.ControlMessage{Mode: mode, Reason: reason})
 	return s.Submit(ctx, generation, inbox.Input{ID: inbox.ID(uuid.New().String()), Kind: inbox.InputControl, Payload: payload})
 }
+
+type observationOperation struct{ public operation.Operation }
+
+func (s *Session) setOperation(op operation.Operation) {
+	s.operations[op.ID] = op
+	s.operationRevision++
+	delete(s.observationOperations, op.ID)
+}
+
+// OperationRevision changes only with the canonical Operation projection. A
+// read-only child observer can reuse decoded identities during progress ticks.
+func (s *Session) OperationRevision() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.operationRevision
+}
+
 func (s *Session) Inspect(after sessionstore.Sequence, limit int) (View, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.view(after, limit)
 }
 func (s *Session) view(after sessionstore.Sequence, limit int) (View, error) {
-	if limit <= 0 || limit > 4096 {
-		return View{}, fmt.Errorf("page limit must be 1..4096")
+	if limit <= 0 {
+		return View{}, fmt.Errorf("page limit must be positive")
 	}
 	if after > sessionstore.Sequence(len(s.items)) {
 		return View{}, fmt.Errorf("history cursor beyond session")
@@ -656,18 +706,33 @@ func (s *Session) view(after sessionstore.Sequence, limit int) (View, error) {
 	if s.err != nil {
 		v.Failure = s.err.Error()
 	}
-	for _, op := range s.operations {
-		v.Operations = append(v.Operations, op)
+	v = clone(v)
+	if s.observationOperations == nil {
+		s.observationOperations = make(map[operation.ID]observationOperation)
+	}
+	for id, op := range s.operations {
+		cached, ok := s.observationOperations[id]
+		if !ok {
+			cached = observationOperation{public: clone(op)}
+			s.observationOperations[id] = cached
+		}
+		// Raw JSON was normalized once when this Operation changed. Public
+		// callers still receive their own bytes and all metadata pointers.
+		metadata := cached.public
+		metadata.State = nil
+		value := clone(metadata)
+		value.State = cached.public.State.Clone()
+		v.Operations = append(v.Operations, value)
 	}
 	sort.Slice(v.Operations, func(i, j int) bool { return v.Operations[i].ID < v.Operations[j].ID })
-	return clone(v), nil
+	return v, nil
 }
 
 // Subscribe atomically installs a subscriber and captures a snapshot. A gap
 // closes that subscription: fetch a new snapshot and subscribe again.
 func (s *Session) Subscribe(after sessionstore.Sequence, limit, capacity int) (Subscription, error) {
-	if capacity < 1 || capacity > 4096 {
-		return Subscription{}, fmt.Errorf("event capacity must be 1..4096")
+	if capacity < 1 {
+		return Subscription{}, fmt.Errorf("event capacity must be positive")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -700,8 +765,15 @@ func (s *Session) broadcast(event Event) {
 		select {
 		case ch <- clone(event):
 		default:
-			for len(ch) > 0 {
-				<-ch
+			// The subscriber drains concurrently. A len check followed by a
+			// receive can block forever while holding the Session mutex.
+		drain:
+			for {
+				select {
+				case <-ch:
+				default:
+					break drain
+				}
 			}
 			ch <- Event{Generation: s.Generation, Revision: s.revision, Kind: "gap"}
 			close(ch)
@@ -723,11 +795,14 @@ func clone[T any](v T) T {
 func (s *Session) rememberItem(item sessionstore.Item, notify bool) {
 	item = clone(item)
 	s.items = append(s.items, item)
+	s.indexHistory()
 	if item.Kind == sessionstore.ItemTurn || item.Kind == sessionstore.ItemModelResponse {
 		s.progress = nil
 	}
 	if item.Kind == sessionstore.ItemFork {
 		clear(s.operations)
+		s.operationRevision++
+		clear(s.observationOperations)
 		s.finish = nil
 		s.selection = nil
 		s.pendingSelection = nil
@@ -760,8 +835,11 @@ func (s *Session) rememberItem(item sessionstore.Item, notify bool) {
 			choice.Effort = control.Parameters.(inbox.Settings).ReasoningEffort
 			s.selection = &choice
 		}
+		if control, e := input.DecodeControlMessage(); e == nil && (control.Mode == inbox.InterruptAgent || control.Mode == inbox.StopHard) {
+			s.progress = nil
+		}
 		if op, e := sessionstore.DecodeOperationIntent(input); e == nil {
-			s.operations[op.ID] = op
+			s.setOperation(op)
 		}
 		if err != nil {
 			panic(err)
@@ -787,7 +865,7 @@ func (s *Session) rememberItem(item sessionstore.Item, notify bool) {
 	}
 	if item.Kind == sessionstore.ItemToolCallStatus {
 		for _, op := range item.Data.(sessionstore.ToolCallStatus).Operations {
-			s.operations[op.ID] = op
+			s.setOperation(op)
 		}
 	}
 	if notify {
@@ -889,4 +967,27 @@ func (s *Session) BoundProjectInstructions() *projectinstructions.Snapshot {
 	}
 	snapshot := *s.boundInstructions
 	return &snapshot
+}
+
+func (h *Host) permissionModePath() string {
+	return filepath.Join(h.config.Directory, "permission-mode")
+}
+
+func (h *Host) savedPermissionMode() permission.Mode {
+	data, err := os.ReadFile(h.permissionModePath())
+	if err != nil {
+		return ""
+	}
+	if mode := permission.Mode(strings.TrimSpace(string(data))); mode.Valid() {
+		return mode
+	}
+	return ""
+}
+
+func (h *Host) savePermissionMode(mode permission.Mode) {
+	path := h.permissionModePath()
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, []byte(string(mode)+"\n"), 0o600) == nil {
+		_ = os.Rename(tmp, path)
+	}
 }

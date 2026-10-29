@@ -74,8 +74,15 @@ func extensionError(err error) string {
 // ExtensionHandler is mounted only on the authenticated private local gateway.
 // It revalidates parent/child identity at the owning Host for every action.
 type ExtensionHandler struct {
+	cache     *parentReadCache
 	Host      *host.Host
 	Directory string
+}
+
+// NewExtensionHandler shares immutable read projections across the scoped
+// child polls of this Host. Direct struct construction remains supported.
+func NewExtensionHandler(owner *host.Host, directory string) ExtensionHandler {
+	return ExtensionHandler{Host: owner, Directory: directory, cache: newParentReadCache()}
 }
 
 func (h ExtensionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +104,7 @@ func (h ExtensionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		switch q.Action {
 		case "inspect":
-			v, e := (ParentReader{Host: h.Host, ParentID: q.ParentID, Directory: h.Directory}).Inspect(r.Context(), q.ID, q.After, q.Limit)
+			v, e := (ParentReader{Host: h.Host, ParentID: q.ParentID, Directory: h.Directory, cache: h.cache}).Inspect(r.Context(), q.ID, q.After, q.Limit)
 			if e != nil {
 				err = e
 			} else {
@@ -141,6 +148,15 @@ type Remote struct {
 	ParentID session.ID
 	Parent   Reader
 	Call     ExtensionCall
+}
+
+func (r Remote) Version(ctx context.Context, id session.ID) (host.ObservationVersion, error) {
+	if id == r.ParentID {
+		if reader, ok := r.Parent.(VersionReader); ok {
+			return reader.Version(ctx, id)
+		}
+	}
+	return host.ObservationVersion{}, ErrUnavailable
 }
 
 func (r Remote) exchange(ctx context.Context, q extensionRequest) (extensionReply, error) {

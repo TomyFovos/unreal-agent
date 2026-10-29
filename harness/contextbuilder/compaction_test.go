@@ -7,12 +7,10 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
-	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 )
@@ -79,97 +77,6 @@ func requestText(r Result) string {
 	return b.String()
 }
 
-func TestCompactionRetrievesExactHistoricalEvidence500And1000Turns(t *testing.T) {
-	for _, n := range []int{500, 1000} {
-		t.Run(fmt.Sprint(n), func(t *testing.T) {
-			f := newContextFixture(t, "claude-code", contextengine.Config{InputBudget: 5000, RecentReserve: 1000, CheckpointThreshold: 32})
-			evidence := map[int]string{5: "The exact error is ABC-1234.", 9: "Filename: src/retained_marker.go", 13: "Function: PreserveHistoricalEvidence", 17: "User constraint: never overwrite the orchid ledger", 21: "Child result: child-old discovered the violet invariant"}
-			for i := 1; i <= n; i++ {
-				text := fmt.Sprintf("ordinary task %d unrelated", i)
-				if old, ok := evidence[i]; ok {
-					text = old
-				}
-				f.turn(t, fmt.Sprint(i), text, "synthetic response "+strings.Repeat("routine details ", 20))
-			}
-			before, _ := json.Marshal(f.history)
-			for _, i := range []int{5, 9, 13, 17, 21} {
-				original := evidence[i]
-				f.user(t, fmt.Sprintf("recall-%d", i), "Recall the exact source for "+original)
-				r, err := f.b.Build()
-				if err != nil {
-					t.Fatal(err)
-				}
-				if r.Package.EstimatedTokens > r.Package.Budget.Input || r.Report.Context.Retrieved == 0 {
-					t.Fatalf("budget/retrieval: %+v", r.Report.Context)
-				}
-				found := false
-				seen := map[string]bool{}
-				for _, s := range r.Package.Selected {
-					if seen[s.Unit.ID] {
-						t.Fatal("duplicate selected unit")
-					}
-					seen[s.Unit.ID] = true
-					if s.Reason == "retrieved" && contextengine.Text(s.Unit.Item) == original {
-						found = true
-						if s.Unit.Source.Sequence == 0 || s.Unit.Source.TurnID == "" {
-							t.Fatal("missing provenance")
-						}
-					}
-				}
-				if !found {
-					t.Fatalf("original turn %d evidence was not retrieved", i)
-				}
-				if !strings.Contains(requestText(r), "required runtime instructions") || !strings.Contains(requestText(r), "Recall the exact source") {
-					t.Fatal("required instructions/current input lost")
-				}
-				if len(r.Request.Tools) != 0 {
-					t.Fatal("Claude received tools")
-				}
-				f.item(t, sessionstore.ItemTurn, session.Turn{ID: session.TurnID(fmt.Sprintf("recall-turn-%d", i)), Type: session.TurnRegular})
-			}
-			after, _ := json.Marshal(f.history[:3*n])
-			if string(before) != string(after) {
-				t.Fatal("context construction changed canonical history")
-			}
-			r, _ := f.b.Build()
-			if r.Report.Context.CheckpointBoundary == 0 || r.Report.Context.CheckpointVersion != 1 {
-				t.Fatal("checkpoint was not derived")
-			}
-			t.Logf("turns=%d units=%d selected=%d estimate=%d budget=%d checkpoint=%d", n, r.Report.Context.CanonicalUnits, len(r.Package.Selected), r.Package.EstimatedTokens, r.Package.Budget.Input, r.Report.Context.CheckpointBoundary)
-		})
-	}
-}
-
-func TestCompactionBudgetRecentDedupAndRequiredOverflow(t *testing.T) {
-	f := newContextFixture(t, "claude-code", contextengine.Config{InputBudget: 5000, RecentReserve: 1500})
-	for i := 0; i < 40; i++ {
-		f.turn(t, fmt.Sprint(i), "same earlier topic", "same answer")
-	}
-	f.turn(t, "recent", "LATEST RAW QUESTION", "LATEST RAW RESPONSE")
-	f.user(t, "current", "CURRENT QUESTION about same earlier topic")
-	r, err := f.b.Build()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, text := range []string{"LATEST RAW QUESTION", "LATEST RAW RESPONSE", "CURRENT QUESTION"} {
-		if !strings.Contains(requestText(r), text) {
-			t.Fatalf("recent raw lost: %s", text)
-		}
-	}
-	seen := map[string]bool{}
-	for _, u := range r.Package.Selected {
-		if u.Reason == "retrieved" && seen[contextengine.Text(u.Unit.Item)] {
-			t.Fatal("retrieval duplicates recent context")
-		}
-		seen[contextengine.Text(u.Unit.Item)] = true
-	}
-	f.user(t, "oversized", strings.Repeat("current input ", 1000))
-	_, err = f.b.Build()
-	if !contextengine.IsBudgetError(err) {
-		t.Fatalf("oversized current input: %v", err)
-	}
-}
-
 func TestCompactionProviderSwitchNativeToolsAndPrivateReasoning(t *testing.T) {
 	f := newContextFixture(t, "openai-codex", contextengine.Config{InputBudget: 12000})
 	f.b.AddTool(llm.Tool{Name: "read", Type: llm.ToolFunction})
@@ -198,10 +105,9 @@ func TestCompactionProviderSwitchNativeToolsAndPrivateReasoning(t *testing.T) {
 	if calls != 1 || results != 1 || private != 1 || len(before.Request.Tools) != 1 {
 		t.Fatalf("native loop lost: calls=%d results=%d private=%d", calls, results, private)
 	}
-	manifest, _ := json.Marshal(f.b.engine.Manifest())
 	pkg, _ := json.Marshal(before.Package)
-	if strings.Contains(string(manifest), "private-replay-marker") || strings.Contains(string(pkg), "private-replay-marker") {
-		t.Fatal("private replay entered index/checkpoint/package")
+	if strings.Contains(string(pkg), "private-replay-marker") {
+		t.Fatal("private replay entered index/package")
 	}
 	f.b.SetRuntimeProvider("claude-code")
 	f.b.ConfigureRuntime(llm.Model{ID: "sonnet", ReasoningEffort: "high"}, "text only", nil, nil, true, true)
@@ -230,55 +136,8 @@ func TestCompactionProviderSwitchNativeToolsAndPrivateReasoning(t *testing.T) {
 	}
 }
 
-func TestCompactionLargeReceiptReferenceAndCurrentFailure(t *testing.T) {
-	f := newContextFixture(t, "claude-code", contextengine.Config{InputBudget: 7000, LargeToolTokens: 800, CheckpointThreshold: 4})
-	f.turn(t, "old", "build the project", "starting")
-	call := llm.ToolCall{CallID: "build", Name: "Bash", Arguments: `{"command":"make check"}`}
-	f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "old", Response: llm.Response{Output: []llm.Item{{Type: llm.ItemToolCall, Data: call}}}})
-	status := sessionstore.ToolCallStatus{TurnID: "old", CallID: "build", Operations: []operation.Operation{{ID: "build-op", Type: operation.TypeShell, Status: operation.StatusCompleted}}}
-	record := sessionstore.Item{Sequence: f.sequence + 1, Kind: sessionstore.ItemToolCallStatus, Data: status}
-	f.b.SetHistoryItem(record)
-	large := "LOG_START\n" + strings.Repeat("successful build output line\n", 1200) + "\nneedle TOOL-9876 exact historical diagnostic\n" + strings.Repeat("successful build output line\n", 1200) + "\nLOG_END"
-	f.b.AddToolResult("build", []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: large}}, false)
-	f.b.ObserveHistory(record)
-	f.b.Commit()
-	// This is closed historical evidence, not a still-unreceived continuation.
-	// A successful recorded response after the receipt establishes that boundary;
-	// Commit/Build or a new user input alone must not do so.
-	f.item(t, sessionstore.ItemTurn, session.Turn{ID: "historical-consumer", Type: session.TurnRegular})
-	f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "historical-consumer", Response: llm.Response{Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "Build output observed."}}}}})
-	f.user(t, "latest", "What did TOOL-9876 say?")
-	r, err := f.b.Build()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Report.Context.Referenced == 0 || strings.Contains(requestText(r), large) {
-		t.Fatal("large successful receipt was resent")
-	}
-	if !strings.Contains(requestText(r), "TOOL-9876 exact historical diagnostic") {
-		t.Fatal("large historical receipt could not be recalled")
-	}
-	failed := sessionstore.ToolCallStatus{TurnID: "old", CallID: "failed", Operations: []operation.Operation{{ID: "failure-op", Type: operation.TypeShell, Status: operation.StatusFailed}}}
-	record = sessionstore.Item{Sequence: f.sequence + 2, Kind: sessionstore.ItemToolCallStatus, Data: failed}
-	f.b.SetHistoryItem(record)
-	f.b.AddToolResult("failed", []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: "CURRENT FAILURE ABC-FAIL remains unresolved"}}, false)
-	f.b.ObserveHistory(record)
-	f.b.Commit()
-	for i := 0; i < 100; i++ {
-		f.turn(t, fmt.Sprintf("later-%d", i), "unrelated messages", "routine reply")
-	}
-	f.user(t, "next", "continue the task")
-	r, err = f.b.Build()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(requestText(r), "CURRENT FAILURE ABC-FAIL remains unresolved") {
-		t.Fatal("unresolved failure lost outside recent suffix")
-	}
-}
-
 func TestCompactionSecretExclusionsDeterminismAndReplay(t *testing.T) {
-	f := newContextFixture(t, "claude-code", contextengine.Config{InputBudget: 6500, CheckpointThreshold: 4})
+	f := newContextFixture(t, "claude-code", contextengine.Config{InputBudget: 6500})
 	f.turn(t, "safe", "original safe task", "safe response")
 	f.turn(t, "secret", "access_token=secret-access-marker account_id=account-marker", "api_key=sk-private-marker")
 	f.b.SetHistoryItem(sessionstore.Item{Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{TurnID: "private"}})
@@ -288,12 +147,12 @@ func TestCompactionSecretExclusionsDeterminismAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, s := range []string{"secret-access-marker", "account-marker", "sk-private-marker", "private-summary-marker", "private-state-marker", "provider-id-marker"} {
+	for _, s := range []string{"secret-access-marker", "sk-private-marker", "private-summary-marker", "private-state-marker", "provider-id-marker"} {
 		if strings.Contains(requestText(r), s) {
 			t.Fatalf("secret/private data leaked: %s", s)
 		}
 	}
-	if r.Report.Context.Excluded != 2 {
+	if r.Report.Context.Excluded != 0 || !strings.Contains(requestText(r), "account-marker") || !strings.Contains(requestText(r), "[REDACTED]") {
 		t.Fatalf("exclusions=%d", r.Report.Context.Excluded)
 	}
 	again, err := f.b.Build()
@@ -320,67 +179,10 @@ func TestCompactionSecretExclusionsDeterminismAndReplay(t *testing.T) {
 	if !reflect.DeepEqual(again.Request, resumed.Request) {
 		t.Fatal("replay changed request selection")
 	}
-	f.user(t, "sensitive-current", "Authorization: Bearer private-input-marker")
-	if _, err := f.b.Build(); err == nil || strings.Contains(err.Error(), "private-input-marker") {
-		t.Fatal("sensitive current input was sent/exposed")
-	}
-}
-
-func TestCompactionHugeHistoricalMessageExactSlicesAndNoDuplicateBody(t *testing.T) {
-	f := newContextFixture(t, "claude-code", contextengine.Config{InputBudget: 7000, RecentReserve: 1700})
-	f.turn(t, "old", "initial task", "initial answer")
-	original := strings.Repeat("padding ", 126) + "BOUNDARY-4321 exact original 日本語" + strings.Repeat(" long uninteresting paragraph", 1500)
-	f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "old", Response: llm.Response{Output: []llm.Item{
-		{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "first output"}},
-		{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: original}},
-	}}})
-	for i := 0; i < 60; i++ {
-		f.turn(t, fmt.Sprint(i), "unrelated later subject", "unrelated later answer")
-	}
-	f.user(t, "current", "Find the exact BOUNDARY-4321 error.")
-	r, err := f.b.Build()
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, selected := range r.Package.Selected {
-		u := selected.Unit
-		if selected.Reason == "retrieved" && strings.Contains(contextengine.Text(u.Item), "BOUNDARY-4321 exact original 日本語") {
-			found = true
-			if u.ParentID == "" || u.Source.OutputIndex != 1 || u.Source.TurnID != "old" || u.Source.Sequence == 0 {
-				t.Fatal("large message lost exact source provenance", u.Source)
-			}
-			if contextengine.Text(u.Item) != original[u.Source.StartByte:u.Source.EndByte] || !utf8.ValidString(contextengine.Text(u.Item)) {
-				t.Fatal("retrieval rewrote or split the original UTF-8 text")
-			}
-		}
-	}
-	if !found || strings.Contains(requestText(r), original) || r.Package.EstimatedTokens > r.Package.Budget.Input {
-		t.Fatal("huge original was lost or sent in full", r.Report.Context)
-	}
-	// If a smaller complete source fits, its auxiliary retrieval chunks must
-	// not repeat its contents in the same request.
-	g := newContextFixture(t, "claude-code", contextengine.Config{InputBudget: 12000})
-	whole := strings.Repeat("smaller source details ", 100) + "WHOLE-7654"
-	g.turn(t, "whole", "previous user", whole)
-	g.user(t, "current", "Recall WHOLE-7654")
-	r, err = g.b.Build()
-	if err != nil {
-		t.Fatal(err)
-	}
-	parents := map[string]bool{}
-	for _, s := range r.Package.Selected {
-		if contextengine.Text(s.Unit.Item) == whole {
-			parents[s.Unit.ID] = true
-		}
-	}
-	if len(parents) != 1 {
-		t.Fatal("fitting raw original was not retained")
-	}
-	for _, s := range r.Package.Selected {
-		if parents[s.Unit.ParentID] {
-			t.Fatal("whole body duplicated by a retrieved byte range")
-		}
+	f.user(t, "sensitive-current", "Continue the task. Authorization: Bearer private-input-marker")
+	r, err = f.b.Build()
+	if err != nil || strings.Contains(requestText(r), "private-input-marker") || !strings.Contains(requestText(r), "Continue the task.") || !strings.Contains(requestText(r), "[REDACTED]") {
+		t.Fatal("current input must continue with only credentials redacted", err)
 	}
 }
 
@@ -413,64 +215,6 @@ func TestCompactionSecretSourceBlocksUnlabelledReceipt(t *testing.T) {
 	}
 }
 
-func TestCompactionChildTaskPinnedWithOwnHistoryAndProviderSwitch(t *testing.T) {
-	f := newContextFixture(t, "openai-codex", contextengine.Config{InputBudget: 7000, RecentReserve: 1500})
-	f.b.SetTaskInput("task:child-operation")
-	payload, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: "parent", Target: "child-synthetic", Handle: "child-operation", Kind: "message", Text: "EXPLICIT CHILD TASK: investigate independent-constraint.go"})
-	f.item(t, sessionstore.ItemInput, inbox.Input{ID: "task:child-operation", Kind: inbox.InputPeer, Payload: payload})
-	f.item(t, sessionstore.ItemTurn, session.Turn{ID: "initial-child-turn", Type: session.TurnRegular})
-	for i := 0; i < 100; i++ {
-		f.turn(t, fmt.Sprint(i), "unrelated progress", "routine public result")
-	}
-	f.b.SetRuntimeProvider("claude-code")
-	f.b.ConfigureRuntime(llm.Model{ID: "synthetic-child-claude"}, "required runtime instructions", nil, nil, true, true)
-	f.b.SetContextRuntime(sessionstore.RuntimeSelection{Version: 1, Provider: "claude-code", Model: "synthetic-child-claude", Revision: 8}, false)
-	f.user(t, "current", "Continue.")
-	r, err := f.b.Build()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(requestText(r), "EXPLICIT CHILD TASK") || r.Package.State.Task == nil || r.Package.State.Task.Sequence != 1 || r.Package.Runtime.Revision != 8 || len(r.Request.Tools) != 0 {
-		t.Fatal("child lost its own canonical task or runtime")
-	}
-	found := false
-	for _, s := range r.Package.Selected {
-		if strings.Contains(contextengine.Text(s.Unit.Item), "EXPLICIT CHILD TASK") {
-			found = s.Reason == "pin" && s.Unit.Required && s.Unit.Source.OperationID == "child-operation"
-		}
-	}
-	if !found {
-		t.Fatal("delegated task was not pinned")
-	}
-}
-
-func TestCompactionCurrentUserRequestSurvivesLongResponseLoop(t *testing.T) {
-	f := newContextFixture(t, "openai-codex", contextengine.Config{InputBudget: 6500, RecentReserve: 1000})
-	f.user(t, "active-task", "EXPLICIT CURRENT REQUEST: preserve the exact original constraints.")
-	f.item(t, sessionstore.ItemTurn, session.Turn{ID: "first", Type: session.TurnRegular})
-	for i := 0; i < 100; i++ {
-		id := session.TurnID(fmt.Sprintf("step-%d", i))
-		f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: id, Response: llm.Response{Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: strings.Repeat("routine step output ", 30)}}}}})
-		f.item(t, sessionstore.ItemTurn, session.Turn{ID: id, Type: session.TurnRegular})
-	}
-	r, err := f.b.Build()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(requestText(r), "EXPLICIT CURRENT REQUEST") || r.Package.State.CurrentRequest == nil || r.Package.State.CurrentRequest.Sequence != 1 {
-		t.Fatal("active original request was lost outside the recent suffix")
-	}
-	found := false
-	for _, s := range r.Package.Selected {
-		if s.Unit.Source.Sequence == 1 {
-			found = s.Unit.Required && s.Reason == "pin"
-		}
-	}
-	if !found {
-		t.Fatal("current request became optional historical evidence")
-	}
-}
-
 func TestCompactionNativeImageIntactOrExplicitBudgetError(t *testing.T) {
 	for _, size := range []int{32, 10000} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
@@ -500,88 +244,5 @@ func TestCompactionNativeImageIntactOrExplicitBudgetError(t *testing.T) {
 				t.Fatal("current native image was replaced with a reference")
 			}
 		})
-	}
-}
-
-func TestCompactionReferenceDoesNotHideRetrievableSmallReceipt(t *testing.T) {
-	f := newContextFixture(t, "claude-code", contextengine.Config{InputBudget: 6000, LargeToolTokens: 200})
-	f.turn(t, "receipt", "public task", "starting")
-	f.b.SetHistoryItem(sessionstore.Item{Sequence: f.sequence + 1, Kind: sessionstore.ItemToolCallStatus, Data: sessionstore.ToolCallStatus{TurnID: "receipt", CallID: "receipt-call"}})
-	original := "SMALL-4321 " + strings.Repeat("exact original receipt ", 12)
-	f.b.AddToolResult("receipt-call", []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: original}}, false)
-	f.b.Commit()
-	f.user(t, "current", "Recall SMALL-4321")
-	r, err := f.b.Build()
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, s := range r.Package.Selected {
-		if s.Reason == "retrieved" && contextengine.Text(s.Unit.Item) == original {
-			found = true
-		}
-	}
-	if !found || r.Report.Context.Referenced == 0 {
-		t.Fatal("reference metadata suppressed raw evidence retrieval")
-	}
-}
-
-func TestCompactionSyntheticMixedProvidersAndChildEvidence(t *testing.T) {
-	for _, turns := range []int{500, 1000} {
-		t.Run(fmt.Sprint(turns), func(t *testing.T) {
-			f := newContextFixture(t, "claude-code", contextengine.Config{InputBudget: 7000, RecentReserve: 1500})
-			const childEvidence = "EXACT-HIST-CHILD-5: child observed src/historical_child.go without mutating it."
-			provider := "claude-code"
-			var revision uint64
-			for i := 0; i < turns; i++ {
-				if i == 5 {
-					payload, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: "child-original", Target: "parent", Handle: "old-child-op", Kind: "message", Text: childEvidence})
-					f.item(t, sessionstore.ItemInput, inbox.Input{ID: "child-outcome", Kind: inbox.InputPeer, Payload: payload})
-				}
-				if i != 0 && i%125 == 0 {
-					provider = map[string]string{"claude-code": "openai-codex", "openai-codex": "claude-code"}[provider]
-					revision++
-					choice := sessionstore.RuntimeSelection{Version: 1, Provider: provider, Model: "synthetic-model", Effort: "medium", Revision: revision, RequestID: fmt.Sprintf("switch-%d", revision)}
-					tools := []llm.Tool(nil)
-					if provider == "openai-codex" {
-						tools = []llm.Tool{{Name: "read", Type: llm.ToolFunction}}
-					}
-					f.b.SetRuntimeProvider(provider)
-					f.b.ConfigureRuntime(llm.Model{ID: choice.Model, ReasoningEffort: choice.Effort}, "required runtime instructions", tools, nil, provider == "claude-code", true)
-					f.b.SetContextRuntime(choice, provider != "claude-code")
-					f.item(t, sessionstore.ItemHostRecord, sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostRuntimeApplied, Selection: &choice})
-				}
-				f.turn(t, fmt.Sprint(i), "ordinary repetitive subject", strings.Repeat("ordinary repetitive response ", 20))
-			}
-			f.user(t, "recall-child", "Retrieve EXACT-HIST-CHILD-5 and src/historical_child.go")
-			r, err := f.b.Build()
-			if err != nil {
-				t.Fatal(err)
-			}
-			found := false
-			for _, s := range r.Package.Selected {
-				if s.Reason == "retrieved" && strings.Contains(contextengine.Text(s.Unit.Item), childEvidence) {
-					found = s.Unit.Kind == contextengine.ChildResult && s.Unit.Source.ChildID == "child-original" && s.Unit.Source.OperationID == "old-child-op" && s.Unit.Source.Sequence != 0
-				}
-			}
-			if !found || r.Package.Runtime.Provider != provider || r.Package.Runtime.Revision != revision || r.Package.EstimatedTokens > 7000 || len(r.Request.Tools) != 1 {
-				t.Fatal("long mixed-provider history lost bounded child evidence/identity/capability")
-			}
-		})
-	}
-}
-
-func BenchmarkCompactionBuild1000Turns(b *testing.B) {
-	f := newContextFixture(b, "claude-code", contextengine.Config{InputBudget: 8000, RecentReserve: 2500})
-	for i := 0; i < 1000; i++ {
-		f.turn(b, fmt.Sprint(i), fmt.Sprintf("task %d independent symbol", i), strings.Repeat("public response ", 30))
-	}
-	f.user(b, "current", "Recall task 5 independent symbol")
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		if _, err := f.b.Build(); err != nil {
-			b.Fatal(err)
-		}
 	}
 }

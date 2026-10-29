@@ -21,10 +21,6 @@ func acquireLock(ctx context.Context, path string) (*os.File, error) {
 		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), path)
-	if err := checkFilesystem(file); err != nil {
-		file.Close()
-		return nil, err
-	}
 	for {
 		if err = ctx.Err(); err != nil {
 			file.Close()
@@ -67,10 +63,6 @@ func (s *Service) openParent(path string) (*os.File, string, error) {
 		fd = next
 	}
 	parent := os.NewFile(uintptr(fd), filepath.Dir(path))
-	if err := checkFilesystem(parent); err != nil {
-		parent.Close()
-		return nil, "", err
-	}
 	return parent, parts[len(parts)-1], nil
 }
 func readTarget(parent *os.File, base string) ([]byte, bool, os.FileMode, error) {

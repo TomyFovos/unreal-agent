@@ -14,7 +14,7 @@ import (
 func TestSessionHeadOperationCapacityGrowth(t *testing.T) {
 	input := make([]operation.Operation, 10000)
 	for i := range input {
-		input[i] = operation.WithPreparationRequired(operation.WithIdempotency(operation.WithExecutionBasis(operation.Operation{ID: operation.ID(fmt.Sprint(i)), State: jsontext.Value(`{"state":true}`)}, jsontext.Value(`{"basis":true}`)), jsontext.Value(`{"key":true}`)), true)
+		input[i] = operation.WithIdempotency(operation.WithDependencies(operation.Operation{ID: operation.ID(fmt.Sprint(i)), State: jsontext.Value(`{"state":true}`)}, []operation.ID{"prior"}), jsontext.Value(`{"key":true}`))
 	}
 	preserved := append([]operation.Operation(nil), input...)
 	var head sessionHead

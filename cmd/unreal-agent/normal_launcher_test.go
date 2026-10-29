@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"io"
@@ -36,6 +37,9 @@ func normalFixture(t *testing.T, codex, claude bool) (*launcherFixture, *testcla
 	cli := testclaude.New(t)
 	t.Chdir(privateCLIDirectory(t))
 	cli.Set(t, testclaude.Config{SignedOut: !claude, Catalog: hostClaudeCatalog})
+	if err := os.WriteFile(filepath.Join(cli.Directory, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", cli.Directory+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("UNREAL_HARNESS_LLM_PROVIDER", "")
 	t.Setenv("UNREAL_HARNESS_LLM_MODEL", "")
@@ -226,8 +230,8 @@ func TestNormalLauncherConcurrentBootstrapNoOverwriteAndMalformedConfiguration(t
 	}
 	o := f.o
 	o.config, o.normal = bad, true
-	var failure *configurationError
-	if _, err := resolveLauncherConfig(t.Context(), o, nil); !errors.As(err, &failure) || failure.Code != "invalid_runtime_configuration" {
+	var failure *jsontext.SyntacticError
+	if _, err := resolveLauncherConfig(t.Context(), o, nil); !errors.As(err, &failure) {
 		t.Fatal("malformed config bootstrapped", err)
 	}
 	badData, _ := os.ReadFile(bad)
@@ -314,7 +318,7 @@ func TestNormalLauncherPreservesExistingConfigAndRejectsIncompatibleHostReuse(t 
 		t.Fatal("normal discovery rewrote config or inferred")
 	}
 	for _, args := range [][]string{{"--session-directory", filepath.Join(f.o.state, "other-sessions")}, {"--config", f.o.config}} {
-		if err := l.run(t.Context(), args, io.Discard); err == nil || !strings.Contains(err.Error(), "Host configuration does not match") {
+		if err := l.run(t.Context(), args, io.Discard); err == nil || !strings.Contains(err.Error(), "別の設定で起動中") {
 			t.Fatal("incompatible Host reused", err)
 		}
 	}
@@ -355,7 +359,7 @@ func TestNormalDiscoveryTeamTrustAndRestartRetainsCanonicalSelection(t *testing.
 	f.config.Permissions.ReadRoots = []string{f.config.Runtime.Workspace}
 	f.config.Launcher = &normalLauncherConfig{Version: 1, ClaudeBinary: cli.Binary}
 	f.writeConfig(t)
-	cli.Set(t, testclaude.Config{Subscription: "team", Catalog: hostClaudeCatalog, BridgeManagedPermissionsOnly: true})
+	cli.Set(t, testclaude.Config{Subscription: "team", Catalog: hostClaudeCatalog})
 	var before host.View
 	l := launcher{start: f.start, attach: func(ctx context.Context, c *gateway.Client, id session.ID) error {
 		v, err := c.Inspect(ctx, id, 0, 256)

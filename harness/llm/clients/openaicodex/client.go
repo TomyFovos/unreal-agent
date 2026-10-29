@@ -16,15 +16,24 @@ import (
 
 const BaseURL = "https://chatgpt.com/backend-api/codex"
 
+// Codex CLI defaults: request_max_retries=4, stream_max_retries=5.
+// These constants include the first attempt.
+// https://github.com/openai/codex/blob/main/codex-rs/model-provider-info/src/lib.rs
+const (
+	DefaultMaxAttempts       = 5
+	DefaultMaxStreamAttempts = 6
+)
+
 type Config struct {
 	HTTPClient  *http.Client
 	AccessToken string
 	AccountID   string
 	// Read once at construction; exclusive with inline credentials.
-	AuthFile    string
-	BaseURL     string
-	MaxAttempts *int
-	Trace       func(responsesapi.Exchange)
+	AuthFile          string
+	BaseURL           string
+	MaxAttempts       *int
+	MaxStreamAttempts *int
+	Trace             func(responsesapi.Exchange)
 	// Requires the separately validated host-owned Sandbox OAuth route. Never
 	// combine with token, account ID or AuthFile, and never infer from a token.
 	DockerSandboxOAuth bool
@@ -98,11 +107,19 @@ func NewClient(config Config) (*Client, error) {
 		httpClient.Jar = nil
 	}
 	remote := primitives.NewRemoteClientWithHTTPClient(&httpClient)
+	attempts, streamAttempts := config.MaxAttempts, config.MaxStreamAttempts
+	if attempts == nil {
+		attempts = new(DefaultMaxAttempts)
+		if streamAttempts == nil {
+			streamAttempts = new(DefaultMaxStreamAttempts)
+		}
+	}
 	adapter, err := responsesapi.NewAdapter(remote, responsesapi.Config{
 		Endpoint:          baseURL + "/responses",
 		Headers:           headers,
 		CacheKeyPlacement: responsesapi.CacheKeyPlacement{UsePromptCacheKeyField: true, Header: "session-id"},
-		MaxAttempts:       config.MaxAttempts,
+		MaxAttempts:       attempts,
+		MaxStreamAttempts: streamAttempts,
 		Trace:             config.Trace,
 	})
 	if err != nil {

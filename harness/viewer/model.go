@@ -11,6 +11,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"math"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -26,10 +27,21 @@ type responseKey struct {
 }
 
 type timing struct{ start, end time.Time }
+type decodedChild struct {
+	child Child
+	ok    bool
+	err   error
+}
+
 type projection struct {
+	children          map[operation.ID]decodedChild
 	view              host.View
 	cursor            sessionstore.Sequence
 	recent            []host.HistoryItem
+	activityTimes     [256]time.Time
+	activityNext      int
+	activityCount     int
+	lastActivityAt    time.Time
 	operations        map[operation.ID]operation.Operation
 	times             map[operation.ID]timing
 	callTargets       map[string]string
@@ -38,6 +50,7 @@ type projection struct {
 	opSequences       map[operation.ID]sessionstore.Sequence
 	responses         map[responseKey]bool
 	usage             Usage
+	lastUsage         Usage
 	finish            *Finish
 	activity          string
 	runtime           Liveness
@@ -49,6 +62,7 @@ type projection struct {
 	observedModel     string
 }
 type Model struct {
+	version  uint64
 	mu       sync.Mutex
 	options  Options
 	sessions map[session.ID]*projection
@@ -88,6 +102,7 @@ func validPage(after sessionstore.Sequence, page host.HistoryPage) bool {
 func (m *Model) Replace(id session.ID, view host.View) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.version++
 	if id == "" || view.Session.Session.ID != id || !validPage(0, view.History) {
 		return ErrInvalidPage
 	}
@@ -112,6 +127,20 @@ func (m *Model) Replace(id session.ID, view host.View) error {
 	p.more = v.History.More
 	return nil
 }
+
+// Child plans are decoded when their Operation changes, never when a UI asks
+// for rows or advances its clock.
+func (m *Model) setOperation(p *projection, op operation.Operation) {
+	p.operations[op.ID] = op
+	if m.options.DecodeChild != nil {
+		if p.children == nil {
+			p.children = make(map[operation.ID]decodedChild)
+		}
+		child, ok, err := m.options.DecodeChild(p.view.Session.Session.ID, op)
+		p.children[op.ID] = decodedChild{child, ok, err}
+	}
+}
+
 func (m *Model) snapshot(p *projection, v host.View) {
 	p.view.Session = v.Session
 	p.view.Generation = v.Generation
@@ -119,9 +148,18 @@ func (m *Model) snapshot(p *projection, v host.View) {
 	p.view.Running = v.Running
 	p.view.Failure = v.Failure
 	p.view.ProjectInstructions = v.ProjectInstructions
-	p.operations = map[operation.ID]operation.Operation{}
+	previous, children := p.operations, p.children
+	p.operations = make(map[operation.ID]operation.Operation, len(v.Operations))
+	p.children = make(map[operation.ID]decodedChild)
 	for _, op := range v.Operations {
-		p.operations[op.ID] = op
+		if old, ok := previous[op.ID]; ok && reflect.DeepEqual(old, op) {
+			p.operations[op.ID] = op
+			if child, ok := children[op.ID]; ok {
+				p.children[op.ID] = child
+			}
+		} else {
+			m.setOperation(p, op)
+		}
 	}
 	p.runtime = RuntimeUnknown
 	if v.Generation != "" {
@@ -134,6 +172,12 @@ func (m *Model) snapshot(p *projection, v host.View) {
 func (m *Model) AppendPage(id session.ID, after sessionstore.Sequence, view host.View) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	changed := true
+	defer func() {
+		if changed {
+			m.version++
+		}
+	}()
 	p := m.sessions[id]
 	if p == nil || p.resync {
 		return ErrResync
@@ -150,6 +194,19 @@ func (m *Model) AppendPage(id session.ID, after sessionstore.Sequence, view host
 	}
 	if view.Revision < p.view.Revision {
 		return ErrStale
+	}
+	if (!view.Running || p.runtime != RuntimeUnknown) && len(view.History.Items) == 0 && !view.History.More && !p.more && view.Revision == p.view.Revision && reflect.DeepEqual(view.Session, p.view.Session) && view.Running == p.view.Running && view.Failure == p.view.Failure && reflect.DeepEqual(view.ProjectInstructions, p.view.ProjectInstructions) && len(view.Operations) == len(p.operations) {
+		same := true
+		for _, op := range view.Operations {
+			if old, ok := p.operations[op.ID]; !ok || !reflect.DeepEqual(old, op) {
+				same = false
+				break
+			}
+		}
+		if same {
+			changed = false
+			return nil
+		}
 	}
 	v, err := copyValue(view)
 	if err != nil {
@@ -172,6 +229,7 @@ func (m *Model) AppendPage(id session.ID, after sessionstore.Sequence, view host
 func (m *Model) Apply(id session.ID, event host.Event) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.version++
 	p := m.sessions[id]
 	if p == nil || p.resync {
 		return ErrResync
@@ -202,7 +260,7 @@ func (m *Model) Apply(id session.ID, event host.Event) error {
 		}
 		if status, ok := e.Item.Data.(sessionstore.ToolCallStatus); ok {
 			for _, op := range status.Operations {
-				p.operations[op.ID] = op
+				m.setOperation(p, op)
 			}
 		}
 	case "operation":
@@ -211,7 +269,7 @@ func (m *Model) Apply(id session.ID, event host.Event) error {
 			p.runtime = RuntimeUnknown
 			return ErrResync
 		}
-		p.operations[e.Operation.ID] = *e.Operation
+		m.setOperation(p, *e.Operation)
 	case "progress":
 		// Streaming text is transient. Advancing its revision keeps the stream
 		// contiguous without inventing canonical activity, usage, or Finish.
@@ -229,13 +287,15 @@ func (m *Model) Apply(id session.ID, event host.Event) error {
 func (m *Model) Disconnect(id session.ID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if p := m.sessions[id]; p != nil {
+	if p := m.sessions[id]; p != nil && p.runtime != RuntimeUnknown {
 		p.runtime = RuntimeUnknown
+		m.version++
 	}
 }
 func (m *Model) Invalidate(id session.ID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.version++
 	if p := m.sessions[id]; p != nil {
 		p.runtime = RuntimeUnknown
 		p.resync = true
@@ -259,12 +319,23 @@ func (m *Model) item(p *projection, item host.HistoryItem) error {
 		}
 	}
 	p.cursor = item.Sequence
+	p.activityTimes[p.activityNext] = item.RecordedAt
+	p.activityNext = (p.activityNext + 1) % len(p.activityTimes)
+	p.activityCount = min(p.activityCount+1, len(p.activityTimes))
+	if item.RecordedAt.After(p.lastActivityAt) {
+		p.lastActivityAt = item.RecordedAt
+	}
 	p.recent = append(p.recent, item)
 	if len(p.recent) > m.options.RecentLimit {
 		p.recent = append([]host.HistoryItem(nil), p.recent[len(p.recent)-m.options.RecentLimit:]...)
 	}
 	switch data := item.Data.(type) {
 	case sessionstore.HostRecord:
+		if data.Kind == sessionstore.HostContext && data.Context != nil && data.Context.Usage != nil {
+			addUsage(&p.usage, *data.Context.Usage)
+			p.lastUsage = Usage{}
+			addUsage(&p.lastUsage, *data.Context.Usage)
+		}
 		if data.Kind == "configuration" {
 			p.managedPolicyMode = sessionstore.ManagedPolicyModeFromConfiguration(data.Configuration)
 			p.selection = sessionstore.SelectionFromConfiguration(data.Configuration)
@@ -293,6 +364,8 @@ func (m *Model) item(p *projection, item host.HistoryItem) error {
 		if !p.responses[key] {
 			p.responses[key] = true
 			addUsage(&p.usage, data.Response.Usage)
+			p.lastUsage = Usage{}
+			addUsage(&p.lastUsage, data.Response.Usage)
 		}
 		for _, out := range data.Response.Output {
 			if msg, ok := out.Data.(llm.Message); ok && msg.Role == llm.RoleAssistant {
@@ -372,10 +445,6 @@ func addUsage(total *Usage, u llm.Usage) {
 		}
 	}
 	total.Partial = total.Partial || len(u.Unknown) > 0
-	if u.InputTokens < 0 || u.OutputTokens < 0 || u.CachedInputTokens < 0 || u.CacheWriteInputTokens < 0 || u.ReasoningTokens < 0 {
-		total.Partial = true
-		return
-	}
 	known := len(u.Raw) > 0 && string(u.Raw) != "null" || u.InputTokens != 0 || u.OutputTokens != 0 || u.CachedInputTokens != 0 || u.CacheWriteInputTokens != 0 || u.ReasoningTokens != 0
 	if !known {
 		total.Partial = true
@@ -383,12 +452,6 @@ func addUsage(total *Usage, u llm.Usage) {
 	}
 	values := []int64{u.InputTokens, u.CachedInputTokens, u.CacheWriteInputTokens, u.OutputTokens, u.ReasoningTokens}
 	targets := []*int64{&total.Input, &total.CachedInput, &total.CacheWriteInput, &total.Output, &total.Reasoning}
-	for i, v := range values {
-		if *targets[i] > math.MaxInt64-v {
-			total.Partial = true
-			return
-		}
-	}
 	total.Known = true
 	for i, v := range values {
 		*targets[i] += v
@@ -432,7 +495,17 @@ func (m *Model) base(id session.ID, p *projection, now time.Time) Row {
 	r.Runtime = p.runtime
 	r.Failure = p.view.Failure
 	r.Activity = p.activity
+	r.CreatedAt = p.view.Session.Session.CreatedAt
+	r.LastActivityAt = p.lastActivityAt
+	cutoff := now.Add(-10 * time.Minute)
+	for i := 0; i < p.activityCount; i++ {
+		at := p.activityTimes[(p.activityNext-p.activityCount+i+len(p.activityTimes))%len(p.activityTimes)]
+		if !at.IsZero() && !at.Before(cutoff) && !at.After(now) {
+			r.RecentActivity = append(r.RecentActivity, at)
+		}
+	}
 	r.Usage = p.usage
+	r.LastUsage = p.lastUsage
 	r.Usage.Partial = r.Usage.Partial || p.more || p.resync
 	r.Cursor = p.cursor
 	r.More = p.more
@@ -474,7 +547,8 @@ func (m *Model) rows(now time.Time) []Row {
 			}
 			sort.Slice(ops, func(i, j int) bool { return ops[i].ID < ops[j].ID })
 			for _, op := range ops {
-				child, ok, err := m.options.DecodeChild(parent, op)
+				decoded := p.children[op.ID]
+				child, ok, err := decoded.child, decoded.ok, decoded.err
 				if err != nil {
 					r := byID[parent]
 					r.Problem = "invalid child plan: " + err.Error()
@@ -500,6 +574,7 @@ func (m *Model) rows(now time.Time) []Row {
 					continue
 				}
 				r.ParentID = parent
+				r.ParentRuntime = p.runtime
 				r.ParentOperationID = op.ID
 				r.ParentOperationStatus = op.Status
 				r.Label = child.Label
@@ -559,17 +634,25 @@ func (m *Model) rows(now time.Time) []Row {
 	return rows
 }
 func (m *Model) Rows(now time.Time) []Row {
+	rows, _ := m.RowsVersion(now)
+	return rows
+}
+
+// RowsVersion returns the projection version atomically with its rows. Time is
+// deliberately separate: elapsed/activity displays can advance without data.
+func (m *Model) RowsVersion(now time.Time) ([]Row, uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rows := m.rows(now)
 	for i := range rows {
 		rows[i] = cloneRow(rows[i])
 	}
-	return rows
+	return rows, m.version
 }
 func (m *Model) Select(id session.ID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.version++
 	for _, r := range m.rows(time.Now()) {
 		if r.ID == id {
 			m.selected = id
@@ -616,3 +699,5 @@ func cloneRow(r Row) Row {
 	}
 	return r
 }
+
+func (m *Model) Version() uint64 { m.mu.Lock(); defer m.mu.Unlock(); return m.version }

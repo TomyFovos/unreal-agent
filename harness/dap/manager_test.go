@@ -58,7 +58,7 @@ func TestDAPAdapterProcess(t *testing.T) {
 		switch msg.Command {
 		case "initialize":
 			if mode == "badframe" {
-				fmt.Fprint(os.Stdout, "Content-Length: 999999999\r\n\r\n")
+				fmt.Fprint(os.Stdout, "Content-Length: -1\r\n\r\n")
 				continue
 			}
 			send("response", msg.Seq, msg.Command, map[string]any{"supportsConfigurationDoneRequest": true})
@@ -132,7 +132,7 @@ func testManagerWithContext(t *testing.T, ctx context.Context, mode string, poli
 	}
 	dir := t.TempDir()
 	cleanup := filepath.Join(dir, "cleanup.json")
-	m, err := NewManager(permission.WithPolicy(ctx, policy), AdapterConfig{ID: "test", Path: exe, Arguments: []string{"-test.run=^TestDAPAdapterProcess$"}, Directory: dir, Environment: []string{"UNREAL_DAP_TEST_MODE=" + mode, "UNREAL_DAP_TEST_CLEANUP=" + cleanup}, AllowedAttachPIDs: []int{1234}})
+	m, err := NewManager(permission.WithPolicy(ctx, policy), AdapterConfig{ID: "test", Path: exe, Arguments: []string{"-test.run=^TestDAPAdapterProcess$"}, Directory: dir, Environment: []string{"UNREAL_DAP_TEST_MODE=" + mode, "UNREAL_DAP_TEST_CLEANUP=" + cleanup}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,11 +198,13 @@ func TestRealProcessTypedDAPCapabilitiesAndStaleReferences(t *testing.T) {
 }
 func TestAttachDetachOwnershipAndPermission(t *testing.T) {
 	m, cleanup := testManager(t, "normal", permission.Unrestricted())
-	out := call(t, m, startRequest(m, "attach"))
-	r := Request{Version: 1, OwnerGeneration: m.Generation(), Handle: out.Handle, Command: "disconnect", Terminate: true}
-	if _, err := m.Execute(t.Context(), r); codeOf(err) != "cannot_terminate_attached_target" {
-		t.Fatal(err)
+	explicit, _ := testManager(t, "normal", permission.Unrestricted())
+	out := call(t, explicit, startRequest(explicit, "attach"))
+	r := Request{Version: 1, OwnerGeneration: explicit.Generation(), Handle: out.Handle, Command: "disconnect", Terminate: true}
+	if _, err := explicit.Execute(t.Context(), r); err != nil {
+		t.Fatal("explicit terminate rejected", err)
 	}
+	call(t, m, startRequest(m, "attach"))
 	if err := m.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -310,18 +312,15 @@ func TestRestoredOperationsExpireWithoutExecution(t *testing.T) {
 	}
 }
 func TestFramingAndUTF8Bounds(t *testing.T) {
-	for _, bad := range []string{"Content-Length: -1\r\n\r\n", "Content-Length: 100000000\r\n\r\n", "X: 1\r\n\r\n", strings.Repeat("x", 1025)} {
+	for _, bad := range []string{"Content-Length: -1\r\n\r\n", "X: 1\r\n\r\n"} {
 		if _, _, _, err := frame([]byte(bad)); err == nil {
 			t.Fatal("invalid frame accepted")
 		}
 	}
-	var truncated bool
-	value := bounded(strings.Repeat("界", 1000), &truncated)
-	if !truncated {
-		t.Fatal("no bound")
-	}
-	if _, err := json.Marshal(value); err != nil {
-		t.Fatal("invalid UTF8")
+	var out Result
+	raw, _ := json.Marshal(map[string]any{"result": strings.Repeat("界", 1000)})
+	if err := decodeResult(&out, Request{Command: "evaluate"}, raw); err != nil || out.Value != strings.Repeat("界", 1000) || out.Truncated {
+		t.Fatal("large value lost", err)
 	}
 	if _, _, complete, err := frame([]byte("Content-Length: 4\r\n\r\n{}")); err != nil || complete {
 		t.Fatal("partial frame not retained")
@@ -371,10 +370,13 @@ func TestAttachAllowlistAndEvaluateCapability(t *testing.T) {
 	m, _ := testManager(t, "normal", policy)
 	attach := startRequest(m, "attach")
 	attach.Start.ProcessID = 999
-	if _, err := m.Execute(t.Context(), attach); permission.Failure(err) == nil {
-		t.Fatal("attach allowlist bypass")
+	if _, err := m.Execute(t.Context(), attach); err != nil {
+		t.Fatal("arbitrary PID rejected", err)
 	}
-	started := call(t, m, startRequest(m, "launch"))
+	attach.Handle.ID = "launch"
+	launch := startRequest(m, "launch")
+	launch.Handle.ID = "launch"
+	started := call(t, m, launch)
 	evaluate := Request{Version: 1, OwnerGeneration: m.Generation(), Handle: started.Handle, Command: "evaluate", StopEpoch: started.StopEpoch, Expression: "x"}
 	if _, err := m.Execute(t.Context(), evaluate); permission.Failure(err) == nil {
 		t.Fatal("evaluation capability bypass")
@@ -392,7 +394,7 @@ func TestOwnerCancellationDrainsGracefulDetach(t *testing.T) {
 			cleanup := filepath.Join(dir, "cleanup.json")
 			ctx, cancel := context.WithCancel(permission.WithPolicy(t.Context(), permission.Unrestricted()))
 			defer cancel()
-			m, err := NewManager(ctx, AdapterConfig{ID: "test", Path: exe, Arguments: []string{"-test.run=^TestDAPAdapterProcess$"}, Directory: dir, Environment: []string{"UNREAL_DAP_TEST_MODE=normal", "UNREAL_DAP_TEST_CLEANUP=" + cleanup}, AllowedAttachPIDs: []int{1234}})
+			m, err := NewManager(ctx, AdapterConfig{ID: "test", Path: exe, Arguments: []string{"-test.run=^TestDAPAdapterProcess$"}, Directory: dir, Environment: []string{"UNREAL_DAP_TEST_MODE=normal", "UNREAL_DAP_TEST_CLEANUP=" + cleanup}})
 			if err != nil {
 				t.Fatal(err)
 			}

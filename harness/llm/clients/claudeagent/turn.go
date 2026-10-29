@@ -19,8 +19,8 @@ import (
 const (
 	gateHook  = "unreal-gate"
 	batchHook = "unreal-batch"
-	// ranPrefix starts the note Claude reads after Unreal ran a command that
-	// Claude Code refused, for example by its organization policy (U22).
+	// ranPrefix starts the note Claude reads after Unreal handled a command
+	// that Claude Code declined (U22).
 	ranPrefix = "Unreal Agent handled"
 )
 
@@ -62,6 +62,8 @@ type turn struct {
 type stepStats struct {
 	known                     bool
 	input, cached, cacheWrite int64
+	contextTokens             int64
+	contextKnown              bool
 	output                    int64
 	micros                    int64
 }
@@ -109,6 +111,7 @@ func (t *turn) handle(f frame) *frame {
 			}
 			if u := event.Message.Usage; u != nil {
 				t.stepUsage = *u
+				t.steps.contextTokens, t.steps.contextKnown = u.inputTokens(), true
 			}
 			t.mu.Unlock()
 		case "message_delta":
@@ -217,6 +220,12 @@ func (t *turn) approve(id string, req controlRequest) {
 func (t *turn) hook(id, callback string, in hookInput) {
 	switch callback {
 	case gateHook:
+		if in.ToolName == "Bash" && subagentWait(inputFields(in.ToolInput).Command) && t.opt.BeginTools != nil {
+			if err := t.opt.BeginTools(t.ctx, true); err != nil {
+				t.fail(err)
+				return
+			}
+		}
 		answer := t.approver.gate(t.ctx, in)
 		if len(answer) > 0 {
 			t.markDenied(in.ToolUseID)
@@ -232,11 +241,60 @@ func (t *turn) hook(id, callback string, in hookInput) {
 // batch records a resolved batch of Claude Code tool calls in Unreal's history.
 // A command Claude Code refused on its own (U22) is handed to Unreal's own
 // Bash instead (U22), and its result goes back to Claude as additional context.
-func (t *turn) batch(in hookInput) map[string]any {
+func (t *turn) batch(in hookInput) (answer map[string]any) {
 	t.record.Lock()
 	defer t.record.Unlock()
+	// Even an empty batch is a steering boundary. Preserve any U22 result in
+	// the same additionalContext and acknowledge input only through the Host.
+	defer func() {
+		if t.opt.Steering == nil || t.ctx.Err() != nil {
+			return
+		}
+		inputs, err := t.opt.Steering(t.ctx)
+		if err != nil {
+			t.fail(err)
+			return
+		}
+		if len(inputs) == 0 {
+			return
+		}
+		if answer == nil {
+			answer = map[string]any{}
+		}
+		output, _ := answer["hookSpecificOutput"].(map[string]any)
+		if output == nil {
+			output = map[string]any{"hookEventName": "PostToolBatch"}
+			answer["hookSpecificOutput"] = output
+		}
+		var notes []string
+		if prior, _ := output["additionalContext"].(string); prior != "" {
+			notes = append(notes, prior)
+		}
+		for _, input := range inputs {
+			notes = append(notes, fmt.Sprintf("The user wrote while you were working: %q. Answer the user first, then continue if still appropriate.", input))
+		}
+		output["additionalContext"] = strings.Join(notes, "\n\n")
+	}()
+	defer func() {
+		if t.opt.BeginTools != nil && t.ctx.Err() == nil {
+			if err := t.opt.BeginTools(t.ctx, false); err != nil {
+				t.fail(err)
+			}
+		}
+	}()
 	if t.ctx.Err() != nil {
 		return map[string]any{}
+	}
+	// A policy refusal can reach PostToolBatch without PreToolUse. Its wait
+	// runs through Unreal's Bash and must yield to the user as well.
+	for _, call := range in.ToolCalls {
+		if call.ToolName == "Bash" && subagentWait(inputFields(call.ToolInput).Command) && t.opt.BeginTools != nil {
+			if err := t.opt.BeginTools(t.ctx, true); err != nil {
+				t.fail(err)
+				return map[string]any{}
+			}
+			break
+		}
 	}
 	t.mu.Lock()
 	output, model := t.text, t.model
@@ -376,7 +434,7 @@ func (s stepStats) report(model string) (llm.Usage, *llm.GenerationStatistics) {
 	if s.micros <= 0 {
 		return u, nil
 	}
-	return u, &llm.GenerationStatistics{Model: model, Tokens: llm.ReportedTokens(u), DurationMicros: s.micros, Source: "client_clock"}
+	return u, &llm.GenerationStatistics{Model: model, Tokens: llm.ReportedTokens(u), ContextTokens: s.contextTokens, ContextKnown: s.contextKnown, DurationMicros: s.micros, Source: "client_clock"}
 }
 
 func unknownUsage() llm.Usage {

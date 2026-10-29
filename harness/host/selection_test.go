@@ -10,6 +10,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 	"testing"
 	"time"
@@ -186,21 +187,17 @@ func TestCanonicalRuntimeSelectionPendingSurvivesInterruptedRequest(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	selectionRequest(t, requests, "model-a", llm.ReasoningEffortMedium)
+	// Work the stop ended stays ended: the interrupted request is not resent.
+	select {
+	case <-requests:
+		t.Fatal("resume resent the request the stop interrupted")
+	case <-time.After(300 * time.Millisecond):
+	}
 	active, pending := s.RuntimeSelection()
 	if active.Revision != 0 || pending == nil || pending.Revision != 1 {
-		t.Fatal("pending choice lost or activated within interrupted loop")
+		t.Fatal("pending choice lost or activated before the next request")
 	}
-	responses <- llm.Response{}
-	waitSelection(t, func() bool {
-		v, _ := s.Inspect(0, 128)
-		for _, i := range v.History.Items {
-			if i.Kind == sessionstore.ItemModelResponse {
-				return true
-			}
-		}
-		return false
-	})
+	// The user's next input runs with the pending choice, at the boundary.
 	selectionSubmit(t, s, "input-2")
 	selectionRequest(t, requests, "model-b", llm.ReasoningEffortHigh)
 	responses <- llm.Response{}
@@ -237,4 +234,116 @@ func TestCanonicalRuntimeSelectionPreservesExistingSettingsControls(t *testing.T
 		responses <- llm.Response{}
 		stop(t, s)
 	}
+}
+
+func TestStoppedSessionCanSelectRuntimeBeforeResume(t *testing.T) {
+	requests, responses := make(chan llm.Request, 4), make(chan llm.Response, 4)
+	h, err := New(t.Context(), Config{Directory: t.TempDir(), Build: selectionFactory(requests, responses)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	s, err := h.Create(t.Context(), selectionOptions("stopped-selection"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop(t, s)
+	if err = s.SelectRuntime(t.Context(), s.Generation, 0, selectionChoice()); err != nil {
+		t.Fatal("stopped selection", err)
+	}
+	s, err = h.Resume(t.Context(), selectionOptions(s.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectionSubmit(t, s, "after-switch")
+	selectionRequest(t, requests, "model-b", llm.ReasoningEffortHigh)
+	responses <- llm.Response{}
+	stop(t, s)
+}
+
+func TestStoppedSelectionKeepsWriterOwnershipAndCanonicalRevision(t *testing.T) {
+	requests, responses := make(chan llm.Request, 4), make(chan llm.Response, 4)
+	directory := t.TempDir()
+	config := Config{Directory: directory, Build: selectionFactory(requests, responses)}
+	h, err := New(t.Context(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	s, err := h.Create(t.Context(), selectionOptions("foreign-selection"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop(t, s)
+	other, err := New(t.Context(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	resumed, err := other.Resume(t.Context(), selectionOptions(s.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SelectRuntime(t.Context(), s.Generation, 0, selectionChoice()); !errors.Is(err, localfile.ErrWriterOwned) {
+		t.Fatal("stopped session bypassed writer ownership", err)
+	}
+	if err = resumed.SelectRuntime(t.Context(), resumed.Generation, 0, selectionChoice()); err != nil {
+		t.Fatal(err)
+	}
+	stop(t, resumed)
+	if err = s.SelectRuntime(t.Context(), s.Generation, 0, selectionChoice()); !errors.Is(err, ErrConflict) {
+		t.Fatal("stale stopped projection overwrote newer history", err)
+	}
+}
+
+func TestFailedSessionSwitchAndResumeRetriesWithSelectedModel(t *testing.T) {
+	requests := make(chan llm.Request, 4)
+	cause := errors.New("credential: external_reauth_required")
+	build := func(ctx context.Context, id session.ID) (Runtime, error) {
+		runtime, err := selectionFactory(requests, make(chan llm.Response, 4))(ctx, id)
+		if err != nil {
+			return runtime, err
+		}
+		runtime.LLM = modelFunc(func(_ context.Context, r llm.Request, _ llm.RequestOptions) (llm.Response, error) {
+			requests <- r
+			if r.Model.ID == "model-a" {
+				return llm.Response{}, cause
+			}
+			return llm.Response{Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "recovered"}}}}, nil
+		})
+		return runtime, nil
+	}
+	h, err := New(t.Context(), Config{Directory: t.TempDir(), Build: build})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	s, err := h.Create(t.Context(), selectionOptions("failed-switch"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectionSubmit(t, s, "original-request")
+	selectionRequest(t, requests, "model-a", llm.ReasoningEffortMedium)
+	if err = s.Wait(timeout(t)); !errors.Is(err, cause) {
+		t.Fatal("failure was not reproduced", err)
+	}
+	if err = s.SelectRuntime(t.Context(), s.Generation, 0, selectionChoice()); err != nil {
+		t.Fatal(err)
+	}
+	s, err = h.Resume(t.Context(), selectionOptions(s.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// /resume alone recovers the failed request; no second user input is needed.
+	selectionRequest(t, requests, "model-b", llm.ReasoningEffortHigh)
+	waitSelection(t, func() bool {
+		v, _ := s.Inspect(0, 128)
+		for _, item := range v.History.Items {
+			if item.Kind == sessionstore.ItemModelResponse {
+				return true
+			}
+		}
+		return false
+	})
+	stop(t, s)
 }

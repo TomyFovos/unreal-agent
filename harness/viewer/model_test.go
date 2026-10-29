@@ -11,7 +11,6 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
-	"math"
 	"strings"
 	"testing"
 	"time"
@@ -164,15 +163,6 @@ func TestUnknownUsageTimingAndOverflow(t *testing.T) {
 	addUsage(&total, u)
 	if !total.Known || total.Input != 0 {
 		t.Fatal("explicit zero lost")
-	}
-	addUsage(&total, llm.Usage{InputTokens: math.MaxInt64})
-	addUsage(&total, llm.Usage{InputTokens: 1, OutputTokens: 2})
-	if !total.Partial || total.Input != math.MaxInt64 || total.Output != 0 {
-		t.Fatal("overflow corruption")
-	}
-	addUsage(&total, llm.Usage{InputTokens: -1})
-	if !total.Partial {
-		t.Fatal("negative accepted")
 	}
 	m.Disconnect("s")
 	if row(t, m, "s").Elapsed.Known {

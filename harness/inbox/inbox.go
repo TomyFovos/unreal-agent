@@ -101,7 +101,7 @@ func (input Input) DecodeControlMessage() (ControlMessage, error) {
 		}
 	case DispatchOperation:
 		var intent OperationIntent
-		if err := json.Unmarshal(envelope.Parameters, &intent, json.RejectUnknownMembers(true)); err != nil || intent.OperationID == "" || intent.ToolName == "" || !intent.Spec.IsValid() || len(intent.Spec) > 131072 {
+		if err := json.Unmarshal(envelope.Parameters, &intent, json.RejectUnknownMembers(true)); err != nil || intent.OperationID == "" || intent.ToolName == "" || !intent.Spec.IsValid() {
 			return ControlMessage{}, fmt.Errorf("invalid operation intent")
 		}
 		request.Parameters = intent

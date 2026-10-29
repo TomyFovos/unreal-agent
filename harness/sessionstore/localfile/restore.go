@@ -1,12 +1,9 @@
 package localfile
 
 import (
-	"bytes"
 	"context"
-	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"reflect"
 	"sync"
@@ -14,109 +11,37 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
-	"golang.org/x/sys/unix"
 )
 
 var (
-	ErrRestoreViewChanged     = errors.New("restore read view changed")
-	ErrRestoreViewClosed      = errors.New("restore read view closed")
-	ErrRestoreViewUnsupported = errors.New("scoped restore read view unavailable")
+	ErrRestoreViewChanged = errors.New("restore read view changed")
+	ErrRestoreViewClosed  = errors.New("restore read view closed")
 )
-
-type restoreIdentity struct {
-	device, inode                                                      uint64
-	size, modifiedSeconds, modifiedNanos, changedSeconds, changedNanos int64
-}
 
 // RestoreView owns one decoded log only during restoration. It is never a
 // persistent cache: Close, cancellation and any local append attempt release it.
-// The duplicated writer descriptor keeps the same exclusive writer lease alive;
-// it cannot confer a parent's Operation rights or be reused by a new owner.
+// The owning Host holds the exclusive writer lease throughout restoration.
 type RestoreView struct {
 	mu               sync.Mutex
 	store            *Store
 	id               session.ID
 	ctx              context.Context
 	state            *storedState
-	log, writer      *os.File
-	identity         restoreIdentity
-	version          int
 	reason, closeErr error
 	stop             func() bool
 }
 
-// OpenRestoreView requires the same sidecar writer lease used by Host.Open.
-// File timestamps (including ctime), identity and length are checked between
-// pages: an external same-size rewrite is not treated as an unchanged log.
-func (s *Store) OpenRestoreView(ctx context.Context, id session.ID, owner *os.File) (view *RestoreView, err error) {
+// OpenRestoreView reads one canonical snapshot under the owning Host writer lease.
+func (s *Store) OpenRestoreView(ctx context.Context, id session.ID) (view *RestoreView, err error) {
 	if err = validateSessionID(id); err != nil {
 		return nil, err
 	}
 	if err = context.Cause(ctx); err != nil {
 		return nil, err
 	}
-	if owner == nil {
-		return nil, fmt.Errorf("restore requires a writer lease")
-	}
-	conn, err := owner.SyscallConn()
-	if err != nil {
-		return nil, err
-	}
-	duplicate := -1
-	var duplicateErr error
-	if err = conn.Control(func(fd uintptr) { duplicate, duplicateErr = unix.FcntlInt(fd, unix.F_DUPFD_CLOEXEC, 0) }); err != nil {
-		return nil, err
-	}
-	if duplicateErr != nil {
-		return nil, duplicateErr
-	}
-	lease := os.NewFile(uintptr(duplicate), "restore writer lease")
-	defer func() {
-		if err != nil {
-			lease.Close()
-		}
-	}()
-	actual, err := lease.Stat()
-	if err != nil {
-		return nil, err
-	}
-	expected, err := os.Lstat(s.sessionPath(id) + ".lock")
-	if err != nil {
-		return nil, err
-	}
-	if !actual.Mode().IsRegular() || !expected.Mode().IsRegular() || !os.SameFile(actual, expected) {
-		return nil, fmt.Errorf("restore writer lease does not own this session")
-	}
-	if _, err = restoreIdentityOf(actual); err != nil {
-		return nil, err
-	}
-	if err = unix.Flock(duplicate, unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		return nil, ErrWriterOwned
-	}
-	fd, err := unix.Open(s.sessionPath(id), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	encoded, err := os.ReadFile(s.sessionPath(id))
 	if err != nil {
 		return nil, fmt.Errorf("read session %q: %w", id, err)
-	}
-	log := os.NewFile(uintptr(fd), "restore canonical log")
-	defer func() {
-		if err != nil {
-			log.Close()
-		}
-	}()
-	info, err := log.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("restore canonical log is not a regular file")
-	}
-	stamp, err := restoreIdentityOf(info)
-	if err != nil {
-		return nil, err
-	}
-	encoded, err := io.ReadAll(log)
-	if err != nil {
-		return nil, err
 	}
 	if err = context.Cause(ctx); err != nil {
 		return nil, err
@@ -128,19 +53,7 @@ func (s *Store) OpenRestoreView(ctx context.Context, id session.ID, owner *os.Fi
 	if state.Snapshot.Session.ID != id {
 		return nil, fmt.Errorf("restore session identity mismatch")
 	}
-	first, _, _ := bytes.Cut(encoded, []byte{'\n'})
-	var record logRecord
-	var header sessionRecord
-	if err = json.Unmarshal(first, &record); err != nil {
-		return nil, err
-	}
-	if err = json.Unmarshal(record.Data, &header); err != nil {
-		return nil, err
-	}
-	v := &RestoreView{store: s, id: id, ctx: ctx, state: &state, log: log, writer: lease, identity: stamp, version: header.Version}
-	if err = v.checkLocked(ctx, id); err != nil {
-		return nil, err
-	}
+	v := &RestoreView{store: s, id: id, ctx: ctx, state: &state}
 	v.mu.Lock()
 	if !s.restoreView.CompareAndSwap(nil, v) {
 		v.mu.Unlock()
@@ -150,9 +63,6 @@ func (s *Store) OpenRestoreView(ctx context.Context, id session.ID, owner *os.Fi
 	v.mu.Unlock()
 	return v, nil
 }
-
-// FormatVersion is immutable header metadata, not an execution grant.
-func (v *RestoreView) FormatVersion() int { return v.version }
 
 func (v *RestoreView) checkLocked(ctx context.Context, id session.ID) error {
 	if id != v.id {
@@ -166,33 +76,6 @@ func (v *RestoreView) checkLocked(ctx context.Context, id session.ID) error {
 	}
 	if err := context.Cause(v.ctx); err != nil {
 		return err
-	}
-	info, err := v.log.Stat()
-	if err != nil {
-		return ErrRestoreViewChanged
-	}
-	stamp, err := restoreIdentityOf(info)
-	if err != nil {
-		return err
-	}
-	pathInfo, err := os.Lstat(v.store.sessionPath(v.id))
-	if err != nil || !pathInfo.Mode().IsRegular() || !os.SameFile(info, pathInfo) {
-		return ErrRestoreViewChanged
-	}
-	pathStamp, err := restoreIdentityOf(pathInfo)
-	if err != nil {
-		return err
-	}
-	if stamp != v.identity || pathStamp != v.identity {
-		return ErrRestoreViewChanged
-	}
-	lockInfo, err := v.writer.Stat()
-	if err != nil {
-		return ErrRestoreViewChanged
-	}
-	currentLock, err := os.Lstat(v.store.sessionPath(v.id) + ".lock")
-	if err != nil || !currentLock.Mode().IsRegular() || !os.SameFile(lockInfo, currentLock) {
-		return ErrRestoreViewChanged
 	}
 	return nil
 }
@@ -287,9 +170,6 @@ func (v *RestoreView) Items(ctx context.Context, id session.ID, after sessionsto
 		}
 		items = append(items, copy)
 	}
-	if err := v.checkLocked(ctx, id); err != nil {
-		return sessionstore.Page{}, err
-	}
 	next := after
 	if len(items) > 0 {
 		next = items[len(items)-1].Sequence
@@ -306,9 +186,6 @@ func (v *RestoreView) Resume(ctx context.Context, id session.ID) (sessionstore.R
 	if err != nil {
 		return value, err
 	}
-	if err = v.checkLocked(ctx, id); err != nil {
-		return sessionstore.ResumeState{}, err
-	}
 	return value, nil
 }
 func (v *RestoreView) Operations(ctx context.Context, id session.ID) ([]operation.Operation, error) {
@@ -319,9 +196,6 @@ func (v *RestoreView) Operations(ctx context.Context, id session.ID) ([]operatio
 	}
 	values, err := cloneRestoreValue(v.state.Operations)
 	if err != nil {
-		return nil, err
-	}
-	if err = v.checkLocked(ctx, id); err != nil {
 		return nil, err
 	}
 	return values, nil
@@ -343,7 +217,6 @@ func (v *RestoreView) finishLocked(reason error) error {
 		v.stop()
 		v.stop = nil
 	}
-	v.closeErr = errors.Join(v.log.Close(), v.writer.Close())
 	return v.closeErr
 }
 func (v *RestoreView) Close() error {

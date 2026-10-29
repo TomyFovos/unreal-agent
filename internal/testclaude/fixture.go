@@ -3,11 +3,8 @@
 package testclaude
 
 import (
-	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
-	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type Config struct {
@@ -28,52 +26,33 @@ type Config struct {
 	AuthStatus                                                          string
 	Catalog, CatalogStream                                              string
 	CatalogWait, CatalogChild, InitializeModelsOnly                     bool
-	BridgeSteps                                                         []BridgeStep
-	BridgeChildSteps                                                    []BridgeStep
-	BridgeSource, BridgeEvent                                           string
-	BridgeExtraServer                                                   bool
-	BridgeOnce                                                          bool
-	BridgeManagedPermissionsOnly                                        bool
-	BridgePermissionRules                                               string
-	StructuredResponses                                                 []string
-	StructuredHelperInputs                                              []string
-	StructuredAssistantFrames                                           []string
-	StructuredInitializeError                                           bool
-	StructuredSerializerFailures                                        int
-	StructuredEnforcementReminder                                       bool
-	StructuredAfterResultMillis                                         int
-	StructuredTrailing                                                  string
-	StructuredHoldAfterResult                                           bool
 	// AgentSteps are tool calls the synthetic Claude Code runs itself on the
 	// Claude route (U21); AgentFinal is its closing text.
 	AgentSteps []AgentStep
 	AgentFinal string
 	// AgentOnce runs AgentSteps on the first conversation turn only; later
 	// turns (for example a child's message waking the Session) just answer.
-	AgentOnce bool
+	AgentOnce                              bool
+	AgentInputTokens, AgentStepInputTokens int64
+	CompactPreTokens, CompactPostTokens    int64
+	CompactFailure                         string
+	CompactCrash, CompactUnknownAfter      bool
+	CompactDelayMillis                     int
 }
 
 // AgentStep is one tool call the synthetic Claude Code runs itself. Refused
-// simulates its organization policy refusing the command (U22).
+// simulates Claude Code declining the command itself (U22).
 type AgentStep struct {
 	Tool    string
 	Input   jsontext.Value
 	Refused bool
 }
-type BridgeStep struct {
-	Name, Arguments, Contains           string
-	Error, Duplicate, DuplicateEnvelope bool
-	// ReadEdit derives path, old text and expected revision solely from the
-	// previous received native read; no fixture revision/body shortcut exists.
-	ReadEdit bool
-}
 type Call struct {
 	Arguments, Environment   []string
 	Input, System, Directory string
 	PID, ChildPID            int
-	Schema                   string
-	// Synthetic fixture traffic only; never used by the real provider probe.
-	Initialize, UserFrame string `json:",omitempty"`
+	OverlappingPID           int
+	InputAt                  time.Time
 }
 type Fixture struct{ Binary, Home, Directory string }
 
@@ -140,6 +119,35 @@ func (f *Fixture) Calls(t testing.TB) []Call {
 	return f.calls(t, "calls.jsonl")
 }
 
+// BatchContexts returns the additionalContext actually received by the fake
+// CLI at each PostToolBatch boundary, independently of its closing response.
+func (f *Fixture) BatchContexts(t testing.TB) []string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(f.Directory, "batches.jsonl"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contexts []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var answer struct {
+			HookSpecificOutput struct {
+				AdditionalContext string `json:"additionalContext"`
+			} `json:"hookSpecificOutput"`
+		}
+		if err := json.Unmarshal([]byte(line), &answer); err != nil {
+			t.Fatal(err)
+		}
+		contexts = append(contexts, answer.HookSpecificOutput.AdditionalContext)
+	}
+	return contexts
+}
+
 // AuthCalls records invocation metadata, never auth-status output or credentials.
 func (f *Fixture) AuthCalls(t testing.TB) []Call {
 	t.Helper()
@@ -149,11 +157,6 @@ func (f *Fixture) AuthCalls(t testing.TB) []Call {
 func (f *Fixture) CatalogCalls(t testing.TB) []Call {
 	t.Helper()
 	return f.calls(t, "catalog-calls.jsonl")
-}
-
-func (f *Fixture) StructuredProbes(t testing.TB) []Call {
-	t.Helper()
-	return f.calls(t, "structured-probes.jsonl")
 }
 
 func (f *Fixture) calls(t testing.TB, name string) []Call {
@@ -177,79 +180,4 @@ func (f *Fixture) calls(t testing.TB, name string) []Call {
 		calls = append(calls, c)
 	}
 	return calls
-}
-
-// Progress contains only synthetic producer phases. ExitIntent is not evidence
-// that the owning adapter has reaped the process.
-type Progress struct {
-	Starts, Inputs, ReceiptChecks, ResultIntents, ExitIntents int
-	ParentStarts, ChildStarts, LastGeneration                 int
-	ExitIntentStatusKnown                                     bool
-	ExitIntentStatus                                          int
-}
-
-func (f *Fixture) Progress() (Progress, error) { return f.ProgressContext(context.Background()) }
-
-func (f *Fixture) ProgressContext(ctx context.Context) (Progress, error) {
-	var out Progress
-	if err := ctx.Err(); err != nil {
-		return out, errors.New("synthetic progress canceled")
-	}
-	p, err := openSyntheticProgress(filepath.Join(f.Directory, "structured-progress.jsonl"))
-	if os.IsNotExist(err) {
-		return out, nil
-	}
-	if err != nil {
-		return out, errors.New("synthetic progress unavailable")
-	}
-	defer p.Close()
-	b, err := io.ReadAll(io.LimitReader(p, (256<<10)+1))
-	if err != nil || len(b) > 256<<10 {
-		return out, errors.New("synthetic progress bound")
-	}
-	seen := map[int]bool{}
-	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-	if len(lines) > 1024 {
-		return out, errors.New("synthetic progress records bound")
-	}
-	for _, line := range lines {
-		if ctx.Err() != nil {
-			return Progress{}, errors.New("synthetic progress canceled")
-		}
-		if line == "" {
-			continue
-		}
-		var r struct {
-			Phase, Generation, PID int
-			Child, ExitKnown       bool
-			ExitCode               int
-			ElapsedMillis          int64
-		}
-		if json.Unmarshal([]byte(line), &r, json.RejectUnknownMembers(true)) != nil || r.Phase < 1 || r.Phase > 5 || r.Generation < 0 || r.Generation > 10000 || r.PID < 1 || r.ElapsedMillis < 0 || r.ExitCode < 0 || r.ExitCode > 255 {
-			return Progress{}, errors.New("synthetic progress invalid")
-		}
-		switch r.Phase {
-		case 1:
-			out.Starts++
-		case 2:
-			out.Inputs++
-		case 3:
-			out.ReceiptChecks++
-			if !seen[r.PID] {
-				seen[r.PID] = true
-				if r.Child {
-					out.ChildStarts++
-				} else {
-					out.ParentStarts++
-				}
-			}
-		case 4:
-			out.ResultIntents++
-		case 5:
-			out.ExitIntents++
-			out.ExitIntentStatusKnown, out.ExitIntentStatus = r.ExitKnown, r.ExitCode
-		}
-		out.LastGeneration = max(out.LastGeneration, r.Generation)
-	}
-	return out, nil
 }

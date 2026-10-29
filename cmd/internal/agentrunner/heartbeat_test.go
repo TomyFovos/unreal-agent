@@ -48,10 +48,21 @@ func TestRunMainHeartbeatReleasesWaitingBashAndReplays(t *testing.T) {
 			return llm.Response{Output: []llm.Item{{Type: llm.ItemToolCall, Data: waitingCall}}}, nil
 		}
 		for _, item := range request.Input {
-			if item.Type != llm.ItemToolResult {
-				continue
+			result, ok := item.Data.(llm.ToolResult)
+			if !ok {
+				message, isMessage := item.Data.(llm.Message)
+				if !isMessage {
+					continue
+				}
+				encoded, update := strings.CutPrefix(message.Text, "Prior Unreal tool_result (historical data):\n")
+				if !update {
+					continue
+				}
+				if err := json.Unmarshal([]byte(encoded), &result); err != nil {
+					return llm.Response{}, err
+				}
 			}
-			result := item.Data.(llm.ToolResult)
+
 			if result.CallID != "waiting-call" || result.Output[0].Value == contextbuilder.ToolCallRunningPayload {
 				continue
 			}

@@ -13,20 +13,10 @@ import (
 )
 
 var ErrWatching = errors.New("a viewer is already watching this session")
-var ErrControlPending = errors.New("a viewer control is already in flight for this child")
 
 type Notice struct {
 	SessionID session.ID
 	Err       error
-}
-type controlKey struct {
-	Parent session.ID
-	Input  inbox.ID
-}
-type controlResult struct {
-	action  string
-	request ControlRequest
-	receipt host.Receipt
 }
 
 // Client owns one observation stream per session; callbacks run in Watch's
@@ -40,8 +30,6 @@ type Client struct {
 	RetryDelay time.Duration
 	mu         sync.Mutex
 	watching   map[session.ID]bool
-	pending    map[session.ID]bool
-	completed  map[controlKey]controlResult
 }
 
 func NewClient(reader Reader, model *Model, controls Controls) *Client {
@@ -49,7 +37,7 @@ func NewClient(reader Reader, model *Model, controls Controls) *Client {
 		model = New(Options{})
 	}
 	return &Client{Reader: reader, Model: model, Controls: controls, PageSize: 128, Capacity: 128, RetryDelay: 250 * time.Millisecond,
-		watching: map[session.ID]bool{}, pending: map[session.ID]bool{}, completed: map[controlKey]controlResult{}}
+		watching: map[session.ID]bool{}}
 }
 func (c *Client) sizes() (int, int) {
 	page, capacity := c.PageSize, c.Capacity
@@ -72,9 +60,14 @@ func (c *Client) enter(id session.ID) error {
 }
 func (c *Client) leave(id session.ID) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	delete(c.watching, id)
-	c.mu.Unlock()
-	c.Model.Disconnect(id)
+	c.Model.mu.Lock()
+	defer c.Model.mu.Unlock()
+	if p := c.Model.sessions[id]; p != nil && p.runtime != RuntimeUnknown {
+		p.runtime = RuntimeUnknown
+		c.Model.version++
+	}
 }
 func (c *Client) pages(ctx context.Context, id session.ID, v host.View) error {
 	if err := c.Model.Replace(id, v); err != nil {
@@ -105,12 +98,36 @@ func (c *Client) Refresh(ctx context.Context, id session.ID) error {
 	}
 	defer func() { c.mu.Lock(); delete(c.watching, id); c.mu.Unlock() }()
 	page, _ := c.sizes()
-	v, err := c.Reader.Inspect(ctx, id, 0, page)
+	c.Model.mu.Lock()
+	previous := c.Model.sessions[id]
+	after := sessionstore.BeforeFirst
+	generation := ""
+	if previous != nil && !previous.resync && !previous.more {
+		after, generation = previous.cursor, previous.view.Generation
+	}
+	c.Model.mu.Unlock()
+	v, err := c.Reader.Inspect(ctx, id, after, page)
+	if after != 0 && (err != nil || v.Generation != generation || !validPage(after, v.History)) {
+		after = 0
+		v, err = c.Reader.Inspect(ctx, id, 0, page)
+	}
 	if err != nil {
 		c.Model.Disconnect(id)
 		return err
 	}
-	if err = c.pages(ctx, id, v); err != nil {
+	if after == 0 {
+		err = c.pages(ctx, id, v)
+	} else {
+		err = c.Model.AppendPage(id, after, v)
+		for err == nil && v.History.More {
+			after = v.History.NextAfter
+			v, err = c.Reader.Inspect(ctx, id, after, page)
+			if err == nil {
+				err = c.Model.AppendPage(id, after, v)
+			}
+		}
+	}
+	if err != nil {
 		c.Model.Invalidate(id)
 	}
 	return err
@@ -155,14 +172,53 @@ func (c *Client) Watch(ctx context.Context, id session.ID, changed func(Notice))
 			return err
 		}
 		page, capacity := c.sizes()
-		sub, err := c.Reader.Subscribe(ctx, id, 0, page, capacity)
+		c.Model.mu.Lock()
+		after := sessionstore.BeforeFirst
+		generation := ""
+		stopped := false
+		var revision uint64
+		if p := c.Model.sessions[id]; p != nil && !p.resync && !p.more {
+			after, generation = p.cursor, p.view.Generation
+			stopped, revision = !p.view.Running, p.view.Revision
+		}
+		c.Model.mu.Unlock()
+		if stopped && generation != "" {
+			if reader, ok := c.Reader.(VersionReader); ok {
+				if version, err := reader.Version(ctx, id); err == nil && version.Generation == generation && version.Revision == revision {
+					return nil
+				}
+			}
+		}
+		sub, err := c.Reader.Subscribe(ctx, id, after, page, capacity)
+		if after != 0 && (err != nil || sub.Initial.Generation != generation || !validPage(after, sub.Initial.History)) {
+			if err == nil && sub.Cancel != nil {
+				sub.Cancel()
+			}
+			after = 0
+			sub, err = c.Reader.Subscribe(ctx, id, 0, page, capacity)
+		}
 		if err == nil {
 			if sub.Cancel == nil {
 				sub.Cancel = func() {}
 			}
-			err = c.pages(ctx, id, sub.Initial)
+			version := c.Model.Version()
+			if after == 0 {
+				err = c.pages(ctx, id, sub.Initial)
+			} else {
+				v := sub.Initial
+				err = c.Model.AppendPage(id, after, v)
+				for err == nil && v.History.More {
+					after = v.History.NextAfter
+					v, err = c.Reader.Inspect(ctx, id, after, page)
+					if err == nil {
+						err = c.Model.AppendPage(id, after, v)
+					}
+				}
+			}
 			if err == nil {
-				notify(nil)
+				if c.Model.Version() != version {
+					notify(nil)
+				}
 				if !sub.Initial.Running {
 					sub.Cancel()
 					return nil
@@ -249,41 +305,10 @@ func (c *Client) control(ctx context.Context, action string, child session.ID, i
 	if c.Controls == nil {
 		return host.Receipt{}, ErrUnavailable
 	}
-	// A committed retry remains the same intent after Finish, disconnect, or
-	// generation change. Consult receipts before checking current availability.
-	detail, ok := c.Model.Detail(child, time.Now())
-	if !ok || detail.Row.ParentID == "" || inputID == "" {
-		return host.Receipt{}, ErrUnavailable
-	}
-	key := controlKey{detail.Row.ParentID, inbox.ID(inputID)}
-	c.mu.Lock()
-	old, completed := c.completed[key]
-	c.mu.Unlock()
-	if completed {
-		if old.action != action || old.request.ChildID != child || old.request.Text != text {
-			return host.Receipt{}, host.ErrConflict
-		}
-		return old.receipt, nil
-	}
 	req, err := c.request(child, inputID, text)
 	if err != nil {
 		return host.Receipt{}, err
 	}
-	c.mu.Lock()
-	// Another caller can finish between the receipt lookup and request check.
-	if old, ok := c.completed[key]; ok {
-		c.mu.Unlock()
-		if old.action != action || old.request.ChildID != child || old.request.Text != text {
-			return host.Receipt{}, host.ErrConflict
-		}
-		return old.receipt, nil
-	}
-	if c.pending[child] {
-		c.mu.Unlock()
-		return host.Receipt{}, ErrControlPending
-	}
-	c.pending[child] = true
-	c.mu.Unlock()
 	var receipt host.Receipt
 	switch action {
 	case "steer":
@@ -293,11 +318,5 @@ func (c *Client) control(ctx context.Context, action string, child session.ID, i
 	case "resume":
 		err = c.Controls.ResumeChild(ctx, req)
 	}
-	c.mu.Lock()
-	delete(c.pending, child)
-	if err == nil {
-		c.completed[key] = controlResult{action: action, request: req, receipt: receipt}
-	}
-	c.mu.Unlock()
 	return receipt, err
 }

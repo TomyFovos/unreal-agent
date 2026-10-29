@@ -14,6 +14,7 @@ import (
 	"github.com/rivo/uniseg"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
@@ -59,11 +60,6 @@ func TestOrchestrationProjectionCrossProviderOwnershipAndIndependentRuntime(t *t
 	if o.Session != "main" || o.Turn != "turn-7" || parent.Provider != "claude-code" || parent.RuntimeRevision != 7 || parent.ObservedModel != "claude-opus-fixture" || a.Provider != "openai-codex" || a.Model != "gpt-fixture" || a.Effort != "medium" || b.Provider != "claude-code" || b.Status != "done" || c.Status != "failed" {
 		t.Fatal("incorrect independent runtime/status metadata", o.Nodes)
 	}
-	for _, e := range o.Edges {
-		if e.Owner != "Unreal Host" {
-			t.Fatal("provider directly owns an edge", e)
-		}
-	}
 	if a.ParentID != parent.ID || topologyNode(t, o, "agent:child-a/op:test-a").ParentID != a.ID {
 		t.Fatal("operation/child ownership linkage lost")
 	}
@@ -106,30 +102,30 @@ func TestOrchestrationNestedChildrenCycleDefenseAndBound(t *testing.T) {
 	if topologyNode(t, o, "agent:child-a1").ParentID != "agent:child-a" {
 		t.Fatal("nested lineage lost")
 	}
-	rows := topologyRows(o, 90, Theme{Plain: true})
+	rows := cardTestRows(o, 90, Theme{Plain: true})
 	var nested string
 	for _, r := range rows {
-		if strings.Contains(r.content.plain(), "child-a1") {
-			nested = r.content.plain()
+		if strings.Contains(r.plain(), "nested task") {
+			nested = r.plain()
 		}
 	}
-	if !strings.Contains(nested, "│  └─") && !strings.Contains(nested, "│  ├─") {
-		t.Fatal("nested connectors absent", nested)
+	if !strings.HasPrefix(nested, "  ▌[B] nested task") {
+		t.Fatal("nested card indentation absent", nested)
 	}
-	u.Viewer.Rows = append(u.Viewer.Rows, viewer.Row{ID: "cycle-x", ParentID: "cycle-y"}, viewer.Row{ID: "cycle-y", ParentID: "cycle-x"})
+	u.Viewer.Rows = append(u.Viewer.Rows, viewer.Row{ID: "cycle-x", ParentID: "cycle-y", Label: "cycle x"}, viewer.Row{ID: "cycle-y", ParentID: "cycle-x", Label: "cycle y"})
 	o = BuildOrchestration(s, u.Viewer, u.Now, 128)
 	text := ""
-	for _, r := range topologyRows(o, 90, Theme{}) {
-		text += r.content.plain() + "\n"
+	for _, r := range cardTestRows(o, 90, Theme{}) {
+		text += r.plain() + "\n"
 	}
-	if !strings.Contains(text, "lineage unknown") || strings.Count(text, "cycle-x") != 1 || strings.Count(text, "cycle-y") != 1 {
+	if !strings.Contains(text, "不明") || strings.Count(text, "cycle x") != 1 || strings.Count(text, "cycle y") != 1 {
 		t.Fatal("cycle did not fail safe", text)
 	}
 	for i := range 2000 {
 		u.Viewer.Rows[0].Operations = append(u.Viewer.Rows[0].Operations, viewer.OperationRow{ID: operation.ID(fmt.Sprintf("op-%04d", i)), Tool: "read", Status: operation.StatusCompleted, Sequence: sessionstore.Sequence(i + 1)})
 	}
 	o = BuildOrchestration(s, u.Viewer, u.Now, 64)
-	if len(o.Nodes) > 64 || o.Hidden == 0 || len(topologyRows(o, 80, Theme{})) > 64*6+2 {
+	if len(o.Nodes) > 64 || o.Hidden == 0 || len(cardTestRows(o, 80, Theme{})) > 64*6+2 {
 		t.Fatal("unbounded topology", len(o.Nodes), o.Hidden)
 	}
 	if topologyNode(t, o, "agent:child-a/op:test-a").Status != "running" {
@@ -150,7 +146,7 @@ func TestOrchestrationUnknownDisconnectedResyncAndFailure(t *testing.T) {
 	}
 	s.Connected, s.Status = false, "resyncing"
 	o = BuildOrchestration(s, u.Viewer, u.Now, 128)
-	if topologyNode(t, o, "agent:main").Status != "unknown" || topologyNode(t, o, "agent:child-a/op:test-a").Status != "unknown" || topologyNode(t, o, "agent:child-b").Status != "done" {
+	if topologyNode(t, o, "agent:main").Status != "unknown" || topologyNode(t, o, "agent:child-a/op:test-a").Status != "unknown" || topologyNode(t, o, "agent:child-b").Status != "unknown" {
 		t.Fatal("disconnection fabricated activity or erased canonical Finish")
 	}
 	s.Connected, s.Failure = true, "provider-internal-secret-never-shown"
@@ -162,12 +158,12 @@ func TestOrchestrationUnknownDisconnectedResyncAndFailure(t *testing.T) {
 	}
 	u.View = ViewOrchestration
 	f := RenderFrame(s, u, 80, 24)
-	if strings.Contains(frameText(f), "never-shown") {
+	if !strings.Contains(frameText(f), "応答を取得できませんでした") || strings.Contains(frameText(f), "provider-internal-secret-never-shown") || strings.Contains(frameText(f), "private-error-never-shown") || strings.Contains(frameText(f), "raw-internal-body-never-shown") {
 		t.Fatal("Orchestration displayed body/error detail", frameText(f))
 	}
 }
 
-func TestOrchestrationClaudePermissionDenialShowsOnlySafeStatus(t *testing.T) {
+func TestOrchestrationClaudePermissionFailureAttentionAndComposer(t *testing.T) {
 	for _, failure := range []string{
 		`call model for turn "turn-id": Claude tool bridge: provider permission denied (decision_reason_type=asyncAgent; scope=unreal_tool_call)`,
 		`call model for turn "turn-id": Claude Code: provider permission denied (decision_reason_type=unknown; scope=unknown)`,
@@ -185,7 +181,7 @@ func TestOrchestrationClaudePermissionDenialShowsOnlySafeStatus(t *testing.T) {
 				u.Theme = theme
 				frame := RenderFrame(s, u, size[0], size[1])
 				text := frameText(frame)
-				if len(frame.Lines) != size[1] || frame.CursorY != size[1]-2 || strings.Contains(text, "decision_reason_type") || strings.Contains(text, "turn-id") {
+				if len(frame.Lines) != size[1] || frame.CursorY != size[1]-2 || !strings.Contains(text, "操作が許可されませんでした") || strings.Contains(text, "turn-id") {
 					t.Fatal("Orchestration leaked error details or displaced composer", size)
 				}
 			}
@@ -196,7 +192,7 @@ func TestOrchestrationClaudePermissionDenialShowsOnlySafeStatus(t *testing.T) {
 func TestOrchestrationOperationStatesSafeTargetsAndHighlight(t *testing.T) {
 	s, u := orchestrationFixture()
 	states := []operation.Status{operation.StatusAwaiting, operation.StatusReady, operation.StatusCompleted, operation.StatusFailed, operation.StatusCanceled, "invalid"}
-	words := []string{"queued", "running", "done", "failed", "canceled", "unknown"}
+	words := []string{"running", "running", "done", "failed", "canceled", "unknown"}
 	for i, status := range states {
 		s.Operations = []operation.Operation{{ID: "parent-op", ToolName: "edit", Status: status, State: []byte(`{"TerminalError":"private-error-never-shown","arguments":"raw-args-never-shown"}`)}}
 		s.Entries = append(s.Entries, Entry{Calls: []Receipt{{Name: "edit", Target: "render.go", Operations: []operation.ID{"parent-op"}}}})
@@ -205,20 +201,16 @@ func TestOrchestrationOperationStatesSafeTargetsAndHighlight(t *testing.T) {
 		if n.Status != words[i] || n.SafeTarget != "render.go" || n.Active != (i < 2) {
 			t.Fatal("incorrect tool state", n)
 		}
-		rows := topologyRows(o, 90, Theme{})
+		rows := cardTestRows(o, 90, Theme{})
 		var text string
-		var highlighted bool
 		for _, r := range rows {
-			text += r.content.plain() + "\n"
-			if strings.Contains(r.content.plain(), "parent-op") {
+			text += r.plain() + "\n"
+			if strings.Contains(r.plain(), "parent-op") {
 				t.Fatal("internal operation ID used as tool title")
 			}
-			if strings.Contains(r.content.plain(), "edit") {
-				highlighted = strings.Contains(r.content.paint(Theme{}), "\x1b[1m")
-			}
 		}
-		if strings.Contains(text, "never-shown") || i < 2 && !highlighted {
-			t.Fatal("raw state or active path styling", text)
+		if strings.Contains(text, "never-shown") || strings.Contains(text, "queued") {
+			t.Fatal("raw state or legacy status", text)
 		}
 	}
 }
@@ -242,16 +234,16 @@ func TestOrchestrationResponsiveViewsRailComposerAndThemes(t *testing.T) {
 					t.Fatal("invalid terminal text")
 				}
 				if f.View == ViewSplit {
-					if !strings.Contains(sgrRE.ReplaceAllString(f.Lines[1], ""), "Chat") || !strings.Contains(sgrRE.ReplaceAllString(f.Lines[1], ""), "Orchestration") {
+					if !strings.Contains(sgrRE.ReplaceAllString(f.Lines[1], ""), "Chat") || !strings.Contains(sgrRE.ReplaceAllString(f.Lines[1], ""), "メイン") {
 						t.Fatal("Split headings are not aligned")
 					}
-					if strings.Contains(text, "child agents") || !strings.Contains(text, "Chat") || !strings.Contains(text, "Orchestration") || !strings.Contains(text, "raw-response") {
+					if strings.Contains(text, "child agents") || !strings.Contains(text, "Chat") || !strings.Contains(text, "メイン") || !strings.Contains(text, "raw-response") {
 						t.Fatal("Split duplicate rail or missing panes", text)
 					}
 					if strings.Count(text, "child-a") > 1 {
 						t.Fatal("child duplicated in Split", text)
 					}
-				} else if f.View == ViewChat && size[0] >= 120 && !strings.Contains(text, "child agents") {
+				} else if f.View == ViewChat && size[0] >= 120 && !strings.Contains(text, theme.chrome("◆ メイン")) {
 					t.Fatal("Chat lost existing child rail")
 				}
 				if f.View == ViewOrchestration && strings.Contains(text, "never-shown") {
@@ -312,41 +304,40 @@ func TestOrchestrationMetadataSecurityAndDeterminism(t *testing.T) {
 	if strings.Contains(frameText(frame), "synthetic-name-token") || strings.Contains(frameText(frame), "synthetic-pending-token") {
 		t.Fatal("header/dock exposed protected runtime labels")
 	}
-	for _, r := range topologyRows(first, 80, Theme{Plain: true}) {
-		if strings.ContainsAny(r.content.plain(), "\x1b\a\u202e") || uniseg.StringWidth(r.content.plain()) > 80 {
+	for _, r := range cardTestRows(first, 80, Theme{Plain: true}) {
+		if strings.ContainsAny(r.plain(), "\x1b\a\u202e") || uniseg.StringWidth(r.plain()) > 80 {
 			t.Fatal("unsafe terminal metadata")
 		}
 	}
 }
 
-func TestOrchestrationScrollReachesEveryNodeAndSplitFollowsActivePath(t *testing.T) {
+func TestOrchestrationScrollReachesEveryCardAndSplitKeepsMain(t *testing.T) {
 	s, u := orchestrationFixture()
 	u.Viewer.Rows = u.Viewer.Rows[:1]
 	for i := range 45 {
-		u.Viewer.Rows[0].Operations = append(u.Viewer.Rows[0].Operations, viewer.OperationRow{ID: operation.ID(fmt.Sprint(i)), Tool: fmt.Sprintf("tool-%02d", i), Status: operation.StatusCompleted})
+		u.Viewer.Rows = append(u.Viewer.Rows, viewer.Row{ID: session.ID(fmt.Sprint(i)), ParentID: s.ID, Label: fmt.Sprintf("task-%02d", i), ParentOperationStatus: operation.StatusReady})
 	}
-	u.Viewer.Rows[0].Operations[42].Status = operation.StatusReady
 	u.View = ViewOrchestration
 	seen := map[string]bool{}
-	for offset := range 60 {
+	for offset := range 100 {
 		u.OrchestrationScroll = offset
 		f := RenderFrame(s, u, 60, 20)
 		for i := range 45 {
-			if strings.Contains(frameText(f), fmt.Sprintf("tool-%02d", i)) {
+			if strings.Contains(frameText(f), fmt.Sprintf("task-%02d", i)) {
 				seen[fmt.Sprint(i)] = true
 			}
 		}
 		if f.OrchestrationOffset > f.OrchestrationMax {
-			t.Fatal("scroll outside bounded viewport")
+			t.Fatal("scroll outside viewport")
 		}
 	}
 	if len(seen) != 45 {
-		t.Fatal("unreachable operation rows", len(seen))
+		t.Fatal("unreachable cards", len(seen))
 	}
 	u.View = ViewSplit
 	f := RenderFrame(s, u, 120, 24)
-	if !strings.Contains(frameText(f), "tool-42") || !strings.Contains(frameText(f), "parent main") {
-		t.Fatal("Split lost active path or parent", frameText(f))
+	if !strings.Contains(frameText(f), "task-00") || !strings.Contains(frameText(f), "◆ メイン") || !strings.Contains(frameText(f), "/view orchestration") {
+		t.Fatal("Split lost cards or overflow count", frameText(f))
 	}
 }
 
@@ -355,19 +346,77 @@ func TestOrchestrationScrollReachesEveryNodeAndSplitFollowsActivePath(t *testing
 func TestOrchestrationShowsWhatEachRunningChildDoes(t *testing.T) {
 	s, u := orchestrationFixture()
 	u.Viewer.Rows[1].Activity = "running the parser tests"
+	u.Viewer.Rows[1].Operations = nil
 	o := BuildOrchestration(s, u.Viewer, u.Now, 128)
 	if a := topologyNode(t, o, "agent:child-a"); a.Activity != "running the parser tests" {
 		t.Fatalf("child-a = %+v", a)
 	}
 	var lines []string
-	for _, r := range topologyRows(o, 100, Theme{Plain: true}) {
-		lines = append(lines, r.content.plain())
+	for _, r := range cardTestRows(o, 100, Theme{Plain: true}) {
+		lines = append(lines, r.plain())
 	}
-	if !strings.Contains(strings.Join(lines, "\n"), "now: running the parser tests") {
+	if !strings.Contains(strings.Join(lines, "\n"), "running the parser tests") {
 		t.Fatalf("rows = %q", lines)
 	}
 	u.Viewer.Rows[1].Activity = "api_key=synthetic-token"
 	if a := topologyNode(t, BuildOrchestration(s, u.Viewer, u.Now, 128), "agent:child-a"); strings.Contains(a.Activity, "synthetic-token") {
 		t.Fatal("activity exposed a secret")
 	}
+}
+
+// Only running agents and operations are shown; ended ones are counted.
+func TestOrchestrationShowsOnlyWhatRuns(t *testing.T) {
+	s, u := orchestrationFixture()
+	var text []string
+	for _, r := range cardTestRows(BuildOrchestration(s, u.Viewer, u.Now, 128), 100, Theme{Plain: true}) {
+		text = append(text, r.plain())
+	}
+	all := strings.Join(text, "\n")
+	if !strings.Contains(all, "inspect parser") || !strings.Contains(all, "go test ./...") {
+		t.Fatalf("running child or its running command missing:\n%s", all)
+	}
+	for _, gone := range []string{"update tests", "check failure", "stream.go", "child-a", "child-b", "child-c"} {
+		if strings.Contains(all, gone) {
+			t.Fatalf("ended %s is shown:\n%s", gone, all)
+		}
+	}
+	if !strings.Contains(all, "終了 ✗✓") {
+		t.Fatalf("ended items are not counted:\n%s", all)
+	}
+}
+
+// Background entries form one aggregate, until the agent marks a human report.
+func TestBackgroundTurnsFoldInTheChat(t *testing.T) {
+	s, u := idleSnapshot(), plainUI()
+	s.Entries = []Entry{
+		{Role: "you", Text: "認証のテストを実装統括に任せて"},
+		{Role: "agent", Text: "設計を書いて実装統括に渡しました。"},
+		{Role: "peer", PeerID: "child-lead", PeerKind: "ready", Text: "Child is ready"},
+		{Role: "peer", PeerID: "child-lead", PeerKind: "message", Text: "質問: トークンの有効期限は?\n詳しくは…"},
+		{Role: "agent", Text: "有効期限は1時間と回答しました。\n理由は設計書のとおり。"},
+		{Role: "peer", PeerID: "child-lead", PeerKind: "ended", Text: "Child ended: completed"},
+		{Role: "agent", Text: "【報告】認証のテストが完成しました。\n12件すべて成功。"},
+	}
+	text := frameText(RenderFrame(s, u, 120, 40))
+	for _, want := range []string{"設計を書いて実装統括に渡しました。", "┄ 裏の作業  0ターン · ツール0回", "【報告】認証のテストが完成しました。", "12件すべて成功。"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q:\n%s", want, text)
+		}
+	}
+	for _, hidden := range []string{"Child is ready", "理由は設計書のとおり。", "詳しくは…", "質問: トークンの有効期限は?", "有効期限は1時間と回答しました。", "Child ended: completed"} {
+		if strings.Contains(text, hidden) {
+			t.Fatalf("background detail %q shown:\n%s", hidden, text)
+		}
+	}
+}
+
+func cardTestRows(o OrchestrationSnapshot, width int, theme Theme) []line {
+	var rows []line
+	for i, card := range o.cards {
+		rows = append(rows, workCardRows(card, width, theme, i%2 == 1)...)
+	}
+	if len(o.beads) > 0 {
+		rows = append(rows, finishedBeads(o.beads, width, theme))
+	}
+	return rows
 }

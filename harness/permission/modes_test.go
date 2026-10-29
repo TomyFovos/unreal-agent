@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,15 +24,7 @@ func humanController(t *testing.T, maximum *Policy, duration time.Duration) (*Co
 func humanMode(t *testing.T, c *Controller, key string, mode Mode) {
 	t.Helper()
 	rev := c.Snapshot().Revision
-	challenge := ""
-	if mode == FullAccess {
-		var err error
-		challenge, err = c.PrepareFull(key, rev)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := c.SetMode(key, rev, mode, challenge); err != nil {
+	if err := c.SetMode(key, rev, mode); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -91,6 +84,16 @@ func TestHumanAllowOnceDenyTimeoutCancellationAndDetach(t *testing.T) {
 			case "detach":
 				_, release := c.AcquireControl()
 				release()
+				select {
+				case <-result:
+					t.Fatal("detach answered pending request")
+				default:
+				}
+				newKey, release := c.AcquireControl()
+				defer release()
+				if err := c.Decide(newKey, c.Snapshot().Revision, "op", false); err != nil {
+					t.Fatal(err)
+				}
 			}
 			p := getPermit(t, result)
 			defer p.Release()
@@ -111,11 +114,6 @@ func TestHumanAllowOnceDenyTimeoutCancellationAndDetach(t *testing.T) {
 func TestHumanFullConfirmationReplayRevocationAndFreshLifetime(t *testing.T) {
 	c, ctx, key := humanController(t, Unrestricted(), time.Second)
 	rev := c.Snapshot().Revision
-	for _, proof := range []string{"", "true", "config approval", "LLM approval"} {
-		if c.SetMode(key, rev, FullAccess, proof) == nil {
-			t.Fatal("forged confirmation")
-		}
-	}
 	humanMode(t, c, key, FullAccess)
 	result := getPermit(t, c.Request(ctx, Request{ID: "process", Tool: "Bash", Privileged: true}))
 	defer result.Release()
@@ -128,7 +126,7 @@ func TestHumanFullConfirmationReplayRevocationAndFreshLifetime(t *testing.T) {
 	}
 	assertDenied(t, FromContext(result.Context).CheckProcess(), Denied)
 	fresh, _, _ := humanController(t, Unrestricted(), time.Second)
-	if fresh.Snapshot().Mode != ReadOnly || fresh.SetMode(key, rev, FullAccess, "old") == nil {
+	if fresh.Snapshot().Mode != ReadOnly || fresh.SetMode(key, rev, FullAccess) == nil {
 		t.Fatal("restored authority")
 	}
 }
@@ -148,7 +146,7 @@ func TestHumanLeaseIsolationParentDenyAndNoSecretProjection(t *testing.T) {
 	assertDenied(t, FromContext(p.Context).CheckProcess(), Denied)
 	newKey, release := c.AcquireControl()
 	defer release()
-	if c.SetMode(key, c.Snapshot().Revision, ReadOnly, "") == nil {
+	if c.SetMode(key, c.Snapshot().Revision, ReadOnly) == nil {
 		t.Fatal("old attachment accepted")
 	}
 	encoded, err := json.Marshal(c.Snapshot())
@@ -158,12 +156,12 @@ func TestHumanLeaseIsolationParentDenyAndNoSecretProjection(t *testing.T) {
 	if strings.Contains(string(encoded), key) || strings.Contains(string(encoded), newKey) {
 		t.Fatal("private control leaked")
 	}
-	if !errors.Is(c.SetMode("", c.Snapshot().Revision, FullAccess, ""), ErrControl) {
+	if !errors.Is(c.SetMode("", c.Snapshot().Revision, FullAccess), ErrControl) {
 		t.Fatal("unauthenticated control")
 	}
 }
 func TestHumanModesConfigAndUnrestrictedBaselineCannotBypassReadonly(t *testing.T) {
-	for _, cfg := range []ModesConfig{{Enabled: true}, {ApprovalTimeoutMillis: -1}, {ApprovalTimeoutMillis: 3600001}} {
+	for _, cfg := range []ModesConfig{{Enabled: true}} {
 		if cfg.Validate() == nil {
 			t.Fatal("bad config accepted")
 		}
@@ -255,5 +253,38 @@ func TestHumanReadOnlyCommandRunsInEveryMode(t *testing.T) {
 			humanMode(t, c, key, ReadOnly)
 		}
 		p.Release()
+	}
+}
+
+func TestHumanApprovalsHaveNoDefaultDeadlineOrPendingLimit(t *testing.T) {
+	c, ctx, key := humanController(t, Unrestricted(), 0)
+	humanMode(t, c, key, Ask)
+	results := make([]<-chan Permit, 129)
+	for i := range results {
+		results[i] = c.Request(ctx, Request{ID: fmt.Sprint(i), Tool: "Bash", Scope: strings.Repeat("command", 100), Privileged: true})
+		select {
+		case <-results[i]:
+			t.Fatal("request unexpectedly settled", i)
+		default:
+		}
+	}
+	snapshot := c.Snapshot()
+	if len(snapshot.Pending) != 129 {
+		t.Fatal("lost pending requests", len(snapshot.Pending))
+	}
+	for _, p := range snapshot.Pending {
+		if !p.Deadline.IsZero() {
+			t.Fatal("unexpected default deadline", p.Deadline)
+		}
+	}
+	for i, result := range results {
+		if err := c.Decide(key, c.Snapshot().Revision, fmt.Sprint(i), true); err != nil {
+			t.Fatal(err)
+		}
+		permit := getPermit(t, result)
+		if permit.Denial != nil {
+			t.Fatal(permit.Decision)
+		}
+		permit.Release()
 	}
 }

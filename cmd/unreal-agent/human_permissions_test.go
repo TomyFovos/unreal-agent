@@ -29,15 +29,7 @@ func humanModeConfiguration(cfg serveConfiguration) serveConfiguration {
 func setGatewayHumanMode(t *testing.T, w permission.ControlConnection, mode permission.Mode) {
 	t.Helper()
 	s := w.Initial
-	proof := ""
-	if mode == permission.FullAccess {
-		out, err := w.Request(t.Context(), permission.ControlRequest{Action: "prepare_full", Expected: s.Revision})
-		if err != nil {
-			t.Fatal(err)
-		}
-		proof = out.Challenge
-	}
-	if _, err := w.Request(t.Context(), permission.ControlRequest{Action: "set_mode", Expected: s.Revision, Mode: mode, Challenge: proof}); err != nil {
+	if _, err := w.Request(t.Context(), permission.ControlRequest{Action: "set_mode", Expected: s.Revision, Mode: mode}); err != nil {
 		t.Fatal(err)
 	}
 }

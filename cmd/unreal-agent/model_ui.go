@@ -13,10 +13,12 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
@@ -42,10 +44,10 @@ type modelReply struct {
 	Capabilities map[string]modelcatalog.Capabilities `json:",omitzero"`
 }
 type modelUI struct {
-	supported []modelcatalog.Provider
-	binding   *launcherHostBinding
-	owner     *host.Host
-	cache     string
+	rediscover func(context.Context) error
+	supported  []modelcatalog.Provider
+	binding    *launcherHostBinding
+	owner      *host.Host
 	// claudeAgent reads the Claude route's catalog (U21).
 	claudeAgent *claudeCatalog
 	codexRead   func(context.Context, bool) (modelcatalog.Catalog, error)
@@ -68,20 +70,26 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.next.ServeHTTP(w, r)
 		return
 	}
-	if r.Method != http.MethodPost || r.Host != "localhost" || r.Header.Get("Origin") != "" {
-		http.Error(w, "invalid local request", 400)
-		return
-	}
 	var q modelRequest
 	out := modelReply{}
 	if json.Unmarshal(body, &q, json.RejectUnknownMembers(true)) != nil {
 		out.Error = "invalid_request"
 	} else if peek.Action == "launcher.check" {
-		if q.HostBinding == nil || h.binding == nil || q.HostBinding.Identity.Build == "" || q.HostBinding.Identity.Protocol != 1 || *q.HostBinding != *h.binding {
+		if q.HostBinding == nil || h.binding == nil || *q.HostBinding != *h.binding {
 			out.Error = "host_configuration_mismatch"
 		}
 	} else if peek.Action == "runtime.health" {
-		out.Capabilities = h.runtime.Capabilities
+		out.Capabilities = make(map[string]modelcatalog.Capabilities)
+		for id, c := range h.runtime.Capabilities {
+			out.Capabilities[id] = c
+		}
+		ids := append([]string{h.runtime.Identity.Provider.Provider}, h.runtime.Discovered.IDs()...)
+		for id := range h.runtime.Backends {
+			ids = append(ids, id)
+		}
+		for _, id := range ids {
+			out.Capabilities[id] = modelcatalog.Capabilities{Tools: h.runtime.ProviderSupportsTools(id)}
+		}
 	} else {
 		s, e := h.owner.Attach(q.ID)
 		if e != nil {
@@ -89,7 +97,7 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			if peek.Action == "child.start" {
 				resolve := childRuntimeResolver(h.runtime)
-				if len(h.runtime.Backends) == 0 {
+				if len(h.runtime.Backends) == 0 && h.runtime.Discovered == nil {
 					resolve = nil
 				}
 				// The resolver bounds the start by the Session's own capability;
@@ -108,6 +116,13 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				h.writeReply(w, out)
 				return
 			}
+			if q.Refresh && h.rediscover != nil {
+				if err := h.rediscover(r.Context()); err != nil {
+					out.Error = "provider_check_failed"
+					h.writeReply(w, out)
+					return
+				}
+			}
 			active, _ := s.RuntimeSelection()
 			if peek.Action == "model.providers" {
 				out.Providers = h.providers(r.Context())
@@ -124,11 +139,13 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					id = active.Provider
 				}
 			}
+			if q.Refresh && peek.Action == "model.catalog" && id == claudeagent.ProviderID {
+				_, _ = h.catalog(r.Context(), id, true)
+			}
 			if len(h.supported) > 0 {
 				available := false
 				if peek.Action == "model.catalog" && q.Refresh {
-					// A registered, authenticated backend can refresh missing model
-					// metadata. This never registers a backend or changes trust/auth.
+					// Rediscovery has published authenticated backend registrations.
 					_, registered := h.runtime.ProviderRuntime(id)
 					available = registered == nil && h.runtime.CheckProvider(r.Context(), id) == nil
 				} else {
@@ -177,6 +194,8 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						switch {
 						case errors.Is(e, host.ErrConflict):
 							out.Error = "selection_changed; reopen /model"
+						case errors.Is(e, localfile.ErrWriterOwned):
+							out.Error = "writer_owned"
 						case errors.Is(e, host.ErrStopped):
 							out.Error = "session_stopped"
 						case errors.Is(e, host.ErrStaleGeneration):

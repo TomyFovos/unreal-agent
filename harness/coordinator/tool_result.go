@@ -22,9 +22,7 @@ func (current *coordinator) projectToolResult(status sessionstore.ToolCallStatus
 		return llm.ErrToolRecoveryRequired
 	}
 	result.State = terminalResultState(status, translator, running)
-	if current.nativeConversation() || current.conversation != nil {
-		current.observeTypedToolResult(status, translator, &result, running)
-	}
+
 	builder.AddTypedToolResult(result, running)
 	return nil
 }
@@ -32,6 +30,9 @@ func (current *coordinator) projectToolResult(status sessionstore.ToolCallStatus
 func terminalResultState(status sessionstore.ToolCallStatus, translator tool.ResultTranslator, running bool) llm.ToolResultState {
 	if running {
 		return llm.ToolResultPending
+	}
+	if status.Status.Error == interruptedOperationResult {
+		return llm.ToolResultUnknown
 	}
 	failed := status.Status.Error != "" || status.Status.Denial != nil
 	if classifier, ok := translator.(tool.ResultFailureClassifier); ok {
@@ -57,31 +58,4 @@ func terminalResultState(status sessionstore.ToolCallStatus, translator tool.Res
 		return llm.ToolResultUnknown
 	}
 	return llm.ToolResultSucceeded
-}
-
-// A successful explicit Host classifier is receipt evidence, not the default
-// false value of a failure bool. A tool type or terminal ExitCode alone does
-// not prove that the surrounding execution state is valid.
-func (current *coordinator) observeTypedToolResult(status sessionstore.ToolCallStatus, translator tool.ResultTranslator, result *llm.ToolResult, running bool) {
-	if running {
-		return
-	}
-	_, classified := translator.(tool.ResultFailureClassifier)
-	proven := result.State == llm.ToolResultSucceeded && classified
-	for _, op := range status.Operations {
-		if current.conversation != nil {
-			delete(current.conversation.pending, op.ID)
-		}
-		if proven {
-			if current.conversation != nil {
-				delete(current.conversation.quarantined, op.ID)
-				delete(current.conversation.effects, op.ID)
-			}
-			continue
-		}
-		current.observeUncertainty(op, false)
-		if current.quarantined(op.ID) {
-			result.State = llm.ToolResultUnknown
-		}
-	}
 }

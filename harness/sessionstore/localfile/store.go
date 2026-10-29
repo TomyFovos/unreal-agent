@@ -93,6 +93,17 @@ func (store *Store) Inspect(ctx context.Context, id session.ID) (sessionstore.Sn
 	return state.Snapshot, nil
 }
 
+// ReadSnapshot decodes one committed log for a read-only observer. The returned
+// values belong to the caller; no writer lease or persistent restore view is
+// acquired, and all metadata/history/operations come from the same read.
+func (store *Store) ReadSnapshot(ctx context.Context, id session.ID) (sessionstore.Snapshot, []sessionstore.Item, []operation.Operation, error) {
+	state, _, err := store.readState(ctx, id)
+	if err != nil {
+		return sessionstore.Snapshot{}, nil, nil, err
+	}
+	return state.Snapshot, state.Items, state.Operations, nil
+}
+
 func (store *Store) Items(
 	ctx context.Context,
 	id session.ID,

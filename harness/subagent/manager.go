@@ -14,6 +14,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/tool/observed"
 	"io/fs"
 	"path/filepath"
 	"slices"
@@ -45,16 +46,25 @@ type job struct {
 	approvals  []Approval // the child's requests waiting for this parent
 }
 type Manager struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	config   Config
-	mu       sync.Mutex
-	jobs     map[operation.ID]*job
-	canceled map[operation.ID]bool
-	changed  chan struct{}
-	updates  chan operation.Operation
-	closed   bool
-	workers  sync.WaitGroup
+	ctx            context.Context
+	cancel         context.CancelFunc
+	config         Config
+	mu             sync.Mutex
+	jobs           map[operation.ID]*job
+	canceled       map[operation.ID]bool
+	changed        chan struct{}
+	updates        chan operation.Operation
+	closed         bool
+	workers        sync.WaitGroup
+	ended          []endedNotification
+	notifyingEnded bool
+}
+
+type endedNotification struct {
+	plan   Plan
+	id     operation.ID
+	status operation.Status
+	state  operation.RemoteJobState
 }
 
 func NewManager(ctx context.Context, c Config) (*Manager, error) {
@@ -86,6 +96,39 @@ func NewManager(ctx context.Context, c Config) (*Manager, error) {
 func (m *Manager) RemoteJobPlanType() operation.RemoteJobPlanType       { return PlanType }
 func (m *Manager) RemoteJobPlanVersion() operation.RemoteJobPlanVersion { return PlanVersion }
 func (m *Manager) RemoteJobUpdates() <-chan operation.Operation         { return m.updates }
+
+// InterruptedInput is owner composition for Coordinator restoration, not an
+// asynchronous submission from the old child transport. The operation is
+// canceled without respawning, and this ended message wakes its parent.
+func (m *Manager) InterruptedInput(op operation.Operation) (*inbox.Input, error) {
+	if op.Type != operation.TypeRemoteJob {
+		return nil, nil
+	}
+	state, err := operation.DecodeRemoteJobState(op)
+	if err != nil {
+		return nil, nil // unknown envelopes keep the existing cancellation path
+	}
+	if state.Plan.Type != PlanType {
+		return nil, nil
+	}
+	p, err := DecodePlan(op)
+	if err != nil {
+		return nil, nil // a notification must not add a restoration barrier
+	}
+	if p.Action != "start" {
+		return nil, nil
+	}
+	sender := p.ChildID
+	if sender == "" {
+		sender = ChildID(p.ParentID, op.ID)
+	}
+	text := fmt.Sprintf("Child %s stopped because Unreal Agent restarted. Its partial report: subagent show %s. Start it again if the work is still needed.", op.ID, op.ID)
+	payload, err := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(sender), Target: string(p.ParentID), Handle: string(op.ID), Kind: "ended", Text: text})
+	if err != nil {
+		return nil, err
+	}
+	return &inbox.Input{ID: inbox.ID("restarted:" + string(op.ID)), Kind: inbox.InputPeer, Payload: payload}, nil
+}
 func (m *Manager) AddRemoteJob(op operation.Operation) error {
 	return m.AddRemoteJobWithContext(m.ctx, op)
 }
@@ -238,6 +281,96 @@ func (m *Manager) run(j *job, p Plan) {
 	if updateErr == nil {
 		m.emit(*step.Operation)
 	}
+	if p.Action == "start" && p.Notify && status != operation.StatusCanceled {
+		m.notifyEnded(p, op.ID, status, state)
+	}
+}
+
+// notifyEnded tells the parent that a child it started with the subagent
+// command ended: its summary or error, as a peer message that wakes it.
+func (m *Manager) notifyEnded(p Plan, id operation.ID, status operation.Status, state operation.RemoteJobState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return
+	}
+	m.ended = append(m.ended, endedNotification{p, id, status, state})
+	if !m.notifyingEnded {
+		m.notifyingEnded = true
+		m.workers.Go(m.sendEnded)
+	}
+}
+
+func (m *Manager) sendEnded() {
+	for {
+		// A parent in the middle of a model call may read the end itself (Claude
+		// waits with the subagent command). Tell it only when that call ended
+		// without having seen it: a second turn for the same news is waste.
+		for {
+			busy, changed := m.config.Owner.ModelBusy()
+			if !busy {
+				break
+			}
+			select {
+			case <-m.ctx.Done():
+				return
+			case <-changed:
+			}
+		}
+		m.mu.Lock()
+		pending := m.ended
+		m.ended = nil
+		if len(pending) == 0 {
+			m.notifyingEnded = false
+			m.mu.Unlock()
+			return
+		}
+		m.mu.Unlock()
+		var texts []string
+		var first endedNotification
+		for _, ended := range pending {
+			if m.parentSaw(ended.id) {
+				continue
+			}
+			if len(texts) == 0 {
+				first = ended
+			}
+			texts = append(texts, endedText(ended.id, ended.status, ended.state))
+		}
+		if len(texts) == 0 {
+			continue
+		}
+		p, id := first.plan, first.id
+		sender := p.ChildID
+		if sender == "" {
+			sender = ChildID(p.ParentID, id)
+		}
+		payload, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(sender), Target: string(p.ParentID), Handle: string(id), Kind: "ended", Text: strings.Join(texts, "\n\n")})
+		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
+		_, _ = m.config.Owner.SubmitPeer(ctx, m.config.Owner.Generation, string(sender), string(id), inbox.Input{ID: inbox.ID("ended:" + string(id)), Kind: inbox.InputPeer, Payload: payload})
+		cancel()
+	}
+}
+
+func endedText(id operation.ID, status operation.Status, state operation.RemoteJobState) string {
+	text := "Child " + string(id) + " ended: " + string(status)
+	var handle Handle
+	if json.Unmarshal(state.Handle, &handle) == nil && handle.Finish != nil {
+		r := handle.Finish.Result
+		text += "\nSummary: " + r.Summary
+		if len(r.ChangedFiles) > 0 {
+			text += "\nChanged files: " + strings.Join(r.ChangedFiles, ", ")
+		}
+		if len(r.Tests) > 0 {
+			text += "\nTests: " + strings.Join(r.Tests, "; ")
+		}
+		if len(r.Blockers) > 0 {
+			text += "\nBlockers: " + strings.Join(r.Blockers, "; ")
+		}
+	} else if state.TerminalError != "" {
+		text += "\nError: " + state.TerminalError
+	}
+	return clipError(text) + "\n(Full report: subagent show " + string(id) + ")"
 }
 func (m *Manager) ownedChild(id operation.ID) (Plan, error) {
 	view, err := m.config.Owner.Inspect(0, 1)
@@ -315,7 +448,7 @@ func (m *Manager) connection(ctx context.Context, id operation.ID) (*processChan
 		}
 	}
 }
-func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.RemoteJobState) (operation.Status, error) {
+func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.RemoteJobState) (status operation.Status, resultErr error) {
 	allowed, ok := m.config.Templates[p.Template]
 	actual, _ := json.Marshal(p.Configuration)
 	expected, _ := json.Marshal(allowed)
@@ -429,7 +562,11 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 	j.approvals = nil
 	m.notify()
 	m.mu.Unlock()
-	defer func() { channel.cancel(); <-channel.done }()
+	defer func() {
+		channel.cancel()
+		<-channel.done
+		resultErr = errors.Join(resultErr, host.ReconcileStoppedSession(context.WithoutCancel(ctx), m.config.Directory, p.ChildID))
+	}()
 	if control != nil {
 		m.workers.Go(func() { followMode(ctx, channel, control, mode) })
 	}
@@ -583,4 +720,53 @@ func finishStatus(h Handle) operation.Status {
 		return operation.StatusFailed
 	}
 	return operation.StatusCompleted
+}
+
+// parentSaw reports whether the parent already read the child's end in a
+// recorded tool result: the subagent command's report names the handle and
+// its result.
+func (m *Manager) parentSaw(id operation.ID) bool {
+	view, err := m.config.Owner.Inspect(0, 1)
+	if err != nil {
+		return false
+	}
+	for _, op := range view.Operations {
+		if op.Status != operation.StatusCompleted {
+			continue
+		}
+		var report string
+		switch op.Type {
+		case operation.TypeValue:
+			value, err := operation.DecodeValue(op)
+			var result observed.Result
+			if err == nil && json.Unmarshal(value, &result) == nil && !result.IsError {
+				report = result.Content
+			}
+		case operation.TypeShell:
+			state, err := operation.DecodeShellState(op)
+			if err == nil && state.Result != nil && state.Result.ExitCode == 0 {
+				report = state.Result.Out
+			}
+		}
+		if sawFinalReport(report, id) {
+			return true
+		}
+	}
+	return false
+}
+
+// wait can report several children at once; a result for another child is not
+// evidence that this child's final report was read. show uses the same format.
+func sawFinalReport(report string, id operation.ID) bool {
+	matched := false
+	for _, line := range strings.Split(report, "\n") {
+		if strings.HasPrefix(line, "== ") {
+			words := strings.Fields(line)
+			matched = len(words) > 1 && words[1] == string(id)
+		}
+		if matched && strings.HasPrefix(line, "result: ") {
+			return true
+		}
+	}
+	return false
 }

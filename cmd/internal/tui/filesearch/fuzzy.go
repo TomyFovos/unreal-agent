@@ -10,7 +10,7 @@ import (
 )
 
 const ResultLimit = 32
-const QueryLimit = 256 // UTF-8 bytes, independent of the composer size limit
+
 type Match struct{ Path string }
 type ranked struct {
 	Path                string
@@ -20,7 +20,7 @@ type ranked struct {
 // Filename-first ranking and bounded sorted top-N follow upstream's search
 // design. The subsequence scorer is local, so no fuzzy/UI dependencies are added.
 func (index Index) Search(ctx context.Context, query string, limit int) ([]Match, error) {
-	if len(query) > QueryLimit || !utf8.ValidString(query) {
+	if !utf8.ValidString(query) {
 		return nil, nil
 	}
 	query = strings.TrimPrefix(query, "./")

@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -165,4 +166,16 @@ func spawnBackgroundHost(binary string, prefix []string, o launchOptions) (*back
 	child := &backgroundHost{process: cmd.Process, done: done}
 	go func() { child.waitErr = cmd.Wait(); close(done) }()
 	return child, nil
+}
+
+func appendLauncherDiagnostic(o launchOptions, text string) {
+	if makePrivateDirectory(o.state) != nil {
+		return
+	}
+	f, err := privateLaunchFile(filepath.Join(o.state, "host.log"), unix.O_CREAT|unix.O_WRONLY|unix.O_APPEND)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = fmt.Fprintln(f, gateway.SafeReason(text))
 }

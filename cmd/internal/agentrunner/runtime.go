@@ -58,6 +58,7 @@ type RuntimeConfig struct {
 	HTTPClient       *http.Client
 	// Borrowed read-only discovery/cache; never part of RuntimeIdentity.
 	ModelCatalog func(context.Context) (modelcatalog.Catalog, error)
+	Discovered   *DiscoveredBackends
 	Backends     map[string]ProviderRuntime
 	Catalogs     map[string]func(context.Context) (modelcatalog.Catalog, error)
 	// Health performs non-inference availability checks independently of a
@@ -281,15 +282,6 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 			closeRuntime()
 			return host.Runtime{}, e
 		}
-		var cache *contextengine.Cache
-		if engine != nil {
-			builder.(interface{ SetTaskInput(inbox.ID) }).SetTaskInput(c.TaskInput)
-			engine.SetCapabilities(c.ProviderSupportsTools)
-			cache = contextengine.OpenCache(c.SessionDirectory, string(id))
-			engine.SetCacheStatus(cache.Status())
-			oldClose := closeRuntime
-			closeRuntime = func() error { return errors.Join(oldClose(), cache.Close()) }
-		}
 		registry := &selectedTools{Registry: configured.Registry}
 		refreshPermission := func(context.Context) error {
 			updated := constraints
@@ -357,7 +349,7 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 			b := builder.(interface {
 				ConfigureRuntime(llm.Model, string, []llm.Tool, []tool.Skill, bool, bool)
 			})
-			b.ConfigureRuntime(llm.Model{ID: choice.Model, ReasoningEffort: choice.Effort}, prompt, definitions, registry.Skills(), !enabled, len(c.Backends) > 0 || !enabled)
+			b.ConfigureRuntime(llm.Model{ID: choice.Model, ReasoningEffort: choice.Effort}, prompt, definitions, registry.Skills(), !enabled, len(c.Backends) > 0 || c.Discovered != nil || !enabled)
 			builder.(interface {
 				SetContextRuntime(sessionstore.RuntimeSelection, bool)
 			}).SetContextRuntime(choice, enabled)
@@ -404,7 +396,7 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 			builder.SetModel(llm.Model{ID: choice.Model, ReasoningEffort: choice.Effort})
 			return nil
 		}
-		return host.Runtime{ContextEngine: engine, ContextCache: cache, Selection: &base, ValidateSelection: validate, ApplySelection: apply, BeforeGeneration: refreshPermission, Builder: builder, LLM: client, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, configured.RemoteJobs...), Close: closeRuntime}, nil
+		return host.Runtime{InterruptedInput: configured.InterruptedInput, ContextEngine: engine, Selection: &base, ValidateSelection: validate, ApplySelection: apply, BeforeGeneration: refreshPermission, Builder: builder, LLM: client, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, configured.RemoteJobs...), Close: closeRuntime}, nil
 
 	}
 	return factory, identity, nil

@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// FinishResult is the canonical, bounded child report. It is independent of
+// FinishResult is the canonical child report. It is independent of
 // model-visible output truncation and contains no credential/configuration data.
 type FinishResult struct {
 	Status       string
@@ -30,23 +30,8 @@ func (r FinishRecord) Validate() error {
 	return r.Result.Validate()
 }
 func (r FinishResult) Validate() error {
-	if (r.Status != "completed" && r.Status != "failed") || strings.TrimSpace(r.Summary) == "" || len(r.Summary) > 32768 {
+	if (r.Status != "completed" && r.Status != "failed") || strings.TrimSpace(r.Summary) == "" {
 		return fmt.Errorf("invalid finish result")
-	}
-	total := len(r.Summary)
-	for _, list := range [][]string{r.ChangedFiles, r.Tests, r.Blockers} {
-		if len(list) > 256 {
-			return fmt.Errorf("too many finish items")
-		}
-		for _, v := range list {
-			if len(v) > 4096 {
-				return fmt.Errorf("finish item too large")
-			}
-			total += len(v)
-		}
-	}
-	if total > 131072 {
-		return fmt.Errorf("finish result too large")
 	}
 	return nil
 }

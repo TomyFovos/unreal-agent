@@ -29,20 +29,26 @@ type panelRequest struct {
 // Panel supplies render/command/update hooks without owning the frontend's
 // terminal or editor. Close joins all read subscriptions; it never stops a Host.
 type Panel struct {
-	client          *Client
-	parent          session.ID
-	ctx             context.Context
-	cancel          context.CancelFunc
-	workers         sync.WaitGroup
-	updates         chan struct{}
-	mu              sync.Mutex
-	transcript      *host.HistoryPage
-	transcriptID    session.ID
-	transcriptAfter sessionstore.Sequence
-	retry           *panelRequest
-	problem         string
-	topologyVisible bool
-	topologyCursor  int
+	snapshotVersion      uint64
+	snapshotModelVersion uint64
+	snapshotSelected     session.ID
+	snapshotProblem      string
+	snapshotRetry        bool
+	snapshotTranscript   *host.HistoryPage
+	client               *Client
+	parent               session.ID
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	workers              sync.WaitGroup
+	updates              chan struct{}
+	mu                   sync.Mutex
+	transcript           *host.HistoryPage
+	transcriptID         session.ID
+	transcriptAfter      sessionstore.Sequence
+	retry                *panelRequest
+	problem              string
+	topologyVisible      bool
+	topologyCursor       int
 }
 
 // NewPanel watches the parent and refreshes the selected child once per second.
@@ -115,12 +121,15 @@ func (p *Panel) refreshChildren() {
 		if p.ctx.Err() != nil {
 			return
 		}
+		version := p.client.Model.Version()
 		err := p.client.Refresh(p.ctx, id)
 		if !errors.Is(err, ErrWatching) {
 			if id == p.client.Model.Selected() {
 				p.setProblem(err)
 			}
-			p.notify()
+			if err != nil || p.client.Model.Version() != version {
+				p.notify()
+			}
 		}
 	}
 }

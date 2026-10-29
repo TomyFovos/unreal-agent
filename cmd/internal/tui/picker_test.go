@@ -18,7 +18,7 @@ func TestProviderPickerSupportedButUnavailableUsesClosedHints(t *testing.T) {
 		{ID: "claude-code", Name: "Claude Code", Availability: "unavailable", Reason: modelcatalog.ManagedTrustRequired},
 	}
 	p := providerPicker(providers, &sessionstore.RuntimeSelection{Provider: "openai-codex"})
-	if len(p.Options) != 2 || p.Selection != 0 || !strings.Contains(p.Options[1], "audit policy") {
+	if len(p.Options) != 2 || p.Selection != 0 || !strings.Contains(p.Options[1], "接続先の利用設定を確認してください") {
 		t.Fatal("provider availability hidden")
 	}
 	providers[1].Reason = "PRIVATE_PROVIDER_PAYLOAD"

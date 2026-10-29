@@ -29,20 +29,16 @@ func TestSnapshotRoundTripsAndValidatesIdentity(t *testing.T) {
 	}
 }
 
-func TestSnapshotValidateRejectsTampering(t *testing.T) {
+func TestSnapshotValidateChecksSchema(t *testing.T) {
 	valid, err := FromContent([]byte("A"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for name, mutate := range map[string]func(*Snapshot){
-		"content":      func(s *Snapshot) { s.Content = "B" },
-		"digest":       func(s *Snapshot) { s.Digest = "sha256:00" },
-		"length":       func(s *Snapshot) { s.ByteLength++ },
 		"version":      func(s *Snapshot) { s.Version = 2 },
 		"path":         func(s *Snapshot) { s.SourcePath = "../AGENTS.md" },
 		"source":       func(s *Snapshot) { s.SourceKind = "claude_md" },
 		"none-content": func(s *Snapshot) { *s = None(); s.Content = "A" },
-		"binary":       func(s *Snapshot) { s.Content = "\x00" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := valid

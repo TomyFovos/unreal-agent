@@ -4,6 +4,7 @@ package ast
 
 import (
 	"context"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -17,7 +18,7 @@ import (
 
 const parserTimeout = 500 * time.Millisecond
 
-// Runtime calls have a hard native timeout and a conservative success budget.
+// Native calls retain a timeout because this binding cannot cancel them safely.
 // This avoids accepting a timed-out partial query as a complete rewrite. v0.25
 // callback APIs retain Go pointer payloads; use bounded synchronous APIs instead.
 func parse(ctx context.Context, parser *ts.Parser, source []byte) (*ts.Tree, error) {
@@ -33,22 +34,15 @@ func parse(ctx context.Context, parser *ts.Parser, source []byte) (*ts.Tree, err
 		}
 		return nil, err
 	}
-	if tree == nil || time.Since(start) >= parserTimeout/2 {
+	if tree == nil || time.Since(start) >= parserTimeout {
 		if tree != nil {
 			tree.Close()
 		}
 		return nil, Failure("parse_budget_exceeded")
 	}
-	if tree.RootNode().HasError() {
-		tree.Close()
-		return nil, Failure("malformed_source")
-	}
 	return tree, nil
 }
 func analyze(ctx context.Context, language, sourceQuery string, source []byte, template *string) (analysis, error) {
-	if len(source) > MaxSourceBytes {
-		return analysis{}, Failure("source_too_large")
-	}
 	if !utf8.Valid(source) || strings.IndexByte(string(source), 0) >= 0 {
 		return analysis{}, Failure("binary_source")
 	}
@@ -83,9 +77,6 @@ func analyze(ctx context.Context, language, sourceQuery string, source []byte, t
 		return analysis{}, Failure("match_capture_required")
 	}
 	names := query.CaptureNames()
-	if len(names) > 32 || query.PatternCount() > 16 {
-		return analysis{}, Failure("query_too_large")
-	}
 	for i := uint(0); i < query.PatternCount(); i++ {
 		if len(query.GeneralPredicates(i))+len(query.PropertyPredicates(i))+len(query.PropertySettings(i)) != 0 {
 			return analysis{}, Failure("unsupported_predicate")
@@ -93,12 +84,11 @@ func analyze(ctx context.Context, language, sourceQuery string, source []byte, t
 	}
 	cursor := ts.NewQueryCursor()
 	defer cursor.Close()
-	cursor.SetMatchLimit(MaxMatches)
+	cursor.SetMatchLimit(math.MaxUint32)
 	cursor.SetTimeoutMicros(uint64(parserTimeout / time.Microsecond))
 	started := time.Now()
 	matches := cursor.Matches(query, tree.RootNode(), source)
 	out := analysis{}
-	replacementBytes := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return analysis{}, err
@@ -106,9 +96,6 @@ func analyze(ctx context.Context, language, sourceQuery string, source []byte, t
 		match := matches.Next()
 		if match == nil {
 			break
-		}
-		if len(out.matches) >= MaxMatches {
-			return analysis{}, Failure("match_limit")
 		}
 		type span struct{ start, end uint }
 		captures := map[string]span{}
@@ -145,13 +132,9 @@ func analyze(ctx context.Context, language, sourceQuery string, source []byte, t
 				return analysis{}, err
 			}
 		}
-		replacementBytes += len(item.text)
-		if replacementBytes > MaxSourceBytes {
-			return analysis{}, Failure("replacement_too_large")
-		}
 		out.matches = append(out.matches, item)
 	}
-	if time.Since(started) >= parserTimeout/2 {
+	if time.Since(started) >= parserTimeout {
 		return analysis{}, Failure("query_budget_exceeded")
 	}
 	if cursor.DidExceedMatchLimit() {
@@ -172,35 +155,19 @@ func analyze(ctx context.Context, language, sourceQuery string, source []byte, t
 		var builder strings.Builder
 		offset := 0
 		for _, change := range out.matches {
-			if builder.Len()+change.start-offset+len(change.text) > MaxSourceBytes {
-				return analysis{}, Failure("replacement_too_large")
-			}
 			builder.Write(source[offset:change.start])
 			builder.WriteString(change.text)
 			offset = change.end
 		}
-		if builder.Len()+len(source)-offset > MaxSourceBytes {
-			return analysis{}, Failure("replacement_too_large")
-		}
 		builder.Write(source[offset:])
 		out.content = []byte(builder.String())
-		replacementTree, err := parse(ctx, parser, out.content)
-		if err != nil {
-			if err == Failure("malformed_source") {
-				return analysis{}, Failure("malformed_replacement")
-			}
-			return analysis{}, err
-		}
-		replacementTree.Close()
+
 	}
 	return out, nil
 }
 func expand(template string, capture func(string) (string, bool)) (string, error) {
 	var out strings.Builder
 	for i := 0; i < len(template); {
-		if out.Len() > MaxSourceBytes {
-			return "", Failure("replacement_too_large")
-		}
 		if template[i] != '$' {
 			out.WriteByte(template[i])
 			i++
@@ -227,9 +194,6 @@ func expand(template string, capture func(string) (string, bool)) (string, error
 		}
 		out.WriteString(text)
 		i += end + 3
-	}
-	if out.Len() > MaxSourceBytes {
-		return "", Failure("replacement_too_large")
 	}
 	return out.String(), nil
 }

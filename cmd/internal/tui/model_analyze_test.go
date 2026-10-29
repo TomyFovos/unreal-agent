@@ -64,7 +64,7 @@ func TestRunModelAndAnalyzePickersCancelScrollConfirmExportAndLiveUpdates(t *tes
 					t.Error("TUI did not detach")
 				}
 			})
-			waitFor(t, func() bool { return strings.Contains(out.text(), "running") })
+			waitFor(t, func() bool { return strings.Contains(out.text(), "入力待ち") })
 			command := func(text string) { t.Helper(); keys <- Key{Text: text}; keys <- Key{Name: "enter"} }
 			pick := func(name string) {
 				t.Helper()
@@ -120,7 +120,7 @@ func TestRunModelAndAnalyzePickersCancelScrollConfirmExportAndLiveUpdates(t *tes
 			if choice.Model != "m11" || choice.Effort != llm.ReasoningEffortMax || choice.RequestID == "" {
 				t.Fatal(choice)
 			}
-			waitFor(t, func() bool { return strings.Contains(out.text(), "Model changed") })
+			waitFor(t, func() bool { return strings.Contains(out.text(), "モデルを変更しました") })
 			choice.Revision = 1
 			f.mu.Lock()
 			f.view.Revision = 1
@@ -175,7 +175,7 @@ func TestRunModelAndAnalyzePickersCancelScrollConfirmExportAndLiveUpdates(t *tes
 				t.Fatal("configuration prompt leaked")
 			}
 			// Paste does not open a command menu or run a command. Explicit
-			// Enter dispatches registered commands, while masked entry stays private.
+			// Enter dispatches registered commands.
 			keys <- Key{Text: "/model", Paste: true}
 			keys <- Key{Name: "up"}
 			keys <- Key{Name: "down"}
@@ -190,22 +190,7 @@ func TestRunModelAndAnalyzePickersCancelScrollConfirmExportAndLiveUpdates(t *tes
 			pick("Model 11")
 			keys <- Key{Name: "escape"}
 			waitFor(t, func() bool { return !strings.Contains(out.text(), "› Model 11") })
-			command("/login openai private")
-			waitFor(t, func() bool { return strings.Contains(out.text(), "private: API key") })
-			privateText := "/analyze private-secret-sensitive"
-			keys <- Key{Text: privateText}
-			keys <- Key{Name: "up"}
-			keys <- Key{Name: "down"}
-			keys <- Key{Name: "enter"}
-			waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.logins == 1 })
-			f.mu.Lock()
-			if len(f.inputs) != 0 || f.login != privateText {
-				t.Error("new command names bypassed paste/private safety")
-			}
-			f.mu.Unlock()
-			if catalogCalls.Load() != 3 || strings.Contains(out.rawText(), privateText) {
-				t.Fatal("private entry opened a picker or exposed private input")
-			}
+
 		})
 	}
 }

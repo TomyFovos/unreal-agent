@@ -2,7 +2,7 @@ package tui
 
 import (
 	"encoding/json/v2"
-	"strings"
+	"fmt"
 	"time"
 
 	"github.com/rivo/uniseg"
@@ -13,12 +13,13 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/internal/displaytext"
 )
 
-const clippedMessage = "[clipped for display; canonical history retained]"
-const olderMessage = "earlier history available; PgUp loads the previous page"
+const clippedMessage = "[表示を省略。全文は履歴に残っています]"
+const olderMessage = "前の会話があります。PgUp で読み込めます"
 
-const messageDisplayBytes = 64 << 10
+const messageDisplayBytes = displaytext.MessageBytes
 const transcriptDisplayBytes = 2 << 20
 const transcriptDisplayEntries = 1024
 
@@ -71,6 +72,21 @@ func entriesFor(item host.HistoryItem) []Entry {
 		result = append(result, Entry{Role: role, Text: clipBytes(safe, messageDisplayBytes), Code: code, At: item.RecordedAt, Sequence: item.Sequence, Clipped: len(safe) > messageDisplayBytes, UnsafeLinks: safe != text})
 	}
 	switch d := item.Data.(type) {
+	case sessionstore.HostRecord:
+		if d.Kind == sessionstore.HostContext && d.Context != nil && d.Context.Conversation != nil {
+			r := d.Context.Conversation
+			if r.Compacted {
+				after := "不明"
+				if r.InputKnown {
+					after = fmt.Sprint(r.InputTokens)
+				}
+				add("host", fmt.Sprintf("会話を圧縮しました: %d → %s トークン", r.BeforeTokens, after), "")
+			} else if r.Interrupted {
+				add("host", "会話の圧縮を中断しました", "")
+			} else if r.Error != "" {
+				add("host", "会話の圧縮に失敗しました: "+r.Error, "")
+			}
+		}
 	case inbox.Input:
 		switch d.Kind {
 		case inbox.InputExternal:
@@ -84,9 +100,27 @@ func entriesFor(item host.HistoryItem) []Entry {
 				result[0].PeerID, result[0].PeerKind = SafeText(peer.Sender), SafeText(peer.Kind)
 			}
 		case inbox.InputControl:
-			var control inbox.ControlMessage
-			if json.Unmarshal(d.Payload, &control) == nil {
-				add("host", "control: "+string(control.Mode), "")
+			if control, err := d.DecodeControlMessage(); err == nil {
+				switch control.Mode {
+				case inbox.DispatchOperation:
+					intent := control.Parameters.(inbox.OperationIntent)
+					add("agent", "", "")
+					result[0].Calls = []Receipt{{Name: clipBytes(intent.ToolName, 128), Operations: []operation.ID{operation.ID(intent.OperationID)}, Status: operation.StatusAwaiting, StartedAt: item.RecordedAt}}
+				case inbox.Heartbeat:
+				case inbox.StopHard, inbox.StopWhenIdle:
+					add("host", "停止要求", "")
+				case inbox.InterruptAgent:
+					add("host", "中断要求", "")
+				case inbox.CancelChildren:
+					add("host", "子をすべて取消", "")
+				case inbox.CancelOperation:
+					add("host", "操作の取消", "")
+				case inbox.UpdateSettings:
+					settings := control.Parameters.(inbox.Settings)
+					if settings.ReasoningEffort != "" {
+						add("host", "推論の深さを変更: "+string(settings.ReasoningEffort), "")
+					}
+				}
 			}
 		case inbox.InputCrash:
 			add("host", "crash recorded", "")
@@ -114,9 +148,8 @@ func entriesFor(item host.HistoryItem) []Entry {
 		}
 		if f := d.Response.Failure; f != nil {
 			add("error", f.Message, f.Code)
+			result[len(result)-1].TurnID = d.TurnID
 		}
-	case sessionstore.HostRecord:
-		add("host", "host: "+strings.Join(strings.Fields(d.Kind), " "), "")
 	}
 	return result
 }

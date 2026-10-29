@@ -440,22 +440,14 @@ func Run(
 		builder.(interface {
 			SetContextRuntime(sessionstore.RuntimeSelection, bool)
 		}).SetContextRuntime(sessionstore.RuntimeSelection{Version: 1, Provider: resolvedProvider.Provider, Model: model, Effort: reasoningEffort(parsed.ThinkingLevel)}, true)
-		var cache *contextengine.Cache
-		if engine != nil {
-			cache = contextengine.OpenCache(storeDirectory, string(id))
-			engine.SetCacheStatus(cache.Status())
-		}
 		closeRuntime := func() error {
 			var err error
 			if configuredTools.Close != nil {
 				err = configuredTools.Close()
 			}
-			if cache != nil {
-				err = errors.Join(err, cache.Close())
-			}
 			return err
 		}
-		return host.Runtime{ContextEngine: engine, ContextCache: cache, Builder: builder, LLM: client, Tools: registry, Close: closeRuntime, Operations: operation.NewLocalOperationManager(sessionContext, configuredTools.RemoteJobs...)}, nil
+		return host.Runtime{InterruptedInput: configuredTools.InterruptedInput, ContextEngine: engine, Builder: builder, LLM: client, Tools: registry, Close: closeRuntime, Operations: operation.NewLocalOperationManager(sessionContext, configuredTools.RemoteJobs...)}, nil
 	}})
 	if err != nil {
 		return err

@@ -75,7 +75,11 @@ func TestGatewayProjectInstructionsPublicProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	check(scanner.Bytes(), first.View)
+	firstRaw, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(firstRaw, first.View)
 	if _, err = client.Submit(bounded(t), current.ID, current.Generation, prompt("projection-input", "hello")); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +88,11 @@ func TestGatewayProjectInstructionsPublicProjection(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		check(scanner.Bytes(), nil)
+		eventRaw, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(eventRaw, nil)
 		if event.Event != nil && event.Event.Item != nil && event.Event.Item.Sequence > first.View.History.NextAfter {
 			break
 		}

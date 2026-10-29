@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestHostMigrationPreservesV2AndUnknownFails(t *testing.T) {
+func TestHostReadsV2WithoutMigrationAndUnknownFails(t *testing.T) {
 	dir := t.TempDir()
 	s := newHostTestStore(t, dir)
 	if _, err := s.Create(t.Context(), "old"); err != nil {
@@ -38,19 +38,15 @@ func TestHostMigrationPreservesV2AndUnknownFails(t *testing.T) {
 	if _, err = s.Resume(t.Context(), "old"); err != nil {
 		t.Fatal(err)
 	}
-	if err = s.Upgrade(t.Context(), "old"); err != nil {
+	if err = os.WriteFile(path+".v2", []byte("unrelated old backup"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	backup, err := os.ReadFile(path + ".v2")
-	if err != nil || !bytes.Equal(backup, old) {
-		t.Fatal("original backup changed", err)
-	}
-	migrated, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(migrated, original) {
-		t.Fatal("migration changed history", err)
-	}
-	if err = s.Upgrade(t.Context(), "old"); err != nil {
+	if _, err = s.Resume(t.Context(), "old"); err != nil {
 		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, old) {
+		t.Fatal("reading rewrote the v2 log", err)
 	}
 	if err = os.WriteFile(path, bytes.Replace(original, []byte(`"Version":3`), []byte(`"Version":999`), 1), 0600); err != nil {
 		t.Fatal(err)
@@ -58,30 +54,6 @@ func TestHostMigrationPreservesV2AndUnknownFails(t *testing.T) {
 	s = newHostTestStore(t, dir)
 	if _, err = s.Resume(t.Context(), "old"); err == nil {
 		t.Fatal("unknown version accepted")
-	}
-}
-
-func TestMigrationRejectsDifferentExistingBackup(t *testing.T) {
-	dir := t.TempDir()
-	s := newHostTestStore(t, dir)
-	if _, err := s.Create(t.Context(), "old"); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, "old.session.jsonl")
-	raw, _ := os.ReadFile(path)
-	old := bytes.Replace(raw, []byte(`"Version":3`), []byte(`"Version":2`), 1)
-	if err := os.WriteFile(path, old, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path+".v2", []byte("different"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Upgrade(t.Context(), "old"); err == nil {
-		t.Fatal("conflicting backup replaced")
-	}
-	after, _ := os.ReadFile(path)
-	if !bytes.Equal(after, old) {
-		t.Fatal("failed migration modified original")
 	}
 }
 

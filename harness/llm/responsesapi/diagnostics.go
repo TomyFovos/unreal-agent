@@ -40,7 +40,7 @@ func safeFailureReason(value string) string {
 		"image_content_policy_violation", "image_file_not_found", "image_file_too_large", "image_parse_error",
 		"image_too_large", "image_too_small", "invalid_base64_image", "invalid_image", "invalid_image_format",
 		"invalid_image_mode", "invalid_image_url", "invalid_prompt", "rate_limit_exceeded", "server_error",
-		"unsupported_image_media_type", "vector_store_timeout", "context_length_exceeded", "insufficient_quota",
+		"unsupported_image_media_type", "vector_store_timeout", "context_length_exceeded", "context_window_exceeded", "insufficient_quota",
 		"usage_not_included", "usage_limit_reached", "credit_balance_exhausted", "billing_hard_limit_reached",
 		"cyber_policy", "misalignment_policy_violation", "invalid_api_key", "invalid_token",
 		"server_is_overloaded", "slow_down", "authentication_error", "permission_error",

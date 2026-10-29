@@ -448,25 +448,6 @@ func (state *storedState) inheritItem(item sessionstore.Item) {
 		state.respondedTurns[response.TurnID] = struct{}{}
 	case sessionstore.ItemToolCallStatus:
 		status := item.Data.(sessionstore.ToolCallStatus)
-		// Preserve bounded terminal receipt facts only as inspection data.
-		// Owned Operations remain empty; the fork marker resets all ownership.
-		// Missing/oversized/nonterminal evidence continues to fail closed.
-		budget := 32 << 20
-		var facts []sessionstore.HistoricalOperation
-		if inherited := status.InheritedFacts(); inherited != nil {
-			facts = make([]sessionstore.HistoricalOperation, len(inherited))
-			copy(facts, inherited)
-		}
-		for _, fact := range facts {
-			budget -= len(operation.Operation(fact).State)
-		}
-		for _, op := range status.Operations {
-			if terminalOperationStatus(op.Status) && len(facts) < 128 && len(op.State) <= budget {
-				budget -= len(op.State)
-				facts = append(facts, sessionstore.HistoricalOperation(op))
-			}
-		}
-		status = sessionstore.WithInheritedFacts(status, facts)
 		status.Operations = nil
 		item.Data = status
 		state.toolCallStatuses[toolCallStatusKey{

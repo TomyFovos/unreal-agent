@@ -18,8 +18,6 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/primitives"
 )
 
-const maxMessageBytes = 4 << 20
-
 type Error struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -169,13 +167,7 @@ func (c *connection) readLoop() {
 func frame(buffer []byte) ([]byte, int, error) {
 	boundary := bytes.Index(buffer, []byte("\r\n\r\n"))
 	if boundary < 0 {
-		if len(buffer) > 8192 {
-			return nil, 0, failure("protocol", "oversized LSP header")
-		}
 		return nil, 0, nil
-	}
-	if boundary > 8192 {
-		return nil, 0, failure("protocol", "oversized LSP header")
 	}
 	length := -1
 	for _, line := range strings.Split(string(buffer[:boundary]), "\r\n") {
@@ -192,7 +184,7 @@ func frame(buffer []byte) ([]byte, int, error) {
 		}
 		if strings.EqualFold(key, "Content-Length") {
 			n, err := strconv.Atoi(strings.TrimSpace(value))
-			if err != nil || n < 0 || n > maxMessageBytes || length != -1 {
+			if err != nil || n < 0 || length != -1 {
 				return nil, 0, failure("protocol", "invalid LSP content length")
 			}
 			length = n
@@ -219,15 +211,10 @@ func (c *connection) receive(body []byte) error {
 				return failure("protocol", "invalid diagnostics")
 			}
 			c.mu.Lock()
-			if len(c.diagnostics) < 64 || c.diagnostics[value.URI].URI != "" {
-				if len(value.Diagnostics) > MaxResultBytes {
-					value.Diagnostics = nil
-				}
-				c.diagnostics[value.URI] = value
-				select {
-				case c.diagnosticsChanged <- struct{}{}:
-				default:
-				}
+			c.diagnostics[value.URI] = value
+			select {
+			case c.diagnosticsChanged <- struct{}{}:
+			default:
 			}
 			c.mu.Unlock()
 		}
@@ -265,9 +252,6 @@ func (c *connection) send(ctx context.Context, msg envelope) error {
 	body, err := json.Marshal(msg)
 	if err != nil {
 		return err
-	}
-	if len(body) > maxMessageBytes {
-		return failure("limit", "LSP message exceeds byte limit")
 	}
 	data := append([]byte(fmt.Sprintf("Content-Length: %d\r\n\r\n", len(body))), body...)
 	select {

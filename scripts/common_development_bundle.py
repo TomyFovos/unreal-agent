@@ -34,8 +34,8 @@ def main():
         if args.copy_to:
             print("delivery: " + str(pilot_kit.copy_delivery(archive, args.copy_to,
                                     prefix=f"common-{args.revision[:7]}-")))
-    except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError):
-        print("common kit failed: preserve old archives; inspect isolated snapshot checks", file=sys.stderr)
+    except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError) as err:
+        print(f"common kit failed: {err}", file=sys.stderr)
         return 1
     return 0
 

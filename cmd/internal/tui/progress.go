@@ -2,66 +2,120 @@ package tui
 
 import (
 	"fmt"
-	"strings"
 	"time"
 )
+
+// mainBusy describes observed work, independently of whether it was started
+// by a person or a child notification.
+func mainBusy(s Snapshot) bool {
+	if s.Progress != nil || s.WaitingForModel {
+		return true
+	}
+	for _, op := range s.Operations {
+		if !terminalStatus(op.Status) && op.ToolName != "SubagentStart" {
+			return true
+		}
+	}
+	return false
+}
+
+func backgroundTurn(s Snapshot) bool {
+	for i := len(s.Entries) - 1; i >= 0; i-- {
+		switch s.Entries[i].Role {
+		case "you":
+			return false
+		case "peer", "child":
+			return true
+		}
+	}
+	return s.TailBackground
+}
+
+func workingChildren(s Snapshot, u UIState) int {
+	n := 0
+	for _, r := range children(u, s) {
+		if state := childVisualState(r, s); state == stateWorking || state == stateCanceling {
+			n++
+		}
+	}
+	return n
+}
+
+func backgroundActive(s Snapshot, u UIState) bool {
+	return s.Connected && s.Running && runtime(s) != "failed" &&
+		(backgroundTurn(s) && mainBusy(s) || !mainBusy(s) && workingChildren(s, u) > 0)
+}
 
 func pulse(s Snapshot, u UIState, l layout) line {
 	if !s.Connected || !s.Running || runtime(s) == "failed" {
 		return nil
 	}
 	phase := ""
+	runningTools := false
 	elapsed := time.Duration(0)
 	known := false
 	if p := s.Progress; p != nil {
 		switch {
+		case p.Mode == "compacting":
+			phase = "会話を圧縮中"
 		case p.Attempt >= 2 && p.Text == "":
-			phase = fmt.Sprintf("retrying (attempt %d)", p.Attempt)
+			phase = fmt.Sprintf("再試行中（%d回目）", p.Attempt)
 		case p.Mode == "streaming" && p.Text != "":
-			phase = "generating"
+			phase = "生成中"
 			if p.Attempt >= 2 {
-				phase += fmt.Sprintf(" (attempt %d)", p.Attempt)
+				phase += fmt.Sprintf("（%d回目）", p.Attempt)
 			}
 		case p.Mode == "streaming":
-			phase = "thinking"
+			phase = "考え中"
 		default:
-			phase = "waiting for completed response"
+			phase = "応答待ち"
 		}
 	} else {
 		var tools []string
 		for _, op := range s.Operations {
 			if !terminalStatus(op.Status) && op.ToolName != "SubagentStart" {
-				tools = append(tools, op.ToolName)
+				target := ""
 				if u.Parent != nil {
 					for _, r := range u.Parent.Operations {
-						if r.ID == op.ID && r.Elapsed.Known && (!known || r.Elapsed.Value > elapsed) {
-							known = true
-							elapsed = r.Elapsed.Value
+						if r.ID != op.ID {
+							continue
+						}
+						target = r.Target
+						if r.Elapsed.Known && (!known || r.Elapsed.Value > elapsed) {
+							known, elapsed = true, r.Elapsed.Value
 						}
 					}
 				}
+				name, _ := displayTool(op.ToolName, target)
+				if name == "" {
+					name = "—"
+				}
+				tools = append(tools, name)
 			}
 		}
 		if len(tools) == 1 {
-			phase = "running " + tools[0]
+			phase, runningTools = tools[0]+" 実行中", true
 		} else if len(tools) > 1 {
-			phase = fmt.Sprintf("running %d tools", len(tools))
+			phase, runningTools = fmt.Sprintf("ツール%d件 実行中", len(tools)), true
 		} else if s.WaitingForModel {
-			phase = "thinking"
+			phase = "考え中"
 		}
+	}
+	if backgroundActive(s, u) && (s.Progress == nil || s.Progress.Mode != "compacting") {
+		phase = fmt.Sprintf("裏で作業中 子%d", workingChildren(s, u))
 	}
 	if phase == "" {
 		return nil
 	}
-	if !strings.HasPrefix(phase, "running ") && !s.LatestAt.IsZero() && !u.Now.Before(s.LatestAt) {
+	if !runningTools && !s.LatestAt.IsZero() && !u.Now.Before(s.LatestAt) {
 		known = true
 		elapsed = u.Now.Sub(s.LatestAt)
 	}
 	text := textLine(phase, normal)
 	if known {
-		text = joined(text, textLine("  "+duration(elapsed), meta))
+		text = joined(text, textLine("  "+coarseDuration(elapsed), meta))
 	}
-	return l.gutter("", u.Theme.spinner(u.Now.UnixMilli()), text)
+	return l.markedGutter(u.Theme.spinner(u.Now.UnixMilli()), visualStyle(stateMain), text)
 }
 
 func stateDock(s Snapshot, u UIState, l layout) []line {
@@ -69,40 +123,21 @@ func stateDock(s Snapshot, u UIState, l layout) []line {
 	conn := connection(s, u.Now)
 	if !s.Connected {
 		if conn == "resyncing" {
-			return []line{l.gutter("", "", textLine("rebuilding the view from canonical history", meta))}
+			return []line{l.gutter("", "", textLine(tail("履歴から表示を作り直しています", l.text, u.Theme), meta))}
 		}
 		if conn == "disconnected" {
 			elapsed := ""
 			if !s.OfflineSince.IsZero() {
 				elapsed = "  " + duration(u.Now.Sub(s.OfflineSince))
 			}
-			text := "reconnecting" + elapsed + "  session state is unknown until the host answers"
-			return []line{l.gutter("", u.Theme.spinner(u.Now.UnixMilli()), textLine(middle(text, l.text, u.Theme), warningStyle))}
+			text := "再接続中" + elapsed + " · 再接続を待っています"
+			return []line{l.gutter("", u.Theme.spinner(u.Now.UnixMilli()), textLine(tail(text, l.text, u.Theme), warningStyle))}
 		}
 		return nil
 	}
-	switch runtime(s) {
-	case "stopped":
-		result = append(result, l.gutter("", u.Theme.symbol("▪", "#"), textLine("session stopped; /resume continues this session", strong)))
-	case "failed":
-		failure := s.Failure
-		if failure == "" {
-			failure = strings.TrimPrefix(s.Status, "session failed: ")
-		}
-		for i, v := range wrapLine(textLine("session failed: "+failure, failureStyle), l.text, false, 0) {
-			if i >= 3 {
-				break
-			}
-			mark := ""
-			if i == 0 {
-				mark = u.Theme.symbol("✗", "x")
-			}
-			result = append(result, l.gutter("", mark, v))
-		}
-	}
 	if s.PendingSelection != nil {
-		text := "next turn: " + topologyText(selectionLabel(*s.PendingSelection, u.Theme), 256)
-		result = append(result, l.gutter("", "", textLine(middle(text, l.text, u.Theme), meta)))
+		text := "次のターンから: " + topologyText(selectionLabel(*s.PendingSelection, u.Theme), 256)
+		result = append(result, l.gutter("", "", textLine(tail(text, l.text, u.Theme), meta)))
 	}
 	return result
 }
