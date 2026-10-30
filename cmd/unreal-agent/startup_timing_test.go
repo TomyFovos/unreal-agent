@@ -69,8 +69,9 @@ func TestLargeSessionLauncherStartup(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
+	// Timing is logged, not asserted: under -race with parallel packages
+	// startup takes several times longer. go test's timeout catches a hang.
+	ctx := t.Context()
 	keys := make(chan tui.Key, 2)
 	out := &startupTimingScreen{frame: make(chan time.Time, 1), input: make(chan time.Time, 1)}
 	t.Cleanup(func() {

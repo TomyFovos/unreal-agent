@@ -186,6 +186,7 @@ def convert(
                 "configuration",
                 "stop_complete",
                 "project_instructions",
+                "activity",
             ):
                 raise ValueError("Unsupported Host metadata record")
             host_records.append({**extra, "timestamp": timestamp, "data": data})
