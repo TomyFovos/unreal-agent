@@ -1,11 +1,57 @@
 package subagent
 
 import (
+	"slices"
+	"strings"
+
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	runtime "github.com/unreallabsai/unreal-agent/harness/subagent"
 	"testing"
 )
+
+func TestSendParentProgressIsOptional(t *testing.T) {
+	extensions, err := Extensions("child", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, extension := range extensions {
+		definition := extension.Definition.Tool
+		if definition.Name != "SendParent" {
+			continue
+		}
+		properties := definition.Parameters["properties"].(map[string]any)
+		progress, ok := properties["progress"].(map[string]any)
+		if !ok || progress["type"] != "boolean" || slices.Contains(definition.Parameters["required"].([]string), "progress") {
+			t.Fatal("progress must be an optional boolean", definition.Parameters)
+		}
+		if description, _ := progress["description"].(string); !strings.Contains(description, "does not wake") || !strings.Contains(description, "False (default)") {
+			t.Fatal("missing progress delivery guidance", progress)
+		}
+		for _, tc := range []struct {
+			name, arguments string
+			progress        bool
+		}{
+			{"default", `{"text":"report"}`, false},
+			{"question", `{"text":"report","progress":false}`, false},
+			{"progress", `{"text":"report","progress":true}`, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				c := &ctx{}
+				if status := extension.Translator.Translate(c, llm.ToolCall{Name: "SendParent", Arguments: tc.arguments}); status.Error != "" || len(c.specs) != 1 {
+					t.Fatal(status, c.specs)
+				}
+				spec := c.specs[0]
+				plan, err := runtime.DecodePlan(operation.Operation{ID: "send", Type: spec.Type, Version: spec.Version, State: spec.State, MaxOutputLength: spec.MaxOutputLength})
+				if err != nil || plan.Action != "parent" || plan.ParentID != "child" || plan.Text != "report" || plan.Progress != tc.progress {
+					t.Fatal(plan, err)
+				}
+			})
+		}
+		return
+	}
+	t.Fatal("SendParent definition missing")
+}
 
 type ctx struct {
 	eligible bool

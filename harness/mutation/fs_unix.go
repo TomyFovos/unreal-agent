@@ -45,12 +45,20 @@ func acquireLock(ctx context.Context, path string) (*os.File, error) {
 	}
 }
 func (s *Service) openParent(path string) (*os.File, string, error) {
-	rel, err := filepath.Rel(s.root, path)
+	root := s.root
+	rel, err := filepath.Rel(root, path)
 	if err != nil {
 		return nil, "", err
 	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		root = string(filepath.Separator)
+		rel, err = filepath.Rel(root, path)
+		if err != nil {
+			return nil, "", err
+		}
+	}
 	parts := strings.Split(rel, string(filepath.Separator))
-	fd, err := unix.Open(s.root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, "", err
 	}

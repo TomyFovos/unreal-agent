@@ -163,6 +163,8 @@ func childTemplateFor(c agentrunner.RuntimeConfig, name string, source childTemp
 	}
 	template = subagent.Template{Workspace: resolved.Workspace, Runtime: identity, Policy: source.Permissions, Baseline: source.Baseline, MutationStateDirectory: files.StateDirectory()}
 	if source.Pinned {
+		// Preserve creation bytes for old pinned templates; the resolver
+		// normalizes the effective effort when starting a child.
 		template.Default = &subagent.RuntimeRequest{Provider: resolved.Provider.Provider, Model: resolved.Provider.Model.ID, Effort: resolved.ReasoningEffort}
 	}
 	for _, config := range []*permission.Config{&template.Policy, template.Baseline} {
@@ -343,8 +345,7 @@ func childFactory(resolver credential.Resolver, codexFile string) subagent.Child
 		}
 		runtime := agentrunner.RuntimeConfig{Identity: identity, SessionDirectory: c.SessionDirectory, Providers: registry, Credentials: resolver, NewTools: tools, ProviderProcess: c.ProviderProcess, TaskInput: c.InitialInput().ID}
 		if codexFile != "" {
-			// Codex sends a selected ultra as the model's multi-agent effort,
-			// which this catalog names.
+			// Resolve legacy effort aliases against the model's supported levels.
 			read := codexCatalogReader(codexFile, isDockerSandboxCodex(identity.Provider.Auth), os.Getenv)
 			runtime.Catalogs = map[string]func(context.Context) (modelcatalog.Catalog, error){"openai-codex": func(ctx context.Context) (modelcatalog.Catalog, error) { return read(ctx, false) }}
 		}

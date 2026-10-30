@@ -651,7 +651,7 @@ func validateRequest(parsed Request) ([]RequestMessage, error) {
 		switch parsed.ThinkingLevel {
 		case "low", "medium", "high", "xhigh", "max", "ultra":
 		default:
-			return nil, errors.New("thinking_level must be one of: low, medium, high, xhigh, max, ultra")
+			return nil, errors.New("thinking_level must be one of: low, medium, high, xhigh, max")
 		}
 	}
 	for _, name := range append(parsed.ExtraAllowedTools, parsed.DisallowedTools...) {
@@ -693,10 +693,8 @@ func reasoningEffort(level string) llm.ReasoningEffort {
 		return llm.ReasoningEffortMedium
 	case "xhigh":
 		return llm.ReasoningEffortXHigh
-	case "max":
+	case "max", "ultra": // legacy settings use the max alias
 		return llm.ReasoningEffortMax
-	case "ultra":
-		return llm.ReasoningEffortUltra
 	default:
 		return llm.ReasoningEffortHigh
 	}

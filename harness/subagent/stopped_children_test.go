@@ -60,7 +60,12 @@ func TestStoppedLeadHelper(t *testing.T) {
 			h.Close()
 			return nil, nil, err
 		}
-		if err = os.WriteFile(filepath.Join(c.SessionDirectory, string(c.ChildID)+".pid"), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+		// Rename so the test never reads a created but still empty pid file.
+		pidPath := filepath.Join(c.SessionDirectory, string(c.ChildID)+".pid")
+		if err = os.WriteFile(pidPath+".tmp", []byte(strconv.Itoa(os.Getpid())), 0600); err == nil {
+			err = os.Rename(pidPath+".tmp", pidPath)
+		}
+		if err != nil {
 			h.Close()
 			return nil, nil, err
 		}

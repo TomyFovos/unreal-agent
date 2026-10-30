@@ -134,7 +134,7 @@ func normalize(models []cliModel) modelcatalog.Catalog {
 		}
 		if info.SupportsEffort != nil && *info.SupportsEffort {
 			for _, level := range info.Efforts {
-				if e := llm.ReasoningEffort(level); e.Valid() && !slices.Contains(m.Efforts, e) {
+				if e := llm.ReasoningEffort(level); e.Valid() && e != llm.ReasoningEffortUltra && !slices.Contains(m.Efforts, e) {
 					m.Efforts = append(m.Efforts, e)
 				}
 			}

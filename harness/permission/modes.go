@@ -248,7 +248,10 @@ func (c *Controller) Request(ctx context.Context, r Request) <-chan Permit {
 			grant = c.maximum
 			state = "full_access"
 		}
-		if r.Orchestration || r.ReadOnlyCommand {
+		if r.Orchestration || r.ReadOnlyCommand || ReadOnlyTool(r.Tool) && c.maximum.CheckProcess() == nil {
+			// A safe shell read already receives this policy in every mode.
+			// Native reads must use the same roots, while immutable ceilings
+			// and the executor's private-state exclusions still apply.
 			grant = c.maximum
 		}
 		result <- c.permitLocked(ctx, r, state, grant)

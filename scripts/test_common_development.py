@@ -113,6 +113,23 @@ class CommonDevelopmentTests(unittest.TestCase):
                 with patch.object(pilot, "bounded_probe", return_value=(json.dumps(reply).encode(), 0)), self.assertRaises(pilot.PilotError):
                     common.preflight(settings)
 
+    def test_install_ucd_when_local_bin_already_on_path(self):
+        self.env["PATH"] = str(self.home / ".local/bin") + ":/usr/bin:/bin"
+        settings = self.install()
+        workspace = self.home / "work space"; workspace.mkdir()
+        paths = common.select_repo(settings, workspace, None)
+        sessions = paths["state"] / "sessions"; sessions.mkdir(parents=True)
+        (sessions / "dev.session.jsonl").write_bytes(b"not read by discovery")
+        (sessions / "child-hidden.session.jsonl").write_bytes(b"not listed")
+        for flags in (("--noprofile", "-ic"), ("-lic",)):
+            result = subprocess.run(["bash", *flags, 'ucd dev && printf "\\nWORKSPACE:%s\\n" "$PWD"'],
+                                    cwd=self.home, env=self.env, capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("WORKSPACE:" + str(workspace), result.stdout)
+            failed = subprocess.run(["bash", *flags, 'ucd missing; status=$?; printf "\\nAFTER:%s:%s\\n" "$status" "$PWD"'],
+                                    cwd=self.home, env=self.env, capture_output=True, text=True, timeout=15)
+            self.assertIn("AFTER:1:" + str(self.home), failed.stdout)
+
     def test_subagent_launcher_keeps_path_and_updates_target(self):
         settings = self.install()
         command = self.home / ".local/bin/unreal-agent"

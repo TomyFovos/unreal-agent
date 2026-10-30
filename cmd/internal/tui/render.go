@@ -218,7 +218,7 @@ func header(s Snapshot, u UIState, l layout) line {
 				state, role = "● 稼働中", bandOK
 			}
 			if backgroundActive(s, u) {
-				state, role = fmt.Sprintf("%s 裏で作業中 子%d", u.Theme.spinner(u.Now.UnixMilli()), workingChildren(s, u)), bandOK
+				state, role = u.Theme.spinner(u.Now.UnixMilli())+" "+backgroundLabel(workingChildren(s, u)), bandOK
 			}
 			if s.Progress != nil && s.Progress.Mode == "compacting" {
 				state, role = u.Theme.spinner(u.Now.UnixMilli())+" 会話を圧縮中", bandOK
@@ -331,9 +331,14 @@ func conversation(s Snapshot, u UIState, l layout) []displayRow {
 		case "you":
 			background = false
 		case "peer", "child":
-			background = true
+			// A child's ready or progress note does not start background
+			// work: the reply that started the child is still the user's turn.
+			// Progress still counts as a report in the folded line.
 			if e.PeerKind == "ready" {
 				continue
+			}
+			if !quietPeerKind(e.PeerKind) {
+				background = true
 			}
 		}
 		if e.Role == "peer" || e.Role == "child" || background && e.Role == "agent" && !forHuman(e.Text) {
@@ -699,14 +704,9 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 		}
 		l.main = l.width - l.rail - 3
 		l.text = min(100, max(1, l.main-2))
-	} else if f.View == ViewChat && width >= 120 && len(children(u, s)) > 0 {
-		l.rail = max(34, min(48, width*3/10))
-		if width >= 160 {
-			l.rail = 48
-		}
-		l.main = l.width - l.rail - 3
-		l.text = min(100, max(1, l.main-2))
 	}
+	// Chat is the conversation alone; children show in its one-line dock.
+	// The work pane belongs to Split.
 	var attention []line
 	if u.cache != nil {
 		attention = u.cache.attentionRows(s, u, full)

@@ -15,6 +15,7 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/responsesapi"
+	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 )
 
 func TestClientUsesSubscriptionProtocol(t *testing.T) {
@@ -195,30 +196,37 @@ func TestClientNeverSendsUltra(t *testing.T) {
 				Effort string `json:"effort"`
 			} `json:"reasoning"`
 		}
-		_ = json.UnmarshalRead(r.Body, &body)
+		if err := json.UnmarshalRead(r.Body, &body); err != nil {
+			t.Error(err)
+		}
 		sent = append(sent, body.Reasoning.Effort)
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n")
 	}))
 	defer server.Close()
-	resolve := func(_ context.Context, model string, selected llm.ReasoningEffort) llm.ReasoningEffort {
-		if model != "gpt-6.1-sol" || selected != llm.ReasoningEffortUltra {
-			t.Errorf("resolver got %s %s", model, selected)
-		}
-		return llm.ReasoningEffortXHigh
-	}
 	request := llm.Request{Model: llm.Model{ID: "gpt-6.1-sol", ReasoningEffort: llm.ReasoningEffortUltra}, Input: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: "hi"}}}}
-	for _, config := range []Config{{AccessToken: "t", AccountID: "a", BaseURL: server.URL, RequestEffort: resolve}, {AccessToken: "t", AccountID: "a", BaseURL: server.URL}} {
-		client, err := NewClient(config)
-		if err != nil {
-			t.Fatal(err)
+	for _, efforts := range [][]llm.ReasoningEffort{{"high", "xhigh", "max", "ultra"}, {"high", "low", "ultra"}} {
+		resolve := func(_ context.Context, model string, selected llm.ReasoningEffort) llm.ReasoningEffort {
+			if model != "gpt-6.1-sol" || selected.Normalize() != llm.ReasoningEffortMax {
+				t.Errorf("resolver got %s %s", model, selected)
+			}
+			return (modelcatalog.Model{Efforts: efforts, MultiAgentEffort: llm.ReasoningEffortXHigh}).RequestEffort(selected)
 		}
-		if _, err = client.Respond(context.Background(), request, llm.RequestOptions{}); err != nil {
-			t.Fatal(err)
+		for _, selected := range []llm.ReasoningEffort{llm.ReasoningEffortUltra, llm.ReasoningEffortMax} {
+			request.Model.ReasoningEffort = selected
+			for _, config := range []Config{{AccessToken: "t", AccountID: "a", BaseURL: server.URL, RequestEffort: resolve}, {AccessToken: "t", AccountID: "a", BaseURL: server.URL}} {
+				client, err := NewClient(config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = client.Respond(t.Context(), request, llm.RequestOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				client.Close()
+			}
 		}
-		client.Close()
 	}
-	if len(sent) != 2 || sent[0] != "xhigh" || sent[1] != "max" {
+	if strings.Join(sent, ",") != "max,max,max,max,high,max,high,max" {
 		t.Fatal("sent efforts", sent)
 	}
 }

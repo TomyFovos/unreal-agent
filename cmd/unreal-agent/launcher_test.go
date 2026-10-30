@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,17 @@ func TestLauncherServeProcess(t *testing.T) {
 	if os.Getenv("UA_LAUNCHER_HELPER") != "1" {
 		return
 	}
+	stopProfile := func() {}
+	if path := os.Getenv("UA_LAUNCHER_CPU_PROFILE"); path != "" {
+		profile, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := pprof.StartCPUProfile(profile); err != nil {
+			t.Fatal(err)
+		}
+		stopProfile = func() { pprof.StopCPUProfile(); profile.Close() }
+	}
 	for i, arg := range os.Args {
 		if arg != "--" {
 			continue
@@ -45,10 +57,13 @@ func TestLauncherServeProcess(t *testing.T) {
 		defer cancel()
 		if err := run(ctx, os.Args[i+1:], os.Stderr); err != nil {
 			os.Stderr.WriteString(err.Error() + "\n")
+			stopProfile()
 			os.Exit(1)
 		}
+		stopProfile()
 		os.Exit(0)
 	}
+	stopProfile()
 	os.Exit(2)
 }
 

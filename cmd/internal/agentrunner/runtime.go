@@ -191,7 +191,8 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 		return nil, nil, err
 	}
 	factory := func(ctx context.Context, id session.ID) (host.Runtime, error) {
-		base := sessionstore.RuntimeSelection{Version: 1, Provider: c.Identity.Provider.Provider, Model: c.Identity.Provider.Model.ID, Name: c.Identity.Provider.Model.ID, Effort: c.Identity.ReasoningEffort}
+		// Keep immutable creation bytes intact; normalize only the active choice.
+		base := sessionstore.RuntimeSelection{Version: 1, Provider: c.Identity.Provider.Provider, Model: c.Identity.Provider.Model.ID, Name: c.Identity.Provider.Model.ID, Effort: c.Identity.ReasoningEffort.Normalize()}
 		active := base
 		if prior := host.ActiveRuntimeSelection(ctx); prior != nil {
 			active = *prior

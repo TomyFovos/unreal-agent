@@ -88,6 +88,18 @@ func (c *Client) pages(ctx context.Context, id session.ID, v host.View) error {
 	return nil
 }
 
+func (c *Client) observe(ctx context.Context, id session.ID) (host.View, bool, error) {
+	reader, ok := c.Reader.(ObservationReader)
+	if !ok {
+		return host.View{}, false, nil
+	}
+	v, err := reader.Observe(ctx, id, c.Model.options.RecentLimit)
+	if errors.Is(err, ErrUnavailable) {
+		return host.View{}, false, nil
+	}
+	return v, true, err
+}
+
 // Refresh reads canonical state without starting or resuming any runtime.
 func (c *Client) Refresh(ctx context.Context, id session.ID) error {
 	if c.Reader == nil {
@@ -106,10 +118,18 @@ func (c *Client) Refresh(ctx context.Context, id session.ID) error {
 		after, generation = previous.cursor, previous.view.Generation
 	}
 	c.Model.mu.Unlock()
-	v, err := c.Reader.Inspect(ctx, id, after, page)
+	inspect := func() (host.View, error) {
+		if after == 0 {
+			if v, used, err := c.observe(ctx, id); used {
+				return v, err
+			}
+		}
+		return c.Reader.Inspect(ctx, id, after, page)
+	}
+	v, err := inspect()
 	if after != 0 && (err != nil || v.Generation != generation || !validPage(after, v.History)) {
 		after = 0
-		v, err = c.Reader.Inspect(ctx, id, 0, page)
+		v, err = inspect()
 	}
 	if err != nil {
 		c.Model.Disconnect(id)
@@ -189,19 +209,34 @@ func (c *Client) Watch(ctx context.Context, id session.ID, changed func(Notice))
 				}
 			}
 		}
-		sub, err := c.Reader.Subscribe(ctx, id, after, page, capacity)
+		version := c.Model.Version()
+		subscribe := func() (host.Subscription, error) {
+			if after == 0 {
+				v, used, err := c.observe(ctx, id)
+				if used {
+					if err != nil {
+						return host.Subscription{}, err
+					}
+					if err = c.Model.Replace(id, v); err != nil {
+						return host.Subscription{}, err
+					}
+					after, generation = v.History.NextAfter, v.Generation
+				}
+			}
+			return c.Reader.Subscribe(ctx, id, after, page, capacity)
+		}
+		sub, err := subscribe()
 		if after != 0 && (err != nil || sub.Initial.Generation != generation || !validPage(after, sub.Initial.History)) {
 			if err == nil && sub.Cancel != nil {
 				sub.Cancel()
 			}
 			after = 0
-			sub, err = c.Reader.Subscribe(ctx, id, 0, page, capacity)
+			sub, err = subscribe()
 		}
 		if err == nil {
 			if sub.Cancel == nil {
 				sub.Cancel = func() {}
 			}
-			version := c.Model.Version()
 			if after == 0 {
 				err = c.pages(ctx, id, sub.Initial)
 			} else {

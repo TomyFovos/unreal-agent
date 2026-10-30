@@ -159,7 +159,11 @@ description: Review code.
 	if items[1].Kind != sessionstore.ItemHostRecord || items[1].Data.(sessionstore.HostRecord).Kind != "configuration" {
 		t.Fatal("missing Host configuration")
 	}
-	control, err := items[2].Data.(inbox.Input).DecodeControlMessage()
+	startup, ok := items[2].Data.(sessionstore.HostRecord)
+	if items[2].Kind != sessionstore.ItemHostRecord || !ok || startup.Kind != sessionstore.HostActivity || startup.Activity == nil || startup.Activity.Kind != "host_start" || startup.Activity.StartedAt.IsZero() || startup.Activity.Revision == "" {
+		t.Fatal("missing Host startup metadata", items[2])
+	}
+	control, err := items[3].Data.(inbox.Input).DecodeControlMessage()
 	if err != nil || control.Mode != inbox.UpdateSettings || control.Parameters != (inbox.Settings{ReasoningEffort: llm.ReasoningEffortMedium}) {
 		t.Fatalf("initial settings = %#v, error = %v", control, err)
 	}
@@ -605,6 +609,7 @@ func TestReasoningEffortMapsEveryThinkingLevel(t *testing.T) {
 		"high":   llm.ReasoningEffortHigh,
 		"xhigh":  llm.ReasoningEffortXHigh,
 		"max":    llm.ReasoningEffortMax,
+		"ultra":  llm.ReasoningEffortMax,
 		"":       llm.ReasoningEffortHigh,
 	}
 	for level, want := range cases {
@@ -612,7 +617,7 @@ func TestReasoningEffortMapsEveryThinkingLevel(t *testing.T) {
 			t.Errorf("reasoningEffort(%q) = %q, want %q", level, got, want)
 		}
 	}
-	for _, level := range []string{"xhigh", "max"} {
+	for _, level := range []string{"xhigh", "max", "ultra"} {
 		if _, err := validateRequest(Request{Prompt: new(string), ThinkingLevel: level}); err != nil {
 			t.Errorf("validateRequest(thinking_level=%q) = %v, want nil", level, err)
 		}

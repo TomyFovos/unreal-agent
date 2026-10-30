@@ -25,7 +25,9 @@ func backgroundTurn(s Snapshot) bool {
 		case "you":
 			return false
 		case "peer", "child":
-			return true
+			if !quietPeerKind(s.Entries[i].PeerKind) {
+				return true
+			}
 		}
 	}
 	return s.TailBackground
@@ -102,7 +104,7 @@ func pulse(s Snapshot, u UIState, l layout) line {
 		}
 	}
 	if backgroundActive(s, u) && (s.Progress == nil || s.Progress.Mode != "compacting") {
-		phase = fmt.Sprintf("裏で作業中 子%d", workingChildren(s, u))
+		phase = backgroundLabel(workingChildren(s, u))
 	}
 	if phase == "" {
 		return nil
@@ -182,3 +184,15 @@ func notificationDock(u UIState, l layout) []line {
 	}
 	return result
 }
+
+// backgroundLabel names background work; a background turn with no child
+// running shows no count.
+func backgroundLabel(children int) string {
+	if children == 0 {
+		return "裏で作業中"
+	}
+	return fmt.Sprintf("裏で作業中 子%d", children)
+}
+
+// quietPeerKind reports child notes that never start a parent turn.
+func quietPeerKind(kind string) bool { return kind == "ready" || kind == "progress" }

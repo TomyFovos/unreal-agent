@@ -43,6 +43,14 @@ func TestInboxSettingsControls(t *testing.T) {
 	}
 }
 
+func TestInboxLegacyUltraSettingsUseMax(t *testing.T) {
+	input := inbox.Input{ID: "legacy", Kind: inbox.InputControl, Payload: jsontext.Value(`{"Mode":"settings","Parameters":{"ReasoningEffort":"ultra"}}`)}
+	got, err := submitAndReceive(t, newInbox(t), input).DecodeControlMessage()
+	if err != nil || got.Parameters.(inbox.Settings).ReasoningEffort != llm.ReasoningEffortMax {
+		t.Fatal("legacy settings", got, err)
+	}
+}
+
 func TestInboxRejectsInvalidControlMessages(t *testing.T) {
 	for _, payload := range []string{
 		"", "null", `{}`, `{"Mode":"unknown"}`, `{"Mode":"soft"}`, `{"Mode":42}`, `{"Mode":"hard"`,

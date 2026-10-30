@@ -548,8 +548,11 @@ the CLI cache on each picker open and validates the selected entry again on
 confirmation. It never fetches/refreshes the catalog, runs a login, or reads
 cache account identity/instructions into the UI. Only entries with CLI
 visibility `list` and their declared reasoning levels are offered. Levels
-unsupported by the existing harness (currently including `ultra`) are omitted
-with an explanation in the effort picker. The list is not a subscription/quota
+unsupported by the existing harness are omitted with an explanation in the
+effort picker. Unreal excludes `ultra` even when Codex advertises it. Legacy
+Session, child and runtime settings using `ultra` are displayed as `max` and
+sent as `max` (or the model's highest supported effort when max is unavailable).
+The list is not a subscription/quota
 check or a promise that an old CLI cache still matches the backend.
 
 When the cache is missing, invalid or unavailable for the current provider,

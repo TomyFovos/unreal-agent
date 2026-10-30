@@ -31,6 +31,7 @@ func Lines(r Report, view string, ascii bool) []string {
 	switch strings.ToLower(view) {
 	case "overview":
 		out = append(out, cacheLines(r)...)
+		out = append(out, TelemetryLines(r, "host_start")...)
 		out = append(out, "Session     "+string(r.Session))
 		if r.Selection != nil {
 			out = append(out, "Provider    "+r.Selection.Provider, "Model       "+r.Selection.Name, "Effort      "+r.Selection.Effort)
@@ -68,6 +69,7 @@ func Lines(r Report, view string, ascii bool) []string {
 		out = append(out, compactionLines(r)...)
 		out = append(out, fmt.Sprintf("Tools       %d calls · %d completed · %d failed · %d canceled", r.Tools.Calls, r.Tools.Completed, r.Tools.Failed, r.Tools.Canceled), fmt.Sprintf("Agents      %d discovered · %d observed", r.AgentCounts.Discovered, r.AgentCounts.Observed), fmt.Sprintf("            %d success · %d failed · %d canceled · %d finish unknown", r.AgentCounts.Success, r.AgentCounts.Failed, r.AgentCounts.Canceled, r.AgentCounts.UnknownFinish))
 	case "usage":
+		out = append(out, TelemetryLines(r, "claude_usage")...)
 		out = append(out, cacheLines(r)...)
 		out = append(out, usageLines(r.Usage)...)
 		out = append(out, compactionLines(r)...)
@@ -87,6 +89,7 @@ func Lines(r Report, view string, ascii bool) []string {
 			out = append(out, "no observed turns")
 		}
 	case "tools":
+		out = append(out, TelemetryLines(r, "native_bash")...)
 		out = append(out, fmt.Sprintf("Calls       %d", r.Tools.Calls), fmt.Sprintf("Completed   %d", r.Tools.Completed), fmt.Sprintf("Failed      %d", r.Tools.Failed), fmt.Sprintf("Canceled    %d", r.Tools.Canceled), fmt.Sprintf("Unresolved  %d", r.Tools.Unresolved))
 		for _, tool := range r.ByTool {
 			elapsed := "unknown"
@@ -99,6 +102,7 @@ func Lines(r Report, view string, ascii bool) []string {
 			out = append(out, fmt.Sprintf("%s: %d calls / %d done / %d failed / %d canceled; elapsed %s", tool.Name, tool.Calls, tool.Completed, tool.Failed, tool.Canceled, elapsed))
 		}
 	case "agents":
+		out = append(out, TelemetryLines(r, "child_start")...)
 		if len(r.Agents) == 0 {
 			out = append(out, "no discovered child agents")
 		}
@@ -126,6 +130,7 @@ func Lines(r Report, view string, ascii bool) []string {
 			}
 		}
 	case "context":
+		out = append(out, TelemetryLines(r, "claude_compact")...)
 		out = append(out, cacheLines(r)...)
 		out = append(out, compactionLines(r)...)
 		if d := r.ContextPackage; d != nil {
@@ -157,6 +162,7 @@ func Lines(r Report, view string, ascii bool) []string {
 			out = append(out, fmt.Sprintf("Turn %-4d %9s %s", t.Number, value(t.Usage.Input, t.Usage, llm.UsageInput), strings.Repeat(mark, max(0, min(24, n)))))
 		}
 	case "timeline":
+		out = append(out, TelemetryLines(r)...)
 		if len(r.Timeline) == 0 {
 			out = append(out, "no canonical timestamps")
 		}

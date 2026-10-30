@@ -27,6 +27,24 @@ func codexFrames(page string) []any {
 	return []any{map[string]any{"id": 1, "result": map[string]any{"userAgent": "synthetic", "codexHome": "private-path"}}, map[string]any{"id": 2, "result": value}}
 }
 
+func TestCodexModelListOmitsUltraAndResolvesDefault(t *testing.T) {
+	for _, tc := range []struct{ levels, want string }{
+		{`{"reasoningEffort":"max"},{"reasoningEffort":"high"},{"reasoningEffort":"ultra"}`, "max"},
+		{`{"reasoningEffort":"high"},{"reasoningEffort":"low"},{"reasoningEffort":"ultra"}`, "high"},
+	} {
+		page := `{"data":[{"model":"gpt-6.1-sol","defaultReasoningEffort":"ultra","supportedReasoningEfforts":[` + tc.levels + `]}]}`
+		input := "{\"id\":1,\"result\":{}}\n{\"id\":2,\"result\":" + page + "}\n"
+		c, err := readCodexCatalog(strings.NewReader(input), &bytes.Buffer{})
+		if err != nil || !c.Available || len(c.Models) != 1 {
+			t.Fatal(c, err)
+		}
+		m := c.Models[0]
+		if len(m.Efforts) != 2 || m.AllowsEffort("ultra") || m.DefaultEffort != llm.ReasoningEffort(tc.want) || !m.AllowsEffort(m.DefaultEffort) {
+			t.Fatalf("unexpected efforts/default: %+v", m)
+		}
+	}
+}
+
 func TestCodexCatalogProtocolMetadataOnly(t *testing.T) {
 	text := `{"id":1,"result":{"userAgent":"synthetic","codexHome":"private-path"}}
 {"method":"account/updated","params":{"accountId":"account-private"}}

@@ -107,7 +107,7 @@ func appendedPrompt(mode string, subagents SubagentCLI) string {
 		mode = "set by the operator"
 	}
 	return fmt.Sprintf("You are running inside Unreal Agent. Unreal Agent records this conversation and decides tool approvals with its permission mode (now: %s).\n"+
-		"Whenever you ask for or await the user's reply, start your message with 【要確認】, including in ordinary foreground turns. Write choices as numbered prose in your message. AskUserQuestion is unavailable.\n"+
+		"When you ask the user something, start that message with 【要確認】, including in ordinary foreground turns, and write choices as numbered prose. Ask once: Unreal Agent keeps an unanswered 【要確認】 on screen until the user replies, so do not repeat the question in later turns; a background turn that only notes progress ends with one short line and no 【要確認】. AskUserQuestion is unavailable.\n"+
 		"When Claude Code declines a shell command itself, Unreal Agent handles it as an ordinary Bash request under its permission mode. Its result then arrives as additional context that starts with %q. Treat that as the command's real result and do not run the command again.", mode, ranPrefix) + subagentPrompt(subagents)
 }
 

@@ -240,7 +240,7 @@ func TestWorkCardsModelEffortBeforeElapsedAndTitleTruncation(t *testing.T) {
 	}
 	s, u := orchestrationFixture()
 	u.Viewer.Rows[1].Elapsed = viewer.Duration{Known: true, Value: 12 * time.Minute}
-	for _, view := range []ViewMode{ViewChat, ViewSplit, ViewOrchestration} {
+	for _, view := range []ViewMode{ViewSplit, ViewOrchestration} {
 		u.View = view
 		frame := RenderFrame(s, u, 160, 40)
 		found := false

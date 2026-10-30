@@ -61,8 +61,10 @@ type builder struct {
 	lastUnit                               string
 	responseSerial                         uint64
 	derived                                map[string][]llm.Item
+	estimate                               derivedEstimate
 	overrides                              map[string][]llm.Item
 	summary                                []llm.Item
+	retained                               map[string]bool
 	viewThrough, portableBefore, lastState string
 	outputLimits                           map[string]int
 	lastInput                              int64
@@ -143,10 +145,12 @@ func (current *builder) AddPeerInput(input inbox.Input) error {
 }
 
 func (current *builder) SetModel(model llm.Model) {
+	current.estimate.prefixValid = false
 	if current.engine != nil && current.request.Model.ID != "" && current.request.Model.ID != model.ID && current.lastUnit != "" {
 		current.pendingRuntime = &sessionstore.ContextRecord{Kind: "runtime", Through: current.lastUnit, Provider: current.provider, Model: model.ID}
 		current.portableBefore = current.lastUnit
 		clear(current.derived)
+		current.estimate = derivedEstimate{}
 	}
 	current.request.Model = model
 }
@@ -156,6 +160,7 @@ func (current *builder) SetRuntimeProvider(id string) {
 		current.pendingRuntime = &sessionstore.ContextRecord{Kind: "runtime", Through: current.lastUnit, Provider: id, Model: current.request.Model.ID}
 		current.portableBefore = current.lastUnit
 		clear(current.derived)
+		current.estimate = derivedEstimate{}
 	}
 	current.provider = id
 	current.historyProvider = id
@@ -191,6 +196,7 @@ func (current *builder) ConfigureRuntime(model llm.Model, prompt string, definit
 func (current *builder) AddControlMessage(request inbox.ControlMessage) {
 	switch request.Mode {
 	case inbox.UpdateSettings:
+		current.estimate.prefixValid = false
 		settings := request.Parameters.(inbox.Settings)
 		current.request.Model.ReasoningEffort = settings.ReasoningEffort
 	case inbox.Heartbeat:
@@ -224,6 +230,7 @@ func (current *builder) SetProjectInstructions(snapshot projectinstructions.Snap
 }
 
 func (current *builder) renderSystem() {
+	current.estimate.prefixValid = false
 	var layers []string
 	for _, layer := range []string{current.preamble, current.systemPrompt, current.permissionPrompt, current.instructions, current.skills} {
 		if layer = strings.TrimSpace(layer); layer != "" {
@@ -256,6 +263,7 @@ func (current *builder) AddReasoning(reasoning llm.Reasoning) {
 }
 
 func (current *builder) AddTool(tool llm.Tool) {
+	current.estimate.prefixValid = false
 	current.request.Tools = append(current.request.Tools, tool)
 }
 

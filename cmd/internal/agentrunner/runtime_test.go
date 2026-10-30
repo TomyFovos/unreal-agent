@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json/v2"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 
@@ -18,6 +21,86 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/provider"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
+
+func TestLegacyUltraRuntimeAndSessionResumeUseMax(t *testing.T) {
+	var sent string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Reasoning struct {
+				Effort string `json:"effort"`
+			} `json:"reasoning"`
+		}
+		if err := json.UnmarshalRead(r.Body, &body); err != nil {
+			t.Error(err)
+		}
+		sent = body.Reasoning.Effort
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n")
+	}))
+	defer server.Close()
+	model := provider.Model{ID: "gpt-6.1-sol"}
+	registry, err := provider.New(provider.Defaults(map[string][]provider.Model{"openai-codex": {model}})...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := RuntimeIdentity{Version: 1, Workspace: t.TempDir(), Profile: profile.Default(), ReasoningEffort: llm.ReasoningEffortUltra,
+		Provider: provider.Selection{Version: 1, Provider: "openai-codex", Model: model, Endpoint: server.URL, Auth: credential.Reference{Provider: "openai-codex", Method: credential.OAuth, ID: "synthetic"}, MaxAttempts: 1, Source: "test"}}
+	directory := t.TempDir()
+	factory, raw, err := NewRuntimeFactory(RuntimeConfig{Identity: identity, SessionDirectory: directory, Providers: registry,
+		Credentials: credential.ResolverFunc(func(context.Context, credential.Reference) (credential.Material, error) {
+			return credential.Material{Token: credential.NewSecret("synthetic-token"), AccountID: "synthetic-account"}, nil
+		}),
+		ModelCatalog: func(context.Context) (modelcatalog.Catalog, error) {
+			return modelcatalog.Catalog{Available: true, Models: []modelcatalog.Model{{ID: model.ID, Efforts: []llm.ReasoningEffort{"high", "xhigh", "max"}, MultiAgentEffort: "xhigh"}}}, nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recorded RuntimeIdentity
+	if err := json.Unmarshal(raw, &recorded); err != nil || recorded.ReasoningEffort != llm.ReasoningEffortUltra {
+		t.Fatal("immutable creation identity changed", recorded.ReasoningEffort, err)
+	}
+	ctx, cancel := context.WithCancel(permission.WithPolicy(t.Context(), permission.Unrestricted()))
+	defer cancel()
+	runtime, err := factory(ctx, "legacy-request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	built, err := runtime.Builder.Build()
+	if err != nil || built.Request.Model.ReasoningEffort != llm.ReasoningEffortMax {
+		t.Fatal("legacy runtime did not build max", err)
+	}
+	if _, err := runtime.LLM.Respond(ctx, built.Request, llm.RequestOptions{}); err != nil || sent != "max" {
+		t.Fatal("legacy runtime sent effort", sent, err)
+	}
+	for _, resume := range []bool{false, true} {
+		owner, err := host.New(t.Context(), host.Config{Directory: directory, Build: factory})
+		if err != nil {
+			t.Fatal(err)
+		}
+		options := host.Options{ID: "legacy-session", Configuration: raw}
+		var s *host.Session
+		if resume {
+			s, err = owner.Resume(t.Context(), options)
+		} else {
+			s, err = owner.Create(t.Context(), options)
+		}
+		if err != nil {
+			owner.Close()
+			t.Fatal(err)
+		}
+		selection, _ := s.RuntimeSelection()
+		if selection == nil || selection.Effort != llm.ReasoningEffortMax {
+			owner.Close()
+			t.Fatal("legacy Session selection", selection)
+		}
+		if err := owner.Close(); err != nil {
+			t.Fatal(err)
+		}
+		<-s.Done()
+	}
+}
 
 func TestRuntimeFactoryOwnsFreshSessionComponentsAndIdentity(t *testing.T) {
 	catalog := map[string][]provider.Model{"ollama": {{ID: "explicit-model", Family: "custom"}}}

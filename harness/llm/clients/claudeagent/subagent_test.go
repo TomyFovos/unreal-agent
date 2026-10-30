@@ -84,7 +84,10 @@ func TestSubagentPromptNamesTheCommandAndRoles(t *testing.T) {
 		t.Fatal("prompt without subagents")
 	}
 	prompt := subagentPrompt(SubagentCLI{Binary: "/opt/unreal/bin/unreal", Socket: "/run/host.sock", Templates: []string{"lead", "worker-high"}})
-	for _, want := range []string{"designer", "GPT is the implementer", "/opt/unreal/bin/unreal subagent start --template lead <<'EOF'", "/opt/unreal/bin/unreal subagent wait HANDLE --timeout 60s", "end your turn; do not wait", "Agent and Monitor are unavailable", "within tens of seconds", "at most --timeout 60s", "ignore versioned command paths", "【報告】", "【要確認】", "one-line title", "subagent approve HANDLE REQUEST allow|deny", "never at ultra", "lead, worker-high", "every permission mode, Read Only included"} {
+	if strings.Contains(prompt, "ultra") {
+		t.Fatal("prompt advertises disabled effort", prompt)
+	}
+	for _, want := range []string{"run the project", "GPT does the work", "over-implementation", "collector template (gpt-6-luna)", "never to a gpt-6.1-sol worker", "/opt/unreal/bin/unreal subagent start --template lead <<'EOF'", "/opt/unreal/bin/unreal subagent wait HANDLE --timeout 60s", "end your turn; do not wait", "Agent and Monitor are unavailable", "You decide; children do the work", "writing documents and commits", "within tens of seconds", "at most --timeout 60s", "ignore versioned command paths", "【報告】", "【要確認】", "one-line title", "subagent approve HANDLE REQUEST allow|deny", "gpt-6.1-sol at max effort", "worker-low through worker-max", "lead, worker-high", "every permission mode, Read Only included"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt lacks %q", want)
 		}
@@ -97,7 +100,7 @@ func TestSubagentPromptNamesTheCommandAndRoles(t *testing.T) {
 func TestUserReplyPromptAppliesWithAndWithoutSubagents(t *testing.T) {
 	for _, subagents := range []SubagentCLI{{}, {Binary: "/opt/unreal/unreal-agent"}} {
 		prompt := appendedPrompt("Read Only", subagents)
-		for _, want := range []string{"【要確認】", "including in ordinary foreground turns", "numbered prose", "AskUserQuestion is unavailable"} {
+		for _, want := range []string{"【要確認】", "including in ordinary foreground turns", "numbered prose", "Ask once", "do not repeat the question in later turns", "AskUserQuestion is unavailable"} {
 			if !strings.Contains(prompt, want) {
 				t.Errorf("prompt lacks %q: %s", want, prompt)
 			}

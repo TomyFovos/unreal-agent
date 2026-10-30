@@ -13,18 +13,22 @@ import (
 
 type idleTestAdapter struct {
 	llm.Adapter
-	idle []context.Context
+	idle     []context.Context
+	complete chan struct{}
 }
 
 func (a *idleTestAdapter) Idle(ctx context.Context, _ llm.Request, _ llm.RequestOptions) {
 	a.idle = append(a.idle, ctx)
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case <-a.complete:
+	}
 }
 
-func TestIdleMaintenanceYieldsToUserAndChildTurns(t *testing.T) {
+func TestIdleMaintenanceYieldsOnlyToUserTurns(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		run := newStopTestRun(t, 0)
-		adapter := &idleTestAdapter{Adapter: run.current.dependencies.LLM}
+		adapter := &idleTestAdapter{Adapter: run.current.dependencies.LLM, complete: make(chan struct{})}
 		run.current.dependencies.LLM = adapter
 		run.start(t)
 		if len(adapter.idle) != 0 {
@@ -42,6 +46,10 @@ func TestIdleMaintenanceYieldsToUserAndChildTurns(t *testing.T) {
 		if len(adapter.idle) != 1 || adapter.idle[0].Err() != nil || len(run.calls) != 1 {
 			t.Fatal("settings interrupted maintenance or started a model turn")
 		}
+		run.input(t, progressPeerInput(t, "progress", "progress", "tests still running"))
+		if len(adapter.idle) != 1 || adapter.idle[0].Err() != nil || len(run.calls) != 1 {
+			t.Fatal("child progress interrupted maintenance or started a model turn")
+		}
 		run.input(t, externalEvent(t, 1, "second", "second task"))
 		if len(run.calls) != 2 || adapter.idle[0].Err() == nil {
 			t.Fatal("new user turn did not cancel and join maintenance")
@@ -55,8 +63,22 @@ func TestIdleMaintenanceYieldsToUserAndChildTurns(t *testing.T) {
 			t.Fatal(err)
 		}
 		run.input(t, inbox.Input{ID: "child-ended", Kind: inbox.InputPeer, Payload: payload})
-		if len(run.calls) != 3 || adapter.idle[1].Err() == nil || !run.current.backgroundTurn {
-			t.Fatal("child turn did not cancel and join maintenance")
+		if len(run.calls) != 2 || adapter.idle[1].Err() != nil {
+			t.Fatal("child notification interrupted maintenance")
+		}
+		run.input(t, progressPeerInput(t, "message", "message", "child result"))
+		if len(run.calls) != 2 || adapter.idle[1].Err() != nil {
+			t.Fatal("child message interrupted maintenance")
+		}
+		adapter.complete <- struct{}{}
+		synctest.Wait()
+		synctest.Sleep(2 * slurpIdleTimeout)
+		synctest.Wait()
+		if len(run.calls) != 3 || !run.current.backgroundTurn {
+			t.Fatal("queued child inputs did not start a turn after maintenance")
+		}
+		if run.current.state.currentTurnInputs != run.current.state.availableInputs {
+			t.Fatal("queued child inputs were not included in the turn")
 		}
 		run.respond(t, 2, textResponse("reviewed"))
 		if len(adapter.idle) != 3 {

@@ -136,11 +136,11 @@ func (client *Client) Respond(ctx context.Context, request llm.Request, options 
 	if request.Model.MaxOutputTokens != nil {
 		return llm.Response{}, errors.New("codex does not support max_output_tokens")
 	}
-	// The backend rejects ultra; Codex sends the model's multi-agent effort.
-	if request.Model.ReasoningEffort == llm.ReasoningEffortUltra {
-		request.Model.ReasoningEffort = llm.ReasoningEffortMax
+	// Legacy ultra and its max alias use the highest effort this model supports.
+	if selected := request.Model.ReasoningEffort; selected.Normalize() == llm.ReasoningEffortMax {
+		request.Model.ReasoningEffort = selected.Normalize()
 		if client.requestEffort != nil {
-			request.Model.ReasoningEffort = client.requestEffort(ctx, request.Model.ID, llm.ReasoningEffortUltra)
+			request.Model.ReasoningEffort = client.requestEffort(ctx, request.Model.ID, selected).Normalize()
 		}
 	}
 	response, err := client.adapter.Respond(ctx, request, options)

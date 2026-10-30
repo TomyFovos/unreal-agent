@@ -325,12 +325,17 @@ func (m *Model) item(p *projection, item host.HistoryItem) error {
 	if item.RecordedAt.After(p.lastActivityAt) {
 		p.lastActivityAt = item.RecordedAt
 	}
-	p.recent = append(p.recent, item)
-	if len(p.recent) > m.options.RecentLimit {
-		p.recent = append([]host.HistoryItem(nil), p.recent[len(p.recent)-m.options.RecentLimit:]...)
+	if len(p.recent) < m.options.RecentLimit {
+		p.recent = append(p.recent, item)
+	} else {
+		copy(p.recent, p.recent[1:])
+		p.recent[len(p.recent)-1] = item
 	}
 	switch data := item.Data.(type) {
 	case sessionstore.HostRecord:
+		if data.Kind == sessionstore.HostContext && data.Context != nil && data.Context.Conversation != nil && data.Context.Conversation.Usage != nil {
+			addUsage(&p.usage, *data.Context.Conversation.Usage)
+		}
 		if data.Kind == sessionstore.HostContext && data.Context != nil && data.Context.Usage != nil {
 			addUsage(&p.usage, *data.Context.Usage)
 			p.lastUsage = Usage{}

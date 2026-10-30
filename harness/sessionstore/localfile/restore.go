@@ -27,6 +27,7 @@ type RestoreView struct {
 	id               session.ID
 	ctx              context.Context
 	state            *storedState
+	committedSize    int64
 	reason, closeErr error
 	stop             func() bool
 }
@@ -46,22 +47,65 @@ func (s *Store) OpenRestoreView(ctx context.Context, id session.ID) (view *Resto
 	if err = context.Cause(ctx); err != nil {
 		return nil, err
 	}
-	state, _, err := decodeLog(encoded)
+	state, committedSize, err := decodeLog(encoded)
 	if err != nil {
 		return nil, fmt.Errorf("read session %q: %w", id, err)
 	}
 	if state.Snapshot.Session.ID != id {
 		return nil, fmt.Errorf("restore session identity mismatch")
 	}
-	v := &RestoreView{store: s, id: id, ctx: ctx, state: &state}
+	v := &RestoreView{store: s, id: id, ctx: ctx, state: &state, committedSize: committedSize}
+	return s.installRestoreView(v)
+}
+
+// OpenHistoryItems borrows the owning Host's already restored canonical items.
+// The Host holds its Session mutex until Close, so appends cannot change this
+// boundary. Raw Store writes retain the same invalidation behavior as disk views.
+func (s *Store) OpenHistoryItems(ctx context.Context, id session.ID, items []sessionstore.Item) (sessionstore.HistoryView, error) {
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
+	}
+	v, err := s.installRestoreView(&RestoreView{store: s, id: id, ctx: ctx, state: &storedState{Items: items}})
+	if err != nil {
+		return nil, err
+	}
+	return &borrowedHistoryView{view: v}, nil
+}
+
+type borrowedHistoryView struct{ view *RestoreView }
+
+func (v *borrowedHistoryView) Items(ctx context.Context, id session.ID, after sessionstore.Sequence, limit int) (sessionstore.Page, error) {
+	return v.view.Items(ctx, id, after, limit)
+}
+func (v *borrowedHistoryView) Close() error { return v.view.Close() }
+
+func (s *Store) installRestoreView(v *RestoreView) (*RestoreView, error) {
 	v.mu.Lock()
 	if !s.restoreView.CompareAndSwap(nil, v) {
 		v.mu.Unlock()
 		return nil, fmt.Errorf("another restore read view is active")
 	}
-	v.stop = context.AfterFunc(ctx, func() { v.finish(context.Cause(ctx)) })
+	v.stop = context.AfterFunc(v.ctx, func() { v.finish(context.Cause(v.ctx)) })
 	v.mu.Unlock()
 	return v, nil
+}
+
+// Take transfers the decoded history to its exclusive Host owner and closes
+// this view. Seeding the ordinary write head avoids rereading the same log for
+// the first activity/configuration append. No transcript cache survives here.
+func (v *RestoreView) Take(ctx context.Context, id session.ID) ([]sessionstore.Item, []operation.Operation, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if err := v.checkLocked(ctx, id); err != nil {
+		return nil, nil, err
+	}
+	head, err := cloneRestoreValue(v.state.sessionHead)
+	if err != nil {
+		return nil, nil, err
+	}
+	v.store.putCachedWriteState(id, head, v.committedSize)
+	items, ops := v.state.Items, v.state.Operations
+	return items, ops, v.finishLocked(ErrRestoreViewClosed)
 }
 
 func (v *RestoreView) checkLocked(ctx context.Context, id session.ID) error {

@@ -63,6 +63,7 @@ type exportTurn struct {
 	internal bool
 }
 type conversationIndex struct {
+	measurements            analysis.Report
 	inputTokens             int64
 	inputTokenResponses     int
 	pruning                 analysis.Pruning
@@ -177,7 +178,20 @@ func indexConversation(ctx context.Context, r Reader, id session.ID, through ses
 		case sessionstore.ItemHostRecord:
 			if record, ok := item.Data.(sessionstore.HostRecord); ok {
 				switch record.Kind {
+				case sessionstore.HostActivity:
+					if record.Activity != nil {
+						index.measurements.Activities = append(index.measurements.Activities, *record.Activity)
+					}
 				case sessionstore.HostContext:
+					if record.Context != nil && record.Context.Conversation != nil {
+						c := *record.Context.Conversation
+						if c.Phase == "compact" || c.Compacted || c.Interrupted || c.Error != "" {
+							index.measurements.Compactions = append(index.measurements.Compactions, c)
+							if c.Usage != nil {
+								index.observeUsage(*c.Usage)
+							}
+						}
+					}
 					if record.Context != nil && record.Context.Kind == "prune" {
 						index.pruning.Epochs++
 						index.pruning.Results += len(record.Context.Projections)
@@ -382,6 +396,11 @@ func writeConversation(ctx context.Context, r Reader, id session.ID, through ses
 	}
 	if _, err := fmt.Fprintf(w, "Average input tokens / call  %s\nPruned tool results  %d · estimated tokens removed %d · epochs %d\n", average, index.pruning.Results, index.pruning.Tokens, index.pruning.Epochs); err != nil {
 		return err
+	}
+	for _, line := range analysis.TelemetryLines(index.measurements) {
+		if _, err := fmt.Fprintln(w, metadataText(line)); err != nil {
+			return err
+		}
 	}
 	var writeErr error
 	lastSection := -1

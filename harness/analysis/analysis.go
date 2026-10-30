@@ -67,6 +67,8 @@ type Errors struct {
 	Recent                             []Event
 }
 type Report struct {
+	Activities          []llm.ActivityRecord     `json:",omitzero"`
+	Compactions         []llm.ConversationRecord `json:",omitzero"`
 	AverageInputTokens  float64
 	InputTokenResponses int
 	Pruning             Pruning
@@ -110,10 +112,13 @@ func (r Report) MarshalJSON() ([]byte, error) {
 
 type call struct {
 	name       string
+	id         string
 	start, end time.Time
 	status     *sessionstore.ToolCallStatus
 }
 type Accumulator struct {
+	activities          []llm.ActivityRecord
+	compactions         []llm.ConversationRecord
 	inputTokens         int64
 	inputTokenResponses int
 	pruning             Pruning
@@ -150,7 +155,27 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 	switch v := item.Data.(type) {
 	case sessionstore.HostRecord:
 		switch v.Kind {
+		case sessionstore.HostActivity:
+			if v.Activity != nil {
+				a.activities = append(a.activities, *v.Activity)
+				e.Kind, e.Name = v.Activity.Kind, viewer.SafeText(v.Activity.ID)
+				if v.Activity.Kind == "model_retry" {
+					a.providerErrors++
+					a.addError(Event{At: item.RecordedAt, Kind: "provider retry", Name: viewer.SafeText(v.Activity.Reason)})
+				}
+			}
 		case sessionstore.HostContext:
+			if v.Context != nil && v.Context.Conversation != nil {
+				c := *v.Context.Conversation
+				if c.Phase == "compact" || c.Compacted || c.Interrupted || c.Error != "" {
+					a.compactions = append(a.compactions, c)
+					e.Kind = "Claude compaction"
+					if c.Usage != nil {
+						a.observeInputTokens(*c.Usage)
+						viewer.AddUsage(&a.usage, *c.Usage)
+					}
+				}
+			}
 			if v.Context != nil && v.Context.Kind == "prune" {
 				a.pruning.Epochs++
 				a.pruning.Results += len(v.Context.Projections)
@@ -254,7 +279,7 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 		for _, out := range v.Response.Output {
 			if tc, ok := out.Data.(llm.ToolCall); ok {
 				key := string(v.TurnID) + "\x00" + tc.CallID
-				a.calls[key] = &call{name: viewer.SafeText(tc.Name), start: item.RecordedAt}
+				a.calls[key] = &call{name: viewer.SafeText(tc.Name), id: tc.CallID, start: item.RecordedAt}
 				a.addEvent(Event{At: item.RecordedAt, Kind: "tool call", Name: viewer.SafeText(tc.Name)})
 			}
 		}
@@ -344,6 +369,8 @@ func count(c *Counts, status string, d viewer.Duration) {
 }
 func (a *Accumulator) Snapshot(now time.Time, _ bool, resync bool, rows []viewer.Row, ops []operation.Operation) Report {
 	r := Report{LatestUsage: a.latestUsage, Version: 1, Session: a.id, At: now, CreatedAt: a.created, Partial: a.partial || resync, Resync: resync, Selection: summarize(a.active), Pending: summarize(a.pending), Usage: a.usage, Turns: append([]Turn(nil), a.turns...), Timeline: append([]Event(nil), a.events...), Errors: Errors{Provider: a.providerErrors, Crashes: a.crashes, Recent: append([]Event(nil), a.errors...)}}
+	r.Activities = append([]llm.ActivityRecord(nil), a.activities...)
+	r.Compactions = append([]llm.ConversationRecord(nil), a.compactions...)
 	r.Pruning, r.InputTokenResponses = a.pruning, a.inputTokenResponses
 	if a.inputTokenResponses > 0 {
 		r.AverageInputTokens = float64(a.inputTokens) / float64(a.inputTokenResponses)
@@ -373,10 +400,22 @@ func (a *Accumulator) Snapshot(now time.Time, _ bool, resync bool, rows []viewer
 		a.operations[op.ID] = op
 	}
 	byTool := map[string]*Tool{}
+	nativeTimes := map[string]viewer.Duration{}
+	for _, activity := range a.activities {
+		if activity.Kind != "native_bash" {
+			continue
+		}
+		if _, exists := nativeTimes[activity.ID]; !exists {
+			nativeTimes[activity.ID] = viewer.Duration{}
+		}
+		if !activity.StartedAt.IsZero() && !activity.EndedAt.IsZero() && !activity.EndedAt.Before(activity.StartedAt) {
+			nativeTimes[activity.ID] = viewer.Duration{Known: true, Value: activity.EndedAt.Sub(activity.StartedAt)}
+		}
+	}
 	for _, c := range a.calls {
 		status := terminalCall(c, a.operations)
-		d := viewer.Duration{}
-		if !c.start.IsZero() && !c.end.IsZero() && !c.end.Before(c.start) {
+		d, native := nativeTimes[c.id]
+		if !native && !c.start.IsZero() && !c.end.IsZero() && !c.end.Before(c.start) {
 			d = viewer.Duration{Known: true, Value: c.end.Sub(c.start)}
 		}
 		count(&r.Tools, status, d)

@@ -11,11 +11,15 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
 
-// The implementers Claude designs for: the lead runs gpt-6.1-sol at ultra and
-// starts its own workers, which never run at ultra (the user's structure).
+// The implementers Claude designs for: the lead runs gpt-6.1-sol at max and
+// starts its own workers at low through max (the user's structure).
 const (
 	leadModel  = "gpt-6.1-sol"
-	leadEffort = llm.ReasoningEffortUltra
+	leadEffort = llm.ReasoningEffortMax
+	// The collector takes the low-difficulty tasks listed in collectorRule:
+	// gpt-6-luna is capable enough for them and far cheaper than gpt-6.1-sol.
+	collectorModel  = "gpt-6-luna"
+	collectorEffort = llm.ReasoningEffortMedium
 )
 
 var workerEfforts = []llm.ReasoningEffort{llm.ReasoningEffortLow, llm.ReasoningEffortMedium, llm.ReasoningEffortHigh, llm.ReasoningEffortXHigh, llm.ReasoningEffortMax}
@@ -24,15 +28,23 @@ var workerEfforts = []llm.ReasoningEffort{llm.ReasoningEffortLow, llm.ReasoningE
 var childToolNames = []string{"Finish", "SendParent", "SubagentStart", "SubagentSend", "SubagentCancel", "SubagentApprove"}
 
 const leadPrompt = `You are the implementation lead. Your parent agent is the designer; its task message is your specification.
-Plan the work and delegate implementation and test runs to workers with SubagentStart. Worker templates: worker-low, worker-medium, worker-high, worker-xhigh, worker-max; pick the effort each task needs. Workers cannot run at ultra.
+Plan the work and delegate implementation and test runs to workers with SubagentStart. Worker templates: worker-low, worker-medium, worker-high, worker-xhigh, worker-max; pick the effort each task needs. Collector tasks, which must go to the collector template (gpt-6-luna) and never to a gpt-6.1-sol worker: fetching a URL or API (curl, gh api, gh pr/issue/run view) and reporting fields; checking CI or run status and pulling the failing log lines; listing or searching files (ls, find, rg, grep) and reporting matches; reading files or logs to extract specific values, counts or sections; read-only git summaries (status, log, diff, show); disk, process and environment checks (df, du, ps); summarizing an existing report or document. Give one collector several such questions at once. A single read-only command that answers your question directly you may still run yourself; do not split such a step off.
+Implement what the specification asks and nothing more: no limits, checks, abstractions or features it does not ask for. Review your workers' results for the same over-implementation before you integrate them.
 Run independent parts in parallel: start several workers at once and keep working while they run; each worker's result arrives as its own tool result. Begin each worker's task with a one-line title.
 Give each worker a precise, self-contained task, review what it reports, and integrate the results. Do small steps yourself, such as reading a file or running git log: a worker costs a whole new context, so delegate only work that takes real effort or runs in parallel.
 When the Session asks for approval, workers ask you, not the user: decide with SubagentApprove. Ask the designer with SendParent when the specification is unclear, and continue with other parts while its answer comes.
+Send progress updates with SendParent progress: true; they wait for the parent's next turn without waking it. For questions or requests needing a decision, omit progress (false by default) to wake the parent.
 When the work is done and verified, call Finish with what changed, the tests you ran and their results, and any blockers.`
 
 const workerPrompt = `You are a worker. Do the task your parent gives you: implement it, run the commands it names (tests, builds), wait for them to finish, and report.
-Don't change the design or touch unrelated code. Ask your parent with SendParent if the task is unclear.
+Don't change the design or touch unrelated code. Implement only what the task asks: no limits, checks, abstractions or features it does not ask for. Ask your parent with SendParent if the task is unclear.
+Send progress updates with SendParent progress: true; they wait for the parent's next turn without waking it. For questions or requests needing a decision, omit progress (false by default) to wake the parent.
 Call Finish with the changed files, the tests you ran and their results (exit codes, failing tests, key log lines), and any blockers.`
+
+const collectorPrompt = `You are a collector. Your parent gives you low-difficulty questions: fetch URLs or APIs, check CI or run status, list or search files, read files or logs, summarize git state or a document, check disk or processes.
+Answer them with exact values, paths, line numbers and short quotes, as briefly as the answer allows. Do not edit files, commit or change anything; if a question needs that, say so in your report.
+Send progress updates with SendParent progress: true; they wait for the parent's next turn without waking it. For questions or requests needing a decision, omit progress (false by default) to wake the parent.
+Call Finish with the answers.`
 
 // defaultSubagents gives a normal Host the lead and worker templates when the
 // operator configured none and Codex is registered. They follow the Session's
@@ -55,16 +67,17 @@ func defaultSubagents(config serveConfiguration) map[string]childTemplate {
 		p.Tools = append(p.Tools, tools...)
 		return p
 	}
-	runtime := func(effort llm.ReasoningEffort, prompt string) agentrunner.RuntimeIdentity {
+	runtime := func(model string, effort llm.ReasoningEffort, prompt string) agentrunner.RuntimeIdentity {
 		selection := codex
-		selection.Model.ID = leadModel
+		selection.Model.ID = model
 		return agentrunner.RuntimeIdentity{Version: 1, Provider: selection, Profile: profile.Default(), Workspace: config.Runtime.Workspace, SystemPrompt: prompt, ReasoningEffort: effort}
 	}
 	workers := map[string]childTemplate{}
 	for _, effort := range workerEfforts {
-		workers["worker-"+string(effort)] = childTemplate{Runtime: runtime(effort, workerPrompt), Permissions: policy([]string{"Finish", "SendParent"}), Baseline: &baseline, Pinned: true}
+		workers["worker-"+string(effort)] = childTemplate{Runtime: runtime(leadModel, effort, workerPrompt), Permissions: policy([]string{"Finish", "SendParent"}), Baseline: &baseline, Pinned: true}
 	}
-	templates := map[string]childTemplate{"lead": {Runtime: runtime(leadEffort, leadPrompt), Permissions: policy(childToolNames), Baseline: &baseline, Pinned: true, Workers: workers}}
+	workers["collector"] = childTemplate{Runtime: runtime(collectorModel, collectorEffort, collectorPrompt), Permissions: policy([]string{"Finish", "SendParent"}), Baseline: &baseline, Pinned: true}
+	templates := map[string]childTemplate{"lead": {Runtime: runtime(leadModel, leadEffort, leadPrompt), Permissions: policy(childToolNames), Baseline: &baseline, Pinned: true, Workers: workers}}
 	for name, worker := range workers {
 		templates[name] = worker
 	}

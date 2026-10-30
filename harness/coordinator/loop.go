@@ -6,6 +6,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"time"
 	"uuid"
@@ -54,8 +55,9 @@ type coordinator struct {
 	idleRequest        llm.Request
 	idleOptions        llm.RequestOptions
 	idlePending        bool
-	cancelIdle         context.CancelFunc
+	cancelIdle         context.CancelCauseFunc
 	idleDone           chan struct{}
+	modelRetry         <-chan time.Time
 }
 
 type stopState struct {
@@ -71,8 +73,8 @@ type loopState struct {
 	availableInputs int
 	deliveredInputs int
 	// quietInputs counts inputs since the latest regular turn began that the
-	// next model call carries but that do not call the model themselves: a
-	// child's ready notice repeats the handle its start already returned.
+	// next model call consumes but that do not call the model themselves:
+	// a child's ready notice or progress update.
 	quietInputs       int
 	currentTurnInputs int
 	callModel         bool
@@ -202,7 +204,7 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 	modelContext, cancelModels := context.WithCancel(ctx)
 	defer cancelModels()
 	defer current.interruptModel()
-	defer current.stopIdle()
+	defer current.stopIdle("session_stopped")
 	modelResponses := make(chan modelResponseResult)
 	current.bridgeRequests = make(chan bridgeRequest)
 
@@ -249,6 +251,14 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+
+		case <-current.idleDone:
+			current.cancelIdle = nil
+			current.idleDone = nil
+
+		case <-current.modelRetry:
+			current.modelRetry = nil
+			current.state.callModel = true
 
 		case received, open := <-inboxOutput:
 			if !open {
@@ -329,8 +339,6 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 		}
 		if current.isIdle() && !current.held() && current.stop.request.Mode == "" {
 			current.startIdle(modelContext)
-		} else {
-			current.stopIdle()
 		}
 	}
 }
@@ -344,7 +352,7 @@ func (current *coordinator) startIdle(ctx context.Context) {
 		return
 	}
 	current.idlePending = false
-	idleCtx, cancel := context.WithCancel(ctx)
+	idleCtx, cancel := context.WithCancelCause(ctx)
 	done := make(chan struct{})
 	current.cancelIdle, current.idleDone = cancel, done
 	request, options := current.idleRequest, current.idleOptions
@@ -354,9 +362,9 @@ func (current *coordinator) startIdle(ctx context.Context) {
 	}()
 }
 
-func (current *coordinator) stopIdle() {
+func (current *coordinator) stopIdle(reason string) {
 	if current.cancelIdle != nil {
-		current.cancelIdle()
+		current.cancelIdle(errors.New(reason))
 		<-current.idleDone
 		current.cancelIdle, current.idleDone = nil, nil
 	}
@@ -393,6 +401,11 @@ func (current *coordinator) processEvents(ctx context.Context) (bool, error) {
 	if current.held() {
 		return false, nil
 	}
+	// Peer inputs are already durable. Keep accepting inputs while maintenance
+	// finishes; only user input or explicit control cancels it.
+	if current.idleDone != nil || current.modelRetry != nil {
+		return false, nil
+	}
 	current.state.interrupted = false
 	return current.state.callModel || (current.wakingInputs() > 0 && current.cancelModel == nil && len(current.state.graceToolCalls) == 0), nil
 }
@@ -406,7 +419,8 @@ func (current *coordinator) held() bool {
 // stops and its own operations are canceled, while child agents run on. The
 // model is called again for the user's next input, with what arrived since.
 func (current *coordinator) interruptAgent(ctx context.Context, reason string) error {
-	current.stopIdle()
+	current.stopIdle("user_interrupt")
+	current.modelRetry = nil
 	current.interruptModel()
 	current.state.interrupted, current.state.interruptExternals = true, current.state.externalInputs
 	for id, op := range current.state.operations {
@@ -460,6 +474,19 @@ func (current *coordinator) processModelResponse(ctx context.Context, modelRespo
 
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		var retryable interface{ RetryableModelFailure() bool }
+		if current.dependencies.RetryModelFailures && errors.As(modelResponse.err, &retryable) && retryable.RetryableModelFailure() {
+			if record := current.dependencies.RecordActivity; record != nil {
+				if err := record(ctx, llm.ActivityRecord{Kind: "model_retry", ID: string(modelResponse.turnID), StartedAt: time.Now().UTC(), Reason: modelResponse.err.Error()}); err != nil {
+					slog.Warn("record model retry", "error", err)
+				}
+			}
+			// The failed response has not executed tools. Retry from canonical
+			// history in this Session; committed Operations are never replayed.
+			current.state.callModel = false
+			current.modelRetry = time.After(2 * time.Second)
+			return nil
 		}
 		return fmt.Errorf("call model for turn %q: %w", modelResponse.turnID, modelResponse.err)
 	}
@@ -571,11 +598,11 @@ func (current *coordinator) wakingInputs() int {
 	return max(current.pendingInputs()-current.state.quietInputs, 0)
 }
 
-// quietPeer reports whether a peer input only repeats what its parent
-// already knows: a child's ready notice.
+// quietPeer reports whether a peer input waits for the parent's next turn:
+// a child's ready notice or progress update.
 func quietPeer(input inbox.Input) bool {
 	peer, err := input.DecodePeerMessage()
-	return err == nil && peer.Kind == "ready"
+	return err == nil && (peer.Kind == "ready" || peer.Kind == "progress")
 }
 
 func (current *coordinator) hasPendingOperations() bool {
@@ -616,9 +643,9 @@ func (current *coordinator) requestModelResponse(
 	ctx context.Context,
 	results chan<- modelResponseResult,
 ) error {
-	// Join maintenance before applying a runtime selection, building context,
-	// or launching the new turn. It never owns the model's tool rendezvous.
-	current.stopIdle()
+	if current.idleDone != nil {
+		return nil
+	}
 	if current.finished() {
 		return nil
 	}
@@ -730,8 +757,9 @@ func (current *coordinator) requestModelResponse(
 }
 
 func (current *coordinator) handleInboxInput(ctx context.Context, input inbox.Input) error {
-	if input.Kind == inbox.InputExternal || input.Kind == inbox.InputPeer && !quietPeer(input) {
-		current.stopIdle()
+	if input.Kind == inbox.InputExternal {
+		current.stopIdle("user_input")
+		current.modelRetry = nil
 	}
 	item, err := current.addItemToLocalState(sessionstore.Item{
 		Kind: sessionstore.ItemInput,
@@ -750,7 +778,7 @@ func (current *coordinator) handleInboxInput(ctx context.Context, input inbox.In
 		}
 		switch request.Mode {
 		case inbox.DispatchOperation:
-			current.stopIdle()
+			current.stopIdle("user_operation")
 			op, err := sessionstore.DecodeOperationIntent(input)
 			if err != nil {
 				return err
@@ -765,7 +793,7 @@ func (current *coordinator) handleInboxInput(ctx context.Context, input inbox.In
 		case inbox.CancelChildren:
 			return current.cancelChildren(ctx, request.Reason)
 		case inbox.StopHard, inbox.StopWhenIdle:
-			current.stopIdle()
+			current.stopIdle("user_stop")
 			current.acceptStop(request)
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"slices"
 	"strings"
 )
 
@@ -112,7 +113,7 @@ func modelPicker(c modelcatalog.Catalog, current *sessionstore.RuntimeSelection,
 			if c.Available {
 				p.Hint = "catalog unavailable for current model; current effort only"
 			}
-			p.Catalog.Models = append(p.Catalog.Models, modelcatalog.Model{ID: current.Model, Name: current.Name, Efforts: []llm.ReasoningEffort{current.Effort}, DefaultEffort: current.Effort})
+			p.Catalog.Models = append(p.Catalog.Models, modelcatalog.Model{ID: current.Model, Name: current.Name, Efforts: []llm.ReasoningEffort{current.Effort.Normalize()}, DefaultEffort: current.Effort.Normalize()})
 		}
 		p.Revision = current.Revision
 	}
@@ -163,6 +164,8 @@ func (p *Picker) capability(c modelcatalog.Capabilities) {
 }
 func (p *Picker) effort(current *sessionstore.RuntimeSelection) *Picker {
 	m := p.Catalog.Models[p.Selection]
+	m.Efforts = slices.DeleteFunc(slices.Clone(m.Efforts), func(e llm.ReasoningEffort) bool { return e == llm.ReasoningEffortUltra })
+	m.DefaultEffort = m.RequestEffort(m.DefaultEffort)
 	n := &Picker{Kind: "effort", Title: SafeText(m.Name) + " · Reasoning effort", Model: m, Catalog: p.Catalog, Revision: p.Revision, Hint: p.Hint, Provider: p.Provider, Providers: p.Providers, ToolBridge: p.ToolBridge}
 	if m.SupportsEffort != nil && !*m.SupportsEffort {
 		n.Options = []string{"No effort parameter (not supported by this model)"}
@@ -183,7 +186,7 @@ func (p *Picker) effort(current *sessionstore.RuntimeSelection) *Picker {
 	}
 	if current != nil && current.Provider == p.Provider && m.Matches(current.Model) {
 		for i, e := range m.Efforts {
-			if e == current.Effort {
+			if e == current.Effort.Normalize() {
 				n.Selection = i
 			}
 		}

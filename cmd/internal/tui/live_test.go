@@ -152,7 +152,7 @@ func TestLivePhase4ThemeModesAndInjection(t *testing.T) {
 			t.Fatal("plain SGR")
 		}
 		if theme.ASCII {
-			if strings.ContainsAny(text, "▌◆▁▂▃▅▇✓✗⊘▸›─·") || !strings.Contains(text, "|* メイン") {
+			if strings.ContainsAny(text, "▌◆▁▂▃▅▇✓✗⊘▸›─·") || f.View == ViewSplit && !strings.Contains(text, "|* メイン") {
 				t.Fatalf("non-ASCII chrome or missing ASCII card: %s", text)
 			}
 		}
@@ -308,6 +308,7 @@ func TestLivePhase3ChildLanesRailFocusAndResponsiveBounds(t *testing.T) {
 	for _, n := range []int{0, 1, 3, 9} {
 		for _, size := range [][2]int{{80, 24}, {60, 20}, {44, 14}, {120, 24}, {160, 40}} {
 			u := childUI(n)
+			u.View = ViewSplit // the work pane is Split's; narrow widths fall back to Chat
 			f := RenderFrame(s, u, size[0], size[1])
 			bounds(t, f, size[0], size[1])
 			text := frameText(f)

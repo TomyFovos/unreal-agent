@@ -63,7 +63,7 @@ func Extensions(owner session.ID, templates map[string]runtime.Template, child b
 		{"SubagentSend", "send", "Send a message to an owned child using its operation handle. Acknowledgement means durable receipt, not task completion.", map[string]any{"handle": map[string]any{"type": "string"}, "text": map[string]any{"type": "string"}}, []string{"handle", "text"}, false},
 		{"SubagentCancel", "cancel", "Cancel an owned child by operation handle.", map[string]any{"handle": map[string]any{"type": "string"}}, []string{"handle"}, false},
 		{"SubagentApprove", "approve", "Allow or deny a request an owned child is waiting on. Children ask their parent, not the user; ask the user yourself when unsure.", map[string]any{"handle": map[string]any{"type": "string"}, "request": map[string]any{"type": "string"}, "allow": map[string]any{"type": "boolean"}}, []string{"handle", "request", "allow"}, false},
-		{"SendParent", "parent", "Send a progress update or question to the parent; end the turn to wait for its reply.", map[string]any{"text": map[string]any{"type": "string"}}, []string{"text"}, true},
+		{"SendParent", "parent", "Send a progress update or question to the parent. Use progress: true for updates; for questions or decisions, omit progress and end the turn to wait for a reply.", map[string]any{"text": map[string]any{"type": "string"}, "progress": map[string]any{"type": "boolean", "description": "True for a progress update: does not wake the parent and is delivered with its next turn. False (default) for questions or requests needing a decision: wakes the parent."}}, []string{"text"}, true},
 		{"Finish", "finish", "Finish delegated work with a canonical report, only after every other operation has completed. Call Finish alone; it stops this child.", map[string]any{"status": map[string]any{"type": "string", "enum": []string{"completed", "failed"}}, "summary": map[string]any{"type": "string"}, "changedFiles": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "tests": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "blockers": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, []string{"status", "summary", "changedFiles", "tests", "blockers"}, true},
 	}
 	var result []tool.Extension
@@ -79,6 +79,7 @@ func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallSta
 		Task         string                  `json:"task"`
 		Handle       operation.ID            `json:"handle"`
 		Text         string                  `json:"text"`
+		Progress     bool                    `json:"progress"`
 		Status       string                  `json:"status"`
 		Summary      string                  `json:"summary"`
 		ChangedFiles []string                `json:"changedFiles"`
@@ -92,6 +93,9 @@ func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallSta
 		return tool.ErrorStatus("Invalid subagent arguments", 0)
 	}
 	p := runtime.Plan{Version: 1, Action: t.action, ParentID: t.owner, Handle: args.Handle, Text: args.Text}
+	if t.action == "parent" {
+		p.Progress = args.Progress
+	}
 	if t.action == "approve" {
 		p.Request, p.Allow = args.Request, args.Allow
 	}

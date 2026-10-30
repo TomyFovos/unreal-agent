@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,9 +47,11 @@ type turn struct {
 	failure  error
 	// The model steps since the last recorded response: their usage and the
 	// time spent streaming them, so TPS never counts tool or approval waits.
-	steps     stepStats
-	stepStart time.Time
-	stepUsage usage
+	steps         stepStats
+	stepStart     time.Time
+	stepUsage     usage
+	usageReported bool
+	toolStarts    map[string]time.Time
 	// mark is when the next model request can start: Claude Code ready, the
 	// previous step done, or a tool batch answered. A step's time runs from
 	// there, so it includes the wait for the first token as Codex's does.
@@ -65,11 +68,13 @@ type stepStats struct {
 	contextTokens             int64
 	contextKnown              bool
 	output                    int64
+	reasoning                 int64
+	reasoningUnknown          bool
 	micros                    int64
 }
 
 func newTurn(ctx context.Context, cancel context.CancelFunc, opt llm.RequestOptions, out *writer, results *observed.Results, a *approver, directory, session string) *turn {
-	return &turn{ctx: ctx, cancel: cancel, opt: opt, out: out, results: results, approver: a, directory: directory, session: session, refused: map[string]bool{}, denied: map[string]bool{}, reported: map[string]observed.Result{}, now: time.Now}
+	return &turn{ctx: ctx, cancel: cancel, opt: opt, out: out, results: results, approver: a, directory: directory, session: session, refused: map[string]bool{}, denied: map[string]bool{}, reported: map[string]observed.Result{}, toolStarts: map[string]time.Time{}, now: time.Now}
 }
 
 // handle acts on one frame. It returns the result frame when the turn ends.
@@ -118,6 +123,12 @@ func (t *turn) handle(f frame) *frame {
 			if u := event.Usage; u != nil {
 				t.mu.Lock()
 				t.stepUsage.OutputTokens = u.OutputTokens
+				if u.ReasoningTokens != nil {
+					t.stepUsage.ReasoningTokens = u.ReasoningTokens
+				}
+				if u.ThinkingTokens != nil {
+					t.stepUsage.ThinkingTokens = u.ThinkingTokens
+				}
 				t.mu.Unlock()
 			}
 		case "message_stop":
@@ -129,6 +140,11 @@ func (t *turn) handle(f frame) *frame {
 				t.steps.cached += u.CacheReadInputTokens
 				t.steps.cacheWrite += u.CacheCreationInputTokens
 				t.steps.output += u.OutputTokens
+				if reasoning, known := u.reasoningTokens(); known {
+					t.steps.reasoning += reasoning
+				} else {
+					t.steps.reasoningUnknown = true
+				}
 				now := t.now()
 				t.steps.micros += now.Sub(t.stepStart).Microseconds()
 				t.stepStart, t.mark = time.Time{}, now
@@ -164,6 +180,7 @@ func (t *turn) handle(f frame) *frame {
 		}
 		for _, b := range m.Content {
 			if b.Type == "tool_result" && b.ToolUseID != "" {
+				t.endNativeBash(b.ToolUseID, "")
 				t.mu.Lock()
 				t.reported[b.ToolUseID] = observed.Result{Content: contentText(b.Content), IsError: b.IsError}
 				t.mu.Unlock()
@@ -227,8 +244,11 @@ func (t *turn) hook(id, callback string, in hookInput) {
 			}
 		}
 		answer := t.approver.gate(t.ctx, in)
-		if len(answer) > 0 {
+		decision, _ := answer["hookSpecificOutput"].(map[string]any)
+		if decision["permissionDecision"] == "deny" {
 			t.markDenied(in.ToolUseID)
+		} else if in.ToolName == "Bash" {
+			t.startNativeBash(in.ToolUseID)
 		}
 		_ = t.out.reply(id, answer)
 	case batchHook:
@@ -308,6 +328,9 @@ func (t *turn) batch(in hookInput) (answer map[string]any) {
 		if call.ToolUseID == "" {
 			continue
 		}
+		if call.ToolName == "Bash" {
+			t.endNativeBash(call.ToolUseID, "post_tool_batch")
+		}
 		t.mu.Lock()
 		refused := t.refused[call.ToolUseID] && !t.denied[call.ToolUseID]
 		result, reported := t.reported[call.ToolUseID]
@@ -333,6 +356,9 @@ func (t *turn) batch(in hookInput) (answer map[string]any) {
 		return map[string]any{}
 	}
 	usage, generation := steps.report(model)
+	t.mu.Lock()
+	t.usageReported = true
+	t.mu.Unlock()
 	outcomes, err := t.opt.Tools(t.ctx, llm.Response{ID: uuid.New().String(), Model: model, Stop: llm.StopComplete, Output: output, Usage: usage, Generation: generation})
 	t.mu.Lock()
 	t.mark = t.now() // tool runs and approvals are never generation time
@@ -411,6 +437,19 @@ func (t *turn) finish(result *frame) llm.Response {
 	}
 	response := llm.Response{ID: uuid.New().String(), Model: t.model, Stop: llm.StopComplete, Output: output}
 	response.Usage, response.Generation = t.takeSteps().report(t.model)
+	if !t.usageReported && result.Usage != nil {
+		// A result may carry usage even if the CLI omitted stream events.
+		if response.Generation == nil {
+			response.Usage = reportedUsage(*result.Usage)
+		}
+		if reasoning, known := result.Usage.reasoningTokens(); known {
+			response.Usage.ReasoningTokens = reasoning
+			response.Usage.Unknown = slices.DeleteFunc(response.Usage.Unknown, func(f llm.UsageField) bool { return f == llm.UsageReasoning })
+		}
+	}
+	if response.Generation != nil {
+		response.Generation.Tokens = llm.ReportedTokens(response.Usage)
+	}
 	if result.StopReason == "refusal" {
 		response.Stop = llm.StopRefused
 	}
@@ -430,7 +469,10 @@ func (s stepStats) report(model string) (llm.Usage, *llm.GenerationStatistics) {
 	if !s.known {
 		return unknownUsage(), nil
 	}
-	u := llm.Usage{InputTokens: s.input, CachedInputTokens: s.cached, CacheWriteInputTokens: s.cacheWrite, OutputTokens: s.output, Unknown: []llm.UsageField{llm.UsageReasoning}}
+	u := llm.Usage{InputTokens: s.input, CachedInputTokens: s.cached, CacheWriteInputTokens: s.cacheWrite, OutputTokens: s.output, ReasoningTokens: s.reasoning}
+	if s.reasoningUnknown {
+		u.Unknown = []llm.UsageField{llm.UsageReasoning}
+	}
 	if s.micros <= 0 {
 		return u, nil
 	}
@@ -439,4 +481,14 @@ func (s stepStats) report(model string) (llm.Usage, *llm.GenerationStatistics) {
 
 func unknownUsage() llm.Usage {
 	return llm.Usage{Unknown: []llm.UsageField{llm.UsageInput, llm.UsageCachedInput, llm.UsageCacheWriteInput, llm.UsageOutput, llm.UsageReasoning}}
+}
+
+func reportedUsage(u usage) llm.Usage {
+	r := llm.Usage{InputTokens: u.inputTokens(), CachedInputTokens: u.CacheReadInputTokens, CacheWriteInputTokens: u.CacheCreationInputTokens, OutputTokens: u.OutputTokens}
+	if reasoning, known := u.reasoningTokens(); known {
+		r.ReasoningTokens = reasoning
+	} else {
+		r.Unknown = []llm.UsageField{llm.UsageReasoning}
+	}
+	return r
 }

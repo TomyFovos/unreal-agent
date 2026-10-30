@@ -209,6 +209,27 @@ func TestChatControlInputsJapaneseAndHidden(t *testing.T) {
 	}
 }
 
+func TestChatProgressCountsAsReport(t *testing.T) {
+	for _, kind := range []string{"message", "progress"} {
+		t.Run(kind, func(t *testing.T) {
+			s, u := idleSnapshot(), plainUI()
+			u.Viewer.Rows = append(u.Viewer.Rows, viewer.Row{ID: "child", ParentID: s.ID})
+			payload, err := json.Marshal(inbox.PeerMessage{Version: 1, Sender: "child", Target: string(s.ID), Handle: "child-op", Kind: kind, Text: "hidden child progress"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Entries = entriesFor(host.HistoryItem{Data: inbox.Input{ID: "report", Kind: inbox.InputPeer, Payload: payload}})
+			if len(s.Entries) != 1 || s.Entries[0].PeerKind != kind {
+				t.Fatal("progress missing from history projection", s.Entries)
+			}
+			got := chatText(s, u, 120)
+			if !strings.Contains(got, "┄ 裏の作業  0ターン · ツール0回 · 報告 [A]") || strings.Contains(got, "hidden child progress") {
+				t.Fatalf("progress missing from folded reports: %s", got)
+			}
+		})
+	}
+}
+
 func TestChatBackgroundCountsMarksAndBoundaries(t *testing.T) {
 	s, u := idleSnapshot(), plainUI()
 	s.Entries = []Entry{{Role: "you", Text: "開始"}}

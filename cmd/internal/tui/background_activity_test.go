@@ -22,6 +22,7 @@ func TestBackgroundActivitySpinsInHeaderChatAndMainCard(t *testing.T) {
 		}
 	}
 
+	u.View = ViewSplit
 	for _, width := range []int{80, 160} {
 		first := RenderFrame(s, u, width, 30)
 		spin := u.Theme.spinner(u.Now.UnixMilli())

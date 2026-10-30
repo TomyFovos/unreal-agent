@@ -243,8 +243,8 @@ func TestOrchestrationResponsiveViewsRailComposerAndThemes(t *testing.T) {
 					if strings.Count(text, "child-a") > 1 {
 						t.Fatal("child duplicated in Split", text)
 					}
-				} else if f.View == ViewChat && size[0] >= 120 && !strings.Contains(text, theme.chrome("◆ メイン")) {
-					t.Fatal("Chat lost existing child rail")
+				} else if f.View == ViewChat && strings.Contains(text, theme.chrome("◆ メイン")) {
+					t.Fatal("Chat shows the Split work pane")
 				}
 				if f.View == ViewOrchestration && strings.Contains(text, "never-shown") {
 					t.Fatal("conversation leaked into read-only topology", text)

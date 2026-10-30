@@ -25,7 +25,7 @@ func (s *Service) ReadDir(ctx context.Context, path string) ([]Entry, error) {
 	}
 	if path != s.root {
 		var err error
-		path, err = s.Path(path)
+		path, err = s.path(path, false)
 		if err != nil {
 			return nil, err
 		}
@@ -50,6 +50,9 @@ func (s *Service) ReadDir(ctx context.Context, path string) ([]Entry, error) {
 	output := make([]Entry, 0, len(entries))
 	for _, entry := range entries {
 		if entry.Type()&os.ModeSymlink != 0 || strings.HasPrefix(entry.Name(), ".unreal-mutation-") {
+			continue
+		}
+		if _, err := s.path(filepath.Join(path, entry.Name()), false); err != nil {
 			continue
 		}
 		if entry.IsDir() || entry.Type().IsRegular() {

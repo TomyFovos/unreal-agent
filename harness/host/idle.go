@@ -14,6 +14,17 @@ func (s *Session) recordConversation(ctx context.Context, record llm.Conversatio
 	})
 }
 
+func (s *Session) recordActivity(ctx context.Context, record llm.ActivityRecord) error {
+	return (&serializedStore{Session: s}).AppendHostRecord(ctx, s.ID, sessionstore.HostRecord{
+		Version: 1, Kind: sessionstore.HostActivity, Activity: &record,
+	})
+}
+
+// RecordActivity appends execution metadata through the owning Session writer.
+func (s *Session) RecordActivity(ctx context.Context, record llm.ActivityRecord) error {
+	return s.recordActivity(ctx, record)
+}
+
 // Idle has its own progress lifetime, independent of the completed Respond.
 // It leaves ModelBusy false so input and child notifications remain usable.
 func (a *progressAdapter) Idle(ctx context.Context, r llm.Request, o llm.RequestOptions) {
@@ -32,6 +43,7 @@ func (a *progressAdapter) Idle(ctx context.Context, r llm.Request, o llm.Request
 	o.ConversationTokens = s.conversationTokensLocked()
 	s.mu.Unlock()
 	o.RecordConversation = s.recordConversation
+	o.RecordActivity = s.recordActivity
 	done := false // protected by s.mu, including late provider callbacks
 	clear := func() {
 		s.mu.Lock()

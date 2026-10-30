@@ -16,6 +16,10 @@ import (
 )
 
 type Dependencies struct {
+	RecordActivity func(context.Context, llm.ActivityRecord) error
+	// Child Sessions keep their execution ownership after a transient inference
+	// failure. Other lifecycles retain their configured provider retry policy.
+	RetryModelFailures bool
 	// InterruptedInput supplies a peer notice for work lost with the previous
 	// executor. Restoration persists it before closing the Operation.
 	InterruptedInput func(operation.Operation) (*inbox.Input, error)

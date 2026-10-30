@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 )
@@ -15,9 +16,14 @@ const compactPrompt = "/compact Preserve the goal, decisions made, questions ask
 type compaction struct {
 	before int64
 	after  *int64
+	usage  *llm.Usage
 }
 
 func (c *compaction) handle(f frame) {
+	if f.Type == "result" && f.Usage != nil {
+		u := reportedUsage(*f.Usage)
+		c.usage = &u
+	}
 	if f.Type == "system" && f.Subtype == "compact_boundary" && f.CompactMetadata != nil {
 		c.before = f.CompactMetadata.PreTokens
 		c.after = f.CompactMetadata.PostTokens
@@ -100,15 +106,22 @@ func (c *Client) Idle(ctx context.Context, request llm.Request, opt llm.RequestO
 // compact is never run at a tool/steering batch. The caller owns the
 // conversation lock until this process has exited and its record is saved.
 func (c *Client) compact(ctx context.Context, request llm.Request, opt llm.RequestOptions, session string, before int64) {
+	started := time.Now().UTC()
+	if opt.RecordActivity != nil {
+		if err := opt.RecordActivity(ctx, llm.ActivityRecord{Kind: "claude_compact", ID: started.Format(time.RFC3339Nano), StartedAt: started, Provider: ProviderID}); err != nil {
+			slog.Warn("record Claude compaction start", "error", err)
+		}
+	}
 	if opt.Progress != nil {
 		opt.Progress(llm.Progress{Attempt: 1, Phase: "compacting"})
 		defer opt.Progress(llm.Progress{Attempt: 1, Reset: true})
 	}
 	state := &compaction{before: before}
 	_, err := c.run(ctx, request, opt, session, true, compactPrompt, state)
-	record := llm.ConversationRecord{Provider: ProviderID, BeforeTokens: state.before}
+	record := llm.ConversationRecord{Provider: ProviderID, BeforeTokens: state.before, Phase: "compact", StartedAt: started, EndedAt: time.Now().UTC(), Usage: state.usage}
 	if err != nil && ctx.Err() != nil {
 		record.InputTokens, record.InputKnown, record.Interrupted = before, true, true
+		record.InterruptReason = context.Cause(ctx).Error()
 		slog.Info("Claude Code conversation compaction interrupted", "session", opt.Identity.SessionID)
 	} else if err != nil {
 		record.InputTokens, record.InputKnown, record.Error = before, true, clip(err.Error(), 2000)

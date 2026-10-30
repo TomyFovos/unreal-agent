@@ -20,6 +20,7 @@ type HostRecord struct {
 	ProjectInstructions *projectinstructions.Snapshot `json:",omitzero"`
 	Context             *ContextRecord                `json:",omitzero"`
 	Selection           *RuntimeSelection             `json:",omitzero"`
+	Activity            *llm.ActivityRecord           `json:",omitzero"`
 }
 
 const HostProjectInstructions = "project_instructions"
@@ -37,6 +38,8 @@ func (r HostRecord) Validate() error {
 		return fmt.Errorf("unexpected runtime selection")
 	}
 	switch r.Kind {
+	case HostActivity:
+		return nil
 	case HostContext:
 		return nil
 	case "model_conversation_epoch", "model_request_failure":
@@ -79,6 +82,7 @@ func (r HostRecord) Validate() error {
 }
 
 const HostContext = "context"
+const HostActivity = "activity"
 
 // ContextRecord logs a model view change; original evidence is never replaced.
 // Unit IDs are deterministic insertion identities reconstructed by canonical replay.
@@ -89,6 +93,7 @@ type ContextRecord struct {
 	Kind            string
 	UnitID          string              `json:",omitzero"`
 	Projections     []ContextProjection `json:",omitzero"`
+	Retained        []string            `json:",omitzero"` // mandatory units retained across a summary boundary
 	PrunedTokens    int64               `json:",omitzero"` // estimated net input tokens removed at this boundary
 	From, Through   string              `json:",omitzero"`
 	Items           []llm.Item          `json:",omitzero"`

@@ -21,6 +21,7 @@ type RequestOptions struct {
 	ConversationTokens map[string]int64
 	// RecordConversation appends a small observation without replacing history.
 	RecordConversation func(context.Context, ConversationRecord) error
+	RecordActivity     func(context.Context, ActivityRecord) error
 	// Tools is a host-owned rendezvous for protocols that keep inference open
 	// while caller-owned tools execute. The host commits this public response,
 	// runs its Registry/Permission/Operation path and returns terminal receipts.
@@ -55,7 +56,7 @@ type Adapter interface {
 
 // IdleAdapter performs optional provider maintenance after Respond has returned
 // and the Coordinator has no model call or pending tool/operation. The owner
-// cancels and joins Idle before starting new work or changing the runtime.
+// joins Idle before starting peer work; user input cancels and joins it.
 type IdleAdapter interface {
 	Idle(context.Context, Request, RequestOptions)
 }

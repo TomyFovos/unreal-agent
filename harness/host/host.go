@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -122,6 +123,7 @@ type Host struct {
 	sessions   map[session.ID]*Session
 	closed     bool
 	reconciled bool
+	startedAt  time.Time
 }
 type Receipt struct {
 	ID       inbox.ID
@@ -230,9 +232,10 @@ func New(ctx context.Context, c Config) (*Host, error) {
 		return nil, err
 	}
 	child, cancel := context.WithCancel(ctx)
-	return &Host{ctx: child, cancel: cancel, config: c, sessions: map[session.ID]*Session{}}, nil
+	return &Host{ctx: child, cancel: cancel, config: c, sessions: map[session.ID]*Session{}, startedAt: time.Now().UTC()}, nil
 }
 func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error) {
+	defer startupPhase(ctx, o.ID, "host.open")()
 	if o.ID == "" {
 		o.ID = session.ID(uuid.New().String())
 	}
@@ -273,7 +276,9 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 			lock.Close()
 		}
 	}()
+	readDone := startupPhase(ctx, o.ID, "host.read_restore")
 	readView, viewErr := raw.OpenRestoreView(ctx, o.ID)
+	readDone()
 	closeReadView := func() error {
 		if readView == nil {
 			return nil
@@ -325,10 +330,6 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 			}
 		}
 	}
-	var startup restoreStartupReader = raw
-	if readView != nil {
-		startup = readView
-	}
 	base := permission.WithPolicy(h.ctx, o.Policy)
 	var controller *permission.Controller
 	if h.config.PermissionMaximum != nil {
@@ -368,29 +369,27 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 			}
 		}
 	}()
-	for after := sessionstore.BeforeFirst; ; {
-		page, e := startup.Items(ctx, o.ID, after, 256)
-		if e != nil {
-			return nil, e
+	restoreDone := startupPhase(ctx, o.ID, "host.restore_items")
+	defer func() {
+		if restoreDone != nil {
+			restoreDone()
 		}
-		for _, item := range page.Items {
-			s.rememberItem(item, false)
-		}
-		if !page.More {
-			break
-		}
-		after = page.NextAfter
-	}
-	ops, e := startup.Operations(ctx, o.ID)
-	if err = s.verifyRuntimeSelections(); err != nil {
-		return nil, err
-	}
+	}()
+	items, ops, e := readView.Take(ctx, o.ID)
 	if e != nil {
 		return nil, e
+	}
+	for _, item := range items {
+		s.rememberOwnedItem(item, false)
+	}
+	if err = s.verifyRuntimeSelections(); err != nil {
+		return nil, err
 	}
 	for _, op := range ops {
 		s.setOperation(op)
 	}
+	restoreDone()
+	restoreDone = nil
 	if err = closeReadView(); err != nil {
 		return nil, err
 	}
@@ -424,8 +423,14 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	if s.runtime.Builder == nil || s.runtime.LLM == nil || s.runtime.Tools == nil || s.runtime.Operations == nil {
 		return nil, fmt.Errorf("incomplete session runtime")
 	}
+	if recordErr := s.recordActivity(ctx, hostStartRecord(h.startedAt)); recordErr != nil {
+		slog.Warn("record Host startup", "error", recordErr)
+	}
 	if !h.reconciled {
-		if err = h.reconcileStoppedSessions(ctx, s); err != nil {
+		cleanupDone := startupPhase(ctx, o.ID, "host.reconcile_stopped")
+		err = h.reconcileStoppedSessions(ctx, s)
+		cleanupDone()
+		if err != nil {
 			return nil, err
 		}
 		h.reconciled = true
@@ -471,11 +476,13 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	}
 	pending := s.pendingStop()
 	dependencies := coordinator.Dependencies{SessionID: o.ID, Inbox: s.inbox, Restored: restored,
-		InterruptedInput: s.runtime.InterruptedInput,
-		ContextBuilt:     s.contextBuilt,
-		BeforeTurn:       s.beginTurn,
-		BeforeGeneration: s.runtime.BeforeGeneration,
-		Sessions:         &serializedStore{s}, ContextBuilder: s.runtime.Builder, LLM: s.runtime.LLM, Tools: s.runtime.Tools,
+		RecordActivity:     s.recordActivity,
+		RetryModelFailures: s.lifecycle == "child",
+		InterruptedInput:   s.runtime.InterruptedInput,
+		ContextBuilt:       s.contextBuilt,
+		BeforeTurn:         s.beginTurn,
+		BeforeGeneration:   s.runtime.BeforeGeneration,
+		Sessions:           &serializedStore{s}, ContextBuilder: s.runtime.Builder, LLM: s.runtime.LLM, Tools: s.runtime.Tools,
 		Finished: func() bool { return s.Finish() != nil }, Operations: s.runtime.Operations, ToolHeartbeatInterval: o.Heartbeat, RestoredStop: pending, InitialInputs: initial}
 	if o.TextOnlyChild {
 		if o.Lifecycle != "child" {
@@ -793,7 +800,12 @@ func clone[T any](v T) T {
 	return result
 }
 func (s *Session) rememberItem(item sessionstore.Item, notify bool) {
-	item = clone(item)
+	s.rememberOwnedItem(clone(item), notify)
+}
+
+// RestoreView.Take hands over canonical values exclusively; live observers
+// still detach caller-owned data in rememberItem before entering this method.
+func (s *Session) rememberOwnedItem(item sessionstore.Item, notify bool) {
 	s.items = append(s.items, item)
 	s.indexHistory()
 	if item.Kind == sessionstore.ItemTurn || item.Kind == sessionstore.ItemModelResponse {

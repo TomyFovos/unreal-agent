@@ -336,6 +336,9 @@ func normalizeCodexModels(rows []codexModelInfo) (Catalog, error) {
 		}
 		efforts := map[llm.ReasoningEffort]bool{}
 		for _, option := range row.Efforts {
+			if option.Effort == llm.ReasoningEffortUltra {
+				continue
+			}
 			if !option.Effort.Valid() {
 				m.UnsupportedEfforts = true
 				continue
@@ -348,6 +351,7 @@ func normalizeCodexModels(rows []codexModelInfo) (Catalog, error) {
 		if len(m.Efforts) == 0 {
 			continue
 		}
+		m.DefaultEffort = m.RequestEffort(m.DefaultEffort)
 		if !m.AllowsEffort(m.DefaultEffort) {
 			m.DefaultEffort = m.Efforts[0]
 		}

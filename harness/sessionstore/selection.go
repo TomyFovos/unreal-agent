@@ -15,7 +15,7 @@ func SelectionFromConfiguration(raw jsontext.Value) *RuntimeSelection {
 	if v == nil {
 		return nil
 	}
-	s := &RuntimeSelection{Version: 1, Provider: v.Provider.Provider, Model: v.Provider.Model.ID, Name: v.Provider.Model.ID, Effort: v.ReasoningEffort}
+	s := &RuntimeSelection{Version: 1, Provider: v.Provider.Provider, Model: v.Provider.Model.ID, Name: v.Provider.Model.ID, Effort: v.ReasoningEffort.Normalize()}
 	if s.Validate() != nil {
 		return nil
 	}
@@ -133,6 +133,15 @@ type RuntimeSelection struct {
 	// Binding is a nonsecret operator backend snapshot. It binds a newly
 	// selected provider without changing the immutable creation configuration.
 	Binding string `json:",omitzero"`
+}
+
+func (s *RuntimeSelection) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	type plain RuntimeSelection
+	if err := json.UnmarshalDecode(dec, (*plain)(s)); err != nil {
+		return err
+	}
+	s.Effort = s.Effort.Normalize()
+	return nil
 }
 
 func (s RuntimeSelection) Validate() error {

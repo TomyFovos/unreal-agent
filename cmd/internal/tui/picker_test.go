@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json/v2"
 	"fmt"
 	"github.com/rivo/uniseg"
 	"github.com/unreallabsai/unreal-agent/harness/analysis"
@@ -8,9 +9,34 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestModelEffortPickerOmitsUltraAndSelectsLegacyMax(t *testing.T) {
+	var current sessionstore.RuntimeSelection
+	if err := json.Unmarshal([]byte(`{"Version":1,"Provider":"openai-codex","Model":"gpt-6.1-sol","Name":"GPT-6.1 Sol","Effort":"ultra"}`), &current); err != nil {
+		t.Fatal(err)
+	}
+	c := modelcatalog.Catalog{Available: true, Models: []modelcatalog.Model{{ID: current.Model, Name: current.Name, Efforts: []llm.ReasoningEffort{"ultra", "high", "max"}, DefaultEffort: "ultra"}}}
+	p := modelPicker(c, &current).effort(&current)
+	if !slices.Equal(p.Options, []string{"high", "max"}) || p.Selection != 1 || p.selectedEffort() != "max" {
+		t.Fatal("effort choices", p.Options, p.Selection, p.selectedEffort())
+	}
+	fallback := modelPicker(modelcatalog.Catalog{}, &current).effort(&current)
+	if !slices.Equal(fallback.Options, []string{"max"}) || fallback.selectedEffort() != "max" {
+		t.Fatal("legacy fallback", fallback.Options)
+	}
+	frame := RenderFrame(Snapshot{ID: "legacy", Connected: true, Running: true, Selection: &current}, UIState{Theme: Theme{Plain: true}}, 100, 24)
+	header := frame.Lines[0]
+	if strings.Contains(header, "ultra") || !strings.Contains(header, "GPT-6.1 Sol · max") {
+		t.Fatal("legacy selection header", header)
+	}
+	if c.Models[0].Efforts[0] != "ultra" {
+		t.Fatal("picker mutated shared catalog")
+	}
+}
 
 func TestProviderPickerSupportedButUnavailableUsesClosedHints(t *testing.T) {
 	providers := []modelcatalog.Provider{

@@ -103,13 +103,21 @@ const (
 	ReasoningEffortHigh   ReasoningEffort = "high"
 	ReasoningEffortXHigh  ReasoningEffort = "xhigh"
 	ReasoningEffortMax    ReasoningEffort = "max"
-	// Ultra is the Codex catalog's top level for models such as GPT-6.1-Sol.
+	// Kept for reading legacy records; Unreal treats ultra as max.
 	ReasoningEffortUltra ReasoningEffort = "ultra"
 )
 
+// Normalize resolves legacy settings without rewriting immutable records.
+func (effort ReasoningEffort) Normalize() ReasoningEffort {
+	if effort == ReasoningEffortUltra {
+		return ReasoningEffortMax
+	}
+	return effort
+}
+
 func (effort ReasoningEffort) Valid() bool {
-	switch effort {
-	case ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh, ReasoningEffortXHigh, ReasoningEffortMax, ReasoningEffortUltra:
+	switch effort.Normalize() {
+	case ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh, ReasoningEffortXHigh, ReasoningEffortMax:
 		return true
 	default:
 		return false

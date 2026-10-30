@@ -30,7 +30,7 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig) subagent.RuntimeResolver 
 		}
 		choice := *active
 		if requested != nil {
-			choice = sessionstore.RuntimeSelection{Version: 1, Provider: requested.Provider, Model: requested.Model, Effort: requested.Effort}
+			choice = sessionstore.RuntimeSelection{Version: 1, Provider: requested.Provider, Model: requested.Model, Effort: requested.Effort.Normalize()}
 		}
 		backend, e := c.ProviderRuntime(choice.Provider)
 		if e != nil {

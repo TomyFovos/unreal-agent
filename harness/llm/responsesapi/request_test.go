@@ -404,22 +404,24 @@ func TestRequestBodyIsByteStableAcrossEncodings(t *testing.T) {
 }
 
 func TestRequestBodyEncodesMaxReasoningEffort(t *testing.T) {
-	body, err := requestBody(llm.Request{
-		Model: llm.Model{ID: "gpt-test", ReasoningEffort: llm.ReasoningEffortMax},
-	}, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var request struct {
-		Reasoning struct {
-			Effort string `json:"effort"`
-		} `json:"reasoning"`
-	}
-	if err := json.Unmarshal(body, &request); err != nil {
-		t.Fatal(err)
-	}
-	if request.Reasoning.Effort != "max" {
-		t.Fatalf("reasoning = %#v", request.Reasoning)
+	for _, effort := range []llm.ReasoningEffort{llm.ReasoningEffortMax, llm.ReasoningEffortUltra} {
+		body, err := requestBody(llm.Request{
+			Model: llm.Model{ID: "gpt-test", ReasoningEffort: effort},
+		}, "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var request struct {
+			Reasoning struct {
+				Effort string `json:"effort"`
+			} `json:"reasoning"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Reasoning.Effort != "max" {
+			t.Fatalf("reasoning = %#v", request.Reasoning)
+		}
 	}
 }
 

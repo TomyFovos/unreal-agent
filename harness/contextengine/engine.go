@@ -6,6 +6,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"slices"
+	"sort"
 	"sync"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -40,6 +41,19 @@ func (e *Engine) Configure(r Runtime, c Constraints, instructions bool) {
 }
 
 func (e *Engine) Add(u Unit, source string) string {
+	id, _ := e.add(u, source, false)
+	return id
+}
+
+// AddWithEligibility reports the result of the same public-data guard used by
+// Add. A replay builder can retain redacted placeholders without running the
+// potentially large message/argument through the guard a second time. Omitted
+// source units do not join a native replay group.
+func (e *Engine) AddWithEligibility(u Unit, source string) (string, bool) {
+	return e.add(u, source, true)
+}
+
+func (e *Engine) add(u Unit, source string, omitGroup bool) (string, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if u.Kind == UserMessage && u.Required {
@@ -50,9 +64,13 @@ func (e *Engine) Add(u Unit, source string) string {
 	}
 	u.ID = fmt.Sprintf("unit-%020d", len(e.order)+1)
 	public, ok := PublicItem(u.Item)
-	if !ok || u.Class == Omit {
+	eligible := ok && u.Class != Omit
+	if !eligible {
 		u.Class = Omit
 		u.Item = llm.Item{}
+		if omitGroup {
+			u.Group = ""
+		}
 	} else {
 		u.Item = public
 	}
@@ -62,7 +80,7 @@ func (e *Engine) Add(u Unit, source string) string {
 	}
 	e.order = append(e.order, u.ID)
 	e.sources[source] = append(e.sources[source], u.ID)
-	return u.ID
+	return u.ID, eligible
 }
 
 func (e *Engine) Observe(item sessionstore.Item, source string) {
@@ -144,10 +162,18 @@ func (e *Engine) State() State {
 }
 
 func (e *Engine) Units() []Unit {
+	return e.UnitsAfter("")
+}
+
+// UnitsAfter returns the ordered suffix without copying the preceding units.
+// Unit identities are monotonically assigned; projection changes never renumber
+// canonical replay units.
+func (e *Engine) UnitsAfter(after string) []Unit {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	result := make([]Unit, 0, len(e.order))
-	for _, id := range e.order {
+	start := sort.Search(len(e.order), func(i int) bool { return e.order[i] > after })
+	result := make([]Unit, 0, len(e.order)-start)
+	for _, id := range e.order[start:] {
 		u := e.units[id]
 		u.Item = clonePublicItem(u.Item)
 		result = append(result, u)

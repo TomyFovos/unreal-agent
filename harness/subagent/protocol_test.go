@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"strings"
 	"testing"
 	"time"
@@ -179,18 +181,16 @@ func TestChildHandshakeRejectsUnknownInstructionVersion(t *testing.T) {
 	}
 }
 
-// A lead's workers start no children of their own and never run at ultra.
-func TestValidateWorkersKeepsOneLevelWithoutUltra(t *testing.T) {
+// A lead's workers start no children of their own; old effort aliases still load.
+func TestValidateWorkersKeepsOneLevelAndReadsLegacyUltra(t *testing.T) {
 	runtime := func(effort string) jsontext.Value {
 		return jsontext.Value(`{"Provider":{"provider":"openai-codex","model":{"id":"gpt-6.1-sol"}},"ReasoningEffort":"` + effort + `"}`)
 	}
-	ok := map[string]Template{"worker-max": {Runtime: runtime("max")}, "worker-low": {Runtime: runtime("low")}}
+	ok := map[string]Template{"worker-max": {Runtime: runtime("max")}, "worker-low": {Runtime: runtime("low")}, "legacy": {Runtime: runtime("ultra"), Default: &RuntimeRequest{Provider: "openai-codex", Model: "gpt-6.1-sol", Effort: "ultra"}}}
 	if err := ValidateWorkers(ok); err != nil {
 		t.Fatal(err)
 	}
 	for name, bad := range map[string]map[string]Template{
-		"ultra runtime": {"w": {Runtime: runtime("ultra")}},
-		"ultra default": {"w": {Runtime: runtime("high"), Default: &RuntimeRequest{Provider: "openai-codex", Model: "gpt-6.1-sol", Effort: "ultra"}}},
 		"grandchildren": {"w": {Runtime: runtime("high"), Subagents: ok}},
 		"unreadable":    {"w": {Runtime: jsontext.Value(`{}`)}},
 	} {
@@ -205,5 +205,28 @@ func TestValidateWorkersKeepsOneLevelWithoutUltra(t *testing.T) {
 	plan.Request = "r"
 	if plan.Validate() != nil {
 		t.Fatal("approve rejected")
+	}
+}
+
+func TestLegacyChildRuntimeRequestPreservesIdentityAndProjectsMax(t *testing.T) {
+	var template Template
+	raw := `{"Runtime":{"Provider":{"provider":"openai-codex","model":{"id":"gpt-6.1-sol"}},"ReasoningEffort":"ultra"},"Default":{"provider":"openai-codex","model":"gpt-6.1-sol","effort":"ultra"}}`
+	if err := json.Unmarshal([]byte(raw), &template); err != nil {
+		t.Fatal(err)
+	}
+	selection := sessionstore.SelectionFromConfiguration(template.Runtime)
+	if template.Default == nil || template.Default.Effort.Normalize() != "max" || selection == nil || selection.Effort != "max" {
+		t.Fatal("legacy child effort", template.Default, selection)
+	}
+	encoded, err := json.Marshal(template.Default)
+	if err != nil || !strings.Contains(string(encoded), `"effort":"ultra"`) {
+		t.Fatal("rewrote immutable template default", string(encoded), err)
+	}
+	if err := ValidateWorkers(map[string]Template{"legacy": template}); err != nil {
+		t.Fatal(err)
+	}
+	var request RuntimeRequest
+	if err := json.Unmarshal([]byte(`{"effort":"ultra","unknown":true}`), &request, json.RejectUnknownMembers(true)); err == nil {
+		t.Fatal("normalization lost strict decoding")
 	}
 }

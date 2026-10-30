@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/tool/observed"
 	"io/fs"
+	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -220,6 +222,19 @@ func (m *Manager) run(j *job, p Plan) {
 				target := ChildID(p.ParentID, p.Handle)
 				payload, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(p.ParentID), Target: string(target), Handle: string(p.Handle), Kind: "message", Text: p.Text})
 				_, err = connection.send(ctx, inbox.Input{ID: inbox.ID("send:" + string(op.ID)), Kind: inbox.InputPeer, Payload: payload})
+				if err != nil && ctx.Err() == nil {
+					select {
+					case <-connection.done:
+						err = childEnded{p.Handle, m.closedChildStatus(ctx, p.Handle)}
+					case <-connection.ctx.Done():
+						err = childEnded{p.Handle, m.closedChildStatus(ctx, p.Handle)}
+					default:
+					}
+				}
+			}
+			var ended childEnded
+			if errors.As(err, &ended) {
+				state.TerminalResult, err = ended.Error(), nil
 			}
 		case "approve":
 			err = m.approve(ctx, p)
@@ -239,7 +254,11 @@ func (m *Manager) run(j *job, p Plan) {
 				err = fmt.Errorf("parent channel unavailable")
 			} else {
 				c := m.config.Child
-				payload, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(c.ChildID), Target: string(c.ParentID), Handle: string(c.OperationID), Kind: "message", Text: p.Text})
+				kind := "message"
+				if p.Progress {
+					kind = "progress"
+				}
+				payload, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(c.ChildID), Target: string(c.ParentID), Handle: string(c.OperationID), Kind: kind, Text: p.Text})
 				_, err = m.config.SendParent(ctx, inbox.Input{ID: inbox.ID("send:" + string(op.ID)), Kind: inbox.InputPeer, Payload: payload})
 			}
 		case "finish":
@@ -416,6 +435,15 @@ func (m *Manager) connection(ctx context.Context, id operation.ID) (*processChan
 	if _, err := m.ownedChild(id); err != nil {
 		return nil, err
 	}
+	view, err := m.config.Owner.Inspect(0, 1)
+	if err != nil {
+		return nil, err
+	}
+	for _, op := range view.Operations {
+		if op.ID == id && terminalStatus(op.Status) {
+			return nil, childEnded{id, op.Status}
+		}
+	}
 	for {
 		m.mu.Lock()
 		j := m.jobs[id]
@@ -427,6 +455,11 @@ func (m *Manager) connection(ctx context.Context, id operation.ID) (*processChan
 		closed := m.closed
 		m.mu.Unlock()
 		if p != nil {
+			select {
+			case <-p.done:
+				return nil, childEnded{id, m.closedChildStatus(ctx, id)}
+			default:
+			}
 			return p, nil
 		}
 		if closed {
@@ -435,9 +468,9 @@ func (m *Manager) connection(ctx context.Context, id operation.ID) (*processChan
 		if j != nil {
 			select {
 			case <-j.done:
-				return nil, fmt.Errorf("child is no longer running")
+				return nil, childEnded{id, m.closedChildStatus(ctx, id)}
 			case <-j.cancel:
-				return nil, fmt.Errorf("child canceled")
+				return nil, childEnded{id, operation.StatusCanceled}
 			default:
 			}
 		}
@@ -545,6 +578,13 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 	}
 	if done, err := collect(false); done || err != nil {
 		return finishStatus(handle), err
+	}
+	started := llm.ActivityRecord{Kind: "child_start", ID: string(j.operation.ID), StartedAt: time.Now().UTC(), Template: p.Template}
+	if selection := sessionstore.SelectionFromConfiguration(child.Runtime); selection != nil {
+		started.Provider, started.Model, started.Effort = selection.Provider, selection.Model, string(selection.Effort)
+	}
+	if err := m.config.Owner.RecordActivity(ctx, started); err != nil {
+		slog.Warn("record child startup", "error", err)
 	}
 	state.Handle, _ = json.Marshal(handle)
 	checkpoint, _ := operation.UpdateRemoteJob(j.operation, *state, operation.StatusAwaiting)

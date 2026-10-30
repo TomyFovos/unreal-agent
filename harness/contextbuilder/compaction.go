@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json/v2"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -43,6 +44,7 @@ func EnableCompaction(b Builder, config contextengine.Config, constraints contex
 		return nil, err
 	}
 	concrete.derived = map[string][]llm.Item{}
+	concrete.estimate = derivedEstimate{}
 	concrete.overrides = map[string][]llm.Item{}
 	concrete.outputLimits = map[string]int{}
 	concrete.pendingReceipts = map[string]llm.ToolResult{}
@@ -141,14 +143,19 @@ func (b *builder) sourceRef() contextengine.HistoryRef {
 }
 
 func (b *builder) addUnit(item llm.Item, kind contextengine.Kind, class contextengine.Class, required bool, group string, extra []llm.Item) string {
+	id, _ := b.addUnitChecked(item, kind, class, required, group, extra)
+	return id
+}
+
+func (b *builder) addUnitChecked(item llm.Item, kind contextengine.Kind, class contextengine.Class, required bool, group string, extra []llm.Item) (string, bool) {
 	if b.engine == nil {
-		return ""
+		return "", false
 	}
 	u := contextengine.Unit{Kind: kind, Class: class, Source: b.sourceRef(), Origin: b.historyProvider, Group: group, Item: item, Required: required}
-	id := b.engine.Add(u, sourceKey(b.source))
+	id, eligible := b.engine.AddWithEligibility(u, sourceKey(b.source))
 	b.lastUnit = id
 	b.native[id] = nativeReplay{origin: b.historyProvider, model: b.historyModel, providerID: item.ProviderID, extra: slices.Clone(extra)}
-	return id
+	return id, eligible
 }
 
 func (b *builder) contextResponse(response llm.Response) {
@@ -195,20 +202,27 @@ func (b *builder) contextResponse(response llm.Response) {
 			b.callGroups[v.CallID] = groupID
 			group.calls[v.CallID] = &continuationCall{}
 			group.chain = true
-			_, eligible := contextengine.PublicItem(item)
-			b.blockedCalls[v.CallID] = !eligible
 		default:
 			continue
 		}
-		if _, safe := contextengine.PublicItem(item); !safe {
+		id, safe := b.addUnitChecked(item, kind, contextengine.Keep, false, groupID, private)
+		if call, ok := item.Data.(llm.ToolCall); ok {
+			b.blockedCalls[call.CallID] = !safe
+		}
+		if !safe {
+			// The engine has already recorded the omitted source unit.
+			// Keep the same inert replay metadata as the previous guard path.
+			replay := b.native[id]
+			replay.extra = nil
+			b.native[id] = replay
 			// Preserve eligibility accounting without retaining the original body
 			// in the public index or adding an OMIT member to a native group.
-			b.addUnit(item, kind, contextengine.Omit, false, "", nil)
 			// Never send redacted arguments under the original native provider ID.
 			group.portable = true
 			item = llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "[Prior Unreal response content redacted; sensitive data omitted.]"}}
+			id = b.addUnit(item, kind, contextengine.Keep, false, groupID, private)
 		}
-		last = b.addUnit(item, kind, contextengine.Keep, false, groupID, private)
+		last = id
 		private = nil
 	}
 	if len(private) > 0 {
@@ -302,45 +316,48 @@ func (b *builder) deriveItems() []llm.Item {
 	items := []llm.Item{instructions}
 	items = append(items, b.summary...)
 	for _, u := range b.engine.Units() {
-		if u.ID <= b.viewThrough || u.Class == contextengine.Omit {
+		if u.ID <= b.viewThrough && !b.retained[u.ID] || u.Class == contextengine.Omit {
 			continue
 		}
-		if cached, ok := b.derived[u.ID]; ok {
-			items = append(items, cached...)
-			continue
-		}
-		replay := b.native[u.ID]
-		portable := replay.update || b.textOnly || replay.origin != b.provider || replay.model != "" && replay.model != b.request.Model.ID || b.portableBefore != "" && u.ID <= b.portableBefore
-		if g := b.continuations[u.Group]; g != nil {
-			portable = portable || g.portable
-		}
-		var rendered []llm.Item
-		if override, ok := b.overrides[u.ID]; ok {
-			rendered = slices.Clone(override)
-		} else if portable {
-			if !replay.only {
-				rendered = []llm.Item{contextengine.Portable(u)}
-			}
-		} else {
-			rendered = append(rendered, replay.extra...)
-			if !replay.only {
-				item := u.Item
-				item.ProviderID = replay.providerID
-				rendered = append(rendered, item)
-			}
-			rendered = append(rendered, replay.after...)
-		}
-		// Overrides preserve native result pairing, and become portable across models.
-		if portable && len(rendered) > 0 && len(b.overrides[u.ID]) > 0 {
-			rendered = PortableInput(rendered)
-		}
-		for i := range rendered {
-			rendered[i].Responses = &llm.ItemEncoding{}
-		}
-		b.derived[u.ID] = rendered
-		items = append(items, rendered...)
+		items = append(items, b.deriveUnit(u)...)
 	}
 	return items
+}
+
+func (b *builder) deriveUnit(u contextengine.Unit) []llm.Item {
+	if cached, ok := b.derived[u.ID]; ok {
+		return cached
+	}
+	replay := b.native[u.ID]
+	portable := replay.update || b.textOnly || replay.origin != b.provider || replay.model != "" && replay.model != b.request.Model.ID || b.portableBefore != "" && u.ID <= b.portableBefore
+	if g := b.continuations[u.Group]; g != nil {
+		portable = portable || g.portable
+	}
+	var rendered []llm.Item
+	if override, ok := b.overrides[u.ID]; ok {
+		rendered = slices.Clone(override)
+	} else if portable {
+		if !replay.only {
+			rendered = []llm.Item{contextengine.Portable(u)}
+		}
+	} else {
+		rendered = append(rendered, replay.extra...)
+		if !replay.only {
+			item := u.Item
+			item.ProviderID = replay.providerID
+			rendered = append(rendered, item)
+		}
+		rendered = append(rendered, replay.after...)
+	}
+	// Overrides preserve native result pairing, and become portable across models.
+	if portable && len(rendered) > 0 && len(b.overrides[u.ID]) > 0 {
+		rendered = PortableInput(rendered)
+	}
+	for i := range rendered {
+		rendered[i].Responses = &llm.ItemEncoding{}
+	}
+	b.derived[u.ID] = rendered
+	return rendered
 }
 
 func (b *builder) buildDerived() (Result, error) {
@@ -381,7 +398,7 @@ func (b *builder) buildDerived() (Result, error) {
 			d.Excluded++
 			continue
 		}
-		if u.ID <= b.viewThrough {
+		if u.ID <= b.viewThrough && !b.retained[u.ID] {
 			d.Omitted++
 			continue
 		}
@@ -408,7 +425,7 @@ func (b *builder) commitContext() {
 	}
 	if t, ok := b.source.Data.(session.Turn); ok {
 		b.turnBounds[t.ID] = b.lastUnit
-		b.turnEstimates[t.ID] = contextengine.Estimate(llm.Request{Model: b.request.Model, Tools: b.request.Tools, Input: b.deriveItems()})
+		b.turnEstimates[t.ID] = b.estimateRequest()
 	}
 }
 
@@ -450,8 +467,13 @@ func (b *builder) ApplyContext(r sessionstore.ContextRecord) {
 		}
 	case "summary":
 		b.viewThrough = r.Through
+		b.retained = make(map[string]bool, len(r.Retained))
+		for _, id := range r.Retained {
+			b.retained[id] = true
+		}
 		b.summary = []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: "Conversation summary:\n" + r.Text}, Responses: &llm.ItemEncoding{}}}
 		clear(b.derived)
+		b.estimate = derivedEstimate{}
 		b.lastInput = 0
 	case "state":
 		b.lastState = r.Text
@@ -459,6 +481,7 @@ func (b *builder) ApplyContext(r sessionstore.ContextRecord) {
 	case "runtime":
 		b.portableBefore = r.Through
 		clear(b.derived)
+		b.estimate = derivedEstimate{}
 		b.addUnit(llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: "Runtime changed to " + r.Provider + " / " + r.Model + "."}}, contextengine.UserMessage, contextengine.Keep, false, "", nil)
 	}
 }
@@ -479,6 +502,7 @@ func (b *builder) applyToolProjection(id string, originalItems []llm.Item, prune
 	}
 	b.overrides[id] = items
 	delete(b.derived, id)
+	b.estimate = derivedEstimate{}
 }
 
 // PrepareContext runs only on the Coordinator goroutine. Each view change is
@@ -588,7 +612,8 @@ func (b *builder) PrepareContext(ctx context.Context, adapter llm.Adapter, optio
 			return nil
 		}
 	}
-	// Keep about 16% of the window, extending backwards for required continuations.
+	// Keep about 16% of the window. Mandatory older native groups are retained
+	// separately, so one long-running tool does not pin all intervening history.
 	units := b.engine.Units()
 	window := b.contextRuntime.ContextWindow
 	if window <= 0 {
@@ -601,23 +626,12 @@ func (b *builder) PrepareContext(ctx context.Context, adapter llm.Adapter, optio
 		cut--
 		cost += contextengine.Estimate(b.derived[units[cut].ID])
 	}
-	for i, u := range units {
-		if u.ID > b.viewThrough && required[u.Group] {
-			cut = min(cut, i)
-		}
-	}
-	// A suffix starts at a response boundary, never between native call partners.
-	starts := map[string]int{}
-	for i, u := range units {
+	// Keep complete native groups, including any group crossing the suffix
+	// boundary, without retaining the unrelated history between its partners.
+	keptGroups := maps.Clone(required)
+	for _, u := range units[cut:] {
 		if u.Group != "" {
-			if _, ok := starts[u.Group]; !ok {
-				starts[u.Group] = i
-			}
-		}
-	}
-	for i := len(units) - 1; i >= cut; i-- {
-		if units[i].Group != "" {
-			cut = min(cut, starts[units[i].Group])
+			keptGroups[u.Group] = true
 		}
 	}
 
@@ -647,6 +661,11 @@ func (b *builder) PrepareContext(ctx context.Context, adapter llm.Adapter, optio
 		summaryText = "[Conversation summary redacted; sensitive data omitted.]"
 	}
 	record := sessionstore.ContextRecord{Kind: "summary", From: b.viewThrough, Through: units[cut-1].ID, Text: summaryText, Usage: &response.Usage, Provider: b.provider, Model: b.request.Model.ID}
+	for _, u := range units[:cut] {
+		if keptGroups[u.Group] && u.Class != contextengine.Omit {
+			record.Retained = append(record.Retained, u.ID)
+		}
+	}
 	if err := persist(record); err != nil {
 		return err
 	}

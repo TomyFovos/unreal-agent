@@ -46,7 +46,7 @@ type BuildConfig struct {
 	Resolver    credential.Resolver
 	HTTPClient  *http.Client
 	ClaudeAgent claudeagent.Config
-	// CodexRequestEffort resolves a selected Codex effort, such as ultra,
+	// CodexRequestEffort resolves a selected effort, including legacy ultra,
 	// to the one the backend accepts.
 	CodexRequestEffort func(ctx context.Context, model string, selected llm.ReasoningEffort) llm.ReasoningEffort
 }
@@ -322,6 +322,11 @@ type Error struct {
 	Code       string
 	Status     int
 	Diagnostic *responsesapi.FailureDiagnostic `json:",omitzero"`
+}
+
+// RetryableModelFailure applies to inference only, never execution receipts.
+func (e *Error) RetryableModelFailure() bool {
+	return e.Diagnostic != nil && e.Diagnostic.Safe().Retryable
 }
 
 func (e *Error) Error() string {

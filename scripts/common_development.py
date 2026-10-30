@@ -2,6 +2,7 @@
 """Install a common wrapper; native Unreal owns discovery, Host and execution."""
 
 import argparse
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -105,6 +106,20 @@ def agent_wrapper(directory):
             + shlex.quote(str(directory / "unreal-agent")) + ' "$@"\n').encode()
 
 
+def shell_path_script():
+    return b'''case ":${PATH-}:" in
+ *":$HOME/.local/bin:"*) ;;
+ *) PATH="$HOME/.local/bin${PATH:+:$PATH}" ;;
+esac
+export PATH
+ucd() {
+    local unreal_workspace
+    unreal_workspace="$("$HOME/.local/bin/unreal" --where "$@")" || return
+    builtin cd -- "$unreal_workspace"
+}
+'''
+
+
 def owned_legacy(home, value, previous=None):
     if daily.owned_unreal_command(home, value, [previous["BinaryDirectory"]] if previous else []):
         return True
@@ -205,7 +220,7 @@ def install(args, directory, meta):
         if previous is None or old_agent != agent_wrapper(Path(previous["BinaryDirectory"])):
             pilot.fail("common_command_conflict", "Existing unrelated unreal-agent command preserved.")
     profiles = files.shell_profiles(home)
-    shells = files.inspect_shell_paths({"home": home})
+    files.inspect_shell_paths({"home": home})
     directory_config = pilot.private_tree(home, ".config/" + NAMESPACE)
     with daily.locked(directory_config):
         route, decision = choices
@@ -236,13 +251,18 @@ def install(args, directory, meta):
             daily.replace_owned(settings_path(home), new_settings, old_settings, 0o600)
         else:
             files.publish_bytes(settings_path(home), new_settings)
-        if any(location == b"missing" for _, location in shells):
-            path_script = directory_config / "path.sh"
-            files.publish_bytes(path_script, b'case ":${PATH-}:" in\n *":$HOME/.local/bin:"*) ;;\n *) PATH="$HOME/.local/bin${PATH:+:$PATH}" ;;\nesac\nexport PATH\n')
-            block = ("# Unreal Agent common development PATH\n[ ! -r " + shlex.quote(str(path_script))
-                     + " ] || . " + shlex.quote(str(path_script)) + "\n").encode()
-            for profile in profiles:
-                files.append_profile(profile, block)
+        path_script = directory_config / "path.sh"
+        new_path_script = shell_path_script()
+        if os.path.lexists(path_script):
+            previous_path_script = files.read_owned(path_script, private=True)
+            if previous_path_script != new_path_script:
+                daily.replace_owned(path_script, new_path_script, previous_path_script, 0o600)
+        else:
+            files.publish_bytes(path_script, new_path_script)
+        block = ("# Unreal Agent common development PATH\n[ ! -r " + shlex.quote(str(path_script))
+                 + " ] || . " + shlex.quote(str(path_script)) + "\n").encode()
+        for profile in profiles:
+            files.append_profile(profile, block)
         if any(kind != b"owned" or location != b"present" for kind, location in files.inspect_shell_paths({"home": home})):
             pilot.fail("common_shell_path_unavailable", "Keep installed files. Open a fresh Bash; current aliases/functions cannot be removed by this installer. Use $HOME/.local/bin/unreal explicitly.")
         prune_versions(home, installed, prior_version)
@@ -420,6 +440,127 @@ def select_repo(settings, workspace, instance, *, explicit_config=None):
         return selected
 
 
+def discover_workspaces(home):
+    """Read existing workspace bindings; Session contents are never inspected."""
+    bindings = {}
+    for root in (home / ".config" / NAMESPACE / "repos").glob("r-*"):
+        for name in ("current.json", "repo.json"):
+            try:
+                value = pilot.decode(files.read_owned(root / name, private=True))
+                workspace = Path(value["Workspace"])
+                if not workspace.is_absolute():
+                    continue
+                bindings[root.name] = {"workspace": workspace.resolve(),
+                                       "instance": value.get("Instance", "default")}
+                break
+            except (OSError, ValueError, TypeError, KeyError, pilot.PilotError):
+                continue
+    return bindings
+
+
+def discover_sessions(home, bindings=None):
+    """Build the main Session inventory from names, mtimes and workspace metadata."""
+    if bindings is None:
+        bindings = discover_workspaces(home)
+    sessions = []
+    # Longer prefixes distinguish explicit instances from their default binding.
+    keys = sorted(bindings, key=len, reverse=True)
+    for state in (home / ".local/state" / NAMESPACE).glob("r-*"):
+        key = next((key for key in keys if state.name == key or state.name.startswith(key + "-")), None)
+        if key is None:
+            continue
+        binding = bindings[key]
+        base_match = re.match(r"r-[0-9a-f]{16}(?=-|$)", key)
+        base = base_match.group() if base_match else key
+        instance = state.name[len(base) + 1:] if state.name != base else "default"
+        current = bindings.get(base, binding)["instance"]
+        for path in (state / "sessions").glob("*.session.jsonl"):
+            name = path.name[:-len(".session.jsonl")]
+            if name.startswith("child-") or not re.fullmatch(r"[A-Za-z0-9-]+", name):
+                continue
+            try:
+                if not path.is_file() or path.is_symlink():
+                    continue
+                modified = path.stat().st_mtime
+            except OSError:
+                continue  # Sessions can disappear while another process lists them.
+            sessions.append({"name": name, "workspace": binding["workspace"],
+                             "instance": instance, "current": instance == current,
+                             "mtime": modified})
+    return sessions
+
+
+def choose_session(sessions, *, always_prompt=False):
+    # A workspace can retain the same name in an older provider instance. Its
+    # current instance wins; otherwise use the most recently updated copy.
+    unique = {}
+    for item in sorted(sessions, key=lambda item: item["mtime"], reverse=True):
+        key = (item["workspace"], item["name"])
+        previous = unique.get(key)
+        if previous is None or item["current"] and not previous["current"]:
+            unique[key] = item
+    choices = sorted(unique.values(), key=lambda item: (-item["mtime"], str(item["workspace"]), item["name"]))
+    if len(choices) == 1 and not always_prompt:
+        return choices[0]
+    print("Session を選んでください:", file=sys.stderr)
+    for number, item in enumerate(choices, 1):
+        when = datetime.fromtimestamp(item["mtime"]).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+        print(f"{number}. {item['name']}  {item['workspace']}  {when}", file=sys.stderr)
+    while True:
+        print("番号: ", end="", file=sys.stderr, flush=True)
+        try:
+            answer = input()
+        except EOFError:
+            pilot.fail("common_session_choice_required", "端末で Session の番号を選んでください。")
+        if answer.isdecimal() and 1 <= int(answer) <= len(choices):
+            return choices[int(answer) - 1]
+        print("一覧の番号を入力してください。", file=sys.stderr)
+
+
+def validate_discovered_workspace(workspace):
+    # Discovery changes where the launcher will run. Keep the existing Git
+    # override and private-directory checks at that destination as well.
+    previous = Path.cwd()
+    try:
+        os.chdir(workspace)
+        daily.git_root()
+    finally:
+        os.chdir(previous)
+
+
+def resolve_session(settings, args):
+    """Resolve a launch or --where without writing bindings or starting a Host."""
+    home = Path(settings["Home"])
+    where = getattr(args, "where", None)
+    name = where if where is not None else args.session
+    explicit = args.instance is not None or getattr(args, "config", None) is not None
+    if where is None and (explicit or args.workspace_info or args.acceptance_fixture):
+        return daily.git_root(), name or "default", args.instance
+    bindings = discover_workspaces(home)
+    cwd = Path.cwd().resolve()
+    local = [item["workspace"] for item in bindings.values()
+             if cwd == item["workspace"] or item["workspace"] in cwd.parents]
+    workspace = max(local, key=lambda path: len(path.parts)) if local else None
+    if workspace is not None and where is None:
+        validate_discovered_workspace(workspace)
+        return workspace, name or "default", args.instance
+    matches = discover_sessions(home, bindings)
+    if name is not None:
+        matches = [item for item in matches if item["name"] == name]
+    if where is not None and workspace is not None:
+        preferred = [item for item in matches if item["workspace"] == workspace]
+        if preferred:
+            matches = preferred
+    if matches:
+        chosen = choose_session(matches, always_prompt=name is None)
+        if where is None:
+            validate_discovered_workspace(chosen["workspace"])
+        return chosen["workspace"], chosen["name"], None if chosen["current"] else chosen["instance"]
+    if where is not None:
+        pilot.fail("common_session_not_found", f"Session が見つかりません: {where}")
+    return daily.git_root(), name or "default", args.instance
+
+
 def create_fixture():
     home = daily.home()
     base = pilot.private_tree(home, "unreal-agent-acceptance")
@@ -436,19 +577,22 @@ def launch(args, directory):
         print(files.read_owned(directory / "README.md").decode("utf-8")); return
     if args.acceptance_fixture:
         os.chdir(create_fixture())
-    workspace = daily.git_root()
     settings = read_settings(daily.home())
+    workspace, session, instance = resolve_session(settings, args)
+    if getattr(args, "where", None) is not None:
+        print(workspace)
+        return
     installed = Path(settings["BinaryDirectory"])
     # Installer and launcher share the settings lock; instances keep their histories.
     with daily.locked(settings_path(daily.home()).parent):
-        paths = select_repo(settings, workspace, args.instance, explicit_config=getattr(args, "config", None))
+        paths = select_repo(settings, workspace, instance, explicit_config=getattr(args, "config", None))
     if args.workspace_info:
         print("Workspace: " + str(workspace) + "\nConfig: " + str(paths["config"]) + "\nState: " + str(paths["state"]) + "\nSocket: " + str(paths["socket"]))
         return
     print("Unreal Agent - Quick Start\nEnter  メッセージ送信   /model  モデル変更\n/permissions  権限変更   Ctrl+D  detach\nFull Access は OS の隔離ではありません。", flush=True)
     env = dict(os.environ, XDG_CONFIG_HOME=str(paths["xdg"]))
     os.chdir(workspace)
-    os.execve(str(installed / "unreal"), command_for(settings, workspace, paths, args.session), env)
+    os.execve(str(installed / "unreal"), command_for(settings, workspace, paths, session), env)
 
 
 def main(argv=None):
@@ -468,7 +612,8 @@ def main(argv=None):
     install_args.add_argument("--claude-binary", default="")
     install_args.add_argument("--replace-pilot-launcher", action="store_true")
     launch_args = modes.add_parser("launch")
-    launch_args.add_argument("session", nargs="?", default="default")
+    launch_args.add_argument("session", nargs="?", default=None)
+    launch_args.add_argument("--where", metavar="NAME", help="Print the workspace of an existing main Session")
     launch_args.add_argument("--instance", default=None)
     launch_args.add_argument("--config", default=None)
     launch_args.add_argument("--readme", action="store_true")

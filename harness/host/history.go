@@ -91,6 +91,9 @@ func (s *Session) indexHistory() {
 				if d.Context != nil && d.Context.Usage != nil {
 					addUsage(*d.Context.Usage)
 				}
+				if d.Context != nil && d.Context.Conversation != nil && d.Context.Conversation.Usage != nil {
+					addUsage(*d.Context.Conversation.Usage)
+				}
 			}
 		case inbox.Input:
 			if d.Kind == inbox.InputExternal {

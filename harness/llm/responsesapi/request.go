@@ -47,7 +47,7 @@ func requestBody(request llm.Request, promptCacheKey string, extensions map[stri
 		if !request.Model.ReasoningEffort.Valid() {
 			return nil, fmt.Errorf("unsupported reasoning effort %q", request.Model.ReasoningEffort)
 		}
-		effort := openaiapi.ReasoningEffort(request.Model.ReasoningEffort)
+		effort := openaiapi.ReasoningEffort(request.Model.ReasoningEffort.Normalize())
 		summary := openaiapi.ReasoningSummaryAuto
 		params.Reasoning = &openaiapi.Reasoning{
 			Effort:  &effort,

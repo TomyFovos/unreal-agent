@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
-	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
@@ -38,8 +37,7 @@ type Template struct {
 	// Default is the runtime a start without one uses, instead of the
 	// parent's current selection.
 	Default *RuntimeRequest `json:",omitzero"`
-	// Subagents are the workers this child may start itself: one level, and
-	// never at ultra effort.
+	// Subagents are the workers this child may start itself: one level.
 	Subagents map[string]Template `json:",omitzero"`
 }
 type Plan struct {
@@ -53,6 +51,8 @@ type Plan struct {
 	Text          string                     `json:",omitzero"`
 	Result        *sessionstore.FinishResult `json:",omitzero"`
 	RuntimeBound  bool                       `json:",omitzero"`
+	// Progress marks a parent message that waits for the parent's next turn.
+	Progress bool `json:",omitzero"`
 	// Request and Allow answer a child's approval request.
 	Request string `json:",omitzero"`
 	Allow   bool   `json:",omitzero"`
@@ -230,7 +230,7 @@ func (c ChildConfig) Validate() error {
 }
 
 // ValidateWorkers checks the templates a child may start: workers that start
-// no children of their own, never at ultra effort.
+// no children of their own. Legacy efforts are read through their max alias.
 func ValidateWorkers(templates map[string]Template) error {
 	for name, t := range templates {
 		if name == "" || len(name) > 128 {
@@ -242,9 +242,6 @@ func ValidateWorkers(templates map[string]Template) error {
 		s := sessionstore.SelectionFromConfiguration(t.Runtime)
 		if s == nil {
 			return fmt.Errorf("worker template %q has no readable runtime", name)
-		}
-		if s.Effort == llm.ReasoningEffortUltra || t.Default != nil && t.Default.Effort == llm.ReasoningEffortUltra {
-			return fmt.Errorf("worker template %q cannot use ultra effort", name)
 		}
 	}
 	return nil

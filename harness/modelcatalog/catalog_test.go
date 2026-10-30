@@ -4,6 +4,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -42,25 +43,24 @@ func TestCodexCacheReadOnlyModelSpecificEfforts(t *testing.T) {
 	}
 }
 
-// GPT-6.1-Sol and its siblings offer "ultra"; it is a selectable effort.
-func TestCodexCacheKeepsUltraEffort(t *testing.T) {
+// Codex can advertise ultra, but Unreal only offers low through max.
+func TestCodexCacheOmitsUltraEffort(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "models_cache.json")
 	data := []byte(`{"models":[{"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","visibility":"list","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]}]}`)
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
 	c := ReadCodexCache(path)
-	if !c.Available || len(c.Models) != 1 || c.Models[0].UnsupportedEfforts || len(c.Models[0].Efforts) != 6 || !c.Models[0].AllowsEffort(llm.ReasoningEffortUltra) {
+	if !c.Available || len(c.Models) != 1 || c.Models[0].UnsupportedEfforts || !slices.Equal(c.Models[0].Efforts, []llm.ReasoningEffort{"low", "medium", "high", "xhigh", "max"}) || c.Models[0].AllowsEffort(llm.ReasoningEffortUltra) || !c.Models[0].AllowsEffort(llm.ReasoningEffortMax) {
 		t.Fatal(c)
 	}
 	if _, err := Configured(c.Models); err != nil {
-		t.Fatal("a six-effort model is not a valid configured catalog", err)
+		t.Fatal("filtered model is not a valid configured catalog", err)
 	}
 }
 
-// Codex never sends ultra: it sends the model's multi-agent effort, else max,
-// else the highest other level, else medium (codex-rs resolve_reasoning_effort).
-func TestRequestEffortResolvesUltraLikeCodex(t *testing.T) {
+// Legacy ultra uses max, ignoring Codex's multi-agent delegation metadata.
+func TestRequestEffortResolvesUltraToHighestSupported(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "models_cache.json")
 	data := []byte(`{"models":[{"slug":"gpt-6.1-sol","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}],"multi_agent_reasoning_effort":"xhigh"}]}`)
 	if err := os.WriteFile(path, data, 0600); err != nil {
@@ -76,11 +76,16 @@ func TestRequestEffortResolvesUltraLikeCodex(t *testing.T) {
 		selected llm.ReasoningEffort
 		want     llm.ReasoningEffort
 	}{
-		{c.Models[0], llm.ReasoningEffortUltra, llm.ReasoningEffortXHigh},
+		{c.Models[0], llm.ReasoningEffortUltra, llm.ReasoningEffortMax},
+		{c.Models[0], llm.ReasoningEffortMax, llm.ReasoningEffortMax},
 		{c.Models[0], llm.ReasoningEffortHigh, llm.ReasoningEffortHigh},
 		{Model{Efforts: efforts("low", "high", "max", "ultra")}, llm.ReasoningEffortUltra, llm.ReasoningEffortMax},
 		{Model{Efforts: efforts("low", "high", "ultra")}, llm.ReasoningEffortUltra, llm.ReasoningEffortHigh},
-		{Model{MultiAgentEffort: llm.ReasoningEffortUltra, Efforts: efforts("ultra")}, llm.ReasoningEffortUltra, llm.ReasoningEffortMedium},
+		{Model{Efforts: efforts("xhigh", "low", "ultra", "high")}, llm.ReasoningEffortUltra, llm.ReasoningEffortXHigh},
+		{Model{Efforts: efforts("high", "low")}, llm.ReasoningEffortMax, llm.ReasoningEffortHigh},
+		{Model{Efforts: efforts("medium", "low")}, llm.ReasoningEffortUltra, llm.ReasoningEffortMedium},
+		{Model{Efforts: efforts("low")}, llm.ReasoningEffortUltra, llm.ReasoningEffortLow},
+		{Model{}, llm.ReasoningEffortUltra, llm.ReasoningEffortMax},
 	} {
 		if got := tc.model.RequestEffort(tc.selected); got != tc.want {
 			t.Errorf("%v %s: got %s, want %s", tc.model.Efforts, tc.selected, got, tc.want)

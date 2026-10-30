@@ -187,7 +187,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		args = append(args, "--model", request.Model.ID)
 	}
 	if request.Model.ReasoningEffort.Valid() {
-		args = append(args, "--effort", string(request.Model.ReasoningEffort))
+		args = append(args, "--effort", string(request.Model.ReasoningEffort.Normalize()))
 	}
 	subagents := c.config.Subagents
 	if opt.Identity.SessionID == "" {
@@ -252,6 +252,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		}
 		cancel()
 		t.workers.Wait()
+		t.endNativeBashCalls()
 	})
 	defer finishProcess()
 	hooks := map[string]any{
@@ -308,6 +309,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		return llm.Response{}, startFailure(stderr.String(), &Error{Code: "subprocess_failure", Message: lastLine(stderr.String())})
 	}
 	if compact == nil {
+		t.recordTurnUsage(result)
 		// The result's usage sums every model call of the turn; the last
 		// message_start is the current context. Use the sum only without one.
 		if lastInput == nil && result.Usage != nil {

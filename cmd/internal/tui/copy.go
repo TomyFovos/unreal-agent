@@ -39,7 +39,9 @@ func walkCopyMessages(ctx context.Context, r Reader, id session.ID, through sess
 				emit(0, "You", publicUserText(data))
 			}
 			if data.Kind == inbox.InputPeer {
-				background = true
+				if peer, err := data.DecodePeerMessage(); err != nil || !quietPeerKind(peer.Kind) {
+					background = true
+				}
 			}
 		case sessionstore.ModelResponse:
 			if internal[data.TurnID] || publicAgentText(data) == "" {

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"slices"
 	"strings"
+
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 )
 
 // Configured validates operator-supplied metadata. It performs no discovery or
@@ -28,10 +30,13 @@ func Configured(models []Model) (Catalog, error) {
 		if m.DefaultEffort != "" && !slices.Contains(m.Efforts, m.DefaultEffort) {
 			return Catalog{}, errors.New("invalid configured default effort")
 		}
+		// These are capabilities, not saved selections: do not invent max when
+		// filtering an old catalog that advertises only lower levels and ultra.
+		m.Efforts = slices.DeleteFunc(slices.Clone(m.Efforts), func(e llm.ReasoningEffort) bool { return e == llm.ReasoningEffortUltra })
+		m.DefaultEffort = m.RequestEffort(m.DefaultEffort)
 		if m.Name == "" {
 			m.Name = m.ID
 		}
-		m.Efforts = slices.Clone(m.Efforts)
 		c.Models = append(c.Models, m)
 	}
 	c.Available, c.Problem = true, ""

@@ -333,6 +333,10 @@ func (c subagentCLI) control(ctx context.Context, action, handle string, request
 	if err != nil {
 		return err
 	}
+	if action == "send" && !child.running() {
+		fmt.Fprintln(c.out, subagent.EndedMessage(child.handle, child.status))
+		return nil
+	}
 	request.ParentID, request.ParentGeneration = c.parent, view.Generation
 	request.OperationID, request.ChildID = child.handle, child.child
 	request.InputID = inbox.ID("cli-" + action + "-" + uuid.New().String())

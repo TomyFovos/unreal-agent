@@ -28,6 +28,12 @@ type Reader interface {
 	Subscribe(context.Context, session.ID, sessionstore.Sequence, int, int) (host.Subscription, error)
 }
 
+// ObservationReader supplies one compact initial projection while preserving
+// the requested recent transcript. Explicit History calls still use Inspect.
+type ObservationReader interface {
+	Observe(context.Context, session.ID, int) (host.View, error)
+}
+
 // VersionReader avoids retransmitting an unchanged, fully observed stopped
 // Session while preserving periodic detection of a new Host generation.
 type VersionReader interface {

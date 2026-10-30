@@ -15,11 +15,13 @@ import (
 
 // RuntimeRequest contains no credentials, process flags or permission settings.
 // It is a request; the operator's registered resolver has final authority.
+// Keep legacy aliases intact here: templates enter immutable Session identity.
 type RuntimeRequest struct {
 	Provider string              `json:"provider"`
 	Model    string              `json:"model"`
 	Effort   llm.ReasoningEffort `json:"effort"`
 }
+
 type RuntimeError struct{ Code string }
 
 func (e *RuntimeError) Error() string { return "child runtime: " + e.Code }
@@ -52,7 +54,7 @@ func StartChild(ctx context.Context, owner *host.Session, generation string, inp
 
 		if requested != nil {
 			s := sessionstore.SelectionFromConfiguration(plan.Configuration.Runtime)
-			if s == nil || s.Provider != requested.Provider || s.Model != requested.Model || s.Effort != requested.Effort {
+			if s == nil || s.Provider != requested.Provider || s.Model != requested.Model || s.Effort != requested.Effort.Normalize() {
 				return host.Receipt{}, host.ErrConflict
 			}
 		}

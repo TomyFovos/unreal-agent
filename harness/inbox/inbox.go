@@ -119,6 +119,7 @@ func (input Input) DecodeControlMessage() (ControlMessage, error) {
 		if !settings.ReasoningEffort.Valid() {
 			return ControlMessage{}, fmt.Errorf("unsupported reasoning effort %q", settings.ReasoningEffort)
 		}
+		settings.ReasoningEffort = settings.ReasoningEffort.Normalize()
 		request.Parameters = settings
 	default:
 		return ControlMessage{}, fmt.Errorf("unsupported control mode %q", request.Mode)

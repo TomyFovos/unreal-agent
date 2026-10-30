@@ -119,6 +119,27 @@ func TestHistoryReceiptsAcrossPageBoundary(t *testing.T) {
 	}
 }
 
+func TestHistoryProgressCountsAsReport(t *testing.T) {
+	for _, kind := range []string{"message", "progress"} {
+		t.Run(kind, func(t *testing.T) {
+			s := &Session{items: []sessionstore.Item{{Sequence: 1, Kind: sessionstore.ItemInput, Data: inbox.Input{
+				ID: "report", Kind: inbox.InputPeer,
+				Payload: []byte(fmt.Sprintf(`{"Version":1,"Sender":"child","Target":"s","Handle":"child-op","Kind":%q,"Text":"working"}`, kind)),
+			}}}}
+			// WorkPrefix describes the folded run crossing a page boundary.
+			s.items = append(s.items, sessionstore.Item{Sequence: 2, Kind: sessionstore.ItemTurn, Data: session.Turn{ID: "t", Type: session.TurnRegular}})
+			view, err := s.InspectBefore(0, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			work := view.History.WorkPrefix
+			if !view.History.Background || work == nil || work.Entries != 1 || len(work.Reports) != 1 || work.Reports[0] != "child" {
+				t.Fatalf("progress missing from background reports: %+v", view.History)
+			}
+		})
+	}
+}
+
 func TestHistoryPrefixWorkAndAttentionBeyondTail(t *testing.T) {
 	s := &Session{}
 	add := func(kind sessionstore.ItemKind, data any) {

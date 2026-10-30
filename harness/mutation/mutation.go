@@ -10,6 +10,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/internal/secretguard"
 	"io"
 	"os"
 	"path/filepath"
@@ -165,6 +166,12 @@ func (s *Service) Root() string { return s.root }
 // StateDirectory is the private shared lock and receipt directory, not a credential.
 func (s *Service) StateDirectory() string { return s.state }
 func (s *Service) Path(path string) (string, error) {
+	return s.path(path, true)
+}
+
+// Reads use the execution policy's roots, just as a read-only shell command
+// does. Workspace containment remains a mutation constraint.
+func (s *Service) path(path string, workspace bool) (string, error) {
 	if path == "" || strings.IndexByte(path, 0) >= 0 {
 		return "", diagnosticError{ReasonInvalidRequest}
 	}
@@ -181,12 +188,15 @@ func (s *Service) Path(path string) (string, error) {
 		}
 	}
 	rel, err := filepath.Rel(s.root, path)
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if workspace && (err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
 		return "", diagnosticError{ReasonWorkspaceBoundary}
 	}
 	stateRel, err := filepath.Rel(s.state, path)
 	if err == nil && stateRel != ".." && !strings.HasPrefix(stateRel, ".."+string(filepath.Separator)) {
 		return "", diagnosticError{ReasonInternalState}
+	}
+	if !workspace && secretguard.CredentialPath(path) {
+		return "", &permission.Error{Code: permission.Denied, Capability: "filesystem", Reason: "provider credential files are excluded"}
 	}
 	return path, nil
 }
@@ -201,7 +211,7 @@ func (s *Service) SnapshotForMutation(ctx context.Context, path string) (Snapsho
 }
 
 func (s *Service) snapshot(ctx context.Context, path string, write bool) (Snapshot, error) {
-	canonical, err := s.Path(path)
+	canonical, err := s.path(path, write)
 	if err != nil {
 		return Snapshot{}, err
 	}

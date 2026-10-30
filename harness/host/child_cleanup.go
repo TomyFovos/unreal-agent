@@ -69,7 +69,18 @@ func (h *Host) reconcileStoppedSessions(ctx context.Context, owner *Session) err
 		if err != nil {
 			return err
 		}
-		err = reconcileStoppedChildren(ctx, store, info.ID, owner.runtime.InterruptedInput)
+		// Most stopped children have no children of their own. Decide that
+		// from Operation metadata without decoding or restoring old responses.
+		ops, scanErr := store.RecoveryOperations(ctx, info.ID)
+		err = scanErr
+		if err == nil {
+			for _, op := range ops {
+				if unfinishedChild(op) {
+					err = reconcileStoppedChildren(ctx, store, info.ID, owner.runtime.InterruptedInput)
+					break
+				}
+			}
+		}
 		err = errors.Join(err, lock.Close())
 		if err != nil {
 			return err

@@ -102,6 +102,14 @@ ratios and `/analyze` totals continue to use the summed usage of those calls.
   finishes. If a recorded `subagent wait` or `subagent show` result already
   contains that child's final report, Unreal suppresses its notice. Unread
   completions, child messages and approval requests keep their existing paths.
+- **Child progress:** children send intermediate updates with
+  `SendParent {"text":"...","progress":true}`. These are recorded as
+  `progress` peer messages and count as reports in the TUI, but do not start a
+  parent model call or interrupt idle compaction. The updates join the context
+  when a question, completion or user message next wakes the parent. Questions
+  and requests needing a decision omit `progress` (or set it to `false`) to
+  wake the parent as before. The `subagent send` command from Claude to a child
+  keeps its existing behavior.
 - **Stopping:** `/stop main` ends the model call and its own tools, clears its
   progress/pulse, and waits for the next user message. Children continue.
   Subscriber eviction drains queues without waiting while holding the Session
@@ -169,13 +177,15 @@ UNREAL_LIVE_CLAUDE=1 go test ./cmd/unreal-agent -run 'TestLiveClaude' -v
 
 When Codex is registered, every Session gets these child templates:
 
-- `lead`: gpt-6.1-sol at ultra effort. It may start workers itself. As in
-  Codex, ultra is never sent as such: requests carry the model's
-  `multi_agent_reasoning_effort` from the Codex catalog (xhigh for
-  gpt-6.1-sol), and the delegation comes from the lead's prompt and workers.
+- `lead`: gpt-6.1-sol at max effort. It may start workers itself. Requests
+  carry max; delegation comes from the lead's prompt and workers.
 - `worker-low`, `worker-medium`, `worker-high`, `worker-xhigh`, `worker-max`:
-  gpt-6.1-sol at that effort. Workers start nobody, and no worker template runs
-  at ultra, so the lead cannot start an ultra child.
+  gpt-6.1-sol at that effort. Workers start nobody.
+
+Unreal does not offer ultra, even when the Codex catalog includes it. Existing
+Session and child settings using ultra are read and displayed as max. Requests
+use max, or the model's highest supported effort when max is unavailable;
+Codex's `multi_agent_reasoning_effort` does not determine this value.
 
 Claude has no Unreal tools, so it drives children with the Host's own command
 through Bash, without MCP or a mod. Claude Code gets `UNREAL_AGENT_SOCKET` and

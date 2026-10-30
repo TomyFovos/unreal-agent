@@ -61,15 +61,35 @@ Docker Sandboxes の Codex（ホストの OAuth）を使う場合は、最後に
 更新後に起動すると、動いていた Host を新しい版で起動し直し、Session と設定はそのまま引き継ぎます。
 インストール時には今回の版と直前の版を残して古い版を削除し、削除した版と解放容量を1行で表示します。
 実行中のプロセスが使う版も残します。キットの展開先は `/tmp` の一時ディレクトリです。
+インストーラーは `~/.local/bin/path.sh` も用意します。インストール後に開いた新しいシェルでは
+`ucd NAME` で該当する作業フォルダへ移動できます。
 
 ## 3. 起動
 
 作業したいフォルダで実行します（引数は Session 名）。Git の作業ツリーの中ならその最上位、
-それ以外ならそのフォルダが作業範囲になります（Codex と同じ）。
+それ以外ならそのフォルダが作業範囲になります（Codex と同じ）。この既存 workspace 内の Session は
+従来どおり優先されます。
 
 ```bash
 cd /path/to/your/repo
 "$HOME/.local/bin/unreal" development
+```
+
+workspace の外からも、Session 名で既存の Session を検索して起動できます。
+同じ名前の Session が複数あるときは番号付きで候補が表示され、選択して再開します。
+
+```bash
+unreal development
+```
+
+外から引数なしで起動すると、既存 Session が新しい順に一覧表示されます。一覧には Session 名、
+workspace、最終使用時刻が表示されます。`unreal --where NAME` は該当 Session の workspace パスだけを出力します。
+`ucd NAME` は Session を検索して、その workspace へシェルの作業ディレクトリを移します。
+
+```bash
+unreal
+unreal --where development
+ucd development
 ```
 
 ## 主な操作
@@ -86,7 +106,7 @@ cd /path/to/your/repo
 | Ctrl+D | 抜ける（Session は動き続けます） |
 
 Claude に「Codex に調べさせて」「実装統括に実装させて」と頼むと、GPT の作業者や
-実装統括（gpt-6.1-sol ultra）をサブエージェントとして起動します。
+実装統括（gpt-6.1-sol max）をサブエージェントとして起動します。
 子の承認は親のエージェントが行います。
 
 ログイン後は `/model refresh`、または `/model` で使えない側を選ぶと再検出します。

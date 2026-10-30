@@ -8,6 +8,27 @@ import (
 	"testing"
 )
 
+func TestLegacyUltraSelectionDisplaysMax(t *testing.T) {
+	base := jsontext.Value(`{"Provider":{"provider":"openai-codex","model":{"id":"gpt-6.1-sol"}},"ReasoningEffort":"ultra"}`)
+	for _, raw := range []jsontext.Value{base, jsontext.Value(`{"Runtime":` + string(base) + `}`)} {
+		s := SelectionFromConfiguration(raw)
+		if s == nil || s.Effort != llm.ReasoningEffortMax {
+			t.Fatal("legacy configuration projection", s)
+		}
+	}
+	var s RuntimeSelection
+	if err := json.Unmarshal([]byte(`{"Version":1,"Provider":"openai-codex","Model":"gpt-6.1-sol","Effort":"ultra"}`), &s); err != nil || s.Validate() != nil || s.Effort != llm.ReasoningEffortMax {
+		t.Fatal("legacy selection", s, err)
+	}
+	encoded, err := json.Marshal(s)
+	if err != nil || strings.Contains(string(encoded), "ultra") || !strings.Contains(string(encoded), `"Effort":"max"`) {
+		t.Fatal("displayed selection", string(encoded), err)
+	}
+	if err := json.Unmarshal([]byte(`{"Effort":"ultra","unknown":true}`), &s, json.RejectUnknownMembers(true)); err == nil {
+		t.Fatal("normalization lost strict decoding")
+	}
+}
+
 func TestNoEffortRuntimeSelectionIsLimitedToClaude(t *testing.T) {
 	for _, provider := range []string{"claude-code", "openai-codex", "openai", "ollama", "openrouter", "fireworks"} {
 		s := RuntimeSelection{Version: 1, Provider: provider, Model: "configured-model"}

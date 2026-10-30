@@ -103,6 +103,13 @@ func (h ExtensionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		out.Error = "invalid_request"
 	} else {
 		switch q.Action {
+		case "observe":
+			v, e := (ParentReader{Host: h.Host, ParentID: q.ParentID, Directory: h.Directory, cache: h.cache}).Observe(r.Context(), q.ID, q.Limit)
+			if e != nil {
+				err = e
+			} else {
+				out.View = &v
+			}
 		case "inspect":
 			v, e := (ParentReader{Host: h.Host, ParentID: q.ParentID, Directory: h.Directory, cache: h.cache}).Inspect(r.Context(), q.ID, q.After, q.Limit)
 			if e != nil {
@@ -191,6 +198,26 @@ func (r Remote) Inspect(ctx context.Context, id session.ID, after sessionstore.S
 		return r.Parent.Inspect(ctx, id, after, limit)
 	}
 	reply, err := r.exchange(ctx, extensionRequest{Action: "inspect", ParentID: r.ParentID, ID: id, After: after, Limit: limit})
+	if err != nil {
+		return host.View{}, err
+	}
+	if reply.View == nil || reply.View.Session.Session.ID != id {
+		return host.View{}, &ExtensionError{Code: "invalid_reply"}
+	}
+	return *reply.View, nil
+}
+
+func (r Remote) Observe(ctx context.Context, id session.ID, recent int) (host.View, error) {
+	if id != r.ParentID {
+		return host.View{}, ErrUnavailable
+	}
+	reply, err := r.exchange(ctx, extensionRequest{Action: "observe", ParentID: r.ParentID, ID: id, Limit: recent})
+	var extension *ExtensionError
+	if errors.As(err, &extension) && (extension.Code == "unsupported_action" || extension.Code == "reply_too_large") {
+		// Older Hosts and observations exceeding the transport's existing frame
+		// size retain the ordinary paged history protocol.
+		return host.View{}, ErrUnavailable
+	}
 	if err != nil {
 		return host.View{}, err
 	}

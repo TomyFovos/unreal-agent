@@ -28,7 +28,7 @@ import (
 )
 
 // fakeGPT plays the lead and its worker on a fake Codex backend: the lead
-// runs a command itself, tries to start an ultra lead (refused), starts a
+// runs a command itself, tries to start another lead (refused), starts a
 // worker, approves the worker's command, and finishes after the worker.
 type fakeGPT struct {
 	t                         *testing.T
@@ -115,7 +115,7 @@ func (g *fakeGPT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case g.leadRuns && !calls["lead-bash"]:
 			output = call("lead-bash", "Bash", map[string]string{"command": "printf lead > " + g.leadMarker})
 		case !calls["lead-start-lead"]:
-			output = call("lead-start-lead", "SubagentStart", map[string]string{"template": "lead", "task": "another ultra lead"})
+			output = call("lead-start-lead", "SubagentStart", map[string]string{"template": "lead", "task": "another lead"})
 		case !calls["lead-start-worker"]:
 			g.refusedLead = strings.Contains(all, "Unknown child template")
 			output = call("lead-start-worker", "SubagentStart", map[string]string{"template": "worker-high", "task": "printf worker > " + g.workerMarker})
@@ -214,16 +214,15 @@ func (h *gptHost) check(t *testing.T) {
 	}
 	h.gpt.mu.Lock()
 	defer h.gpt.mu.Unlock()
-	// The lead is selected at ultra; like Codex, the request carries the
-	// model's multi-agent effort, since the backend rejects ultra.
-	if len(h.gpt.leadEfforts) == 0 || slices.ContainsFunc(h.gpt.leadEfforts, func(e string) bool { return e != "xhigh" }) {
+	// The lead sends max even when Codex advertises a lower multi-agent effort.
+	if len(h.gpt.leadEfforts) == 0 || slices.ContainsFunc(h.gpt.leadEfforts, func(e string) bool { return e != "max" }) {
 		t.Fatal("lead efforts", h.gpt.leadEfforts)
 	}
 	if len(h.gpt.workerEffort) == 0 || slices.ContainsFunc(h.gpt.workerEffort, func(e string) bool { return e != "high" }) {
 		t.Fatal("worker efforts", h.gpt.workerEffort)
 	}
 	if !h.gpt.refusedLead {
-		t.Fatal("the lead could start another ultra lead")
+		t.Fatal("the lead could start another lead")
 	}
 	view, err := h.client.Inspect(t.Context(), "designer", 0, 1)
 	if err != nil || len(view.Permissions.Pending) != 0 {
@@ -231,9 +230,9 @@ func (h *gptHost) check(t *testing.T) {
 	}
 }
 
-// The subagent command drives GPT: the lead runs at ultra, asks the
+// The subagent command drives GPT: the lead runs at max, asks the
 // designer's Session (not the human) to approve its own command, starts a
-// worker that is never ultra, approves the worker itself, and reports.
+// worker at high, approves the worker itself, and reports.
 func TestSubagentCommandRunsLeadAndWorkers(t *testing.T) {
 	h := startGPTHost(t, true)
 	h.designer(t)
@@ -272,7 +271,7 @@ func TestSubagentCommandRunsLeadAndWorkers(t *testing.T) {
 	if !strings.Contains(report, "result: completed") || !strings.Contains(report, "  - worker") {
 		t.Fatal(report)
 	}
-	if list := cli("", "list"); !strings.Contains(list, handle[1]+"  lead (gpt-6.1-sol ultra)  completed  lead done") {
+	if list := cli("", "list"); !strings.Contains(list, handle[1]+"  lead (gpt-6.1-sol max)  completed  lead done") {
 		t.Fatal(list)
 	}
 	// The designer need not wait: the lead's end arrives as a message that
@@ -331,7 +330,7 @@ func TestClaudeDrivesGPTThroughBash(t *testing.T) {
 	if err != nil {
 		t.Fatal("Claude did not finish the delegated run", err)
 	}
-	if !strings.Contains(history, "summary: lead done") || !strings.Contains(history, "lead (gpt-6.1-sol ultra)") {
+	if !strings.Contains(history, "summary: lead done") || !strings.Contains(history, "lead (gpt-6.1-sol max)") {
 		v, _ := h.client.Inspect(t.Context(), "designer", 0, 1)
 		for _, op := range v.Operations {
 			t.Logf("op %s %s %s %.400s", op.ToolName, op.ID, op.Status, op.State)

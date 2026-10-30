@@ -28,30 +28,23 @@ type Model struct {
 	// No verified effort metadata: omit the optional request feature rather
 	// than claiming support or inventing an effort value.
 	EffortUnknown bool `json:",omitzero"`
-	// MultiAgentEffort is what Codex sends when ultra is selected.
+	// MultiAgentEffort is Codex delegation metadata, unused by Unreal.
 	MultiAgentEffort llm.ReasoningEffort `json:",omitzero"`
 }
 
-// RequestEffort is the effort a Codex request carries for the selected one.
-// Codex never sends ultra: ultra selects automatic delegation and sends the
-// model's multi-agent effort, else max, else the highest other level, else
-// medium (codex-rs resolve_reasoning_effort).
+// RequestEffort maps legacy ultra to max, or the model's highest supported
+// effort. Normalized legacy selections may already contain max.
 func (m Model) RequestEffort(selected llm.ReasoningEffort) llm.ReasoningEffort {
-	if selected != llm.ReasoningEffortUltra {
+	selected = selected.Normalize()
+	if selected != llm.ReasoningEffortMax || len(m.Efforts) == 0 {
 		return selected
 	}
-	if m.MultiAgentEffort.Valid() && m.MultiAgentEffort != llm.ReasoningEffortUltra {
-		return m.MultiAgentEffort
-	}
-	if slices.Contains(m.Efforts, llm.ReasoningEffortMax) {
-		return llm.ReasoningEffortMax
-	}
-	for i := len(m.Efforts) - 1; i >= 0; i-- {
-		if m.Efforts[i] != llm.ReasoningEffortUltra {
-			return m.Efforts[i]
+	for _, effort := range []llm.ReasoningEffort{llm.ReasoningEffortMax, llm.ReasoningEffortXHigh, llm.ReasoningEffortHigh, llm.ReasoningEffortMedium, llm.ReasoningEffortLow} {
+		if slices.Contains(m.Efforts, effort) {
+			return effort
 		}
 	}
-	return llm.ReasoningEffortMedium
+	return selected
 }
 
 type Catalog struct {
@@ -141,6 +134,9 @@ func (m Model) Matches(id string) bool {
 }
 
 func (m Model) AllowsEffort(e llm.ReasoningEffort) bool {
+	if e == llm.ReasoningEffortUltra {
+		return false
+	}
 	if m.EffortUnknown {
 		return e == ""
 	}
@@ -240,6 +236,9 @@ func ReadCodexCache(path string) Catalog {
 		}
 		efforts := map[llm.ReasoningEffort]bool{}
 		for _, level := range m.Levels {
+			if level.Effort == llm.ReasoningEffortUltra {
+				continue
+			}
 			if !level.Effort.Valid() {
 				model.UnsupportedEfforts = true
 			}
@@ -249,6 +248,7 @@ func ReadCodexCache(path string) Catalog {
 				efforts[level.Effort] = true
 			}
 		}
+		model.DefaultEffort = model.RequestEffort(model.DefaultEffort)
 		if len(model.Efforts) > 0 {
 			c.Models = append(c.Models, model)
 		}

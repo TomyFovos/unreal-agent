@@ -45,10 +45,22 @@ type frame struct {
 }
 
 type usage struct {
-	InputTokens              int64 `json:"input_tokens"`
-	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
-	OutputTokens             int64 `json:"output_tokens"`
+	InputTokens              int64  `json:"input_tokens"`
+	CacheCreationInputTokens int64  `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64  `json:"cache_read_input_tokens"`
+	OutputTokens             int64  `json:"output_tokens"`
+	ReasoningTokens          *int64 `json:"reasoning_tokens"`
+	ThinkingTokens           *int64 `json:"thinking_tokens"`
+}
+
+func (u usage) reasoningTokens() (int64, bool) {
+	if u.ReasoningTokens != nil {
+		return *u.ReasoningTokens, true
+	}
+	if u.ThinkingTokens != nil {
+		return *u.ThinkingTokens, true
+	}
+	return 0, false
 }
 
 func (u usage) inputTokens() int64 {
