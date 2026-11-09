@@ -67,6 +67,9 @@ func analyze(ctx context.Context, language, sourceQuery string, source []byte, t
 		return analysis{}, err
 	}
 	defer tree.Close()
+	if stalledQuantifier(sourceQuery) {
+		return analysis{}, Failure("unsupported_quantifier")
+	}
 	query, queryErr := ts.NewQuery(grammar, sourceQuery)
 	if queryErr != nil {
 		return analysis{}, Failure("invalid_query")
