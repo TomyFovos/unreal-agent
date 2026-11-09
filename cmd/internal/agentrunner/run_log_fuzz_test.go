@@ -190,9 +190,10 @@ func FuzzRunLogMatchesExecution(f *testing.F) {
 					t.Fatal("resuming changed existing history")
 				}
 				delta := nextHistory[len(history):]
-				if run == 0 && mode == 3 {
-					// A failed client is a projection: the owner may commit
-					// more history before detach. Its log must be a prefix.
+				if run == 0 && (mode == 2 || mode == 3) {
+					// A failed or canceled client is a projection: the owner may
+					// commit more history (such as the next turn it had begun)
+					// before detach. Its log must be a prefix.
 					if len(items) > len(delta) || !reflect.DeepEqual(delta[:len(items)], items) {
 						t.Fatal("failed client log is not a canonical prefix")
 					}
