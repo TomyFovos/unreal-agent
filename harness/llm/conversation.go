@@ -9,6 +9,7 @@ type ConversationRecord struct {
 	InputTokens     int64
 	InputKnown      bool
 	BeforeTokens    int64     `json:",omitzero"`
+	AfterTokens     int64     `json:",omitzero"` // summary size; InputTokens is the actual model input
 	Compacted       bool      `json:",omitzero"`
 	Interrupted     bool      `json:",omitzero"`
 	Error           string    `json:",omitzero"`

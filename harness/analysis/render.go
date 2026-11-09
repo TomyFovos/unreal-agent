@@ -130,7 +130,7 @@ func Lines(r Report, view string, ascii bool) []string {
 			}
 		}
 	case "context":
-		out = append(out, TelemetryLines(r, "claude_compact")...)
+		out = append(out, TelemetryLines(r, "claude_compact", "context_redaction")...)
 		out = append(out, cacheLines(r)...)
 		out = append(out, compactionLines(r)...)
 		if d := r.ContextPackage; d != nil {

@@ -24,7 +24,11 @@ func registeredProviders(initial agentrunner.RuntimeIdentity, extra map[string]a
 		}
 		add(p)
 	}
-	return provider.New(provider.Defaults(catalog)...)
+	descriptors := provider.Defaults(catalog)
+	if initial.Provider.Provider == loginProvider {
+		descriptors = append(descriptors, loginDescriptor())
+	}
+	return provider.New(descriptors...)
 }
 
 func (h modelUI) catalog(ctx context.Context, id string, refresh bool) (modelcatalog.Catalog, error) {
@@ -62,6 +66,9 @@ func (h modelUI) providers(ctx context.Context) []modelcatalog.Provider {
 	sort.Strings(ids)
 	var out []modelcatalog.Provider
 	for _, id := range ids {
+		if id == loginProvider {
+			continue
+		}
 		if _, err := h.runtime.ProviderRuntime(id); err != nil {
 			for _, p := range supported {
 				if p.ID == id {

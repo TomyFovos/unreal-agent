@@ -40,7 +40,7 @@ import (
 
 // Build and invoke the real CLI: serve -> RemoteJob -> child --stdio.
 // Only the provider HTTP response is a fixture; processes/IPC/stores are real.
-func TestCLIChildInheritsBoundInstructions(t *testing.T) {
+func TestCLIChildDiscoversCurrentInstructions(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "unreal-agent")
 	build := exec.CommandContext(t.Context(), "go", "build", "-race", "-o", binary, ".")
 	if data, err := build.CombinedOutput(); err != nil {
@@ -59,7 +59,7 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 				t.Fatal(err)
 			}
 			store := filepath.Join(workspace, "sessions")
-			const ruleA = "PROJECT_REVISION_A"
+			const ruleA, ruleB = "PROJECT_REVISION_A", "PROJECT_REVISION_B"
 			const token, account = "child-external-token-sensitive", "child-external-account-sensitive"
 			const managedKey = "child-managed-api-key-sensitive"
 			authPath := filepath.Join(t.TempDir(), "auth file.json")
@@ -101,14 +101,11 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 				case "child":
 					calls := childCalls.Add(1)
 					body := string(data)
-					if strings.Contains(body, "PARENT_CONVERSATION_ONLY") || strings.Contains(body, "PROJECT_REVISION_B") {
-						t.Error("child copied parent conversation or rediscovered disk")
+					if strings.Contains(body, "PARENT_CONVERSATION_ONLY") || strings.Contains(body, ruleA) {
+						t.Error("child copied parent conversation or stale project instructions")
 					}
-					if strings.Contains(body, ruleA) != present {
-						t.Error("child context lost bound snapshot")
-					}
-					if strings.Count(body, ruleA) > 1 {
-						t.Error("instructions duplicated in delegated task")
+					if strings.Count(body, ruleB) != 1 {
+						t.Error("child context must include current workspace instructions exactly once")
 					}
 					output = []any{map[string]any{"type": "function_call", "id": "finish", "call_id": "finish", "name": "Finish", "arguments": `{"status":"completed","summary":"CLI child finished","changedFiles":[],"tests":["fixture"],"blockers":[]}`}}
 					if scenario.control != "" && calls == 1 {
@@ -233,8 +230,13 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 			if view.ProjectInstructions == nil || *view.ProjectInstructions != want.Metadata() {
 				t.Fatal("parent binding missing")
 			}
+			parentSnapshot := want
 			// Change disk after parent creation and before the actual child spawn.
-			if err = os.WriteFile(filepath.Join(workspace, "AGENTS.md"), []byte("PROJECT_REVISION_B"), 0600); err != nil {
+			if err = os.WriteFile(filepath.Join(workspace, "AGENTS.md"), []byte(ruleB), 0600); err != nil {
+				t.Fatal(err)
+			}
+			want, err = projectinstructions.FromContent([]byte(ruleB))
+			if err != nil {
 				t.Fatal(err)
 			}
 			payload, _ := json.Marshal("PARENT_CONVERSATION_ONLY")
@@ -305,6 +307,9 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 			} else if completed.Status != operation.StatusCompleted {
 				t.Fatalf("child outcome: %+v", completed)
 			}
+			if view.ProjectInstructions == nil || *view.ProjectInstructions != parentSnapshot.Metadata() {
+				t.Fatal("child start replaced the parent's instruction snapshot")
+			}
 			plan, err := subagent.DecodePlan(completed)
 			if err != nil {
 				t.Fatal(err)
@@ -323,7 +328,7 @@ func TestCLIChildInheritsBoundInstructions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(string(public), "PROJECT_REVISION_A") {
+			if strings.Contains(string(public), ruleA) || strings.Contains(string(public), ruleB) {
 				t.Fatal("child view exposed project instructions")
 			}
 			canonicalStore, err := localfile.New(store)

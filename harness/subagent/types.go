@@ -51,6 +51,9 @@ type Plan struct {
 	Text          string                     `json:",omitzero"`
 	Result        *sessionstore.FinishResult `json:",omitzero"`
 	RuntimeBound  bool                       `json:",omitzero"`
+	// RuntimeOverride records explicit CLI model/effort overrides of the
+	// template. Its provider is empty; the template's provider stays fixed.
+	RuntimeOverride *RuntimeRequest `json:",omitzero"`
 	// Progress marks a parent message that waits for the parent's next turn.
 	Progress bool `json:",omitzero"`
 	// Request and Allow answer a child's approval request.

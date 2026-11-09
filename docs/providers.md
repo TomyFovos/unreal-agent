@@ -2,7 +2,7 @@
 
 **Language:** English | [日本語](ja/providers.md)
 
-Unreal Agent supports **Claude** and **Codex** under a single installation and `/model` menu. Both providers use your existing subscription logins. Unreal never switches providers automatically or falls back to an API key.
+Unreal Agent supports **Claude only, ChatGPT (Codex) only, or both** under a single installation and `/model` menu. Both providers use your existing subscription logins. Unreal never switches providers automatically or falls back to an API key.
 
 ---
 
@@ -10,11 +10,13 @@ Unreal Agent supports **Claude** and **Codex** under a single installation and `
 
 1. Run `/model` in the TUI and choose a provider (`Claude` or `Codex`).
 2. Select a model from the catalog, then choose a reasoning effort level.
-3. If you sign in or update an external CLI while Unreal is open, run `/model refresh` (or select the unavailable provider in `/model`) to re-check authentication and reload the model list.
+3. After signing in later or updating an external CLI, run `/model refresh` to re-check authentication and reload models, then select the provider in `/model`. Reinstallation is unnecessary. An existing Session keeps its selected provider until you change it.
 
 > **Notes:**
 > - On first launch, Unreal defaults to **Claude** if both providers are ready, or whichever provider is available. (You can override the initial choice with `UNREAL_HARNESS_LLM_PROVIDER` and `UNREAL_HARNESS_LLM_MODEL`.)
 > - Unavailable providers remain listed with their status and login instructions so you can see why they are disabled.
+> - With neither provider ready, Unreal still starts and shows login instructions on the first input. `/login` displays the same sign-in steps.
+> - Explicitly disabled providers remain disabled after login. Re-enable Codex with `bash development.sh --configure-providers --codex-auto`, or Claude with `bash development.sh --configure-providers`.
 > - Seeing a model in the catalog means the CLI advertised it; your subscription tier still determines whether the provider accepts inference requests for that model.
 
 ---
@@ -49,6 +51,7 @@ Unreal Agent supports **Claude** and **Codex** under a single installation and `
 
 - **Provider ID:** `openai-codex`
 - **Execution:** Unreal sends requests through its built-in Codex Responses adapter and executes Unreal's native, AST, and Bash tools directly.
+- **CLI availability:** Codex inference does not require the CLI while the selected authentication and model catalog remain valid. Use the official CLI to sign in or renew its login.
 - **Credential ownership:** The external `codex` CLI owns OAuth tokens and token refresh. Unreal reads the auth file in read-only mode and never imports tokens into an internal store.
 - **Auth file lookup order:**
   1. `--codex-auth-file` flag (native launcher)
@@ -87,11 +90,15 @@ If you run Unreal inside a **Docker Sandbox**, Unreal can use your host machine'
   - On `/model refresh` (when `models_cache.json` is unavailable), Unreal bypasses the saved CLI catalog cache to fetch a fresh list. If that lookup fails or is slow, the last successful saved catalog is retained after validating the proxy route.
   - Catalog loading does not authenticate inference and never falls back to direct network requests, another credential source, an API key, or another provider.
 
+The Codex CLI is unnecessary when the proxy route is valid and a model catalog is already available.
+
 ---
 
 ## Delegated GPT work
 
-When Codex is registered, Permission Modes are enabled with a configured `Maximum`, and no explicit `Subagents` configuration replaces the defaults, Unreal registers built-in sub-agent templates so Claude can delegate coding, testing, and research tasks to background GPT agents. Each template uses a fixed Codex model and reasoning effort independent of the parent Session's active model:
+When Codex is configured or enabled for discovery, Permission Modes are enabled with a configured `Maximum`, and no explicit `Subagents` configuration replaces the defaults, Unreal prepares built-in GPT templates, including for a later Codex login. Each template uses a fixed Codex model and reasoning effort independent of the parent Session's active model:
+
+Claude is guided to use these GPT children only while Codex authentication and its model catalog are available in that Session. Otherwise it uses Claude Code's Agent tool with `haiku` or `sonnet`. A GPT parent continues to use GPT children; unavailable Codex produces login guidance and never switches its children to Claude.
 
 | Template / Role | Model & Effort | Purpose |
 | --- | --- | --- |

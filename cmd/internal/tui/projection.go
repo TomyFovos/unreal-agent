@@ -77,7 +77,9 @@ func entriesFor(item host.HistoryItem) []Entry {
 			r := d.Context.Conversation
 			if r.Compacted {
 				after := "不明"
-				if r.InputKnown {
+				if r.AfterTokens > 0 {
+					after = fmt.Sprint(r.AfterTokens)
+				} else if r.InputKnown {
 					after = fmt.Sprint(r.InputTokens)
 				}
 				add("host", fmt.Sprintf("会話を圧縮しました: %d → %s トークン", r.BeforeTokens, after), "")

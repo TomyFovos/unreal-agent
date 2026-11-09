@@ -42,6 +42,15 @@ func TestGatewayReasonExcludesSecretsAndTerminalControls(t *testing.T) {
 	}
 }
 
+func TestGatewayReasonRetainsDiagnosticAroundSensitiveFields(t *testing.T) {
+	for _, field := range []string{"token=synthetic-credential", "api_\x1bkey=synthetic-credential", "email=synthetic-identity", "org_id=synthetic-identity", "private_key=-----BEGIN PRIVATE KEY-----\nsynthetic-key\n-----END PRIVATE KEY-----"} {
+		got := SafeReason("workspace /safe failed: " + field + " ; retry after reconnect")
+		if got != "workspace /safe failed: [REDACTED] ; retry after reconnect" {
+			t.Fatalf("diagnostic lost or leaked: %q", got)
+		}
+	}
+}
+
 func TestGatewayObservationVersionTracksStoppedSession(t *testing.T) {
 	owner, client, _, _ := fixture(t)
 	v, err := client.Open(t.Context(), host.Create, "version")

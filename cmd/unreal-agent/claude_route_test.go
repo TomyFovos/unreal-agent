@@ -40,55 +40,43 @@ func claudeRouteConfiguration(t *testing.T, f *testclaude.Fixture) serveConfigur
 	}
 }
 
-func TestClaudeCompactsConversationWhenIdle(t *testing.T) {
+func TestClaudeThresholdDoesNotStartSeparateIdleCompaction(t *testing.T) {
 	f := testclaude.New(t)
-	f.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentInputTokens: 120_000, AgentFinal: "first complete", CompactPreTokens: 120_050, CompactPostTokens: 12_000})
+	f.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentInputTokens: 120_000, AgentFinal: "first complete"})
 	cfg := claudeRouteConfiguration(t, f)
-	cfg.Context.ClaudeCompactThresholdTokens = 100_000
+	cfg.Claude.CompactThresholdTokens = 100_000
 	c, _, _ := startInteractiveHost(t, cfg, "--normal-runtime")
 	v, err := c.Open(t.Context(), host.Create, "compact-route")
 	if err != nil {
 		t.Fatal(err)
 	}
 	submitInteractive(t, c, v, "first", "first task")
-	end := inspectInteractive(t, c, "compact-route", func(v host.View) bool {
-		for _, item := range v.History.Items {
-			if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Context != nil && record.Context.Conversation != nil && record.Context.Conversation.Compacted {
-				return hasFinalText(v, "first complete") && v.Progress == nil
-			}
-		}
-		return false
-	})
-	calls := f.Calls(t)
-	if len(calls) != 2 || !strings.HasPrefix(calls[1].Input, "/compact ") || calls[1].OverlappingPID != 0 {
-		t.Fatalf("turn inputs=%+v", calls)
-	}
-	compacted := 0
-	for _, item := range end.History.Items {
-		if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Context != nil && record.Context.Conversation != nil && record.Context.Conversation.Compacted {
-			r := record.Context.Conversation
-			compacted++
-			if r.BeforeTokens != 120_050 || !r.InputKnown || r.InputTokens != 12_000 {
-				t.Fatal("incorrect compact counts", r)
-			}
-		}
-		if response, ok := item.Data.(sessionstore.ModelResponse); ok {
-			for _, output := range response.Response.Output {
-				if m, ok := output.Data.(llm.Message); ok && strings.Contains(m.Text, "compact complete") {
-					t.Fatal("compact response entered canonical messages")
-				}
-			}
-		}
-	}
-	if compacted != 1 {
-		t.Fatal("missing Session compact record", compacted)
-	}
+	inspectInteractive(t, c, "compact-route", func(v host.View) bool { return hasFinalText(v, "first complete") && v.Progress == nil })
 	f.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentFinal: "second complete"})
 	submitInteractive(t, c, v, "second", "second task")
-	inspectInteractive(t, c, "compact-route", func(v host.View) bool { return hasFinalText(v, "second complete") })
-	calls = f.Calls(t)
-	if len(calls) != 3 || calls[2].Input != "second task" || calls[2].OverlappingPID != 0 {
-		t.Fatalf("next input after idle compaction = %+v", calls)
+	end := inspectInteractive(t, c, "compact-route", func(v host.View) bool { return hasFinalText(v, "second complete") && v.Progress == nil })
+	stopMultiSession(t, c, v)
+	calls := f.Calls(t)
+	if len(calls) != 2 || calls[0].Input != "first task" || calls[1].Input != "second task" {
+		t.Fatalf("unexpected separate process: %+v", calls)
+	}
+	for _, call := range calls {
+		if call.OverlappingPID != 0 {
+			t.Fatalf("conversation processes overlapped: %+v", call)
+		}
+	}
+	contexts := 0
+	for _, item := range end.History.Items {
+		if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Context != nil && record.Context.Conversation != nil {
+			r := record.Context.Conversation
+			contexts++
+			if r.Compacted || r.Interrupted || r.Phase != "" || !r.InputKnown {
+				t.Fatal("threshold fabricated a compact observation", r)
+			}
+		}
+	}
+	if contexts != 2 {
+		t.Fatalf("context observations = %d, want both normal turns", contexts)
 	}
 }
 

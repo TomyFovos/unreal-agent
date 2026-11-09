@@ -28,7 +28,8 @@ const (
 )
 
 // Snapshot is the exact instruction text a session was created with. It is
-// persisted so resume, fork, and child sessions never reread the filesystem.
+// persisted so resume, restart, and fork never reread the filesystem. Each new
+// child discovers its own workspace's instructions at start.
 type Snapshot struct {
 	Version    uint32
 	SourceKind SourceKind

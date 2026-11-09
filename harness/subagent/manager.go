@@ -14,6 +14,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/tool/observed"
 	"io/fs"
@@ -488,7 +489,17 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 	if !ok {
 		return operation.StatusFailed, fmt.Errorf("child template changed")
 	}
-	if p.RuntimeBound && m.config.ValidateTemplate != nil {
+	if p.RuntimeOverride != nil {
+		var err error
+		allowed, err = overrideRuntime(allowed, *p.RuntimeOverride)
+		if err != nil {
+			return operation.StatusFailed, err
+		}
+		expected, _ = json.Marshal(allowed)
+		if !sameJSON(actual, expected) {
+			return operation.StatusFailed, fmt.Errorf("child template changed")
+		}
+	} else if p.RuntimeBound && m.config.ValidateTemplate != nil {
 		if err := m.config.ValidateTemplate(allowed, *p.Configuration); err != nil {
 			return operation.StatusFailed, err
 		}
@@ -496,8 +507,11 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 	} else if !sameJSON(actual, expected) {
 		return operation.StatusFailed, fmt.Errorf("child template changed")
 	}
-	snapshot := m.config.Owner.BoundProjectInstructions()
-	child := ChildConfig{MutationStateDirectory: allowed.MutationStateDirectory, ProjectInstructions: snapshot, Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: j.operation.ID, SessionDirectory: m.config.Directory, Workspace: allowed.Workspace, Runtime: allowed.Runtime, Policy: allowed.Policy, Baseline: allowed.Baseline, Subagents: allowed.Subagents, ReadyID: inbox.ID("ready:" + string(j.operation.ID)), Task: p.Text}
+	snapshot, err := projectinstructions.Discover(allowed.Workspace)
+	if err != nil {
+		return operation.StatusFailed, err
+	}
+	child := ChildConfig{MutationStateDirectory: allowed.MutationStateDirectory, ProjectInstructions: &snapshot, Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: j.operation.ID, SessionDirectory: m.config.Directory, Workspace: allowed.Workspace, Runtime: allowed.Runtime, Policy: allowed.Policy, Baseline: allowed.Baseline, Subagents: allowed.Subagents, ReadyID: inbox.ID("ready:" + string(j.operation.ID)), Task: p.Text}
 	if s := sessionstore.SelectionFromConfiguration(allowed.Runtime); s != nil && s.Provider == "claude-code" {
 		child.TextOnly = !sessionstore.ToolBridgeEnabledFromConfiguration(child.Runtime)
 		child.ProviderProcess = true

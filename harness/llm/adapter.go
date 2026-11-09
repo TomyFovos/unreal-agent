@@ -22,6 +22,11 @@ type RequestOptions struct {
 	// RecordConversation appends a small observation without replacing history.
 	RecordConversation func(context.Context, ConversationRecord) error
 	RecordActivity     func(context.Context, ActivityRecord) error
+	// StartBackground optionally starts work in the owning Session/Runtime.
+	// Its context outlives request/Idle cancellation. The owner cancels it and
+	// joins the work before closing the runtime; work must return on cancellation.
+	// False means the owner is closing; nil means background work is unsupported.
+	StartBackground func(func(context.Context)) bool
 	// Tools is a host-owned rendezvous for protocols that keep inference open
 	// while caller-owned tools execute. The host commits this public response,
 	// runs its Registry/Permission/Operation path and returns terminal receipts.

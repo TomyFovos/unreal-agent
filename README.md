@@ -2,16 +2,16 @@
 
 **Language:** English | [日本語](docs/ja/README.md)
 
-Unreal Agent is a terminal coding agent for day-to-day development with **Claude** and **Codex** in a single interface.
+Unreal Agent is a terminal coding agent for day-to-day development with **Claude only**, **ChatGPT (Codex) only**, or **both** in a single interface.
 
 This repository is a personal-use fork of [unreallabsai/unreal-agent](https://github.com/unreallabsai/unreal-agent). It preserves Unreal's background Host/Session architecture and canonical Operation model while adding:
 - Subscription-based provider switching (`/model`) between Claude Code and Codex
 - Interactive permission modes (`Read Only`, `Ask for Approval`, `Full Access`)
-- Delegated background GPT sub-agents (`lead`, `worker-*`, `collector`)
+- Delegated GPT sub-agents (`lead`, `worker-*`, `collector`), or Claude Code's Agent (`haiku` / `sonnet`) when Claude cannot use Codex
 
 ## Key Characteristics
 
-- **Subscription-only authentication:** Claude runs through the signed-in `claude` CLI (Claude Code). Codex uses your ChatGPT subscription via `codex login` (or Docker Sandbox OAuth). Only one provider is required to start.
+- **Subscription-only authentication:** Claude runs through the signed-in `claude` CLI (Claude Code). Codex uses your ChatGPT subscription via `codex login` (or Docker Sandbox OAuth). One login is enough to work; with neither login, Unreal starts and shows sign-in instructions on your first input. Sign in later, run `/model refresh`, and select the provider in `/model`; reinstalling is unnecessary.
 - **No silent fallbacks:** Unreal never switches providers automatically or falls back to paid API keys.
 - **Persistent background sessions:** A background Host process owns the conversation history. Detaching from the terminal (`Ctrl+D`) leaves your Session running so you can reattach at any time.
 
@@ -30,6 +30,8 @@ This repository is a personal-use fork of [unreallabsai/unreal-agent](https://gi
    - Run `/model` to select a provider, model, and reasoning effort.
    - Run `/permissions` to select `Read Only`, `Ask for Approval`, or `Full Access`.
 5. **Send a task:** Type your prompt and press `Enter`. Press `Ctrl+D` to detach; run `unreal development` again to reconnect.
+
+New installations start with Claude when both providers are available, or the available provider when only one is ready. A GPT parent uses GPT children; if Codex becomes unavailable, Unreal shows login guidance without switching to Claude children. See [Providers](docs/providers.md) for availability and explicitly disabled providers.
 
 > **Note:** On terminals 120 columns or wider, Unreal opens in **Split** view (Chat on the left, live agent/tool cards on the right). Narrower terminals open in **Chat** view.
 >

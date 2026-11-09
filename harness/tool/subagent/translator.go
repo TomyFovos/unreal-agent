@@ -5,7 +5,10 @@ package subagent
 import (
 	"context"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
+	"strings"
+
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -59,12 +62,12 @@ func Extensions(owner session.ID, templates map[string]runtime.Template, child b
 		required                  []string
 		isChild                   bool
 	}{
-		{"SubagentStart", "start", "Start an independent child agent. The operation remains running; ready messages expose its handle. End your turn to wait for events.", map[string]any{"template": map[string]any{"type": "string"}, "task": map[string]any{"type": "string"}}, []string{"template", "task"}, false},
-		{"SubagentSend", "send", "Send a message to an owned child using its operation handle. Acknowledgement means durable receipt, not task completion.", map[string]any{"handle": map[string]any{"type": "string"}, "text": map[string]any{"type": "string"}}, []string{"handle", "text"}, false},
+		{"SubagentStart", "start", "Start a child; ready messages provide its operation handle. End the turn to wait.", map[string]any{"template": map[string]any{"type": "string"}, "task": map[string]any{"type": "string"}}, []string{"template", "task"}, false},
+		{"SubagentSend", "send", "Message an owned child by operation handle; acknowledgement confirms receipt only.", map[string]any{"handle": map[string]any{"type": "string"}, "text": map[string]any{"type": "string"}}, []string{"handle", "text"}, false},
 		{"SubagentCancel", "cancel", "Cancel an owned child by operation handle.", map[string]any{"handle": map[string]any{"type": "string"}}, []string{"handle"}, false},
-		{"SubagentApprove", "approve", "Allow or deny a request an owned child is waiting on. Children ask their parent, not the user; ask the user yourself when unsure.", map[string]any{"handle": map[string]any{"type": "string"}, "request": map[string]any{"type": "string"}, "allow": map[string]any{"type": "boolean"}}, []string{"handle", "request", "allow"}, false},
-		{"SendParent", "parent", "Send a progress update or question to the parent. Use progress: true for updates; for questions or decisions, omit progress and end the turn to wait for a reply.", map[string]any{"text": map[string]any{"type": "string"}, "progress": map[string]any{"type": "boolean", "description": "True for a progress update: does not wake the parent and is delivered with its next turn. False (default) for questions or requests needing a decision: wakes the parent."}}, []string{"text"}, true},
-		{"Finish", "finish", "Finish delegated work with a canonical report, only after every other operation has completed. Call Finish alone; it stops this child.", map[string]any{"status": map[string]any{"type": "string", "enum": []string{"completed", "failed"}}, "summary": map[string]any{"type": "string"}, "changedFiles": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "tests": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "blockers": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, []string{"status", "summary", "changedFiles", "tests", "blockers"}, true},
+		{"SubagentApprove", "approve", "Allow or deny an owned child request; escalate to your parent/user if unsure.", map[string]any{"handle": map[string]any{"type": "string"}, "request": map[string]any{"type": "string"}, "allow": map[string]any{"type": "boolean"}}, []string{"handle", "request", "allow"}, false},
+		{"SendParent", "parent", "Message the parent; end the turn when awaiting a reply.", map[string]any{"text": map[string]any{"type": "string"}, "progress": map[string]any{"type": "boolean", "description": "True: progress does not wake the parent; delivered next turn. False (default): wakes it for a question or decision."}}, []string{"text"}, true},
+		{"Finish", "finish", "Record the final report and stop this child. Call alone after all other calls/operations finish.", map[string]any{"status": map[string]any{"type": "string", "enum": []string{"completed", "failed"}}, "summary": map[string]any{"type": "string"}, "changedFiles": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "tests": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "blockers": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, []string{"status", "summary", "changedFiles", "tests", "blockers"}, true},
 	}
 	var result []tool.Extension
 	for _, d := range definitions {
@@ -90,7 +93,22 @@ func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallSta
 		Allow        bool                    `json:"allow"`
 	}
 	if err := json.Unmarshal([]byte(call.Arguments), &args, json.RejectUnknownMembers(true)); err != nil {
-		return tool.ErrorStatus("Invalid subagent arguments", 0)
+		detail := "malformed JSON; send an object matching the tool schema"
+		var semantic *json.SemanticError
+		if errors.As(err, &semantic) {
+			field := string(semantic.JSONPointer)
+			if field == "" {
+				field = "(root)"
+			}
+			detail = "field " + field + ": use the type and fields in the tool schema"
+			if errors.Is(err, json.ErrUnknownName) {
+				detail = "unknown field " + field + "; remove it and use the tool schema"
+			}
+		}
+		if t.action == "finish" {
+			detail += "; Finish fields: status, summary, changedFiles, tests, blockers"
+		}
+		return tool.ErrorStatus("Invalid subagent arguments: "+detail, 0)
 	}
 	p := runtime.Plan{Version: 1, Action: t.action, ParentID: t.owner, Handle: args.Handle, Text: args.Text}
 	if t.action == "parent" {
@@ -121,7 +139,13 @@ func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallSta
 	if t.action == "finish" {
 		eligibility, ok := ctx.(interface{ CanFinish() bool })
 		if !ok || !eligibility.CanFinish() {
-			return tool.ErrorStatus("Finish requires no other unfinished calls or operations", 0)
+			message := "Finish requires no other unfinished calls or operations. Wait for their results, then call Finish alone"
+			if waiting, ok := ctx.(interface{ FinishWaitingFor() []string }); ok {
+				if targets := waiting.FinishWaitingFor(); len(targets) > 0 {
+					message += ": " + strings.Join(targets, ", ")
+				}
+			}
+			return tool.ErrorStatus(message, 0)
 		}
 		p.Result = &sessionstore.FinishResult{Status: args.Status, Summary: args.Summary, ChangedFiles: args.ChangedFiles, Tests: args.Tests, Blockers: args.Blockers}
 	}

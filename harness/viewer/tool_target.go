@@ -100,15 +100,11 @@ func SafeToolTarget(c llm.ToolCall) string {
 		}
 		target = strings.TrimSpace(o.Tool + " " + detail)
 	}
-	// Never expose credential-shaped display arguments, even within a recognized
-	// field. Check before clipping so truncation cannot hide a sensitive prefix.
-	if secretguard.Sensitive(target) {
-		return ""
-	}
+	// Mask sensitive display arguments before clipping so a sensitive prefix
+	// cannot be hidden by truncation. Retain the rest of the tool target.
+	target = secretguard.RedactSensitive(target)
 	target = strings.Join(strings.Fields(SafeText(target)), " ")
-	if secretguard.Sensitive(target) {
-		return ""
-	}
+	target = secretguard.RedactSensitive(target)
 	g := uniseg.NewGraphemes(target)
 	end := 0
 	for g.Next() {

@@ -192,14 +192,14 @@ func TestProjectInstructionsBindAtCreateAndSurviveResumeRestartAndFork(t *testin
 		t.Fatalf("fresh session did not discover revision B: %q", text)
 	}
 
-	// A child inherits the parent's snapshot even though disk now holds B.
+	// An explicit creation snapshot takes precedence over discovery.
 	child, err := h.Create(t.Context(), Options{ID: "child", Workspace: workspace, ProjectInstructions: &snapshotA})
 	if err != nil {
 		t.Fatal(err)
 	}
 	runTurn(t, child, "child-one")
 	if text := model.last(t); !strings.Contains(text, "Revision A") || strings.Contains(text, "Revision B") {
-		t.Fatalf("child split from the parent snapshot: %q", text)
+		t.Fatalf("explicit creation snapshot was replaced: %q", text)
 	}
 	if got := boundSnapshot(t, child); got != snapshotA {
 		t.Fatalf("child snapshot = %+v, want %+v", got, snapshotA)

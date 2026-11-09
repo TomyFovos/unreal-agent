@@ -47,6 +47,7 @@ type RuntimeConfig struct {
 	// Context is a versioned, disposable projection strategy. It is deliberately
 	// outside immutable runtime/auth identity, so old histories need no migration.
 	Context contextengine.Config
+	Claude  ClaudeRouteConfig
 	// ClaudeSubagents lets the Claude route drive this Host's child templates
 	// through Bash (U21); zero when there are none.
 	ClaudeSubagents  claudeagent.SubagentCLI
@@ -134,7 +135,8 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 	if c.Identity.Provider.Provider == claudeagent.ProviderID && (c.Identity.Claude == nil || !filepath.IsAbs(c.Identity.Claude.Binary)) {
 		return nil, nil, errors.New("runtime: Claude executable configuration required")
 	}
-	toolResources := supportsTools
+	// A normal Host may discover a tool-capable provider after login.
+	toolResources := supportsTools || c.Discovered != nil
 	for id, p := range c.Backends {
 		if id != p.Provider.Provider || id == c.Identity.Provider.Provider {
 			return nil, nil, errors.New("runtime: invalid backend registration")

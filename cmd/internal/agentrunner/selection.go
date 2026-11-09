@@ -76,7 +76,7 @@ func selectionClient(c RuntimeConfig, s sessionstore.RuntimeSelection, workspace
 		build.ClaudeAgent.Results = results
 		build.ClaudeAgent.Subagents = c.ClaudeSubagents
 		build.ClaudeAgent.Namespace = c.SessionDirectory
-		build.ClaudeAgent.CompactThresholdTokens = c.Context.ClaudeCompactThresholdTokens
+		build.ClaudeAgent.CompactThresholdTokens = c.Claude.CompactThresholdTokens
 	}
 	client, _, err := registry.Build(build)
 	return client, err

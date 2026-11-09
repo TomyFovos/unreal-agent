@@ -2633,6 +2633,10 @@ func (store *fakeStore) AppendInput(_ context.Context, _ session.ID, input inbox
 	return store.appendInputErr
 }
 
+func (store *fakeStore) AppendHostRecord(_ context.Context, _ session.ID, record sessionstore.HostRecord) error {
+	return record.Validate()
+}
+
 func (store *fakeStore) AppendTurn(_ context.Context, _ session.ID, turn session.Turn) error {
 	store.appendedTurns = append(store.appendedTurns, turn)
 	if store.onAppendTurn != nil {

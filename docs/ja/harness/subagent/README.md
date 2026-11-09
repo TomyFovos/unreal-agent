@@ -15,7 +15,7 @@
 3. `tool/subagent.Extensions(owner.ID, templates, false)` をツールレジストリに追加し、親ランタイムの終了時にハンドラの `Close` を呼びます。
 
 - **テンプレートによる安全な制限:** 実行バイナリ、引数、プロバイダ・プロファイル選択、および子に許可する権限は Host 側の信頼されたテンプレート設定（`Subagents`）で固定されます。モデルが指定できるのは登録済みテンプレート名とタスク文字列のみです。
-- **権限の制限と共有ロック:** 子のツール権限は常に親ポリシーの部分集合になります。また、親と同じ `MutationStateDirectory` と `ProjectInstructionSnapshot`（`AGENTS.md` のスナップショット）を引き継ぎ、ファイルロックの整合性を保ちます。
+- **権限の制限と共有ロック:** 子のツール権限は常に親ポリシーの部分集合になります。新しい子は起動時に自身のワークスペースの `AGENTS.md` を読み直し、resume・restart ではその子に記録した snapshot を再生します。親と共有する `MutationStateDirectory` によりファイルロックの整合性を保ちます。
 
 ### 子プロセス側 (`unreal-agent child --stdio`)
 

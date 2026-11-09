@@ -312,12 +312,23 @@ def print_install_result(settings, home):
     statuses = settings["ProviderStatus"]
     for status in statuses:
         print(provider_guidance(status))
+    codex = any(p["ID"] == "openai-codex" and p["Availability"] == "available" for p in statuses)
+    claude = any(p["ID"] in ("claude", "claude-code") and p["Availability"] == "available" for p in statuses)
+    if codex and claude:
+        print("Claude と ChatGPT（Codex）の両方で使えます。新規の統括は Claude で始まります。")
+    elif claude:
+        print("Claude だけで使えます。ChatGPT のログインは不要です。")
+    elif codex:
+        print("ChatGPT（Codex）だけで使えます。Claude のログインは不要です。")
     if any(p["ID"] in ("claude", "claude-code") and p["Availability"] == "available" for p in statuses):
         print("Claude の操作は /permissions で選んだ権限に従います。")
     if any(p["Availability"] == "available" for p in statuses):
         print("次に: 新しい Bash で作業フォルダに移動し、unreal を起動してください。/model でモデルを選べます。")
     else:
-        print("次に: 使うにはどちらかの準備（インストールとログイン）が必要です。済んだら unreal を起動してください。")
+        print("次に: 使うにはどちらかの準備（インストールとログイン）が必要です。unreal を起動すると最初の入力にもログイン方法を表示します。")
+    print("あとからログインしたら /model refresh で再検出し、/model で選んでください。インストールのやり直しは不要です。")
+    if any(p["Reason"] == "operator_disabled" for p in statuses):
+        print("明示的に無効にした接続先を使う場合は development.sh --configure-providers を再実行してください。Codex の再有効化には --codex-auto も付けてください。")
     if shell_masks_unreal(home):
         print("別の unreal が先に見つかりました。type -a unreal で確認するか、$HOME/.local/bin/unreal を使ってください。")
 

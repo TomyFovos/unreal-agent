@@ -132,7 +132,7 @@ func literalWords(line string) (words []string, delimiter string, ok bool) {
 // (the user's structure: Claude designs, GPT implements).
 func subagentPrompt(s SubagentCLI) string {
 	if s.Binary == "" {
-		return ""
+		return claudeDelegationPrompt
 	}
 	cli := s.Binary
 	if !literalCLI(cli) {
@@ -147,8 +147,8 @@ func subagentPrompt(s SubagentCLI) string {
 		"Always use the command path shown below, including after an update; ignore versioned command paths in older messages. Run these commands with Bash exactly in these forms. Unreal Agent approves them itself in every permission mode, Read Only included; the children follow the mode, so in Read Only they read files and run read-only commands such as git log, git show or rg, which is enough for investigations:\n"+
 		"- Start the lead, with the task in a quoted heredoc: %[1]s subagent start --template lead <<'EOF' (then the title line, the goal, design, files and interfaces, constraints and how to verify, then a line EOF)\n"+
 		"- Answer a child's approval request: %[1]s subagent approve HANDLE REQUEST allow|deny. Children ask you instead of the user.\n"+
-		"- Send more instructions or answers: %[1]s subagent send HANDLE <<'EOF' (text, then EOF). Stop a child: %[1]s subagent cancel HANDLE. Overview: %[1]s subagent list. Full report: %[1]s subagent show HANDLE. Do not use wait unless you know the result will arrive within tens of seconds; use at most --timeout 60s: %[1]s subagent wait HANDLE --timeout 60s.\n"+
-		"Templates: %[2]s (worker-<effort> starts one worker directly).", cli, strings.Join(s.Templates, ", "))
+		"- Send more instructions or answers: %[1]s subagent send HANDLE <<'EOF' (text, then EOF). Stop a child: %[1]s subagent cancel HANDLE. Active children and ended counts: %[1]s subagent list; all children: %[1]s subagent list --all. Report: %[1]s subagent show HANDLE; include its original instructions with --task. Do not use wait unless you know the result will arrive within tens of seconds; use at most --timeout 60s: %[1]s subagent wait HANDLE --timeout 60s.\n"+
+		"Templates: %[2]s (worker-<effort> starts one worker directly). Add --model ID and --effort LEVEL to subagent start to override a template's model and reasoning effort.", cli, strings.Join(s.Templates, ", "))
 }
 
 func literalCLI(path string) bool {

@@ -2,16 +2,16 @@
 
 **言語:** [English](../../README.md) | 日本語
 
-Unreal Agent は、1つのターミナル上で **Claude** と **Codex** を使い分けながら日常の開発を行うためのコーディングエージェントです。
+Unreal Agent は、1つのターミナル上で **Claude だけ・ChatGPT（Codex）だけ・両方**の構成で日常の開発を行えるコーディングエージェントです。
 
 本リポジトリは [unreallabsai/unreal-agent](https://github.com/unreallabsai/unreal-agent) の個人開発向けフォークです。オリジナルのバックグラウンド Host / Session 構造と Operation モデルを維持しつつ、以下の機能を追加しています。
 - サブスクリプション認証による **Claude Code / Codex の切り替え** (`/model`)
 - 対話的な **権限モード切替** (`Read Only` / `Ask for Approval` / `Full Access`)
-- バックグラウンドの **GPT サブエージェントへの作業委譲** (`lead`, `worker-*`, `collector`)
+- **GPT サブエージェントへの作業委譲** (`lead`, `worker-*`, `collector`)。Claude から Codex を使えない場合は Claude Code の Agent（`haiku` / `sonnet`）を使用
 
 ## 主な特徴
 
-- **サブスクリプションのみで動作:** Claude はログイン済みの `claude` CLI（Claude Code）経由で動作し、Codex は `codex login`（または Docker Sandbox OAuth）による ChatGPT サブスクリプションで動作します。どちらか片方が使えればすぐに始められます。
+- **サブスクリプションのみで動作:** Claude はログイン済みの `claude` CLI（Claude Code）経由で動作し、Codex は `codex login`（または Docker Sandbox OAuth）による ChatGPT サブスクリプションで動作します。片方のログインで作業でき、両方未ログインでも起動して最初の入力にログイン手順を案内します。後からログインしたら `/model refresh` を実行し、`/model` で選択します。インストールのやり直しは不要です。
 - **意図しない自動フォールバックなし:** エラー時に別のプロバイダへ勝手に切り替えたり、従量課金の API キーへフォールバックしたりすることはありません。
 - **画面を閉じても続くセッション:** 会話履歴と実行状態はバックグラウンドの Host プロセスが保持します。`Ctrl+D` でターミナル表示から離れても作業は継続し、いつでも再接続できます。
 
@@ -30,6 +30,8 @@ Unreal Agent は、1つのターミナル上で **Claude** と **Codex** を使�
    - `/model` でプロバイダ・モデル・推論の深さ（effort）を選択します。
    - `/permissions` で `Read Only`（読み取り専用）、`Ask for Approval`（都度確認）、`Full Access`（自動許可）を選択します。
 5. **指示を送る:** タスクを入力して `Enter` で送信します。`Ctrl+D` で画面から離れ、再度 `unreal development` を実行すると再接続できます。
+
+新規導入時は、両方使える場合は Claude、片方だけ使える場合はそのプロバイダで始まります。GPT の統括は GPT の子を使い、Codex が利用できなくなったらログインを案内します。Claude の子には自動で切り替えません。利用可否と明示的に無効化した場合の手順は[プロバイダ設定](providers.md)を参照してください。
 
 > **画面レイアウト:** 端末幅が 120 列以上の場合は **Split** ビュー（左にチャット、右にエージェント/ツールの稼働カード）、120 列未満の場合は **Chat** ビューで起動します。
 >

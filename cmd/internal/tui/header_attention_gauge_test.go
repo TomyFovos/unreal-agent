@@ -318,6 +318,11 @@ func TestCompactPulseAndConversationRecord(t *testing.T) {
 	if len(entries) != 1 || entries[0].Role != "host" || entries[0].Sequence != 7 || entries[0].Text != "会話を圧縮しました: 250000 → 12000 トークン" {
 		t.Fatal("compact record projection", entries)
 	}
+	record.AfterTokens = 10_000
+	if got := entriesFor(item)[0].Text; got != "会話を圧縮しました: 250000 → 10000 トークン" {
+		t.Fatal("post_tokens must be distinct from actual model input", got)
+	}
+	record.AfterTokens = 0
 	record.InputKnown = false
 	if got := entriesFor(item)[0].Text; !strings.Contains(got, "→ 不明") {
 		t.Fatal("invented post-compact usage", got)

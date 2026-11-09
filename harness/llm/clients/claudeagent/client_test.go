@@ -205,7 +205,7 @@ func TestFullAccessEditRunsAndIsRecorded(t *testing.T) {
 		t.Fatalf("progress = %q", h.progress.String())
 	}
 	args, _ := os.ReadFile(h.args)
-	for _, want := range []string{"--session-id", sessionUUID("", "session-1"), "--model\nopus", "--effort\nmax", "--permission-prompt-tool\nstdio", "--disallowedTools\nAgent\nMonitor\nAskUserQuestion", "Full Access"} {
+	for _, want := range []string{"--session-id", sessionUUID("", "session-1"), "--model\nopus", "--effort\nmax", "--permission-prompt-tool\nstdio", "--tools\n" + enabledTools, "Full Access"} {
 		if !strings.Contains(string(args), want) {
 			t.Fatalf("argv lacks %q:\n%s", want, args)
 		}
@@ -474,8 +474,8 @@ func TestPromptPlan(t *testing.T) {
 }
 
 func TestEnvironmentKeepsTheSubscription(t *testing.T) {
-	got := environment([]string{"PATH=/usr/local/go/bin:/usr/bin", "HOME=/home/u", "ANTHROPIC_API_KEY=x", "ANTHROPIC_AUTH_TOKEN=y", "CLAUDE_CODE_USE_BEDROCK=1", "CLAUDECODE=1", "CLAUDE_CODE_SESSION_ID=s", "CLAUDE_CONFIG_DIR=/c", "CLAUDE_CODE_OAUTH_TOKEN=t", "CLAUDE_CODE_MAX_OUTPUT_TOKENS=9"})
-	want := []string{"PATH=/usr/local/go/bin:/usr/bin", "HOME=/home/u", "CLAUDE_CONFIG_DIR=/c", "CLAUDE_CODE_OAUTH_TOKEN=t", "CLAUDE_CODE_MAX_OUTPUT_TOKENS=9"}
+	got := environment([]string{"PATH=/usr/local/go/bin:/usr/bin", "HOME=/home/u", "ANTHROPIC_API_KEY=x", "ANTHROPIC_AUTH_TOKEN=y", "CLAUDE_CODE_USE_BEDROCK=1", "CLAUDECODE=1", "CLAUDE_CODE_SESSION_ID=s", "CLAUDE_CONFIG_DIR=/c", "CLAUDE_CODE_OAUTH_TOKEN=t", "CLAUDE_CODE_MAX_OUTPUT_TOKENS=9", "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=0"})
+	want := []string{"PATH=/usr/local/go/bin:/usr/bin", "HOME=/home/u", "CLAUDE_CONFIG_DIR=/c", "CLAUDE_CODE_OAUTH_TOKEN=t", "CLAUDE_CODE_MAX_OUTPUT_TOKENS=9", "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("env = %q, want %q", got, want)
 	}
@@ -536,17 +536,6 @@ func TestDroppedFilesAreReadableInReadOnly(t *testing.T) {
 	}
 	if ok, _ := a.decide(ctx, "Read", jsontext.Value(`{"file_path":"`+filepath.Join(home, ".codex", "auth.json")+`"}`), "t2"); ok {
 		t.Fatal("Read Only allowed a file outside the drop directory")
-	}
-}
-
-func TestProjectInstructionsKeepLargeInput(t *testing.T) {
-	root := t.TempDir()
-	instructions := strings.Repeat("project instruction\n", 4000)
-	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte(instructions), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if got := projectInstructions(root); !strings.HasSuffix(got, instructions) {
-		t.Fatal("large project instructions lost")
 	}
 }
 

@@ -2,8 +2,6 @@ package claudeagent
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -116,21 +114,4 @@ func modeLabel(controller *permission.Controller) string {
 		return ""
 	}
 	return controller.Snapshot().Mode.Label()
-}
-
-// projectInstructions gives Claude the workspace's AGENTS.md, which the GPT
-// agents get from Unreal, unless the workspace's CLAUDE.md already brings it
-// in (Claude Code reads CLAUDE.md itself).
-func projectInstructions(directory string) string {
-	if directory == "" {
-		return ""
-	}
-	if claude, err := os.ReadFile(filepath.Join(directory, "CLAUDE.md")); err == nil && strings.Contains(string(claude), "AGENTS.md") {
-		return ""
-	}
-	data, err := os.ReadFile(filepath.Join(directory, "AGENTS.md"))
-	if err != nil || len(data) == 0 {
-		return ""
-	}
-	return "\n\nProject instructions (AGENTS.md at the workspace root):\n" + strings.ToValidUTF8(string(data), "\uFFFD")
 }

@@ -146,6 +146,46 @@ func fakeCLI(scenario string, args []string) int {
 	f.emit(map[string]any{"type": "user", "isReplay": true, "parent_tool_use_id": nil, "message": user["message"]})
 	cwd := os.Getenv("CLAUDEAGENT_CWD")
 	switch scenario {
+	case "auto_compact", "auto_compact_no_usage", "auto_compact_failed":
+		f.step(200_000, 0, 0, 1, "Before")
+		f.emit(map[string]any{"type": "system", "subtype": "status", "status": "compacting"})
+		if scenario == "auto_compact_failed" {
+			f.emit(map[string]any{"type": "system", "subtype": "status", "compact_result": "failed", "compact_error": "too_few_groups"})
+		} else {
+			f.emit(map[string]any{"type": "system", "subtype": "status", "compact_result": "success"})
+			f.emit(map[string]any{"type": "system", "subtype": "compact_boundary", "compact_metadata": map[string]any{"trigger": "auto", "pre_tokens": 200_000, "post_tokens": 1234, "duration_ms": 1500}})
+		}
+		if scenario != "auto_compact_no_usage" {
+			f.step(50, 2000, 300, 9, "After")
+		}
+		f.text("msg_final", "Done.")
+		f.result("Done.")
+	case "compact_hooks":
+		req, _ := initialize["request"].(map[string]any)
+		hooks, _ := req["hooks"].(map[string]any)
+		for name, id := range map[string]string{"SessionStart": compactStartHook, "PreCompact": preCompactHook, "PostCompact": postCompactHook} {
+			entries, _ := hooks[name].([]any)
+			if len(entries) != 1 {
+				return 2
+			}
+			entry, _ := entries[0].(map[string]any)
+			ids, _ := entry["hookCallbackIds"].([]any)
+			if len(ids) != 1 || ids[0] != id || name == "SessionStart" && entry["matcher"] != "compact" {
+				return 2
+			}
+		}
+		pre := f.ask("pre", map[string]any{"subtype": "hook_callback", "callback_id": preCompactHook, "input": map[string]any{"hook_event_name": "PreCompact", "trigger": "auto", "custom_instructions": nil}})
+		if len(pre) != 0 {
+			return 2
+		}
+		start := f.ask("start", map[string]any{"subtype": "hook_callback", "callback_id": compactStartHook, "input": map[string]any{"hook_event_name": "SessionStart", "source": "compact"}})
+		post := f.ask("post", map[string]any{"subtype": "hook_callback", "callback_id": postCompactHook, "input": map[string]any{"hook_event_name": "PostCompact", "compact_summary": "private summary"}})
+		if len(post) != 0 {
+			return 2
+		}
+		text := hookOutput(start, "additionalContext")
+		f.text("msg_final", text)
+		f.result(text)
 	case "interrupt":
 		// A long command runs until Unreal asks Claude Code to stop.
 		for m := f.next(); m != nil; m = f.next() {

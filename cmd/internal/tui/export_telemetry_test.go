@@ -19,12 +19,13 @@ func TestConversationExportIncludesExecutionMeasurements(t *testing.T) {
 	for _, a := range []llm.ActivityRecord{{Kind: "host_start", StartedAt: at, Revision: "export-revision"}, {Kind: "child_start", StartedAt: at, Template: "worker-test", Model: "test-model", Effort: "high"}, {Kind: "native_bash", ID: "bash-1", StartedAt: at, EndedAt: at.Add(3 * time.Second)}} {
 		appendRecord(sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostActivity, Activity: &a})
 	}
-	appendRecord(sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostContext, Context: &sessionstore.ContextRecord{Kind: "provider_conversation", Conversation: &llm.ConversationRecord{Provider: "claude", Phase: "compact", Compacted: true, StartedAt: at, EndedAt: at.Add(time.Minute), Usage: &llm.Usage{InputTokens: 100, OutputTokens: 10, Unknown: []llm.UsageField{llm.UsageReasoning}}}}})
+	appendRecord(sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostActivity, Activity: &llm.ActivityRecord{Kind: "context_redaction", StartedAt: at, Redaction: &llm.ContextRedaction{Reason: "partial_redaction", CallID: "call-export", BeforeBytes: 100, AfterBytes: 20}}})
+	appendRecord(sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostContext, Context: &sessionstore.ContextRecord{Kind: "provider_conversation", Conversation: &llm.ConversationRecord{Provider: "claude", Phase: "compact", Compacted: true, BeforeTokens: 250_000, AfterTokens: 12_000, StartedAt: at, EndedAt: at.Add(time.Minute), Usage: &llm.Usage{InputTokens: 100, OutputTokens: 10, Unknown: []llm.UsageField{llm.UsageReasoning}}}}})
 	text, err := ConversationText(t.Context(), f, "s", throughHistory(f))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"export-revision", "worker-test", "test-model", "effort=high", "elapsed=3s", "Claude compact completed", "reasoning     unknown"} {
+	for _, want := range []string{"export-revision", "worker-test", "test-model", "effort=high", "elapsed=3s", "Claude compact completed", "before=250000 after=12000", "reasoning     unknown", `partial\_redaction: count=1 before\_bytes=100 after\_bytes=20`, `call\_id=call-export`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %s: %s", want, text)
 		}

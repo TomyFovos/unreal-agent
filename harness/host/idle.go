@@ -44,6 +44,9 @@ func (a *progressAdapter) Idle(ctx context.Context, r llm.Request, o llm.Request
 	s.mu.Unlock()
 	o.RecordConversation = s.recordConversation
 	o.RecordActivity = s.recordActivity
+	if s.background != nil {
+		o.StartBackground = s.background.start
+	}
 	done := false // protected by s.mu, including late provider callbacks
 	clear := func() {
 		s.mu.Lock()

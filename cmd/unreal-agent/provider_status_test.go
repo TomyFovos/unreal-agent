@@ -157,11 +157,9 @@ func TestCommonProviderStatusPreflightAndUnavailableSelection(t *testing.T) {
 			cfg, err := bootstrapRuntime(t.Context(), o, func([]string) (string, error) { return "openai-codex", nil }, os.Getenv)
 			available := tc.codexReason == "" || tc.claudeReason == ""
 			if !available {
-				var failure *normalRuntimeError
-				if !errors.As(err, &failure) || !strings.Contains(failure.Error(), "OpenAI Codex:") || !strings.Contains(failure.Error(), "Claude:") {
-					t.Fatal("startup lost both statuses", err)
+				if err != nil || cfg.Runtime.Provider.Provider != loginProvider || len(cfg.providerStatuses) != 2 {
+					t.Fatal("startup did not retain login state and both statuses", err)
 				}
-				return
 			}
 			if err != nil {
 				t.Fatal(err)

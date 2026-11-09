@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json/v2"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -80,8 +78,8 @@ func TestSubagentWaitMarksTheExistingRendezvousInterruptible(t *testing.T) {
 }
 
 func TestSubagentPromptNamesTheCommandAndRoles(t *testing.T) {
-	if subagentPrompt(SubagentCLI{}) != "" {
-		t.Fatal("prompt without subagents")
+	if got := subagentPrompt(SubagentCLI{}); got != claudeDelegationPrompt || !strings.Contains(got, `"haiku"`) || !strings.Contains(got, `"sonnet"`) {
+		t.Fatal("prompt without subagents", got)
 	}
 	prompt := subagentPrompt(SubagentCLI{Binary: "/opt/unreal/bin/unreal", Socket: "/run/host.sock", Templates: []string{"lead", "worker-high"}})
 	if strings.Contains(prompt, "ultra") {
@@ -105,23 +103,6 @@ func TestUserReplyPromptAppliesWithAndWithoutSubagents(t *testing.T) {
 				t.Errorf("prompt lacks %q: %s", want, prompt)
 			}
 		}
-	}
-}
-
-// Claude gets the workspace's AGENTS.md, unless CLAUDE.md brings it in.
-func TestProjectInstructionsReachClaude(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("テストは必ず実行する"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got := projectInstructions(dir); !strings.Contains(got, "テストは必ず実行する") {
-		t.Fatalf("got %q", got)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("@AGENTS.md"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got := projectInstructions(dir); got != "" {
-		t.Fatalf("doubled through CLAUDE.md: %q", got)
 	}
 }
 

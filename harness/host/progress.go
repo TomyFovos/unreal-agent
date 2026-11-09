@@ -83,6 +83,9 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 	s.mu.Unlock()
 	o.RecordConversation = s.recordConversation
 	o.RecordActivity = s.recordActivity
+	if s.background != nil {
+		o.StartBackground = s.background.start
+	}
 	lastBroadcast := time.Time{}
 	now := a.now
 	if now == nil {

@@ -34,11 +34,15 @@ type receiptStateStub struct {
 
 // Use the production translator's WaitingFor, including after reconciliation.
 // The remote handle is synthetic, but has the actual typed native read shape.
-func translatedSecretReceipt(t *testing.T, s operation.Status) (sessionstore.ToolCallStatus, llm.ToolResult) {
+func translatedSecretReceipt(t *testing.T, s operation.Status, path string) (sessionstore.ToolCallStatus, llm.ToolResult) {
 	t.Helper()
 	translator := nativetool.New("read")
 	r := &receiptStateRecorder{}
-	call := llm.ToolCall{CallID: "secret-read", Name: "read", Arguments: `{"path":"fixture.txt"}`}
+	args, err := json.Marshal(map[string]string{"path": path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := llm.ToolCall{CallID: "secret-read", Name: "read", Arguments: string(args)}
 	status := translator.Translate(r, call)
 	if status.Error != "" || len(status.WaitingFor) != 1 {
 		t.Fatal("native translation did not submit one dependency")
@@ -70,19 +74,19 @@ func decodeReceiptStub(t *testing.T, text string) receiptStateStub {
 	return stub
 }
 
-func TestReceiptStateRepairNativeTerminalWaitingFor(t *testing.T) {
+func TestReceiptStateRepairPrivateSourceNativeTerminalWaitingFor(t *testing.T) {
 	for _, s := range []operation.Status{operation.StatusCompleted, operation.StatusFailed, operation.StatusCanceled} {
 		t.Run(string(s), func(t *testing.T) {
-			status, result := translatedSecretReceipt(t, s)
-			if _, safe := contextengine.PublicItem(llm.Item{Type: llm.ItemToolResult, Data: result}); safe {
-				t.Fatal("fixture did not exercise the actual secretguard")
+			status, result := translatedSecretReceipt(t, s, "/synthetic/.codex/auth.json")
+			if _, safe := contextengine.PublicItem(llm.Item{Type: llm.ItemToolCall, Data: llm.ToolCall{Name: "read", Arguments: `{"path":"/synthetic/.codex/auth.json"}`}}); safe {
+				t.Fatal("fixture did not exercise the private-source guard")
 			}
 			before, _ := json.Marshal(status)
 			makeFixture := func() *contextFixture {
 				f := newContextFixture(t, "openai-codex", contextengine.Config{})
 				f.user(t, "input", "Inspect fixture.txt")
 				f.item(t, sessionstore.ItemTurn, session.Turn{ID: status.TurnID, Type: session.TurnRegular})
-				f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: status.TurnID, Response: llm.Response{Output: []llm.Item{{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: status.CallID, Name: "read", Arguments: `{"path":"fixture.txt"}`}}}}})
+				f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: status.TurnID, Response: llm.Response{Output: []llm.Item{{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: status.CallID, Name: "read", Arguments: `{"path":"/synthetic/.codex/auth.json"}`}}}}})
 				return f
 			}
 			apply := func(f *contextFixture) {
@@ -104,7 +108,8 @@ func TestReceiptStateRepairNativeTerminalWaitingFor(t *testing.T) {
 					t.Fatal(err)
 				}
 				var found bool
-				for _, item := range built.Request.Input {
+				for _, selected := range built.Package.Selected {
+					item := selected.Unit.Item
 					if r, ok := item.Data.(llm.ToolResult); ok && r.CallID == status.CallID {
 						stub := decodeReceiptStub(t, r.Output[0].Value)
 						if !stub.ReceiptPresent || stub.State != string(s) || !slices.Equal(stub.OperationStates, []string{string(s)}) {
@@ -120,6 +125,11 @@ func TestReceiptStateRepairNativeTerminalWaitingFor(t *testing.T) {
 				}
 				if !found || strings.Contains(requestText(built), "SYNTHETIC_SECRET_BODY") {
 					t.Fatal("safe receipt absent or private body leaked")
+				}
+				for _, item := range built.Request.Input {
+					if item.Type != llm.ItemMessage || item.ProviderID != "" {
+						t.Fatal("private-source receipt retained native replay state")
+					}
 				}
 			}
 			after, _ := json.Marshal(status)

@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/unreallabsai/unreal-agent/harness/credential"
+	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/internal/testclaude"
 )
 
@@ -38,15 +39,19 @@ func TestCommonBootstrapUsesNormalDiscoveryAndExplicitTrust(t *testing.T) {
 			}
 			cfg, err := bootstrapRuntime(t.Context(), o, func(ids []string) (string, error) { return ids[0], nil }, os.Getenv)
 			if providers.want == 0 {
-				if err == nil {
-					t.Fatal("unavailable providers claimed available")
+				if err != nil || cfg.Runtime.Provider.Provider != loginProvider || len(cfg.Providers) != 0 || len(cfg.providerStatuses) != 2 {
+					t.Fatal("unavailable providers did not enter login state", err)
 				}
-				return
+				for _, status := range cfg.providerStatuses {
+					if status.Availability == "available" {
+						t.Fatal("unavailable provider claimed available", status.ID)
+					}
+				}
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(cfg.Providers)+1 != providers.want || cfg.Launcher.DiscoverProviders != nil && !*cfg.Launcher.DiscoverProviders {
+			if providers.want > 0 && len(cfg.Providers)+1 != providers.want || cfg.Launcher.DiscoverProviders != nil && !*cfg.Launcher.DiscoverProviders {
 				t.Fatal("common startup retained single-provider Pilot")
 			}
 			if !reflect.DeepEqual(cfg.Permissions.Tools, []string{"read", "grep", "glob"}) || cfg.Permissions.FilesystemUnrestricted || cfg.Permissions.NetworkUnrestricted {
@@ -77,8 +82,15 @@ func TestCommonBootstrapDockerProxyAvailability(t *testing.T) {
 				if err != nil || cfg.Runtime.Provider.Auth.Method != credential.DockerSandboxOAuth || !cfg.Launcher.CodexDockerSandboxOAuth {
 					t.Fatal("explicit OAuth route lost", err)
 				}
-			} else if err == nil {
-				t.Fatal("bad proxy registered as available")
+			} else {
+				if err != nil || cfg.Runtime.Provider.Provider != loginProvider || len(cfg.Providers) != 0 || len(cfg.providerStatuses) != 2 || !cfg.Launcher.CodexDockerSandboxOAuth {
+					t.Fatal("invalid proxy prevented login state or changed route", err)
+				}
+				for _, status := range cfg.providerStatuses {
+					if status.Availability == "available" || status.ID == "openai-codex" && status.Reason != modelcatalog.ProxyInvalid {
+						t.Fatal("invalid proxy claimed available", status.ID, status.Reason)
+					}
+				}
 			}
 			if len(cli.Calls(t)) != 0 {
 				t.Fatal("discovery inferred")

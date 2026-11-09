@@ -119,7 +119,7 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 	// An explicit nonempty, nonsecret environment prevents os/exec's nil-env
 	// inheritance, including provider tokens, .env overlays and proxy credentials.
 	execution := subagent.Config{Directory: directory, Binary: binary, Arguments: arguments, Environment: childEnvironment(c), Templates: templates, ResolveRuntime: childRuntimeResolver(c), ValidateTemplate: childTemplateValidator(c)}
-	if len(c.Backends) == 0 {
+	if len(c.Backends) == 0 && c.Discovered == nil {
 		execution.ResolveRuntime = nil
 		execution.ValidateTemplate = nil
 	}

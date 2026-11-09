@@ -51,7 +51,8 @@ Codex（`openai-codex`）では、[コンテキストビルダー](../../harness
 | `ResponseReserve` | `4096` | 応答予約量、および最大出力不明時のしきい値計算用の代替値 |
 | `ToolResultKeepTokens` | `15000` | 古いツール結果を省略候補にする前に保護する、直近ツール結果のトークン予算 |
 | `ToolResultMinPruneTokens` | `15000` | 新しい `prune` 境界を記録するために必要な最小推定節約トークン数 |
-| `ClaudeCompactThresholdTokens` | `200000` | Claude のアイドル時自動圧縮を開始する入力トークンしきい値 |
+
+Claude 経路の設定は `Claude.CompactThresholdTokens`（既定 `200000`）で、`Context` と Session identity の外に置きます。旧 `Context.ClaudeCompactThresholdTokens` も読み込めます。新しい経路設定が非ゼロなら、そちらを優先します。
 
 ---
 
@@ -59,7 +60,7 @@ Codex（`openai-codex`）では、[コンテキストビルダー](../../harness
 
 Claude ルートでは Claude Code 自身が会話を管理しているため、Unreal が `claude` CLI を通じて自動圧縮を制御します。
 
-- **アイドル時のバックグラウンド圧縮（既定: 200,000 トークン超）:** 1つのターンとすべてのツール実行が完了した時点で、直近のコンテキスト量が `Context.ClaudeCompactThresholdTokens` を超えていれば、バックグラウンドで同じ Claude Code 会話に対して `/compact` を実行します。
+- **アイドル時のバックグラウンド圧縮（既定: 200,000 トークン超）:** 1つのターンとすべてのツール実行が完了した時点で、直近のコンテキスト量が `Claude.CompactThresholdTokens` を超えていれば、バックグラウンドで同じ Claude Code 会話に対して `/compact` を実行します。
   - 圧縮中に新しいユーザー入力やサブエージェントからの通知が届いた場合は、即座にバックグラウンド圧縮を中断して次のターンを開始します（圧縮は次回アイドル時に再試行されます）。
 - **ターン開始前のブロッキング圧縮（しきい値の2倍＝400,000 トークン超）:** コンテキスト量がしきい値の2倍を超えた場合のみ、次のターンを開始する前に圧縮完了を待ちます。
 - **フッターのコンテキスト表示:** ツールループ全体の合算ではなく、最新の `message_start` の入力トークン数（`input + cache_read + cache_creation`）を表示します。

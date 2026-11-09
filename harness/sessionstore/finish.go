@@ -30,8 +30,11 @@ func (r FinishRecord) Validate() error {
 	return r.Result.Validate()
 }
 func (r FinishResult) Validate() error {
-	if (r.Status != "completed" && r.Status != "failed") || strings.TrimSpace(r.Summary) == "" {
-		return fmt.Errorf("invalid finish result")
+	if r.Status != "completed" && r.Status != "failed" {
+		return fmt.Errorf("invalid finish result: status must be completed or failed")
+	}
+	if strings.TrimSpace(r.Summary) == "" {
+		return fmt.Errorf("invalid finish result: summary must contain text")
 	}
 	return nil
 }

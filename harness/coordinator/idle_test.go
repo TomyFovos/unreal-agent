@@ -25,7 +25,7 @@ func (a *idleTestAdapter) Idle(ctx context.Context, _ llm.Request, _ llm.Request
 	}
 }
 
-func TestIdleMaintenanceYieldsOnlyToUserTurns(t *testing.T) {
+func TestIdleMaintenanceYieldsToUserAndUrgentPeerTurns(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		run := newStopTestRun(t, 0)
 		adapter := &idleTestAdapter{Adapter: run.current.dependencies.LLM, complete: make(chan struct{})}
@@ -67,15 +67,8 @@ func TestIdleMaintenanceYieldsOnlyToUserTurns(t *testing.T) {
 			t.Fatal("child notification interrupted maintenance")
 		}
 		run.input(t, progressPeerInput(t, "message", "message", "child result"))
-		if len(run.calls) != 2 || adapter.idle[1].Err() != nil {
-			t.Fatal("child message interrupted maintenance")
-		}
-		adapter.complete <- struct{}{}
-		synctest.Wait()
-		synctest.Sleep(2 * slurpIdleTimeout)
-		synctest.Wait()
-		if len(run.calls) != 3 || !run.current.backgroundTurn {
-			t.Fatal("queued child inputs did not start a turn after maintenance")
+		if len(run.calls) != 3 || adapter.idle[1].Err() == nil || !run.current.backgroundTurn {
+			t.Fatal("urgent peer message did not interrupt maintenance and deliver queued reports")
 		}
 		if run.current.state.currentTurnInputs != run.current.state.availableInputs {
 			t.Fatal("queued child inputs were not included in the turn")

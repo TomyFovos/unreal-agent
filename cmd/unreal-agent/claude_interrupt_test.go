@@ -31,7 +31,7 @@ type interruptScreen struct {
 	rows map[string]string
 }
 
-func TestClaudeIdleCompactionYieldsToTUIInputAndRetries(t *testing.T) {
+func TestClaudeLargeContextDoesNotDelayTUIInput(t *testing.T) {
 	f := testclaude.New(t)
 	f.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentInputTokens: 250_000, AgentFinal: "first complete", CompactDelayMillis: 30_000})
 	cfg := claudeRouteConfiguration(t, f)
@@ -58,56 +58,39 @@ func TestClaudeIdleCompactionYieldsToTUIInputAndRetries(t *testing.T) {
 	}()
 	submitInteractive(t, c, v, "first", "first task")
 	inspectInteractive(t, c, "idle-interrupt", func(v host.View) bool {
-		return hasFinalText(v, "first complete") && v.Progress != nil && v.Progress.Mode == "compacting"
+		return hasFinalText(v, "first complete") && v.Progress == nil
 	})
-	waitInteractive(t, func() bool { return len(f.Calls(t)) == 2 })
-	waitInteractive(t, func() bool { return strings.Count(screen.text(), "会話を圧縮中") >= 2 })
-	// The already running fake keeps its 30s delay. Subsequent invocations
-	// answer and compact immediately, making a retry independently observable.
 	f.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentInputTokens: 250_000, AgentFinal: "second complete", CompactPreTokens: 250_050, CompactPostTokens: 12_000})
 	submitted := time.Now()
 	keys <- tui.Key{Text: "second task"}
 	keys <- tui.Key{Name: "enter"}
 	end := inspectInteractive(t, c, "idle-interrupt", func(v host.View) bool {
-		for _, item := range v.History.Items {
-			if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Context != nil && record.Context.Conversation != nil && record.Context.Conversation.Compacted {
-				return hasFinalText(v, "second complete") && v.Progress == nil
-			}
-		}
-		return false
+		return hasFinalText(v, "second complete") && v.Progress == nil
 	})
 	calls := f.Calls(t)
-	if len(calls) != 4 || !strings.HasPrefix(calls[1].Input, "/compact ") || calls[2].Input != "second task" || !strings.HasPrefix(calls[3].Input, "/compact ") {
-		t.Fatalf("interrupt/retry process order = %+v", calls)
+	if len(calls) != 2 || calls[1].Input != "second task" {
+		t.Fatalf("unexpected separate compaction process: %+v", calls)
 	}
-	if elapsed := calls[2].InputAt.Sub(submitted); elapsed < 0 || elapsed >= 5*time.Second {
-		t.Fatalf("input waited %v for a 30s compaction", elapsed)
+	if elapsed := calls[1].InputAt.Sub(submitted); elapsed < 0 || elapsed >= 5*time.Second {
+		t.Fatalf("new input delayed by %v", elapsed)
 	}
 	for _, call := range calls {
 		if call.OverlappingPID != 0 {
 			t.Fatalf("Claude processes overlapped: %+v", call)
 		}
 	}
-	interrupted, compacted := 0, 0
+	contexts := 0
 	for _, item := range end.History.Items {
 		if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Context != nil && record.Context.Conversation != nil {
 			r := record.Context.Conversation
-			if r.Interrupted {
-				interrupted++
-				if r.Compacted || !r.InputKnown || r.InputTokens != 250_050 || r.BeforeTokens != 250_050 || r.Error != "" {
-					t.Fatal("interruption changed the pre-compact context", r)
-				}
-			}
-			if r.Compacted {
-				compacted++
-				if r.BeforeTokens != 250_050 || !r.InputKnown || r.InputTokens != 12_000 {
-					t.Fatal("retry compact counts", r)
-				}
+			contexts++
+			if r.Compacted || r.Interrupted || !r.InputKnown || r.InputTokens != 250_050 {
+				t.Fatal("large context was not retained until CLI compaction", r)
 			}
 		}
 	}
-	if interrupted != 1 || compacted != 1 {
-		t.Fatalf("interrupted=%d compacted=%d; want one of each", interrupted, compacted)
+	if contexts != 2 {
+		t.Fatalf("context observations = %d, want both normal turns", contexts)
 	}
 }
 

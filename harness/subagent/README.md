@@ -21,7 +21,7 @@
 
 Calls `subagent.Serve(ctx, os.Stdin, os.Stdout, childFactory)`:
 - Opens a child Host (`Lifecycle="child"`, `Heartbeat=0`) with tools restricted to bounded executors plus `SendParent` and `Finish`.
-- Inherits the parent's `ProjectInstructionSnapshot` (`AGENTS.md` snapshot) and shared `MutationStateDirectory` so multi-process file locking stays coordinated.
+- Discovers its workspace's current `AGENTS.md` at each new child start; resume/restart replay the child's saved snapshot. The shared `MutationStateDirectory` keeps multi-process file locking coordinated.
 
 ---
 

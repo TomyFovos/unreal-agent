@@ -12,6 +12,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/internal/secretguard"
 )
 
 // Only small, public receipt metadata is retained here, never raw Operation state.
@@ -30,8 +31,8 @@ func toolReceiptInfo(status sessionstore.ToolCallStatus) receiptInfo {
 		if op.Type == operation.TypeShell {
 			if state, err := operation.DecodeShellState(op); err == nil {
 				for _, path := range []string{state.OutPath, state.ErrPath} {
-					if path != "" && !contextengine.Sensitive(path) {
-						info.captures = append(info.captures, path)
+					if path != "" {
+						info.captures = append(info.captures, secretguard.Redact(path))
 					}
 				}
 				info.failed = info.failed || state.Result != nil && state.Result.ExitCode != 0
@@ -202,28 +203,16 @@ func (b *builder) pruneToolEpoch(persist func(sessionstore.ContextRecord) error)
 	return persist(record)
 }
 
-func (b *builder) omittedOutput(u contextengine.Unit, r llm.ToolResult, call llm.ToolCall) string {
-	label := strings.Join(strings.Fields(call.Name), " ")
-	var args struct {
-		Command string `json:"command"`
-		Path    string `json:"path"`
-	}
-	_ = json.Unmarshal([]byte(call.Arguments), &args)
-	if args.Command != "" {
-		label += " " + fmt.Sprintf("%q", args.Command)
-	} else if args.Path != "" {
-		label += " " + fmt.Sprintf("%q", args.Path)
-	}
-	if label == "" {
-		label = "tool result"
-	}
-	lines := 0
-	for _, part := range r.Output {
-		if part.Kind == llm.ToolResultText && part.Value != "" {
-			lines += strings.Count(part.Value, "\n")
-			if !strings.HasSuffix(part.Value, "\n") {
-				lines++
-			}
+func (b *builder) omittedOutput(u contextengine.Unit, r llm.ToolResult, _ llm.ToolCall) string {
+	state := "completed"
+	switch r.State {
+	case llm.ToolResultPending:
+		state = "pending"
+	case llm.ToolResultFailed:
+		state = "failed"
+	default:
+		if b.receiptInfo[u.ID].failed {
+			state = "failed"
 		}
 	}
 	files := ""
@@ -234,7 +223,7 @@ func (b *builder) omittedOutput(u contextengine.Unit, r llm.ToolResult, call llm
 		}
 		files = " Full output: " + strings.Join(quoted, ", ") + "."
 	}
-	return fmt.Sprintf("[Output omitted to keep the context small: %s (%d lines). Run it again if you need it.%s Canonical Unit ID %s.]", label, lines, files, u.ID)
+	return fmt.Sprintf("[Output omitted: call %s; unit %s; state %s; re-run if needed.%s]", r.CallID, u.ID, state, files)
 }
 
 func toolFileAccess(call llm.ToolCall) (read string, writes []string) {

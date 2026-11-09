@@ -88,10 +88,9 @@ func TestInstallConsentNativePreflightAndBootstrap(t *testing.T) {
 			}
 			cfg, err := bootstrapRuntime(t.Context(), o, func(ids []string) (string, error) { return ids[0], nil }, os.Getenv)
 			if !codexOK && !claudeOK {
-				if err == nil {
-					t.Fatal("unavailable providers started")
+				if err != nil || cfg.Runtime.Provider.Provider != loginProvider || len(cfg.providerStatuses) != 2 {
+					t.Fatal("unavailable providers did not start in login state", err)
 				}
-				return
 			}
 			if err != nil {
 				t.Fatal(err)

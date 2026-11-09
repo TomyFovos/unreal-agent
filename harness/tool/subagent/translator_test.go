@@ -55,11 +55,13 @@ func TestSendParentProgressIsOptional(t *testing.T) {
 
 type ctx struct {
 	eligible bool
+	waiting  []string
 	specs    []operation.Spec
 }
 
 func (c *ctx) Submit(s operation.Spec) operation.ID { c.specs = append(c.specs, s); return "op" }
 func (c *ctx) CanFinish() bool                      { return c.eligible }
+func (c *ctx) FinishWaitingFor() []string           { return c.waiting }
 func TestFinishRejectsOtherPendingCallsBeforeSubmit(t *testing.T) {
 	tr := translator{action: "finish", owner: "child"}
 	call := llm.ToolCall{Name: "Finish", Arguments: `{"status":"completed","summary":"done","changedFiles":[],"tests":[],"blockers":[]}`}
@@ -70,6 +72,35 @@ func TestFinishRejectsOtherPendingCallsBeforeSubmit(t *testing.T) {
 	c.eligible = true
 	if s := tr.Translate(c, call); s.Error != "" || len(c.specs) != 1 {
 		t.Fatal(s, c.specs)
+	}
+}
+
+func TestFinishErrorsExplainFieldsAndWaitTargets(t *testing.T) {
+	tr := translator{action: "finish", owner: "child"}
+	for _, tc := range []struct{ args, want string }{
+		{`{"answers":"synthetic-private"}`, "unknown field /answers"},
+		{`{"status":42}`, "field /status"},
+		{`{"changedFiles":[42]}`, "field /changedFiles/0"},
+		{`{"summary":{"token":"synthetic-private"}}`, "field /summary"},
+		{`{"status":"done","summary":"text"}`, "status must be completed or failed"},
+		{`{"status":"completed","summary":"  "}`, "summary must contain text"},
+		{`{"summary":`, "malformed JSON"},
+	} {
+		c := &ctx{eligible: true}
+		got := tr.Translate(c, llm.ToolCall{Name: "Finish", Arguments: tc.args})
+		if !strings.Contains(got.Error, tc.want) || strings.Contains(got.Error, "synthetic-private") || len(c.specs) != 0 {
+			t.Fatalf("%s: %+v", tc.want, got)
+		}
+	}
+	c := &ctx{waiting: []string{"call read-1 (read)", "operation op-1 (Bash, awaiting)"}}
+	got := tr.Translate(c, llm.ToolCall{Name: "Finish", Arguments: `{"status":"completed","summary":"done"}`})
+	for _, want := range append(c.waiting, "Wait for their results", "call Finish alone") {
+		if !strings.Contains(got.Error, want) {
+			t.Fatal(got.Error)
+		}
+	}
+	if len(c.specs) != 0 {
+		t.Fatal("ineligible Finish submitted")
 	}
 }
 

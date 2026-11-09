@@ -12,11 +12,13 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 	"uuid"
 
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
@@ -37,13 +39,14 @@ const (
 const defaultWait = 9 * time.Minute
 
 const subagentUsage = `usage: unreal-agent subagent COMMAND
-  start [--template lead] [--task TEXT]   start a child; the task is read from stdin without --task
+  start [--template lead] [--model ID] [--effort LEVEL] [--task TEXT]
+                                         start a child; the task is read from stdin without --task
   wait [HANDLE ...] [--timeout 9m]        wait until a child finishes or asks for approval
   approve HANDLE REQUEST allow|deny       answer a child's approval request
   send HANDLE [--text TEXT]               send a child more instructions (stdin without --text)
   cancel HANDLE                           stop a child
-  list                                    show this Session's children
-  show HANDLE                             show a child's full report`
+  list [--all]                            show active children and ended counts; --all shows every child
+  show HANDLE [--task]                    show a child's report; --task includes its instructions`
 
 // isSubagentCommand reports whether args are this command: always for
 // unreal-agent, and for unreal only inside an agent's shell, where
@@ -69,14 +72,23 @@ func runSubagentCLI(ctx context.Context, args []string, stdin io.Reader, out io.
 	case "start":
 		template := flags.String("template", "lead", "child template")
 		task := flags.String("task", "", "task text; read from stdin when empty")
+		model := flags.String("model", "", "override the template's model ID")
+		effort := flags.String("effort", "", "override reasoning effort: low, medium, high, xhigh, max")
 		if rest, err := parseAll(flags, args[1:]); err != nil || len(rest) != 0 {
 			return errors.New(subagentUsage)
+		}
+		var runtime *subagent.RuntimeRequest
+		if *model != "" || *effort != "" {
+			runtime = &subagent.RuntimeRequest{Model: *model, Effort: llm.ReasoningEffort(*effort).Normalize()}
+			if runtime.Effort != "" && !runtime.Effort.Valid() {
+				return fmt.Errorf("invalid effort %q; use low, medium, high, xhigh or max", *effort)
+			}
 		}
 		text, err := textArgument(*task, stdin)
 		if err != nil {
 			return err
 		}
-		return c.start(ctx, *template, text)
+		return c.start(ctx, *template, text, runtime)
 	case "wait":
 		timeout := flags.Duration("timeout", defaultWait, "longest wait")
 		handles, err := parseAll(flags, args[1:])
@@ -106,6 +118,10 @@ func runSubagentCLI(ctx context.Context, args []string, stdin io.Reader, out io.
 		}
 		return c.control(ctx, "cancel", args[1], viewer.ControlRequest{})
 	case "list":
+		all := flags.Bool("all", false, "include ended children")
+		if rest, err := parseAll(flags, args[1:]); err != nil || len(rest) != 0 {
+			return errors.New(subagentUsage)
+		}
 		children, _, err := c.children(ctx)
 		if err != nil {
 			return err
@@ -113,19 +129,29 @@ func runSubagentCLI(ctx context.Context, args []string, stdin io.Reader, out io.
 		if len(children) == 0 {
 			fmt.Fprintln(out, "No children in this Session.")
 		}
+		ended := map[operation.Status]int{}
 		for _, child := range children {
-			child.summary(out)
+			if *all || child.running() {
+				child.summary(out)
+			} else {
+				ended[child.status]++
+			}
+		}
+		if len(ended) > 0 {
+			fmt.Fprintf(out, "ended: %d completed, %d failed, %d canceled (subagent list --all)\n", ended[operation.StatusCompleted], ended[operation.StatusFailed], ended[operation.StatusCanceled])
 		}
 		return nil
 	case "show":
-		if len(args) != 2 {
+		task := flags.Bool("task", false, "include the child's instructions")
+		handles, err := parseAll(flags, args[1:])
+		if err != nil || len(handles) != 1 {
 			return errors.New(subagentUsage)
 		}
-		child, _, err := c.child(ctx, args[1])
+		child, _, err := c.child(ctx, handles[0])
 		if err != nil {
 			return err
 		}
-		child.report(out, c.name, true)
+		child.report(out, c.name, *task)
 		return nil
 	}
 	return errors.New(subagentUsage)
@@ -226,16 +252,16 @@ func (c subagentCLI) child(ctx context.Context, handle string) (childState, host
 			return child, view, nil
 		}
 	}
-	return childState{}, view, fmt.Errorf("this Session has no child %q; see %s subagent list", handle, c.name)
+	return childState{}, view, fmt.Errorf("this Session has no child %q; see %s subagent list --all", handle, c.name)
 }
 
-func (c subagentCLI) start(ctx context.Context, template, task string) error {
+func (c subagentCLI) start(ctx context.Context, template, task string, runtime *subagent.RuntimeRequest) error {
 	view, err := c.client.Inspect(ctx, c.parent, 0, 1)
 	if err != nil {
 		return fmt.Errorf("cannot reach this Session's Host: %w", err)
 	}
 	input := inbox.ID("cli-start-" + uuid.New().String())
-	if _, err = modelExchange(ctx, c.client.Extension, modelRequest{Action: "child.start", ID: c.parent, Generation: view.Generation, InputID: input, Template: template, Task: task}); err != nil {
+	if _, err = modelExchange(ctx, c.client.Extension, modelRequest{Action: "child.start", ID: c.parent, Generation: view.Generation, InputID: input, Template: template, Task: task, ChildRuntime: runtime}); err != nil {
 		return fmt.Errorf("could not start %q: %w", template, err)
 	}
 	handle := subagent.StartOperationID(c.parent, input)
@@ -283,7 +309,7 @@ func (c subagentCLI) wait(ctx context.Context, handles []string, timeout time.Du
 			}
 		}
 		if len(handles) > 0 && len(selected) != len(handles) {
-			return fmt.Errorf("this Session has no child among %s; see %s subagent list", strings.Join(handles, " "), c.name)
+			return fmt.Errorf("this Session has no child among %s; see %s subagent list --all", strings.Join(handles, " "), c.name)
 		}
 		if first && len(selected) == 0 {
 			// Nothing runs anymore: report the latest child in full, which a
@@ -393,9 +419,9 @@ func (s childState) summary(out io.Writer) {
 	fmt.Fprintln(out, line)
 }
 
-func (s childState) report(out io.Writer, name string, full bool) {
+func (s childState) report(out io.Writer, name string, includeTask bool) {
 	fmt.Fprintf(out, "== %s  %s  %s\n", s.handle, s.label(), s.status)
-	if full {
+	if includeTask {
 		fmt.Fprintf(out, "task: %s\n", s.task)
 	}
 	for _, a := range s.approvals {
@@ -425,7 +451,11 @@ func (s childState) report(out io.Writer, name string, full bool) {
 func firstLine(text string) string {
 	line, _, _ := strings.Cut(strings.TrimSpace(text), "\n")
 	if len(line) > 160 {
-		line = line[:157] + "..."
+		end := 157
+		for !utf8.RuneStart(line[end]) {
+			end--
+		}
+		line = line[:end] + "..."
 	}
 	return line
 }

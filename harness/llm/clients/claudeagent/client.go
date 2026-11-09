@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,8 +40,8 @@ const maxLine = 64 << 20
 
 // Config names the CLI. The Session's runtime fills in the rest per Session.
 type Config struct {
-	// CompactThresholdTokens defaults to 200,000 for idle compaction.
-	CompactThresholdTokens int64             `json:"-"` // injected from Context; not immutable runtime identity
+	// CompactThresholdTokens defaults to 200,000 for CLI automatic compaction.
+	CompactThresholdTokens int64             `json:"-"` // injected from route settings; not immutable runtime identity
 	Binary                 string            // absolute path of the claude CLI
 	Directory              string            `json:"-"` // the workspace; Claude Code's working directory
 	Results                *observed.Results `json:"-"`
@@ -57,6 +58,9 @@ type SubagentCLI struct {
 	Binary    string   // stable kit launcher, or the executable for a source build
 	Socket    string   // the Host's gateway socket
 	Templates []string // the child templates, for the prompt
+	// Available checks the Host's existing provider health/catalog at each turn.
+	// Nil retains the explicitly configured CLI behavior.
+	Available func(context.Context) bool `json:"-"`
 }
 
 // The environment that tells the subagent command its Host and Session.
@@ -120,10 +124,14 @@ func (e *Error) Unwrap() error {
 // Respond runs one Claude Code turn. Each turn is its own process that resumes
 // the Session's Claude Code conversation.
 func (c *Client) Respond(ctx context.Context, request llm.Request, opt llm.RequestOptions) (llm.Response, error) {
+	session := sessionUUID(c.config.Namespace, opt.Identity.SessionID)
+	if idle := c.idleCompactionState(session, opt); idle != nil {
+		idle.beginTurn()
+		defer idle.endTurn()
+	}
 	if opt.Tools == nil {
 		return llm.Response{}, &Error{Code: "tool_rendezvous_required"}
 	}
-	session := sessionUUID(c.config.Namespace, opt.Identity.SessionID)
 	unlock, err := c.lockConversation(ctx, session)
 	if err != nil {
 		return llm.Response{}, err
@@ -136,12 +144,6 @@ func (c *Client) Respond(ctx context.Context, request llm.Request, opt llm.Reque
 	}
 	plan := planPrompt(request.Input)
 	resume, prompt := plan.resume, plan.prompt
-	before := c.lastContextTokens(session, opt)
-	// Idle maintenance normally takes care of this. Only the emergency
-	// threshold may delay a new input after maintenance was interrupted.
-	if before > c.config.CompactThresholdTokens && before-c.config.CompactThresholdTokens > c.config.CompactThresholdTokens {
-		c.compact(ctx, request, opt, session, before)
-	}
 	if err := ctx.Err(); err != nil {
 		return llm.Response{}, err
 	}
@@ -176,8 +178,20 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	if err := ctx.Err(); err != nil {
 		return llm.Response{}, err
 	}
+	env := environment(c.config.Environ())
 	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--replay-user-messages"}
-	args = append(args, "--disallowedTools", "Agent", "Monitor", "AskUserQuestion")
+	subagents := c.config.Subagents
+	if opt.Identity.SessionID == "" || subagents.Available != nil && !subagents.Available(ctx) {
+		subagents = SubagentCLI{}
+	}
+	// The measured allowlist omits Monitor and AskUserQuestion, and Agent while
+	// Unreal's GPT children are configured. Slash commands remain enabled.
+	args = append(args, "--tools", launchTools(subagents))
+	env = launchEnv(env, subagents)
+	args = append(args, "--autocompact", strconv.FormatInt(autoCompactTokens(c.config.CompactThresholdTokens), 10))
+	if settings := ancestorInstructionSettings(c.config.Directory, env); settings != "" {
+		args = append(args, "--settings", settings)
+	}
 	if resume {
 		args = append(args, "--resume", session)
 	} else {
@@ -189,11 +203,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	if request.Model.ReasoningEffort.Valid() {
 		args = append(args, "--effort", string(request.Model.ReasoningEffort.Normalize()))
 	}
-	subagents := c.config.Subagents
-	if opt.Identity.SessionID == "" {
-		subagents = SubagentCLI{}
-	}
-	args = append(args, "--append-system-prompt", appendedPrompt(modeLabel(permission.ControllerFromContext(ctx)), subagents)+projectInstructions(c.config.Directory))
+	args = append(args, "--append-system-prompt", appendedPrompt(modeLabel(permission.ControllerFromContext(ctx)), subagents))
 
 	// The process outlives ctx briefly: an interrupted turn first asks Claude
 	// Code to stop, which also ends the command it runs.
@@ -201,7 +211,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	defer cancel()
 	cmd := exec.CommandContext(processCtx, c.config.Binary, args...)
 	cmd.Dir = c.config.Directory
-	cmd.Env = environment(c.config.Environ())
+	cmd.Env = env
 	if subagents.Binary != "" {
 		cmd.Env = append(cmd.Env, SubagentSocketEnv+"="+subagents.Socket, SubagentSessionEnv+"="+opt.Identity.SessionID)
 	}
@@ -216,11 +226,16 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	}
 	var stderr tail
 	cmd.Stderr = &stderr
+	started := time.Now().UTC()
 	if err = cmd.Start(); err != nil {
 		return llm.Response{}, &Error{Code: "cli_missing", Message: err.Error()}
 	}
 	out := &writer{w: stdin}
 	t := newTurn(ctx, cancel, opt, out, c.config.Results, &c.approver, c.config.Directory, session)
+	t.startup.process = started
+	t.subagents, t.environ = subagents, cmd.Env
+	compacts := &compactEvents{client: c, turn: t}
+	defer compacts.finish()
 	stopInterrupt := context.AfterFunc(ctx, func() {
 		if compact != nil {
 			// Do not let an interrupted summary be saved during graceful
@@ -258,6 +273,9 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	hooks := map[string]any{
 		"PreToolUse":    []any{map[string]any{"matcher": gateMatcher, "hookCallbackIds": []string{gateHook}}},
 		"PostToolBatch": []any{map[string]any{"hookCallbackIds": []string{batchHook}, "timeout": batchHookSeconds}},
+		"SessionStart":  []any{map[string]any{"matcher": "compact", "hookCallbackIds": []string{compactStartHook}}},
+		"PreCompact":    []any{map[string]any{"hookCallbackIds": []string{preCompactHook}}},
+		"PostCompact":   []any{map[string]any{"hookCallbackIds": []string{postCompactHook}}},
 	}
 	if err = out.send(map[string]any{"type": "control_request", "request_id": "unreal-init", "request": map[string]any{"subtype": "initialize", "hooks": hooks}}); err == nil {
 		err = out.send(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": prompt}, "parent_tool_use_id": nil, "session_id": ""})
@@ -276,6 +294,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 			var f frame
 			if json.Unmarshal(line, &f) == nil {
 				if compact != nil {
+					t.recordStartup(f)
 					compact.handle(f)
 					if f.Type == "result" {
 						result = &f
@@ -283,11 +302,22 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 						t.handle(f)
 					}
 				} else {
+					if compacts.handle(f) {
+						// A pre-compaction call no longer describes this conversation.
+						lastInput = nil
+						t.mu.Lock()
+						t.steps.contextKnown = false
+						t.mu.Unlock()
+					}
 					if f.Type == "stream_event" && f.ParentToolUseID == nil {
 						var event streamEvent
 						if json.Unmarshal(f.Event, &event) == nil && event.Type == "message_start" && event.Message.Usage != nil {
 							value := event.Message.Usage.inputTokens()
 							lastInput = &value
+							if compacts.awaitingInput {
+								c.recordConversation(ctx, opt, session, llm.ConversationRecord{Provider: ProviderID, InputTokens: value, InputKnown: true})
+								compacts.awaitingInput = false
+							}
 						}
 					}
 					result = t.handle(f)
@@ -312,7 +342,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		t.recordTurnUsage(result)
 		// The result's usage sums every model call of the turn; the last
 		// message_start is the current context. Use the sum only without one.
-		if lastInput == nil && result.Usage != nil {
+		if lastInput == nil && result.Usage != nil && !compacts.awaitingInput {
 			value := result.Usage.inputTokens()
 			lastInput = &value
 		}
@@ -387,6 +417,7 @@ func environment(env []string) []string {
 	drop := map[string]bool{
 		"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true,
 		"CLAUDECODE": true, "CLAUDE_PID": true, "CLAUDE_EFFORT": true,
+		"CLAUDE_CODE_DISABLE_BUNDLED_SKILLS": true,
 	}
 	var out []string
 	for _, kv := range env {
@@ -396,7 +427,7 @@ func environment(env []string) []string {
 		}
 		out = append(out, kv)
 	}
-	return out
+	return append(out, "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1")
 }
 
 func sessionLink(key string) bool {

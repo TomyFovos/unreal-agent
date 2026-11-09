@@ -4,10 +4,13 @@ package secretguard
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 )
 
-var pattern = regexp.MustCompile(`(?i)(\b(?:access[_-]?token|refresh[_-]?token|id[_-]?token|oauth[_-]?token|auth[_-]?token|token|api[_-]?key|authorization|client[_-]?secret|secret|password|private[_-]?key|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_CODEX_ACCESS_TOKEN)\b\s*["']?\s*[:=]\s*(?:bearer\s+)?[^\s,}\]]+|\bbearer\s+\S+|\bsk-[A-Za-z0-9_-]{8,}|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?(?:-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|$))`)
+const privateKeyExpression = `-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?(?:-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|$)`
+
+var pattern = regexp.MustCompile(`(?i)(\b(?:access[_-]?token|refresh[_-]?token|id[_-]?token|oauth[_-]?token|auth[_-]?token|token|api[_-]?key|authorization|client[_-]?secret|secret|password|private[_-]?key|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_CODEX_ACCESS_TOKEN)\b\s*["']?\s*[:=]\s*(?:bearer\s+)?[^\s,}\]]+|\bbearer\s+\S+|\bsk-[A-Za-z0-9_-]{8,}|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|` + privateKeyExpression + `)`)
 
 // Presentation/export surfaces retain their existing identity exclusions.
 // Model context uses Credentials so ordinary task metadata remains usable.
@@ -30,7 +33,47 @@ func Redact(text string) string {
 	if !credentialCandidate(text) {
 		return text
 	}
-	return pattern.ReplaceAllString(text, "[REDACTED]")
+	return redact(text, pattern)
+}
+
+// RedactSensitive also masks identity fields on presentation/export surfaces.
+// Model context uses Redact so ordinary task metadata remains available.
+func RedactSensitive(text string) string {
+	return redact(text, pattern, identityPattern)
+}
+
+func redact(text string, patterns ...*regexp.Regexp) string {
+	var matches [][]int
+	for _, p := range patterns {
+		for offset := 0; offset < len(text); {
+			match := p.FindStringIndex(text[offset:])
+			if match == nil {
+				break
+			}
+			match[0] += offset
+			match[1] += offset
+			matches = append(matches, match)
+			// Assignment/Bearer matches can consume the start of another
+			// credential, including a PEM header. Cover overlapping matches.
+			offset = match[0] + 1
+		}
+	}
+	if len(matches) == 0 {
+		return text
+	}
+	// Merge overlapping ranges before replacing, retaining all other text.
+	slices.SortFunc(matches, func(a, b []int) int { return a[0] - b[0] })
+	var out strings.Builder
+	end := 0
+	for _, match := range matches {
+		if match[0] >= end {
+			out.WriteString(text[end:match[0]])
+			out.WriteString("[REDACTED]")
+		}
+		end = max(end, match[1])
+	}
+	out.WriteString(text[end:])
+	return out.String()
 }
 
 // Every alternative in pattern contains at least one of these literal words.

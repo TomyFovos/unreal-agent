@@ -54,6 +54,7 @@ func EnableCompaction(b Builder, config contextengine.Config, constraints contex
 	concrete.constraints = constraints
 	concrete.native = map[string]nativeReplay{}
 	concrete.blockedCalls = map[string]bool{}
+	concrete.blockedReasons = map[string]string{}
 	concrete.callGroups = map[string]string{}
 	concrete.continuations = map[string]*continuationGroup{}
 	concrete.turnBounds = map[session.TurnID]string{}
@@ -152,7 +153,16 @@ func (b *builder) addUnitChecked(item llm.Item, kind contextengine.Kind, class c
 		return "", false
 	}
 	u := contextengine.Unit{Kind: kind, Class: class, Source: b.sourceRef(), Origin: b.historyProvider, Group: group, Item: item, Required: required}
-	id, eligible := b.engine.AddWithEligibility(u, sourceKey(b.source))
+	id, eligible, redaction := b.engine.AddWithRedaction(u, sourceKey(b.source))
+	if redaction != nil {
+		if c, ok := item.Data.(llm.ToolCall); ok && !eligible {
+			b.blockedReasons[c.CallID] = redaction.Reason
+		}
+		// Excluded receipt measurements include the replacement stub below.
+		if _, receipt := item.Data.(llm.ToolResult); !receipt || class != contextengine.Omit {
+			b.queueRedaction(id, redaction)
+		}
+	}
 	b.lastUnit = id
 	b.native[id] = nativeReplay{origin: b.historyProvider, model: b.historyModel, providerID: item.ProviderID, extra: slices.Clone(extra)}
 	return id, eligible
@@ -206,12 +216,18 @@ func (b *builder) contextResponse(response llm.Response) {
 			continue
 		}
 		id, safe := b.addUnitChecked(item, kind, contextengine.Keep, false, groupID, private)
+		if safe && contextengine.Sensitive(contextengine.Text(item)) {
+			// Redacted messages/arguments cannot reuse the native response ID
+			// or its reasoning. Replay the complete group as historical data.
+			group.portable = true
+		}
 		if call, ok := item.Data.(llm.ToolCall); ok {
 			b.blockedCalls[call.CallID] = !safe
 		}
 		if !safe {
 			// The engine has already recorded the omitted source unit.
-			// Keep the same inert replay metadata as the previous guard path.
+			// Private sources and unsupported payloads cannot be made public
+			// by masking credential-shaped substrings in the original body.
 			replay := b.native[id]
 			replay.extra = nil
 			b.native[id] = replay
@@ -256,8 +272,12 @@ func (b *builder) contextReceipt(callID string, output []llm.ToolResultOutput, r
 		}
 	}
 	item := llm.Item{Type: llm.ItemToolResult, Data: llm.ToolResult{CallID: callID, Output: output, State: state}}
-	if _, safe := contextengine.PublicItem(item); !safe || b.blockedCalls[callID] {
-		b.addUnit(item, contextengine.ToolResult, contextengine.Omit, false, "", nil)
+	_, safe, redaction := contextengine.PublicItemWithRedaction(item)
+	if !safe || b.blockedCalls[callID] {
+		if b.blockedCalls[callID] {
+			redaction = &llm.ContextRedaction{Reason: b.blockedReasons[callID], CallID: callID, BeforeBytes: contextengine.PublicPayloadBytes(item)}
+		}
+		id := b.addUnit(item, contextengine.ToolResult, contextengine.Omit, false, "", nil)
 		if stub, present := b.redactedReceipt(running); present {
 			output = stub
 			item.Data = llm.ToolResult{CallID: callID, Output: output, State: state}
@@ -269,6 +289,8 @@ func (b *builder) contextReceipt(callID string, output []llm.ToolResultOutput, r
 				group.portable = true
 			}
 		}
+		redaction.AfterBytes = contextengine.PublicPayloadBytes(item)
+		b.queueRedaction(id, redaction)
 	}
 	if running {
 		if !b.receiptSent[callID] {
@@ -443,6 +465,10 @@ func ContextDebug(r Result) []string {
 // ApplyContext replays a durable projection decision. Original units stay intact.
 func (b *builder) ApplyContext(r sessionstore.ContextRecord) {
 	switch r.Kind {
+	case "peer_format":
+		if r.Text == "quoted-v1" {
+			b.legacyPeerFormat = false
+		}
 	case "pending_receipt":
 		for _, item := range r.Items {
 			if result, ok := item.Data.(llm.ToolResult); ok {
@@ -471,7 +497,11 @@ func (b *builder) ApplyContext(r sessionstore.ContextRecord) {
 		for _, id := range r.Retained {
 			b.retained[id] = true
 		}
-		b.summary = []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: "Conversation summary:\n" + r.Text}, Responses: &llm.ItemEncoding{}}}
+		item := llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: "Conversation summary:\n" + r.Text}}
+		public, _, redaction := contextengine.PublicItemWithRedaction(item)
+		b.queueRedaction("", redaction)
+		public.Responses = &llm.ItemEncoding{}
+		b.summary = []llm.Item{public}
 		clear(b.derived)
 		b.estimate = derivedEstimate{}
 		b.lastInput = 0
@@ -489,8 +519,22 @@ func (b *builder) ApplyContext(r sessionstore.ContextRecord) {
 func (b *builder) applyToolProjection(id string, originalItems []llm.Item, pruned bool) {
 	b.pruned[id] = b.pruned[id] || pruned
 	b.pendingProjections = slices.DeleteFunc(b.pendingProjections, func(p sessionstore.ContextRecord) bool { return p.UnitID == id })
-	items := slices.Clone(originalItems)
-	if u, ok := b.engine.ResolveUnit(id); ok {
+	u, resolved := b.engine.ResolveUnit(id)
+	var items []llm.Item
+	for _, item := range originalItems {
+		public, safe, redaction := contextengine.PublicItemWithRedaction(item)
+		b.queueRedaction(id, redaction)
+		if safe {
+			if (item.Type == llm.ItemToolCall || item.Type == llm.ItemMessage) && contextengine.Text(item) != contextengine.Text(public) {
+				if group := b.continuations[u.Group]; group != nil {
+					group.portable = true
+					clear(b.derived)
+				}
+			}
+			items = append(items, public)
+		}
+	}
+	if resolved {
 		if original, ok := u.Item.Data.(llm.ToolResult); ok {
 			for i, item := range items {
 				if result, ok := item.Data.(llm.ToolResult); ok {
@@ -657,9 +701,9 @@ func (b *builder) PrepareContext(ctx context.Context, adapter llm.Adapter, optio
 	if strings.TrimSpace(summaryText) == "" {
 		return &contextengine.Error{Code: "required_context_exceeds_budget"}
 	}
-	if contextengine.Sensitive(summaryText) {
-		summaryText = "[Conversation summary redacted; sensitive data omitted.]"
-	}
+	public, _, redaction := contextengine.PublicItemWithRedaction(llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: summaryText}})
+	b.queueRedaction("", redaction)
+	summaryText = public.Data.(llm.Message).Text
 	record := sessionstore.ContextRecord{Kind: "summary", From: b.viewThrough, Through: units[cut-1].ID, Text: summaryText, Usage: &response.Usage, Provider: b.provider, Model: b.request.Model.ID}
 	for _, u := range units[:cut] {
 		if keptGroups[u.Group] && u.Class != contextengine.Omit {

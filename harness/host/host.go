@@ -90,7 +90,8 @@ type Options struct {
 	// binds. Resume, restart, and fork replay the persisted snapshot instead.
 	Workspace string
 	// ProjectInstructions binds this snapshot to a newly created session
-	// instead of discovering one, so a child shares its parent's revision.
+	// instead of discovering one. A new child receives its workspace's snapshot
+	// discovered at start; resume and restart replay that child's saved snapshot.
 	ProjectInstructions *projectinstructions.Snapshot
 	// PermissionMode starts a child Session in its parent's mode; empty
 	// starts Read Only.
@@ -191,6 +192,7 @@ type Session struct {
 	store                 *localfile.Store
 	inbox                 *inbox.Inbox
 	runtime               Runtime
+	background            *backgroundWork
 	lifecycle             string
 	finish                *sessionstore.FinishRecord
 	mu                    sync.Mutex
@@ -361,6 +363,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	s.permissions = controller
 	defer func() {
 		if err != nil {
+			s.background.close()
 			cancel()
 			if s.runtime.Close != nil {
 				s.runtime.Close()
@@ -417,6 +420,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	cctx = context.WithValue(cctx, sessionContextKey{}, s)
 	cctx = context.WithValue(cctx, newSessionKey{}, created)
 	s.ctx = cctx
+	s.background = newBackgroundWork(cctx)
 	s.runtime, err = h.config.Build(cctx, o.ID)
 	if err != nil {
 		return nil, err
@@ -513,6 +517,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 			runErr = s.completeStops(context.WithoutCancel(cctx))
 		}
 		s.mu.Unlock()
+		s.background.close()
 		if s.runtime.Close != nil {
 			runErr = errors.Join(runErr, s.runtime.Close())
 		}

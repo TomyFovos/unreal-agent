@@ -158,9 +158,42 @@ func TestDefaultSubagentsLeadAtMaxWorkersUnchanged(t *testing.T) {
 
 func assertProgressGuidance(t *testing.T, prompt string) {
 	t.Helper()
-	for _, rule := range []string{"Send progress updates with SendParent progress: true", "without waking it", "For questions or requests needing a decision, omit progress (false by default) to wake the parent"} {
+	for _, rule := range []string{"Send progress, acknowledgements and completion estimates with SendParent progress: true", "without waking it", "For questions, decisions or approvals, omit progress (false by default) to wake the parent", "Do not repeat the same content across messages, progress updates and Finish"} {
 		if !strings.Contains(prompt, rule) {
 			t.Fatalf("child prompt lacks %q: %s", rule, prompt)
 		}
+	}
+}
+
+func TestDefaultPromptsUseFinishFieldsAndCollectorContract(t *testing.T) {
+	for name, prompt := range map[string]string{"lead": leadPrompt, "worker": workerPrompt, "collector": collectorPrompt} {
+		t.Run(name, func(t *testing.T) {
+			assertProgressGuidance(t, prompt)
+			for _, field := range []string{"status", "summary", "changedFiles", "tests", "blockers", "Finish alone"} {
+				if !strings.Contains(prompt, field) {
+					t.Fatalf("missing %q", field)
+				}
+			}
+			if name != "collector" {
+				for _, detail := range []string{"In Finish summary", "parent decide without rereading", "commit SHA/version", "main files and points", "tests/results", "key failure lines", "decisions for the parent", "unverified items", "Cite paths, lines or commits", "omit long source text and full diffs"} {
+					if !strings.Contains(prompt, detail) {
+						t.Fatalf("Finish guidance lacks %q", detail)
+					}
+				}
+			}
+		})
+	}
+	for _, want := range []string{"Do not ask collectors to save files; use a worker or save them yourself", "Batch these questions per collector", "precise, self-contained tasks"} {
+		if !strings.Contains(leadPrompt, want) {
+			t.Fatal("lead lacks", want)
+		}
+	}
+	for _, want := range []string{"Read-only URL and API requests are allowed", "put the answers in summary", "changedFiles to []", "Do not edit or save files", "Cite source paths, lines or commits with your answers"} {
+		if !strings.Contains(collectorPrompt, want) {
+			t.Fatal("collector lacks", want)
+		}
+	}
+	if strings.Contains(collectorPrompt, "Finish with the answers") {
+		t.Fatal("ambiguous Finish guidance")
 	}
 }

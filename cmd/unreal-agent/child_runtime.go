@@ -8,6 +8,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
@@ -49,11 +50,11 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig) subagent.RuntimeResolver 
 			}
 		}
 		if c.CheckProvider(ctx, choice.Provider) != nil {
-			return fail("provider_unavailable")
+			return template, &subagent.RuntimeError{Code: "provider_unavailable", Hint: modelcatalog.AuthRequired.ProviderHint(choice.Provider) + "。ログイン後は /model refresh を実行してください"}
 		}
 		catalog, e := c.Catalog(ctx, choice.Provider)
 		if e != nil {
-			return fail("provider_unavailable")
+			return template, &subagent.RuntimeError{Code: "provider_unavailable", Hint: modelcatalog.CatalogUnavailable.ProviderHint(choice.Provider) + "。/login でログイン手順を確認してください"}
 		}
 		model, e := catalog.FindSelection(choice.Model)
 		if e != nil && !catalog.Authoritative && choice.Provider == active.Provider && choice.Model == active.Model && choice.Effort == active.Effort {

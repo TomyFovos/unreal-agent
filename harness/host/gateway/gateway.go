@@ -77,18 +77,14 @@ func (e *Error) Error() string {
 // SafeReason applies the shared credential guard before a diagnostic crosses
 // the gateway or reaches a terminal, including diagnostics from older peers.
 func SafeReason(value string) string {
-	value = secretguard.Redact(value)
+	value = secretguard.RedactSensitive(value)
 	value = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 || r >= 0x202a && r <= 0x202e || r >= 0x2066 && r <= 0x2069 || r == 0x200e || r == 0x200f || r == 0x061c {
 			return -1
 		}
 		return r
 	}, value)
-	value = secretguard.Redact(value)
-	if secretguard.Sensitive(value) {
-		return "[protected]"
-	}
-	return value
+	return secretguard.RedactSensitive(value)
 }
 func (e *Error) Is(target error) bool {
 	return (e.Code == "stale_generation" && target == host.ErrStaleGeneration) || (e.Code == "writer_owned" && target == localfile.ErrWriterOwned) || (e.Code == "stopped" && target == host.ErrStopped) || (e.Code == "conflict" && target == host.ErrConflict) || (e.Code == "not_found" && target == fs.ErrNotExist)

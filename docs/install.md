@@ -2,25 +2,25 @@
 
 **Language:** English | [日本語](ja/install.md)
 
-The Unreal Agent common kit runs on **Linux amd64** (including WSL and Linux Docker Sandboxes) and supports both Claude and Codex in a single installation.
+The Unreal Agent common kit runs on **Linux amd64** (including WSL and Linux Docker Sandboxes) and supports **Claude only, ChatGPT (Codex) only, or both** in a single installation.
 
 ## System Requirements
 
 - **OS / Architecture:** Linux amd64 (glibc version is checked automatically by `doctor.sh` against `KIT.json`)
 - **Required tools:** `bash`, `python3`, `git`, `tar`, `sha256sum`
-- **Provider CLI (at least one):** Official `claude` CLI (Claude Code) and/or official `codex` CLI
+- **Provider login:** The official `claude` CLI for Claude, or `codex login` for ChatGPT. Codex inference can run without its CLI while valid authentication and a model catalog are available, including host-managed Docker Sandbox OAuth.
 
 ---
 
 ## Step 1: Sign In to a Provider
 
-Prepare at least one subscription login inside the Linux environment where Unreal will run:
+Prepare a subscription login for whichever provider you want to use inside the Linux environment where Unreal will run:
 
 - **Claude:** Install the official Claude Code CLI, run `claude` in Bash, and execute `/login` inside Claude Code with your Claude subscription.
 - **Codex:** Install the official Codex CLI and run `codex login` in Bash with your ChatGPT subscription.
 - **Docker Sandbox (host-managed Codex OAuth):** Prepare the host login instead. See [Providers — Docker Sandboxes Codex OAuth](providers.md#docker-sandboxes-codex-oauth).
 
-> **Note:** Unreal does not accept API keys in normal interactive use. Running `/login` inside Unreal displays these CLI sign-in instructions. You can sign in to the second provider at any time later and run `/model refresh`.
+> **Note:** Unreal does not accept API keys in normal interactive use. Running `/login` inside Unreal displays these sign-in instructions. With neither provider ready, installation still succeeds (exit code `0`), and Unreal starts and shows login guidance on the first input. After a later login, run `/model refresh` and select the provider in `/model`; no reinstall is needed. If you explicitly disabled a provider, re-enable it with `bash development.sh --configure-providers --codex-auto` for Codex or `bash development.sh --configure-providers` for Claude.
 
 ---
 
@@ -44,6 +44,7 @@ Prepare at least one subscription login inside the Linux environment where Unrea
    ```
 
 3. Check the printed availability summary for Claude and Codex.
+   With both ready, a new installation starts with Claude; with one ready, it starts with that provider. Claude uses GPT children when Codex is available, otherwise Claude Code's Agent (`haiku` / `sonnet`). A GPT parent always uses GPT children and reports unavailable Codex with login guidance.
 4. Navigate to your project directory and start a named Session:
 
    ```bash

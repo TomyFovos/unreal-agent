@@ -233,17 +233,12 @@ func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProvid
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
-	if len(ids) == 0 {
-		for _, status := range config.providerStatuses {
-			if status.Reason == modelcatalog.CatalogUnavailable {
-				return config, &normalRuntimeError{Code: "catalog_unavailable", Providers: config.providerStatuses, Diagnostics: config.providerDiagnostics}
-			}
-		}
-		return config, &normalRuntimeError{Code: "providers_unavailable", Providers: config.providerStatuses, Diagnostics: config.providerDiagnostics}
-	}
 	id := getenv("UNREAL_HARNESS_LLM_PROVIDER")
 	if id == "" {
-		if len(ids) == 1 {
+		if len(ids) == 0 {
+			id = loginProvider
+			config.Providers[id] = loginRuntime()
+		} else if len(ids) == 1 {
 			id = ids[0]
 		} else {
 			id, err = choose(ids)
@@ -373,11 +368,13 @@ func normalRediscovery(config serveConfiguration, codexFile string, live *agentr
 			}
 		}
 		for id, runtime := range fresh.Providers {
-			if id == config.Runtime.Provider.Provider || config.Providers[id].Provider.Provider != "" {
-				continue
-			}
-			if _, exists := live.Lookup(id); exists {
-				continue
+			// Refresh health/catalogs without changing a recorded binding.
+			if id == config.Runtime.Provider.Provider {
+				runtime = agentrunner.ProviderRuntime{Provider: config.Runtime.Provider, ReasoningEffort: config.Runtime.ReasoningEffort, Claude: config.Runtime.Claude}
+			} else if configured, ok := config.Providers[id]; ok {
+				runtime = configured
+			} else if registered, ok := live.Lookup(id); ok {
+				runtime = registered.Runtime
 			}
 			b := agentrunner.DiscoveredBackend{Runtime: runtime}
 			if id == claudeagent.ProviderID {

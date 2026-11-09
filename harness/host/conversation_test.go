@@ -22,7 +22,7 @@ func TestProviderConversationRecordSurvivesHostResume(t *testing.T) {
 		if view.Progress == nil || view.Progress.Mode != "compacting" || view.Progress.Text != "" {
 			t.Fatal("compaction not projected", view.Progress)
 		}
-		record := llm.ConversationRecord{Provider: "claude", BeforeTokens: 250_000, InputTokens: 12_000, InputKnown: true, Compacted: true}
+		record := llm.ConversationRecord{Provider: "claude", BeforeTokens: 250_000, AfterTokens: 10_000, InputTokens: 12_000, InputKnown: true, Compacted: true}
 		if err := opt.RecordConversation(ctx, record); err != nil {
 			return llm.Response{}, err
 		}
@@ -52,6 +52,22 @@ func TestProviderConversationRecordSurvivesHostResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	view, _ := s.Inspect(0, 256)
+	found := false
+	for _, item := range view.History.Items {
+		if r, ok := item.Data.(sessionstore.HostRecord); ok && r.Context != nil && r.Context.Conversation != nil {
+			c := r.Context.Conversation
+			if c.Compacted {
+				found = true
+				if c.AfterTokens != 10_000 || c.InputTokens != 12_000 {
+					t.Fatal("resume lost summary size or actual input", c)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("compact record not restored")
+	}
 	model = s.withProgress(modelFunc(func(_ context.Context, _ llm.Request, opt llm.RequestOptions) (llm.Response, error) {
 		if opt.ConversationTokens["claude"] != 12_000 {
 			t.Fatal("context not restored", opt.ConversationTokens)
@@ -74,5 +90,9 @@ func TestConversationTokensUseExplicitMeasurementOverStepTotals(t *testing.T) {
 		sessionstore.Item{Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{Response: llm.Response{Usage: llm.Usage{InputTokens: 999_000}}}})
 	if got := s.conversationTokensLocked()["claude"]; got != 12_000 {
 		t.Fatal("step totals overrode context", got)
+	}
+	s.items = append(s.items, sessionstore.Item{Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostContext, Context: &sessionstore.ContextRecord{Conversation: &llm.ConversationRecord{Provider: "claude", Compacted: true, AfterTokens: 1000}}}})
+	if _, ok := s.conversationTokensLocked()["claude"]; ok {
+		t.Fatal("summary size must not become actual model input")
 	}
 }

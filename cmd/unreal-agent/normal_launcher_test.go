@@ -150,7 +150,7 @@ func TestNormalLauncherFirstRunProviderAvailabilityAndExplicitInitialOverride(t 
 		{"codex-only", true, false, "", "openai-codex", ""},
 		{"claude-only", false, true, "", claudeagent.ProviderID, ""},
 		{"both-explicit-claude", true, true, claudeagent.ProviderID, claudeagent.ProviderID, ""},
-		{"neither", false, false, "", "", "providers_unavailable"},
+		{"neither", false, false, "", loginProvider, ""},
 		{"explicit-unavailable-no-fallback", true, false, claudeagent.ProviderID, "", "initial_provider_unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -240,18 +240,20 @@ func TestNormalLauncherConcurrentBootstrapNoOverwriteAndMalformedConfiguration(t
 	}
 }
 
-func TestNormalLauncherMissingCatalogDoesNotGuessModelsOrCredentials(t *testing.T) {
+func TestNormalLauncherMissingCatalogStartsWithLoginInstructions(t *testing.T) {
 	f, cli := normalFixture(t, true, false)
 	if err := os.Remove(filepath.Join(os.Getenv("HOME"), ".codex", "models_cache.json")); err != nil {
 		t.Fatal(err)
 	}
-	var failure *normalRuntimeError
-	err := (launcher{start: f.start}).run(t.Context(), nil, io.Discard)
-	if !errors.As(err, &failure) || failure.Code != "catalog_unavailable" || f.starts.Load() != 0 {
-		t.Fatal("missing catalog was guessed or misclassified", err)
-	}
-	if _, err := os.Stat(f.o.config); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatal("missing catalog published configuration")
+	err := (launcher{start: f.start, attach: func(ctx context.Context, client *gateway.Client, id session.ID) error {
+		view, err := client.Inspect(ctx, id, 0, 256)
+		if err != nil || multiReport(t, view).Selection.Provider != loginProvider {
+			t.Fatal("missing catalog guessed an inference model", err)
+		}
+		return nil
+	}}).run(t.Context(), nil, io.Discard)
+	if err != nil || f.starts.Load() != 1 {
+		t.Fatal("missing catalog prevented login", err)
 	}
 	if len(cli.Calls(t)) != 0 || f.calls.Load() != 0 {
 		t.Fatal("catalog absence led to inference")
@@ -433,9 +435,9 @@ func TestNormalRegisteredUnavailableInitialProviderNeverAutomaticallyFallsBack(t
 	}
 	c := gateway.NewClient(f.o.socket)
 	defer c.Close()
-	submitInteractive(t, c, v, "unavailable", "must fail at selected Codex, not go to Claude")
-	failed := inspectInteractive(t, c, "no-fallback", func(v host.View) bool { return !v.Running })
-	if failed.Failure == "" || responseCount(failed) != 0 || len(cli.Calls(t)) != 0 || f.calls.Load() != 0 || multiReport(t, failed).Selection.Provider != "openai-codex" {
+	submitInteractive(t, c, v, "unavailable", "show login guidance for the selected Codex")
+	end := inspectInteractive(t, c, "no-fallback", func(v host.View) bool { return hasFinalText(v, "codex login") && v.Progress == nil })
+	if !end.Running || end.Failure != "" || responseCount(end) != 1 || !hasFinalText(end, "/model refresh") || len(cli.Calls(t)) != 0 || f.calls.Load() != 0 || multiReport(t, end).Selection.Provider != "openai-codex" {
 		t.Fatal("unavailable provider silently fell back")
 	}
 }

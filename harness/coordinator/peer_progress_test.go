@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/session"
@@ -39,15 +40,15 @@ func TestChildProgressWaitsForNextParentTurn(t *testing.T) {
 					}
 					for _, id := range []inbox.ID{"progress-one", "progress-two"} {
 						run.input(t, progressPeerInput(t, id, "progress", string(id)))
-						if len(run.calls) != 1 || run.current.wakingInputs() != 0 && delivery == "idle" {
-							t.Fatal("progress woke the parent", len(run.calls), run.current.wakingInputs())
+						if run.modelCallCount() != 1 || run.current.wakingInputs() != 0 && delivery == "idle" {
+							t.Fatal("progress woke the parent", run.modelCallCount(), run.current.wakingInputs())
 						}
 					}
 					if delivery != "idle" {
 						run.respond(t, 0, textResponse("delegated"))
 					}
-					if len(run.calls) != 1 || run.current.wakingInputs() != 0 {
-						t.Fatal("progress started a follow-up model call", len(run.calls), run.current.wakingInputs())
+					if run.modelCallCount() != 1 || run.current.wakingInputs() != 0 {
+						t.Fatal("progress started a follow-up model call", run.modelCallCount(), run.current.wakingInputs())
 					}
 					if len(run.store.appendedInputs) != 3 {
 						t.Fatal("progress was not recorded", run.store.appendedInputs)
@@ -62,8 +63,15 @@ func TestChildProgressWaitsForNextParentTurn(t *testing.T) {
 					} else {
 						run.input(t, progressPeerInput(t, "wake", wake, "needs review"))
 					}
-					if len(run.calls) != 2 {
-						t.Fatalf("%s started %d calls, want 2", wake, len(run.calls))
+					if wake == "ended" {
+						if run.modelCallCount() != 1 {
+							t.Fatal("ended report bypassed the idle batch")
+						}
+						synctest.Sleep(45 * time.Second)
+						synctest.Wait()
+					}
+					if run.modelCallCount() != 2 {
+						t.Fatalf("%s started %d calls, want 2", wake, run.modelCallCount())
 					}
 					request := requestDump(t, run.calls[1].request)
 					for _, text := range []string{"progress-one", "progress-two"} {
@@ -75,7 +83,7 @@ func TestChildProgressWaitsForNextParentTurn(t *testing.T) {
 						t.Fatal("incorrect turn origin")
 					}
 					run.respond(t, 1, textResponse("reviewed"))
-					if len(run.calls) != 2 || run.current.pendingInputs() != 0 {
+					if run.modelCallCount() != 2 || run.current.pendingInputs() != 0 {
 						t.Fatal("progress was not consumed with the waking input")
 					}
 					run.input(t, stopInput(t, "stop", inbox.StopWhenIdle))
@@ -96,11 +104,11 @@ func TestRestoredChildProgressWaitsForUser(t *testing.T) {
 			storedItem(4, sessionstore.ItemInput, progressPeerInput(t, "progress", "progress", "saved progress")),
 		}
 		run.start(t)
-		if len(run.calls) != 0 || run.current.pendingInputs() != 1 || run.current.wakingInputs() != 0 {
+		if run.modelCallCount() != 0 || run.current.pendingInputs() != 1 || run.current.wakingInputs() != 0 {
 			t.Fatal("restored progress woke the parent or was lost")
 		}
 		run.input(t, externalEvent(t, 1, "user", "review"))
-		if len(run.calls) != 1 || !strings.Contains(requestDump(t, run.calls[0].request), "saved progress") {
+		if run.modelCallCount() != 1 || !strings.Contains(requestDump(t, run.calls[0].request), "saved progress") {
 			t.Fatal("next user turn lost restored progress")
 		}
 		run.respond(t, 0, textResponse("reviewed"))

@@ -40,7 +40,7 @@ class CommonDevelopmentTests(unittest.TestCase):
         self.args = argparse.Namespace(docker_sandbox_oauth=False, policy_audited=False,
             trust_managed_policy=False, claude_binary="", replace_pilot_launcher=False)
 
-    def install(self):
+    def install(self, statuses=None, *, entrypoint=False):
         def probe(argv, env, **kwargs):
             if argv == ["bash", str(self.package / "install.sh")]:
                 identity = hashlib.sha256((self.package / "SHA256SUMS").read_bytes()).hexdigest()[:16]
@@ -50,19 +50,47 @@ class CommonDevelopmentTests(unittest.TestCase):
             if len(argv)>1 and argv[1] == "providers":
                 self.preflight_calls.append(list(argv))
                 reply = {"Providers": [{"ID": "openai-codex", "Availability": "unavailable" if "--codex-disabled" in argv else "available", "Reason":"operator_disabled" if "--codex-disabled" in argv else ""}, {"ID":"claude-code", "Availability":"unavailable" if "--claude-disabled" in argv else "available", "Reason":"operator_disabled" if "--claude-disabled" in argv else ""}]}
-                if "--codex-auto" in argv: reply["CodexRoute"] = "external"
+                if statuses is not None:
+                    reply["Providers"] = statuses
+                if "--codex-auto" in argv:
+                    reply["CodexRoute"] = "external" if reply["Providers"][0]["Availability"] == "available" else "auto"
                 return json.dumps(reply).encode(),0
             return original(argv, env, **kwargs)
         original = pilot.bounded_probe
         self.install_output = io.StringIO()
         with patch.dict(os.environ, self.env, clear=True), patch.object(pilot, "bounded_probe", side_effect=probe), contextlib.redirect_stdout(self.install_output):
-            common.install(self.args, self.package, self.meta)
+            if entrypoint:
+                with patch.object(common, "__file__", str(self.package / "common_development.py")):
+                    self.install_code = common.main(["install", "--configure-providers"])
+            else:
+                common.install(self.args, self.package, self.meta)
         return common.read_settings(self.home)
 
     def repo(self, name="workspace/project"):
         root = self.home / name; root.mkdir(parents=True)
         subprocess.run(["git", "init", "--quiet", str(root)], check=True, env=self.env)
         return root
+
+    def test_install_entrypoint_four_login_states_succeeds(self):
+        for codex, claude in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(codex=codex, claude=claude):
+                statuses = [{"ID": provider, "Availability": "available" if ready else "unavailable",
+                             "Reason": "" if ready else "auth_required"}
+                            for provider, ready in (("openai-codex", codex), ("claude", claude))]
+                settings = self.install(statuses, entrypoint=True)
+                self.assertEqual(self.install_code, 0)
+                self.assertEqual(settings["ProviderStatus"], statuses)
+                output = self.install_output.getvalue()
+                self.assertIn("次に:", output)
+                self.assertIn("/model refresh", output)
+                self.assertIn("インストールのやり直しは不要", output)
+                if codex and claude:
+                    self.assertIn("両方で使えます", output)
+                    self.assertIn("新規の統括は Claude", output)
+                elif codex or claude:
+                    self.assertIn("だけで使えます", output)
+                else:
+                    self.assertIn("最初の入力にもログイン方法", output)
 
     def test_one_inventory_same_product_no_credentials(self):
         with tarfile.open(self.archive) as archive:
@@ -622,6 +650,8 @@ class InstallGuidanceTests(unittest.TestCase):
                 self.assertEqual("claude を起動して /login" in text, not claude)
                 self.assertEqual("使うにはどちらかの準備" in text, not codex and not claude)
                 self.assertEqual("Claude の操作は" in text, claude)
+                self.assertIn("/model refresh", text)
+                self.assertIn("インストールのやり直しは不要", text)
                 for hidden in ("auth_required", "unavailable", "aliases/functions", "NOTE:"):
                     self.assertNotIn(hidden, text)
 

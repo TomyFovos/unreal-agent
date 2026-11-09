@@ -11,6 +11,15 @@ import (
 
 const DefaultCompactThresholdTokens int64 = 200_000
 
+// Claude Code 2.1.311 starts auto compaction about 33,000 tokens below the
+// --autocompact argument: at 100,000, measured pre_tokens were 63,886/65,057.
+const autoCompactOffset int64 = 33_000
+
+func autoCompactTokens(threshold int64) int64 {
+	// Clamp before adding, including very large configured thresholds.
+	return min(max(threshold, 100_000-autoCompactOffset), 1_000_000-autoCompactOffset) + autoCompactOffset
+}
+
 const compactPrompt = "/compact Preserve the goal, decisions made, questions asked of the user and anything awaiting their reply, active child handles and their roles, files being changed, and the next actions to take."
 
 type compaction struct {
@@ -27,10 +36,6 @@ func (c *compaction) handle(f frame) {
 	if f.Type == "system" && f.Subtype == "compact_boundary" && f.CompactMetadata != nil {
 		c.before = f.CompactMetadata.PreTokens
 		c.after = f.CompactMetadata.PostTokens
-	}
-	if f.Type == "result" && c.after == nil && f.Usage != nil && f.Usage.inputTokens() > 0 {
-		value := f.Usage.inputTokens()
-		c.after = &value
 	}
 }
 
@@ -89,18 +94,12 @@ func (c *Client) lockConversation(ctx context.Context, session string) (func(), 
 	}
 }
 
-// Idle is called by the Session owner only after the turn and its tools finish.
-// It has its own process, resuming the same Claude Code conversation.
+// Idle only arms cache maintenance. Token-threshold compaction belongs to
+// Claude Code, including busy sessions that receive reports without idling.
 func (c *Client) Idle(ctx context.Context, request llm.Request, opt llm.RequestOptions) {
-	session := sessionUUID(c.config.Namespace, opt.Identity.SessionID)
-	unlock, err := c.lockConversation(ctx, session)
-	if err != nil {
-		return
-	}
-	defer unlock()
-	if before := c.lastContextTokens(session, opt); before > c.config.CompactThresholdTokens {
+	c.scheduleIdleCompaction(ctx, opt, func(ctx context.Context, session string, before int64) {
 		c.compact(ctx, request, opt, session, before)
-	}
+	})
 }
 
 // compact is never run at a tool/steering batch. The caller owns the
@@ -129,7 +128,7 @@ func (c *Client) compact(ctx context.Context, request llm.Request, opt llm.Reque
 	} else {
 		record.Compacted = true
 		if state.after != nil {
-			record.InputTokens, record.InputKnown = *state.after, true
+			record.AfterTokens = *state.after
 		}
 	}
 	c.recordConversation(context.WithoutCancel(ctx), opt, session, record)

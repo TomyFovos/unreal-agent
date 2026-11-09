@@ -179,7 +179,7 @@ func TestContinuationRepairReadBodyAndRevision(t *testing.T) {
 	}
 }
 
-func TestContinuationRepairSecretReceiptUsesActualStateStub(t *testing.T) {
+func TestContinuationRepairPrivateSourceReceiptUsesActualStateStub(t *testing.T) {
 	for _, state := range []operation.Status{operation.StatusCompleted, operation.StatusFailed, operation.StatusCanceled, operation.StatusAwaiting} {
 		t.Run(string(state), func(t *testing.T) {
 			h := newRepairHistory(t, contextengine.Config{})
@@ -187,7 +187,9 @@ func TestContinuationRepairSecretReceiptUsesActualStateStub(t *testing.T) {
 			if _, _, err := h.request("t1"); err != nil {
 				t.Fatal(err)
 			}
-			h.response("t1", repairCall("read"))
+			call := repairCall("read")
+			call.Data = llm.ToolCall{CallID: "read", Name: "read", Arguments: `{"path":"/synthetic/.codex/auth.json"}`}
+			h.response("t1", call)
 			h.receipt("t1", "read", `Authorization: Bearer SYNTHETIC_PRIVATE_MARKER`, state)
 			_, wire, err := h.request("t2")
 			if err != nil {
@@ -197,17 +199,100 @@ func TestContinuationRepairSecretReceiptUsesActualStateStub(t *testing.T) {
 			text := repairWireText(wire)
 			want := string(state)
 			if state == operation.StatusAwaiting {
-				// The public Builder deliberately replaces any running body with
-				// its fixed waiting placeholder before compaction sees the payload.
-				if strings.Contains(text, "SYNTHETIC_PRIVATE_MARKER") || !strings.Contains(text, "still running") {
-					t.Fatal("running placeholder lost its real state")
-				}
-				return
+				want = "running"
 			}
 			if strings.Contains(text, "SYNTHETIC_PRIVATE_MARKER") || !strings.Contains(text, "redacted") || !strings.Contains(text, want) {
 				t.Fatal("secret receipt not replaced by state-preserving stub")
 			}
 		})
+	}
+}
+
+func TestContinuationRepairToolResultRedactsOnlySensitiveParts(t *testing.T) {
+	h := newRepairHistory(t, contextengine.Config{})
+	h.user("request", "inspect source.py")
+	if _, _, err := h.request("t1"); err != nil {
+		t.Fatal(err)
+	}
+	h.response("t1", repairCall("read"))
+	h.receipt("t1", "read", "def read(token: str):\n    secret = load()\n    return production_writeback()\nBearer SYNTHETIC_PRIVATE_MARKER\nrevision: keep-revision", operation.StatusCompleted)
+	_, wire, err := h.request("t2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRepairPairs(t, wire)
+	text := repairWireText(wire)
+	if strings.Contains(text, "SYNTHETIC_PRIVATE_MARKER") || !strings.Contains(text, "[REDACTED]") || !strings.Contains(text, "return production_writeback()") || !strings.Contains(text, "keep-revision") {
+		t.Fatal("wire discarded useful result content or leaked credentials")
+	}
+	var resultFound bool
+	for _, item := range wire {
+		resultFound = resultFound || item["type"] == "function_call_output"
+	}
+	if !resultFound {
+		t.Fatal("redacted result lost native call/result pairing")
+	}
+}
+
+func TestContinuationRepairRedactedResponseUsesWholePortableGroup(t *testing.T) {
+	for _, surface := range []string{"arguments", "name", "message"} {
+		t.Run(surface, func(t *testing.T) {
+			h := newRepairHistory(t, contextengine.Config{})
+			h.user("request", "inspect source.py")
+			if _, _, err := h.request("t1"); err != nil {
+				t.Fatal(err)
+			}
+			call := repairCall("read")
+			message := llm.Item{Type: llm.ItemMessage, ProviderID: "native-message-id", Data: llm.Message{Role: llm.RoleAssistant, Text: "Keep commentary."}}
+			switch surface {
+			case "arguments":
+				call.Data = llm.ToolCall{CallID: "read", Name: "read", Arguments: `{"path":"source.py","token":"SYNTHETIC_PRIVATE_MARKER"}`}
+			case "name":
+				call.Data = llm.ToolCall{CallID: "read", Name: "read token=SYNTHETIC_PRIVATE_MARKER", Arguments: `{"path":"source.py"}`}
+			case "message":
+				message.Data = llm.Message{Role: llm.RoleAssistant, Text: "Keep commentary. token=SYNTHETIC_PRIVATE_MARKER"}
+			}
+			h.response("t1", repairReasoning("private-reasoning", 128), message, call, repairCall("other"))
+			h.receipt("t1", "read", "keep read result", operation.StatusCompleted)
+			h.receipt("t1", "other", "keep other result", operation.StatusCompleted)
+			_, wire, err := h.request("t2")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, item := range wire {
+				if item["type"] != nil && item["type"] != "message" || item["id"] != nil {
+					t.Fatal("redacted response retained native replay state", item)
+				}
+			}
+			text := repairWireText(wire)
+			for _, gone := range []string{"SYNTHETIC_PRIVATE_MARKER", "private-reasoning", "native-message-id", "fc-read", "fc-other"} {
+				if strings.Contains(text, gone) {
+					t.Fatalf("redacted native response retained %s", gone)
+				}
+			}
+			for _, keep := range []string{"source.py", "Keep commentary.", "keep read result", "keep other result", "[REDACTED]"} {
+				if !strings.Contains(text, keep) {
+					t.Fatalf("portable group discarded %s", keep)
+				}
+			}
+		})
+	}
+}
+
+func TestLegacyBuilderRedactionDoesNotReuseCachedWireBytes(t *testing.T) {
+	message := llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "Keep commentary. token=SYNTHETIC_PRIVATE_MARKER"}, Responses: &llm.ItemEncoding{}}
+	if _, err := requestInputItem(message); err != nil {
+		t.Fatal(err)
+	}
+	b := contextbuilder.NewBuilder()
+	b.AddModelResponse(llm.Response{Output: []llm.Item{message}})
+	built, err := b.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := requestBody(built.Request, "", nil)
+	if err != nil || strings.Contains(string(body), "SYNTHETIC_PRIVATE_MARKER") || !strings.Contains(string(body), "Keep commentary. [REDACTED]") {
+		t.Fatal("legacy builder replayed cached unredacted response", err)
 	}
 }
 

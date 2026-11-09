@@ -51,7 +51,8 @@ Configured under the top-level `Context` key ([`harness/contextengine/types.go`]
 | `ResponseReserve` | `4096` | Response reserve and fallback maximum output for threshold calculation |
 | `ToolResultKeepTokens` | `15000` | Token budget reserved for recent tool outputs before older outputs become prune candidates |
 | `ToolResultMinPruneTokens` | `15000` | Minimum estimated token savings required before writing a new `prune` boundary |
-| `ClaudeCompactThresholdTokens` | `200000` | Input token threshold that triggers background idle compaction for Claude |
+
+Claude's route setting is `Claude.CompactThresholdTokens` (default `200000`), outside `Context` and Session identity. Existing `Context.ClaudeCompactThresholdTokens` values still load; a nonzero route setting takes precedence.
 
 ---
 
@@ -59,7 +60,7 @@ Configured under the top-level `Context` key ([`harness/contextengine/types.go`]
 
 Because Claude Code manages its own conversation state, Unreal coordinates compaction through the `claude` CLI:
 
-- **Background idle compaction (default: >200,000 tokens):** When a turn and all of its tool calls finish, Unreal checks the latest context size. If it exceeds `Context.ClaudeCompactThresholdTokens`, Unreal starts a background `/compact` on the same Claude Code conversation with preservation guidance.
+- **Background idle compaction (default: >200,000 tokens):** When a turn and all of its tool calls finish, Unreal checks the latest context size. If it exceeds `Claude.CompactThresholdTokens`, Unreal starts a background `/compact` on the same Claude Code conversation with preservation guidance.
   - If you send a new message or a child agent reports back while idle compaction is running, Unreal immediately interrupts the background compaction and runs your turn without delay.
 - **Blocking compaction (>2× threshold, i.e., >400,000 tokens):** Only when context exceeds twice the threshold does Unreal run compaction before starting the next turn.
 - **Context measurement:** The TUI footer displays the latest `message_start` input tokens (`input + cache_read + cache_creation`), rather than summing every step of an internal tool loop.

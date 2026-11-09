@@ -136,13 +136,9 @@ type Config struct {
 	RetrievalLimit, CheckpointThreshold                           int    `json:",omitzero"`
 	LargeToolTokens                                               int64  `json:",omitzero"`
 	ToolResultKeepTokens, ToolResultMinPruneTokens                int64  `json:",omitzero"`
-	ClaudeCompactThresholdTokens                                  int64  `json:",omitzero"`
 }
 
 func (c Config) Resolve() (Config, error) {
-	if c.ClaudeCompactThresholdTokens <= 0 {
-		c.ClaudeCompactThresholdTokens = 200_000
-	}
 	if c.Version == 0 {
 		c.Version = Version
 	}

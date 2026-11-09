@@ -2,25 +2,25 @@
 
 **言語:** [English](../install.md) | 日本語
 
-Unreal Agent の共通キットは **Linux amd64**（WSL および Linux Docker Sandbox を含む）に対応しており、1つのキットで Claude と Codex の両方を利用できます。
+Unreal Agent の共通キットは **Linux amd64**（WSL および Linux Docker Sandbox を含む）に対応しており、1つのキットで **Claude だけ・ChatGPT（Codex）だけ・両方**の構成を利用できます。
 
 ## 動作要件
 
 - **OS / アーキテクチャ:** Linux amd64（最低 glibc バージョンは `KIT.json` に記録され、インストール時に `doctor.sh` が自動検査します）
 - **必要なコマンド:** `bash`, `python3`, `git`, `tar`, `sha256sum`
-- **プロバイダ CLI（どちらか1つ以上）:** 公式 `claude` CLI（Claude Code）または公式 `codex` CLI
+- **プロバイダのログイン:** Claude は公式 `claude` CLI、ChatGPT は `codex login` を使用します。Codex は有効な認証とモデル一覧があれば CLI なしでも推論でき、Docker Sandbox のホスト管理 OAuth も利用できます。
 
 ---
 
 ## ステップ 1: プロバイダへのログイン準備
 
-Unreal を動かす Linux 環境内で、少なくとも1つのプロバイダにサブスクリプションでログインしておきます。
+Unreal を動かす Linux 環境内で、利用したいプロバイダにサブスクリプションでログインします。
 
 - **Claude を使う場合:** 公式の Claude Code CLI をインストールし、Bash で `claude` を起動して `/login` を実行します（Claude サブスクリプションでログイン）。
 - **Codex を使う場合:** 公式の Codex CLI をインストールし、Bash で `codex login` を実行します（ChatGPT サブスクリプションでログイン）。
 - **Docker Sandbox のホスト管理 Codex OAuth を使う場合:** ホスト側で OAuth ログインを準備します。詳しくは [プロバイダ設定 — Docker Sandboxes Codex OAuth](providers.md#docker-sandboxes-codex-oauth) を参照してください。
 
-> **補足:** Unreal の通常利用では API キーは使用しません。Unreal 内で `/login` を実行すると、上記のログイン手順が案内されます。もう片方のプロバイダは後からログインし、Unreal 内で `/model refresh` を実行するだけで追加できます。
+> **補足:** Unreal の通常利用では API キーは使用しません。Unreal 内の `/login` はログイン手順を表示します。両方未準備でもインストールは成功（終了コード `0`）し、起動後の最初の入力にログインを案内します。後からログインしたら `/model refresh` を実行し、`/model` で選択します。インストールのやり直しは不要です。明示的に無効化した場合は、Codex は `bash development.sh --configure-providers --codex-auto`、Claude は `bash development.sh --configure-providers` で再び有効にします。
 
 ---
 
@@ -44,6 +44,7 @@ Unreal を動かす Linux 環境内で、少なくとも1つのプロバイダ�
    ```
 
 3. インストール完了後に表示される Claude / Codex の利用可能状態を確認します。
+   新規導入時は両方使えれば Claude、片方ならそのプロバイダで始まります。Claude は Codex が使えれば GPT の子、使えなければ Claude Code の Agent（`haiku` / `sonnet`）を使います。GPT の統括は常に GPT の子を使い、Codex が利用できない場合はログインを案内します。
 4. 開発したいプロジェクトのディレクトリへ移動し、名前付きセッションを起動します。
 
    ```bash

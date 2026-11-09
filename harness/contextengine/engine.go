@@ -41,7 +41,7 @@ func (e *Engine) Configure(r Runtime, c Constraints, instructions bool) {
 }
 
 func (e *Engine) Add(u Unit, source string) string {
-	id, _ := e.add(u, source, false)
+	id, _, _ := e.add(u, source, false)
 	return id
 }
 
@@ -50,10 +50,16 @@ func (e *Engine) Add(u Unit, source string) string {
 // potentially large message/argument through the guard a second time. Omitted
 // source units do not join a native replay group.
 func (e *Engine) AddWithEligibility(u Unit, source string) (string, bool) {
+	id, eligible, _ := e.add(u, source, true)
+	return id, eligible
+}
+
+// AddWithRedaction also reports body-free projection measurements.
+func (e *Engine) AddWithRedaction(u Unit, source string) (string, bool, *llm.ContextRedaction) {
 	return e.add(u, source, true)
 }
 
-func (e *Engine) add(u Unit, source string, omitGroup bool) (string, bool) {
+func (e *Engine) add(u Unit, source string, omitGroup bool) (string, bool, *llm.ContextRedaction) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if u.Kind == UserMessage && u.Required {
@@ -63,8 +69,14 @@ func (e *Engine) add(u Unit, source string, omitGroup bool) (string, bool) {
 		}
 	}
 	u.ID = fmt.Sprintf("unit-%020d", len(e.order)+1)
-	public, ok := PublicItem(u.Item)
+	public, ok, redaction := PublicItemWithRedaction(u.Item)
 	eligible := ok && u.Class != Omit
+	if u.Class == Omit && ok {
+		redaction = &llm.ContextRedaction{Reason: NonPublic, BeforeBytes: PublicPayloadBytes(u.Item)}
+		if r, ok := u.Item.Data.(llm.ToolResult); ok {
+			redaction.CallID = r.CallID
+		}
+	}
 	if !eligible {
 		u.Class = Omit
 		u.Item = llm.Item{}
@@ -80,7 +92,7 @@ func (e *Engine) add(u Unit, source string, omitGroup bool) (string, bool) {
 	}
 	e.order = append(e.order, u.ID)
 	e.sources[source] = append(e.sources[source], u.ID)
-	return u.ID, eligible
+	return u.ID, eligible, redaction
 }
 
 func (e *Engine) Observe(item sessionstore.Item, source string) {

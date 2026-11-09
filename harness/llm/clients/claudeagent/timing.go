@@ -2,10 +2,60 @@ package claudeagent
 
 import (
 	"context"
+	"encoding/json/v2"
 	"log/slog"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 )
+
+type startupTiming struct {
+	process, init, message, text time.Time
+}
+
+// Each interval is recorded once, so startup, provider latency and streaming
+// latency can be distinguished without storing any message content.
+func (t *turn) recordStartup(f frame) {
+	if t.startup.process.IsZero() {
+		return
+	}
+	now := t.now().UTC()
+	record := func(reason string, started time.Time) {
+		if !started.IsZero() {
+			t.recordActivity(llm.ActivityRecord{Kind: "claude_startup", ID: t.opt.Identity.TurnID, Provider: ProviderID, Reason: reason, StartedAt: started, EndedAt: now})
+		}
+	}
+	if f.Type == "system" && f.Subtype == "init" && t.startup.init.IsZero() {
+		t.startup.init = now
+		record("process_to_init", t.startup.process)
+	}
+	if f.ParentToolUseID != nil {
+		return
+	}
+	text := false
+	if f.Type == "stream_event" {
+		var event streamEvent
+		if json.Unmarshal(f.Event, &event) != nil {
+			return
+		}
+		if event.Type == "message_start" && t.startup.message.IsZero() {
+			t.startup.message = now
+			record("init_to_message_start", t.startup.init)
+		}
+		text = event.Type == "content_block_delta" && event.Delta.Type == "text_delta" && event.Delta.Text != ""
+	} else if f.Type == "assistant" {
+		var m message
+		if json.Unmarshal(f.Message, &m) == nil {
+			for _, b := range m.Content {
+				text = text || b.Type == "text" && b.Text != ""
+			}
+		}
+	}
+	if text && t.startup.text.IsZero() {
+		t.startup.text = now
+		record("message_start_to_text", t.startup.message)
+	}
+}
 
 func (t *turn) recordActivity(record llm.ActivityRecord) {
 	if t.opt.RecordActivity != nil {

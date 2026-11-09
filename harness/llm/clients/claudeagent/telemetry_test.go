@@ -1,17 +1,111 @@
 package claudeagent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json/v2"
 	"errors"
 	"io"
+	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/tool/observed"
 )
+
+func TestNormalTurnRecordsCompactionAndActualContext(t *testing.T) {
+	for _, scenario := range []string{"auto_compact", "auto_compact_no_usage", "auto_compact_failed"} {
+		t.Run(scenario, func(t *testing.T) {
+			h := newHarness(t, scenario)
+			var records []llm.ConversationRecord
+			var activities []llm.ActivityRecord
+			var phases []llm.Progress
+			var logs bytes.Buffer
+			old := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			defer slog.SetDefault(old)
+			_, err := h.client.Respond(t.Context(), llm.Request{Input: []llm.Item{user("continue")}}, llm.RequestOptions{
+				Identity: llm.RequestIdentity{SessionID: "compacting"}, Tools: h.tools,
+				RecordConversation: func(_ context.Context, r llm.ConversationRecord) error { records = append(records, r); return nil },
+				RecordActivity:     func(_ context.Context, r llm.ActivityRecord) error { activities = append(activities, r); return nil },
+				Progress: func(p llm.Progress) {
+					if p.Phase != "" || p.Reset {
+						phases = append(phases, p)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(records) == 0 || records[0].Phase != "compact" || records[0].Provider != ProviderID {
+				t.Fatal(records)
+			}
+			compact := records[0]
+			if compact.StartedAt.IsZero() || compact.EndedAt.Before(compact.StartedAt) {
+				t.Fatal(compact)
+			}
+			if len(phases) != 2 || phases[0].Phase != "compacting" || !phases[1].Reset {
+				t.Fatal(phases)
+			}
+			var compacts []llm.ActivityRecord
+			for _, r := range activities {
+				if r.Kind == "claude_compact" {
+					compacts = append(compacts, r)
+				}
+			}
+			if len(compacts) != 2 || compacts[1].EndedAt.IsZero() {
+				t.Fatal(compacts)
+			}
+			if scenario == "auto_compact_failed" {
+				if compact.Compacted || compact.Error != "too_few_groups" || !strings.Contains(logs.String(), "too_few_groups") {
+					t.Fatal(compact, logs.String())
+				}
+			} else if !compact.Compacted || compact.BeforeTokens != 200_000 || compact.AfterTokens != 1234 || compact.InputKnown || compact.InputTokens != 0 || compact.EndedAt.Sub(compact.StartedAt) != 1500*time.Millisecond {
+				t.Fatal(compact)
+			}
+			got := h.client.lastContextTokens(sessionUUID("", "compacting"), llm.RequestOptions{})
+			if scenario == "auto_compact_no_usage" {
+				if len(records) != 1 || got != 0 {
+					t.Fatal("invented actual input from post_tokens or aggregate result", records, got)
+				}
+			} else if last := records[len(records)-1]; !last.InputKnown || last.InputTokens != 2350 || got != 2350 {
+				t.Fatal("context must be actual input including caches", records, got)
+			}
+		})
+	}
+}
+
+func TestStartupTimingRecordsEachStageOnce(t *testing.T) {
+	now := time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)
+	var records []llm.ActivityRecord
+	opt := llm.RequestOptions{Identity: llm.RequestIdentity{TurnID: "turn"}, RecordActivity: func(_ context.Context, r llm.ActivityRecord) error { records = append(records, r); return nil }}
+	round := newTurn(t.Context(), func() {}, opt, &writer{w: io.Discard}, observed.NewResults(), &approver{}, t.TempDir(), "s")
+	round.now = func() time.Time { return now }
+	round.startup.process = now
+	now = now.Add(time.Second)
+	round.handle(frame{Type: "system", Subtype: "init"})
+	parent := "child"
+	round.handle(frame{Type: "stream_event", ParentToolUseID: &parent, Event: []byte(`{"type":"message_start"}`)})
+	now = now.Add(2 * time.Second)
+	round.handle(frame{Type: "stream_event", Event: []byte(`{"type":"message_start"}`)})
+	round.handle(frame{Type: "stream_event", Event: []byte(`{"type":"content_block_delta","delta":{"type":"thinking_delta","text":"thinking"}}`)})
+	now = now.Add(3 * time.Second)
+	round.handle(frame{Type: "stream_event", Event: []byte(`{"type":"content_block_delta","delta":{"type":"text_delta","text":"body"}}`)})
+	round.handle(frame{Type: "system", Subtype: "init"})
+	round.handle(frame{Type: "stream_event", Event: []byte(`{"type":"message_start"}`)})
+	round.handle(frame{Type: "assistant", Message: []byte(`{"content":[{"type":"text","text":"body"}]}`)})
+	if len(records) != 3 {
+		t.Fatal(records)
+	}
+	for i, reason := range []string{"process_to_init", "init_to_message_start", "message_start_to_text"} {
+		if r := records[i]; r.Kind != "claude_startup" || r.ID != "turn" || r.Reason != reason || r.EndedAt.Sub(r.StartedAt) != time.Duration(i+1)*time.Second {
+			t.Fatal(records)
+		}
+	}
+}
 
 func TestCompactRecordsStartEndAndCancellationCause(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(t.Context())

@@ -22,6 +22,34 @@ func epochCall(id, name, arguments string) llm.Item {
 	return llm.Item{Type: llm.ItemToolCall, ProviderID: "fc-" + id, Data: llm.ToolCall{CallID: id, Name: name, Arguments: arguments}}
 }
 
+func TestOmittedOutputUsesReferencesAndStateWithoutArguments(t *testing.T) {
+	f := newContextFixture(t, "openai-codex", contextengine.Config{})
+	u := contextengine.Unit{ID: "unit-00000000000000000042"}
+	command := "printf " + strings.Repeat("long-command-", 500)
+	args, _ := json.Marshal(map[string]string{"command": command, "path": "original/path"})
+	r := llm.ToolResult{CallID: "call-42", State: llm.ToolResultSucceeded, Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: "first\nsecond\n"}}}
+	f.b.receiptInfo[u.ID] = receiptInfo{captures: []string{"/captures/42/out", "/captures/42/err"}}
+	got := f.b.omittedOutput(u, r, llm.ToolCall{Name: "Bash", Arguments: string(args)})
+	want := `[Output omitted: call call-42; unit unit-00000000000000000042; state completed; re-run if needed. Full output: "/captures/42/out", "/captures/42/err".]`
+	if got != want || strings.Contains(got, command) || strings.Contains(got, "original/path") {
+		t.Fatal(got)
+	}
+	old := fmt.Sprintf(`[Output omitted to keep the context small: Bash %q (2 lines). Run it again if you need it. Full output: "/captures/42/out", "/captures/42/err". Canonical Unit ID %s.]`, command, u.ID)
+	t.Logf("synthetic long Bash omission bytes: %d -> %d", len(old), len(got))
+	for _, tc := range []struct {
+		state  llm.ToolResultState
+		failed bool
+		want   string
+	}{{llm.ToolResultFailed, false, "failed"}, {llm.ToolResultPending, false, "pending"}, {llm.ToolResultUnknown, true, "failed"}, {llm.ToolResultUnknown, false, "completed"}} {
+		r.State = tc.state
+		f.b.receiptInfo[u.ID] = receiptInfo{failed: tc.failed}
+		got := f.b.omittedOutput(u, r, llm.ToolCall{})
+		if !strings.Contains(got, "state "+tc.want+";") || strings.Contains(got, "Full output") {
+			t.Fatal(got)
+		}
+	}
+}
+
 func epochApply(t testing.TB, f *contextFixture, kind sessionstore.ItemKind, data any) {
 	t.Helper()
 	status, receipt := data.(sessionstore.ToolCallStatus)

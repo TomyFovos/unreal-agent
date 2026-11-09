@@ -69,3 +69,73 @@ func TestTurnTotalUsageIsVisibleWithoutDoubleCountingResponses(t *testing.T) {
 		t.Fatal("result reasoning missing", text)
 	}
 }
+
+func TestCompactionAfterTokensAppearInAnalyzeAndExports(t *testing.T) {
+	r := Report{Compactions: []llm.ConversationRecord{{Provider: "claude", Compacted: true, BeforeTokens: 250_000, AfterTokens: 12_000, InputKnown: true, InputTokens: 14_000}}}
+	if text := strings.Join(Lines(r, "Context", true), "\n"); !strings.Contains(text, "before=250000 after=12000") {
+		t.Fatal(text)
+	}
+	for _, format := range []string{"json", "markdown"} {
+		data, err := Encode(r, format)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "after=12000"
+		if format == "json" {
+			want = `"AfterTokens": 12000`
+		}
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("%s lost post_tokens: %s", format, data)
+		}
+	}
+	r.Compactions[0].AfterTokens = 0
+	if text := strings.Join(TelemetryLines(r), "\n"); !strings.Contains(text, "after=14000") {
+		t.Fatal("legacy compact size missing", text)
+	}
+	r.Compactions[0].InputKnown = false
+	if text := strings.Join(TelemetryLines(r), "\n"); !strings.Contains(text, "after=unknown") {
+		t.Fatal("invented post_tokens", text)
+	}
+}
+
+func TestRedactionCountsAndBytesAppearInAnalyzeAndExports(t *testing.T) {
+	a := New("redactions")
+	for _, r := range []llm.ContextRedaction{
+		{Reason: "partial_redaction", CallID: "call-1", BeforeBytes: 100, AfterBytes: 40},
+		{Reason: "partial_redaction", CallID: "call-2", BeforeBytes: 200, AfterBytes: 60},
+		{Reason: "private_source", CallID: "call-3", BeforeBytes: 400, AfterBytes: 0},
+		{Reason: "non_public", CallID: "call-4", BeforeBytes: 500, AfterBytes: 30},
+	} {
+		activity := llm.ActivityRecord{Kind: "context_redaction", Redaction: &r}
+		a.Apply(host.HistoryItem{Data: sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostActivity, Activity: &activity}})
+	}
+	r := a.Snapshot(time.Now(), false, false, nil, nil)
+	if len(r.Redactions) != 3 || r.Redactions[0] != (RedactionTotals{Reason: "partial_redaction", Count: 2, BeforeBytes: 300, AfterBytes: 100}) {
+		t.Fatal(r.Redactions)
+	}
+	for _, format := range []string{"context", "markdown", "json"} {
+		var text string
+		if format == "context" {
+			text = strings.Join(Lines(r, format, true), "\n")
+		} else {
+			data, err := Encode(r, format)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text = string(data)
+		}
+		text = strings.ReplaceAll(text, `\_`, "_")
+		for _, want := range []string{"partial_redaction", "private_source", "non_public", "call-1", "before_bytes", "after_bytes"} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("%s missing %s", format, want)
+			}
+		}
+		if format != "json" && !strings.Contains(text, "count=2 before_bytes=300 after_bytes=100") {
+			t.Fatal(text)
+		}
+	}
+	legacy := New("old").Snapshot(time.Now(), false, false, nil, nil)
+	if len(legacy.Redactions) != 0 {
+		t.Fatal("invented historical measurements", legacy.Redactions)
+	}
+}
