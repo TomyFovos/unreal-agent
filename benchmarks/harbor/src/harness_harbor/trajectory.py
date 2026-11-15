@@ -24,6 +24,7 @@ from harness_harbor.remote_results import (
     dap_result,
     lsp_result,
     native_result,
+    subagent_result,
 )
 
 RUNNING = (
@@ -31,6 +32,13 @@ RUNNING = (
     "continue with independent work, or end your turn to wait for it."
 )
 TERMINAL = {"completed", "failed", "canceled"}
+USAGE_FIELDS = {
+    "prompt": "InputTokens",
+    "completion": "OutputTokens",
+    "cached": "CachedInputTokens",
+    "reasoning": "ReasoningTokens",
+    "cache_write": "CacheWriteInputTokens",
+}
 
 
 def bash_result(data: dict[str, Any]) -> str:
@@ -163,6 +171,9 @@ def convert(
     pending_observations: list[ObservationResult] = []
     errors: list[str] = []
     host_records: list[dict] = []
+    runner_records: list[dict] = []
+    changed_files: set[str] = set()
+    session_end: dict | None = None
     totals = dict(prompt=0, completion=0, cached=0, reasoning=0, cache_write=0)
     previous_sequence = 0
     for line_number, line in enumerate(lines, 1):
@@ -175,6 +186,9 @@ def convert(
         if item.get("type") == "error":
             errors.append(item["message"])
             continue
+        if item.get("type") == "session_end":
+            session_end = {"IsError": item["is_error"]}
+            continue
         sequence = item["Sequence"]
         if sequence <= previous_sequence:
             raise ValueError("Runner records must have increasing sequence numbers")
@@ -182,6 +196,11 @@ def convert(
         kind, data = item["Kind"], item["Data"]
         timestamp = item["RecordedAt"]
         extra = {"sequence": sequence}
+        child_id = item.get("ChildID", "")
+        if child_id:
+            extra["child_id"] = child_id
+        if "SourceSequence" in item:
+            extra["source_sequence"] = item["SourceSequence"]
         if kind == "host_record":
             if data.get("Version") != 1 or (
                 not product
@@ -191,14 +210,33 @@ def convert(
                     "stop_complete",
                     "project_instructions",
                     "activity",
+                    "context",
                 )
             ):
                 raise ValueError("Unsupported Host metadata record")
             host_records.append({**extra, "timestamp": timestamp, "data": data})
+            context = data.get("Context", {})
+            for usage in (
+                context.get("Usage"),
+                context.get("Conversation", {}).get("Usage"),
+            ):
+                if usage:
+                    for key, field in USAGE_FIELDS.items():
+                        totals[key] += usage.get(field, 0)
+        elif kind in {"subagent_start", "subagent_end", "file_change", "session_end"}:
+            runner_records.append(
+                {**extra, "timestamp": timestamp, "kind": kind, "data": data}
+            )
+            if kind == "file_change":
+                changed_files.add(data["Path"])
+            elif kind == "session_end":
+                session_end = data
+                changed_files.update(data.get("ChangedFiles", []))
         elif kind == "turn":
-            for result in pending_observations:
-                result.extra["available_before_turn"] = data["ID"]
-            pending_observations.clear()
+            for result in pending_observations[:]:
+                if result.extra.get("child_id", "") == child_id:
+                    result.extra["available_before_turn"] = data["ID"]
+                    pending_observations.remove(result)
         elif kind == "input":
             if data["Kind"] != "external":
                 continue
@@ -233,7 +271,11 @@ def convert(
                             arguments = {"raw_arguments": raw}
                         tool_calls.append(
                             ToolCall(
-                                tool_call_id=value["CallID"],
+                                tool_call_id=(
+                                    f"{child_id}/{value['CallID']}"
+                                    if child_id
+                                    else value["CallID"]
+                                ),
                                 function_name=value["Name"],
                                 arguments=arguments,
                             )
@@ -241,13 +283,7 @@ def convert(
                     case _:
                         raise ValueError(f"Unsupported model output: {output['Type']}")
             usage = response["Usage"]
-            counts = {
-                "prompt": usage["InputTokens"],
-                "completion": usage["OutputTokens"],
-                "cached": usage["CachedInputTokens"],
-                "reasoning": usage["ReasoningTokens"],
-                "cache_write": usage["CacheWriteInputTokens"],
-            }
+            counts = {key: usage[field] for key, field in USAGE_FIELDS.items()}
             for key, count in counts.items():
                 totals[key] += count
             step = Step(
@@ -282,7 +318,8 @@ def convert(
                     raise ValueError(f"Duplicate tool call: {call.tool_call_id}")
                 calls[call.tool_call_id] = step, call.function_name
         elif kind == "tool_call_status":
-            step, name = calls[data["CallID"]]
+            call_id = f"{child_id}/{data['CallID']}" if child_id else data["CallID"]
+            step, name = calls[call_id]
             if name == "Bash":
                 content = bash_result(data)
             elif name == "ViewImage":
@@ -306,6 +343,15 @@ def convert(
                 content = lsp_result(data)
             elif name == "DAP":
                 content = dap_result(data)
+            elif name in {
+                "SubagentStart",
+                "SubagentSend",
+                "SubagentCancel",
+                "SubagentApprove",
+                "SendParent",
+                "Finish",
+            }:
+                content = subagent_result(data)
             elif product and name == "claude_code":
                 values = [
                     op.get("State", {}).get("Value", {})
@@ -329,12 +375,12 @@ def convert(
                 result
                 for result in pending_observations
                 if not (
-                    result.source_call_id == data["CallID"]
+                    result.source_call_id == call_id
                     and result.content in (RUNNING, *REMOTE_PENDING)
                 )
             ]
             result = ObservationResult(
-                source_call_id=data["CallID"],
+                source_call_id=call_id,
                 content=content,
                 extra={**extra, "timestamp": timestamp},
             )
@@ -344,6 +390,16 @@ def convert(
             pending_observations.append(result)
         else:
             raise ValueError(f"Unsupported runner record: {kind}")
+    if session_end is not None:
+        if session_end["IsError"]:
+            if not errors:
+                errors.append("Runner session ended with an error")
+        elif "Usage" in session_end:
+            # The terminal summary already includes parent and descendant usage.
+            # Replace the streamed total rather than count those tokens again.
+            totals = {
+                key: session_end["Usage"][field] for key, field in USAGE_FIELDS.items()
+            }
     return Trajectory(
         schema_version="ATIF-v1.7",
         session_id=session_id,
@@ -366,5 +422,11 @@ def convert(
                 "cache_write_tokens": totals["cache_write"],
             },
         ),
-        extra={"runner_errors": errors, "host_records": host_records},
+        extra={
+            "runner_errors": errors,
+            "host_records": host_records,
+            "runner_records": runner_records,
+            "changed_files": sorted(changed_files),
+            "session_end": session_end,
+        },
     )

@@ -81,6 +81,7 @@ func TestRejectMalformedAmbiguousUnsupportedAndNoMatch(t *testing.T) {
 		{"malformed_source", "function f( {", "(identifier) @match", "name", "ok"},
 		{"missing_node", "let a = ;", "(identifier) @match", "name", "ok"},
 		{"query", "old(1);", "(made_up_node) @match", "new", "invalid_query"},
+		{"stalled_query", "old(1);", "_?_?\f+0", "new", "unsupported_quantifier"},
 		{"no_capture", "old(1);", "(identifier)", "new", "match_capture_required"},
 		{"overlap", "old(old(1));", "(call_expression) @match", "updated(1)", "overlapping_matches"},
 		{"bad_replacement", "old(1);", query("javascript"), "(", "ok"},

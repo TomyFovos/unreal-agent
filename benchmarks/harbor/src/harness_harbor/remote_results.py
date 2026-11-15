@@ -55,6 +55,27 @@ def native_result(data: dict[str, Any]) -> str:
     return typed_json(state["Handle"])
 
 
+def subagent_result(data: dict[str, Any]) -> str:
+    if data["Status"].get("Error"):
+        return data["Status"]["Error"]
+    op = one_operation(data, "subagent")
+    if op.get("Denial"):
+        return permission_text(op["Denial"])
+    state = remote_state(op, "subagent")
+    return json.dumps(
+        {
+            "Handle": op["ID"],
+            "Status": op["Status"],
+            "Message": state.get("TerminalError") or state.get("TerminalResult", ""),
+            "Result": state.get("Handle")
+            if state["Plan"]["Data"]["Action"] == "start"
+            else None,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 AST_PENDING = "Structural operation is pending."
 LSP_PENDING = '{"version":1,"code":"running"}'
 DAP_PENDING = "Debugger operation is running."

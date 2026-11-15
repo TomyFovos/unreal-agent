@@ -6,13 +6,14 @@ from harbor.models.trajectories import Agent, Trajectory
 from harness_harbor.trajectory import RUNNING, bash_result, convert
 
 
-def record(sequence, kind, data):
+def record(sequence, kind, data, **extra):
     return json.dumps(
         {
             "Sequence": sequence,
             "Kind": kind,
             "Data": data,
             "RecordedAt": "2026-09-10T10:00:00Z",
+            **extra,
         }
     )
 
@@ -54,6 +55,210 @@ def status(state="completed", stdout="test", **fields):
 
 
 class TrajectoryTests(unittest.TestCase):
+    def test_context_usage_is_kept_without_a_success_summary(self):
+        counts = response("t", [])["Response"]["Usage"]
+        trajectory = convert(
+            [
+                record(1, "model_response", response("t", [])),
+                record(
+                    2,
+                    "host_record",
+                    {
+                        "Version": 1,
+                        "Kind": "context",
+                        "Context": {"Usage": counts, "Conversation": {"Usage": counts}},
+                    },
+                    ChildID="worker",
+                ),
+                json.dumps({"type": "session_end", "is_error": True}),
+            ],
+            Agent(name="unreal-agent", version="test"),
+            "s",
+        )
+        self.assertEqual(trajectory.final_metrics.total_prompt_tokens, 30)
+        self.assertEqual(trajectory.final_metrics.total_completion_tokens, 9)
+        self.assertEqual(trajectory.extra["host_records"][0]["child_id"], "worker")
+
+    def test_runner_lifecycle_records_and_terminal_totals_are_not_steps(self):
+        parent = response("turn-1", [])
+        child = response("turn-1", [])
+        summary = {
+            "IsError": False,
+            "Usage": {
+                "InputTokens": 25,
+                "OutputTokens": 8,
+                "CachedInputTokens": 9,
+                "ReasoningTokens": 3,
+                "CacheWriteInputTokens": 1,
+            },
+            "ToolCalls": 0,
+            "ChangedFiles": ["a.py", "b.py"],
+        }
+        lines = [
+            record(1, "model_response", parent),
+            record(2, "subagent_start", {"ChildID": "worker", "CallID": "start"}),
+            record(3, "file_change", {"Path": "a.py", "Change": "add"}),
+            record(4, "model_response", child, ChildID="worker", SourceSequence=2),
+            record(
+                5,
+                "file_change",
+                {"Path": "a.py", "Change": "modify"},
+                ChildID="worker",
+            ),
+            record(6, "subagent_end", {"ChildID": "worker", "Status": "completed"}),
+            record(7, "session_end", summary, Synthetic=True),
+        ]
+        trajectory = convert(lines, Agent(name="unreal-agent", version="test"), "s")
+        self.assertEqual(len(trajectory.steps), 2)
+        self.assertEqual(trajectory.steps[1].extra["child_id"], "worker")
+        self.assertEqual(trajectory.steps[1].extra["source_sequence"], 2)
+        self.assertEqual(trajectory.final_metrics.total_prompt_tokens, 25)
+        self.assertEqual(trajectory.final_metrics.total_completion_tokens, 8)
+        self.assertEqual(trajectory.final_metrics.total_cached_tokens, 9)
+        self.assertEqual(trajectory.final_metrics.extra["reasoning_tokens"], 3)
+        self.assertEqual(trajectory.final_metrics.extra["cache_write_tokens"], 1)
+        self.assertEqual(trajectory.extra["changed_files"], ["a.py", "b.py"])
+        self.assertEqual(len(trajectory.extra["runner_records"]), 5)
+        self.assertEqual(trajectory.extra["session_end"], summary)
+        self.assertEqual(trajectory.extra["runner_errors"], [])
+        Trajectory.model_validate(trajectory.to_json_dict())
+
+    def test_failed_session_end_keeps_partial_usage_and_reports_error(self):
+        for terminal in (
+            json.dumps({"type": "session_end", "is_error": True}),
+            record(2, "session_end", {"IsError": True}),
+        ):
+            for error in ([], [json.dumps({"type": "error", "message": "canceled"})]):
+                with self.subTest(terminal=terminal, error=error):
+                    trajectory = convert(
+                        [
+                            record(1, "model_response", response("t", [])),
+                            *error,
+                            terminal,
+                        ],
+                        Agent(name="unreal-agent", version="test"),
+                        "s",
+                    )
+                    self.assertEqual(trajectory.final_metrics.total_prompt_tokens, 10)
+                    self.assertEqual(trajectory.extra["session_end"], {"IsError": True})
+                    self.assertEqual(
+                        trajectory.extra["runner_errors"],
+                        ["canceled"]
+                        if error
+                        else ["Runner session ended with an error"],
+                    )
+
+    def test_parent_and_children_can_reuse_call_ids(self):
+        lines = []
+        for child in ("", "worker-1", "worker-2"):
+            lines.append(
+                record(
+                    len(lines) + 1,
+                    "model_response",
+                    response(
+                        "t",
+                        [
+                            {
+                                "Type": "tool_call",
+                                "Data": {
+                                    "CallID": "call-1",
+                                    "Name": "Bash",
+                                    "Arguments": "{}",
+                                },
+                            }
+                        ],
+                    ),
+                    ChildID=child,
+                )
+            )
+            lines.append(
+                record(
+                    len(lines) + 1,
+                    "tool_call_status",
+                    status(stdout=child or "parent"),
+                    ChildID=child,
+                )
+            )
+        trajectory = convert(lines, Agent(name="unreal-agent", version="test"), "s")
+        self.assertEqual(trajectory.final_metrics.total_prompt_tokens, 30)
+        for step, name in zip(
+            trajectory.steps, ("parent", "worker-1", "worker-2"), strict=True
+        ):
+            self.assertEqual(step.observation.results[0].content, name)
+            self.assertEqual(
+                step.tool_calls[0].tool_call_id,
+                step.observation.results[0].source_call_id,
+            )
+        self.assertEqual(
+            len({step.tool_calls[0].tool_call_id for step in trajectory.steps}), 3
+        )
+
+    def test_subagent_tool_observations_match_the_product_translator(self):
+        for name, action in (
+            ("SubagentStart", "start"),
+            ("SubagentSend", "send"),
+            ("SubagentCancel", "cancel"),
+            ("SubagentApprove", "approve"),
+            ("SendParent", "parent"),
+            ("Finish", "finish"),
+        ):
+            with self.subTest(name=name):
+                handle = {"Version": 1, "ChildID": "worker"}
+                data = {
+                    "CallID": "call-1",
+                    "Status": {"WaitingFor": ["op-1"]},
+                    "Operations": [
+                        {
+                            "ID": "op-1",
+                            "Type": "remote_job",
+                            "Version": 2,
+                            "Status": "completed",
+                            "State": {
+                                "Plan": {
+                                    "Type": "subagent",
+                                    "Version": 1,
+                                    "Data": {"Action": action},
+                                },
+                                "TerminalResult": "done",
+                                "Handle": handle,
+                            },
+                        }
+                    ],
+                }
+                trajectory = convert(
+                    [
+                        record(
+                            1,
+                            "model_response",
+                            response(
+                                "t",
+                                [
+                                    {
+                                        "Type": "tool_call",
+                                        "Data": {
+                                            "CallID": "call-1",
+                                            "Name": name,
+                                            "Arguments": "{}",
+                                        },
+                                    }
+                                ],
+                            ),
+                        ),
+                        record(2, "tool_call_status", data),
+                    ],
+                    Agent(name="unreal-agent", version="test"),
+                    "s",
+                )
+                self.assertEqual(
+                    json.loads(trajectory.steps[0].observation.results[0].content),
+                    {
+                        "Handle": "op-1",
+                        "Status": "completed",
+                        "Message": "done",
+                        "Result": handle if action == "start" else None,
+                    },
+                )
+
     def test_host_records_are_audit_metadata_not_model_steps(self):
         lines = [
             record(

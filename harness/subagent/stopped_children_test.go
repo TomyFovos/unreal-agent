@@ -35,9 +35,12 @@ func TestStoppedLeadHelper(t *testing.T) {
 	}
 	err = sub.Serve(context.Background(), os.Stdin, os.Stdout, func(ctx context.Context, c sub.ChildConfig, link sub.ChildLink) (*host.Session, io.Closer, error) {
 		started := false
-		model := adapter(func(_ context.Context, r llm.Request, _ llm.RequestOptions) (llm.Response, error) {
+		model := adapter(func(ctx context.Context, r llm.Request, _ llm.RequestOptions) (llm.Response, error) {
 			if c.Task != "lead" {
-				return llm.Response{}, nil
+				// The worker must still be working when the lead stops. An empty
+				// response would instead finish it before cancellation is tested.
+				<-ctx.Done()
+				return llm.Response{}, ctx.Err()
 			}
 			if !started {
 				started = true
@@ -196,7 +199,8 @@ func TestStoppedLeadCancelsGrandchildAndReapsProcess(t *testing.T) {
 				if op.ID == grandchild.ID {
 					found = true
 					if op.Status != operation.StatusCanceled {
-						t.Fatalf("stopped lead left grandchild %s", op.Status)
+						snapshot, snapshotErr := sub.ReadChildSnapshot(t.Context(), dir, grandPlan.ChildID)
+						t.Fatalf("stopped lead left grandchild %s; Finish=%+v; snapshot error=%v", op.Status, snapshot.Finish, snapshotErr)
 					}
 				}
 			}

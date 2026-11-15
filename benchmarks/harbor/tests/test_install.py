@@ -6,6 +6,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from harbor.environments.base import ExecResult
+from harbor.models.agent.context import AgentContext
+from test_trajectory import record, response
 
 from harness_harbor.runner import APT_ARCHIVE_FALLBACK
 from harness_harbor.runner import RunnerAgent as UnrealAgent
@@ -58,6 +60,45 @@ def make_agent(directory: Path) -> UnrealAgent:
 
 
 class InstallTests(unittest.TestCase):
+    def test_post_run_accepts_summary_and_rejects_failed_session_end(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                agent = make_agent(root)
+                usage = response("t", [])["Response"]["Usage"]
+                terminal = (
+                    json.dumps({"type": "session_end", "is_error": True})
+                    if failed
+                    else record(
+                        2,
+                        "session_end",
+                        {
+                            "IsError": False,
+                            "Usage": usage,
+                            "ToolCalls": 0,
+                            "ChangedFiles": [],
+                        },
+                    )
+                )
+                (root / "runner.jsonl").write_text(
+                    record(1, "model_response", response("t", []))
+                    + "\n"
+                    + terminal
+                    + "\n"
+                )
+                context = AgentContext()
+                if failed:
+                    with self.assertRaisesRegex(
+                        RuntimeError, "session ended with an error"
+                    ):
+                        agent.populate_context_post_run(context)
+                else:
+                    agent.populate_context_post_run(context)
+                self.assertEqual(context.n_input_tokens, 10)
+                self.assertEqual(context.n_output_tokens, 3)
+                self.assertEqual(context.metadata["session_end"]["IsError"], failed)
+                self.assertTrue((root / "trajectory.json").exists())
+
     def test_curl_is_installed_before_the_agent_runs(self):
         with TemporaryDirectory() as temporary:
             agent = make_agent(Path(temporary))

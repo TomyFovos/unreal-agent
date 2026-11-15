@@ -29,8 +29,14 @@ func TestDescendantChildHelper(t *testing.T) {
 	err := sub.Serve(context.Background(), os.Stdin, os.Stdout, func(ctx context.Context, c sub.ChildConfig, link sub.ChildLink) (*host.Session, io.Closer, error) {
 		send := link.Send
 		directory = c.SessionDirectory
-		model := adapter(func(context.Context, llm.Request, llm.RequestOptions) (llm.Response, error) {
-			return llm.Response{}, nil
+		model := adapter(func(ctx context.Context, _ llm.Request, _ llm.RequestOptions) (llm.Response, error) {
+			// An empty response finishes a tool-capable child. Keep this child
+			// working until owner loss so normal completion cannot win the race.
+			if err := os.WriteFile(filepath.Join(c.SessionDirectory, "model.started"), []byte("started"), 0600); err != nil {
+				return llm.Response{}, err
+			}
+			<-ctx.Done()
+			return llm.Response{}, ctx.Err()
 		})
 		h, err := host.New(ctx, host.Config{Directory: c.SessionDirectory, Build: factory(sub.Config{Child: &c, SendParent: send}, model)})
 		if err != nil {
@@ -94,6 +100,7 @@ func TestDescendantParentHelper(t *testing.T) {
 		os.Exit(4)
 	}
 	waitReady(t, s)
+	awaitBoundary(t, func() bool { _, err := os.Stat(filepath.Join(dir, "model.started")); return err == nil })
 	if err = os.WriteFile(filepath.Join(dir, "parent.ready"), []byte("ready"), 0600); err != nil {
 		os.Exit(5)
 	}
@@ -123,6 +130,11 @@ func TestParentDeathEOFCleanupWithSurvivingDescriptorDescendant(t *testing.T) {
 	defer syscall.Kill(pid, syscall.SIGKILL)
 	if err = syscall.Kill(pid, 0); err != nil {
 		t.Fatal("descendant not alive before owner loss", err)
+	}
+	for _, marker := range []string{"child.closed", "serve.closed"} {
+		if _, err := os.Stat(filepath.Join(dir, marker)); !os.IsNotExist(err) {
+			t.Fatal("child stopped before owner loss", marker, err)
+		}
 	}
 	if err = cmd.Process.Kill(); err != nil {
 		t.Fatal(err)

@@ -1,0 +1,4 @@
+go test fuzz v1
+string("\x7f")
+string("_?_?\f+0")
+string("N")

@@ -208,3 +208,5 @@ class RunnerAgent(BaseInstalledAgent):
             **self._not_offered,
             "revision": self.version(),
         }
+        if (trajectory.extra.get("session_end") or {}).get("IsError"):
+            raise RuntimeError("; ".join(trajectory.extra["runner_errors"]))

@@ -1,27 +1,31 @@
 package ast
 
+import "unicode"
+
 // stalledQuantifier reports a query that tree-sitter v0.25's query compiler
 // never finishes compiling: a + quantifier after ? or * in the same run of
 // quantifiers ("_?+", "(identifier)* +", "_?*+", "__?+"). The call is native
 // and cannot be canceled, so such a query is refused before it reaches
 // ts_query_new. Whitespace, comments and captures may separate the
-// quantifiers; text inside strings is not a quantifier. No valid query needs
+// quantifiers, including form feeds and vertical tabs accepted by tree-sitter's
+// iswspace scanner; text inside strings is not a quantifier. No valid query needs
 // + right after ? or *, so the check does not depend on what precedes them.
 func stalledQuantifier(query string) bool {
-	name := func(c byte) bool {
-		return c == '_' || c == '-' || c == '.' ||
-			'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9'
+	name := func(c rune) bool {
+		return c == '_' || c == '-' || c == '.' || c == '?' || c == '!' ||
+			unicode.IsLetter(c) || unicode.IsNumber(c)
 	}
+	chars := []rune(query)
 	nullable := false // the current run of quantifiers holds ? or *
-	for i := 0; i < len(query); i++ {
-		switch c := query[i]; {
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+	for i := 0; i < len(chars); i++ {
+		switch c := chars[i]; {
+		case unicode.IsSpace(c):
 		case c == ';':
-			for i < len(query) && query[i] != '\n' {
+			for i < len(chars) && chars[i] != '\n' {
 				i++
 			}
 		case c == '@':
-			for i+1 < len(query) && name(query[i+1]) {
+			for i+1 < len(chars) && name(chars[i+1]) {
 				i++
 			}
 		case c == '?' || c == '*':
@@ -31,8 +35,8 @@ func stalledQuantifier(query string) bool {
 				return true
 			}
 		case c == '"':
-			for i++; i < len(query) && query[i] != '"'; i++ {
-				if query[i] == '\\' {
+			for i++; i < len(chars) && chars[i] != '"'; i++ {
+				if chars[i] == '\\' {
 					i++
 				}
 			}
