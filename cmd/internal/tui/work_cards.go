@@ -17,6 +17,7 @@ type workCard struct {
 	id                      session.ID
 	mark, title, now, model string
 	elapsed                 string
+	stats                   string // a child's context · speed · cache, numbers only
 	state                   visualState
 	depth                   int
 	main, stalled, observed bool
@@ -50,6 +51,22 @@ func cardModel(r viewer.Row) string {
 		value += " · " + string(r.Selection.Effort)
 	}
 	return safeCardText(value)
+}
+
+// cardStats gives a child's latest context size, output speed and cache hit
+// as bare numbers; the footer keeps the main agent's.
+func cardStats(r viewer.Row) string {
+	var parts []string
+	if u := r.LastUsage; u.Known && u.Input > 0 {
+		parts = append(parts, strings.ReplaceAll(strings.ReplaceAll(number(u.Input), ".0k", "k"), ".0m", "m"))
+	}
+	if r.OutputTPS > 0 {
+		parts = append(parts, fmt.Sprintf("%.0f tok/s", r.OutputTPS))
+	}
+	if u := r.LastUsage; u.Known && u.Input > 0 && u.CachedInput >= 0 {
+		parts = append(parts, fmt.Sprintf("%.0f%%", float64(u.CachedInput)*100/float64(u.Input)))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func currentChildOperation(r viewer.Row) string {
@@ -220,7 +237,7 @@ func newWorkCardIndex(s Snapshot, panel viewer.PanelSnapshot, now time.Time) *wo
 		}
 		seen[r.ID] = true
 		depth = max(depth, max(0, r.Depth-1))
-		card := workCard{id: r.ID, mark: marks[r.ID], title: childTitle(r), state: states[r.ID], depth: depth, elapsed: childElapsed(r, s, u), model: cardModel(r), now: currentChildOperation(r), observed: observed(r), activity: activityBuckets(r, now)}
+		card := workCard{id: r.ID, mark: marks[r.ID], title: childTitle(r), state: states[r.ID], depth: depth, elapsed: childElapsed(r, s, u), model: cardModel(r), stats: cardStats(r), now: currentChildOperation(r), observed: observed(r), activity: activityBuckets(r, now)}
 		if childStalled(r, s, now) {
 			card.stalled = true
 			card.now = fmt.Sprintf("動きなし %d分", int(now.Sub(r.LastActivityAt)/time.Minute))
@@ -471,6 +488,9 @@ func workCardRows(c workCard, width int, t Theme, alternate bool) []line {
 	activity := activityBars(c, t)
 	if len(activity) > 0 {
 		activity = joined(textLine(" ", base), activity)
+	}
+	if c.stats != "" && !c.main && room >= 40 {
+		activity = joined(textLine(" "+strings.ReplaceAll(c.stats, " · ", t.symbol(" · ", " / ")), visualStyle(dimColor)), activity)
 	}
 	currentStyle := visualStyle(dimColor)
 	value := c.now

@@ -10,6 +10,8 @@ class Bundle:
     revision: str
     sha256: str
     arch: str
+    files: dict[str, str]
+    runtime: dict[str, str]
 
     @classmethod
     def load(cls, directory: str) -> "Bundle":
@@ -21,9 +23,24 @@ class Bundle:
                 raise ValueError(f"Invalid bundle {name}")
         if manifest["goos"] != "linux" or manifest["goarch"] not in ("amd64", "arm64"):
             raise ValueError("Runner bundle must target Linux amd64 or arm64")
-        bundle = cls(path, manifest["revision"], manifest["sha256"], manifest["goarch"])
+        bundle = cls(
+            path,
+            manifest["revision"],
+            manifest["sha256"],
+            manifest["goarch"],
+            manifest.get("files", {}),
+            manifest.get("runtime", {}),
+        )
         bundle.read_binary()
         return bundle
+
+    def read_file(self, name: str) -> bytes:
+        if name not in {"unreal-agent", "claude-install.py"} or name not in self.files:
+            raise ValueError("Host bundle missing required file; build an E2 bundle")
+        data = (self.directory / name).read_bytes()
+        if hashlib.sha256(data).hexdigest() != self.files[name]:
+            raise ValueError("Bundle file checksum mismatch")
+        return data
 
     def read_binary(self) -> bytes:
         data = (self.directory / "unreal-agent-runner").read_bytes()

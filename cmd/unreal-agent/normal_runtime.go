@@ -29,6 +29,7 @@ import (
 
 // Normal discovery adds registrations, never replaces Runtime or permissions.
 type normalLauncherConfig struct {
+	APIKeys           map[string]credential.Source `json:",omitzero"`
 	Version           int
 	DiscoverProviders *bool `json:",omitzero"`
 	// ClaudeBinary is an explicit Claude Code executable (--bootstrap-claude-binary).
@@ -155,6 +156,11 @@ func registerNormalProviders(ctx context.Context, config serveConfiguration, cod
 	config.providerStatuses = nil
 	config.providerDiagnostics = nil
 
+	var apiErr error
+	config, apiErr = registerAPIProviders(ctx, config, getenv)
+	if apiErr != nil {
+		return config, apiErr
+	}
 	if !discover {
 		return config, nil
 	}
@@ -229,8 +235,10 @@ func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProvid
 		return config, err
 	}
 	ids := make([]string, 0, len(config.Providers))
-	for id := range config.Providers {
-		ids = append(ids, id)
+	for id, p := range config.Providers {
+		if p.Provider.Auth.Method != credential.APIKey {
+			ids = append(ids, id)
+		}
 	}
 	slices.Sort(ids)
 	id := getenv("UNREAL_HARNESS_LLM_PROVIDER")
@@ -255,6 +263,8 @@ func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProvid
 		var catalog modelcatalog.Catalog
 		if id == claudeagent.ProviderID {
 			catalog, _, err = claudeagent.Discover(ctx, p.Claude.Binary, nil)
+		} else if id == "openai" || id == claudeagent.APIProviderID {
+			catalog, err = apiBackend(p, config.apiKeySources()[id]).Catalog(ctx, false)
 		} else if id == "openai-codex" {
 			path, _ := externalCodexAuthFile(o.codexFile, getenv)
 			catalog, err = codexCatalogReader(path, isDockerSandboxCodex(p.Provider.Auth), getenv)(ctx, false)
@@ -281,6 +291,9 @@ func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProvid
 	}
 	if u, e := url.Parse(openaicodex.BaseURL); e == nil {
 		config.Permissions.NetworkOrigins = append(config.Permissions.NetworkOrigins, u.Scheme+"://"+u.Host)
+	}
+	if config.Runtime.Provider.Provider == "openai" || config.Providers["openai"].Provider.Provider == "openai" {
+		config.Permissions.NetworkOrigins = append(config.Permissions.NetworkOrigins, "https://api.openai.com")
 	}
 	maximum := permission.Config{Tools: tool.StaticNames(), FilesystemUnrestricted: true, NetworkUnrestricted: true, ProcessMode: permission.ProcessUnrestricted}
 	config.PermissionModes = &permission.ModesConfig{Enabled: true, Maximum: &maximum}
@@ -376,7 +389,7 @@ func normalRediscovery(config serveConfiguration, codexFile string, live *agentr
 			} else if registered, ok := live.Lookup(id); ok {
 				runtime = registered.Runtime
 			}
-			b := agentrunner.DiscoveredBackend{Runtime: runtime}
+			b := apiBackend(runtime, config.apiKeySources()[id])
 			if id == claudeagent.ProviderID {
 				catalog := &claudeCatalog{binary: runtime.Claude.Binary}
 				b.Catalog, b.Check = catalog.read, catalog.check

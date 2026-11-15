@@ -15,6 +15,7 @@ class Model(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
+        self.wfile.write(b'{"data":[{"id":"smoke"},{"id":"gpt-6-luna"}]}')
 
     def do_POST(self):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -57,6 +58,18 @@ class Model(BaseHTTPRequestHandler):
             output = self.tool("image", "ViewImage", {"path": "image.bmp"})
         elif "image" not in outputs:
             output = self.message("Waiting for the image.")
+        elif any(tool["name"] == "Finish" for tool in request["tools"]):
+            output = self.tool(
+                "finish",
+                "Finish",
+                {
+                    "status": "completed",
+                    "summary": "Smoke task complete",
+                    "changedFiles": [],
+                    "tests": [],
+                    "blockers": [],
+                },
+            )
         else:
             output = self.message("done")
         response = {
@@ -114,5 +127,6 @@ if __name__ == "__main__":
         "<IIIHHIIIIII", 40, 4000, 2, 1, 24, 0, len(pixels), 0, 0, 0, 0
     )
     Path("/app/image.bmp").write_bytes(header + pixels)
+    Path("/app/model-requests.jsonl").touch()
     with HTTPServer(("0.0.0.0", 8765), Model) as server:
         server.serve_forever()

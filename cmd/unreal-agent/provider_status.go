@@ -54,11 +54,15 @@ func unavailableProvider(id string, reason modelcatalog.AvailabilityReason) mode
 }
 
 func bootstrapDiscovery(o launchOptions) serveConfiguration {
-	return serveConfiguration{Launcher: &normalLauncherConfig{Version: 1, CodexDockerSandboxOAuth: o.bootstrapDocker,
+	sources, _ := o.apiKeySources()
+	return serveConfiguration{Launcher: &normalLauncherConfig{APIKeys: sources, Version: 1, CodexDockerSandboxOAuth: o.bootstrapDocker,
 		CodexAuto: o.bootstrapAuto, CodexDisabled: o.bootstrapCodexDisabled, ClaudeDisabled: o.bootstrapClaudeDisabled, ClaudeBinary: o.bootstrapClaude}}
 }
 
 func validateBootstrapChoices(o launchOptions) error {
+	if _, err := o.apiKeySources(); err != nil {
+		return err
+	}
 	if o.bootstrapDocker && (o.bootstrapCodexDisabled || o.bootstrapAuto) || o.bootstrapAuto && o.bootstrapCodexDisabled {
 		return errors.New("conflicting provider configuration; no discovery started")
 	}
@@ -76,6 +80,7 @@ func runProviderPreflight(ctx context.Context, args []string, out io.Writer) err
 	flags.BoolVar(&o.bootstrapCodexDisabled, "codex-disabled", false, "explicitly decline Codex discovery")
 	flags.BoolVar(&o.bootstrapClaudeDisabled, "claude-disabled", false, "explicitly decline Claude discovery")
 	flags.StringVar(&o.bootstrapClaude, "claude-binary", "", "external Claude executable")
+	apiKeyFlags(flags, &o)
 	if err := flags.Parse(args); err != nil {
 		return err
 	}

@@ -45,7 +45,7 @@ func statisticsBar(s Snapshot, u UIState, l layout) line {
 		cache = joined(textLine("キャッシュ ", meta), gaugeBar(ratio, 10, stateDone, u.Theme), textLine(strings.TrimPrefix(label, "cache "), meta))
 	}
 	build := func() line {
-		out := textLine("文脈 ", meta)
+		out := textLine("コンテキスト ", meta)
 		out = joined(out, contextBar, textLine(contextNumber, meta), textLine(u.Theme.symbol(" · ", " / ")+"速度 ", meta), speedBars, textLine(rate, meta))
 		if cache != nil {
 			out = joined(out, textLine(u.Theme.symbol(" · ", " / "), meta), cache)

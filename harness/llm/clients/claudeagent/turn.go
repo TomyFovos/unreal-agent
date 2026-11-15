@@ -56,12 +56,15 @@ type turn struct {
 	stepStart     time.Time
 	stepUsage     usage
 	usageReported bool
+	messages      map[string]message
 	toolStarts    map[string]time.Time
+	nativeTools   map[string]nativeToolActivity
 	// mark is when the next model request can start: Claude Code ready, the
 	// previous step done, or a tool batch answered. A step's time runs from
 	// there, so it includes the wait for the first token as Codex's does.
 	mark    time.Time
 	startup startupTiming
+	streams *streamActivities
 
 	record  sync.Mutex // one rendezvous round at a time
 	workers sync.WaitGroup
@@ -163,7 +166,25 @@ func (t *turn) handle(f frame) *frame {
 		if json.Unmarshal(f.Message, &m) != nil {
 			return nil
 		}
+		t.mu.Lock()
+		if m.ID != "" && m.Usage != nil {
+			if t.messages == nil {
+				t.messages = map[string]message{}
+			}
+			t.messages[m.ID] = message{Model: m.Model, Usage: m.Usage}
+		}
+		if f.ParentToolUseID != nil {
+			// The parent Agent tool call is the link to this native child's
+			// transcript. These are observations, never executable tool calls.
+			t.seq++
+			publicMessage, _ := json.Marshal(m)
+			t.text = append(t.text, llm.Item{ProviderID: itemPrefix + m.ID + "/native/" + strconv.Itoa(t.seq), Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "[Claude Code Agent " + *f.ParentToolUseID + "] " + string(publicMessage)}})
+		}
+		t.mu.Unlock()
 		for _, b := range m.Content {
+			if b.Type == "tool_use" && f.ParentToolUseID == nil && b.Name != "Bash" {
+				t.startNativeTool(b.ID, b.Name)
+			}
 			switch {
 			case b.Type == "text" && f.ParentToolUseID == nil && strings.TrimSpace(b.Text) != "":
 				t.mu.Lock()
@@ -188,6 +209,7 @@ func (t *turn) handle(f frame) *frame {
 		for _, b := range m.Content {
 			if b.Type == "tool_result" && b.ToolUseID != "" {
 				t.endNativeBash(b.ToolUseID, "")
+				t.endNativeTool(b.ToolUseID, "")
 				t.mu.Lock()
 				t.reported[b.ToolUseID] = observed.Result{Content: contentText(b.Content), IsError: b.IsError}
 				t.mu.Unlock()
@@ -347,6 +369,7 @@ func (t *turn) batch(in hookInput) (answer map[string]any) {
 		if call.ToolName == "Bash" {
 			t.endNativeBash(call.ToolUseID, "post_tool_batch")
 		}
+		t.endNativeTool(call.ToolUseID, "post_tool_batch")
 		t.mu.Lock()
 		refused := t.refused[call.ToolUseID] && !t.denied[call.ToolUseID]
 		result, reported := t.reported[call.ToolUseID]

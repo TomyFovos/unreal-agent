@@ -42,7 +42,9 @@ type serveConfiguration struct {
 	Subagents       map[string]childTemplate
 	// Additional registered backends. Runtime.Provider remains the initial
 	// provider, preserving existing single-provider configuration identities.
-	Providers map[string]agentrunner.ProviderRuntime `json:",omitzero"`
+	Providers        map[string]agentrunner.ProviderRuntime `json:",omitzero"`
+	SubagentDefaults *subagentDefaults                      `json:",omitzero"`
+	DisableSubagents bool                                   `json:",omitzero"`
 }
 
 func run(ctx context.Context, args []string, output io.Writer) error {
@@ -55,17 +57,23 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	switch args[0] {
 	case "providers":
 		return runProviderPreflight(ctx, args[1:], output)
-	case "serve":
+	case "serve", "exec":
 		normal := flags.Bool("normal-runtime", false, "enable normal launcher provider discovery (internal launcher option)")
 		path := flags.String("config", "", "nonsecret runtime/policy JSON configuration")
 		directory := flags.String("session-directory", "", "canonical session directory")
 		credentials := flags.String("credential-directory", "", "private credential store; optional for unauthenticated providers")
 		codexFile := flags.String("codex-auth-file", "", "existing private Codex auth file path; defaults to Codex environment discovery")
+		promptFile := flags.String("prompt-file", "", "exec: UTF-8 task input file")
+		sessionID := flags.String("session", "", "exec: new Session ID")
+		mode := flags.String("permission-mode", "full_access", "exec: permission mode selected by the operator")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
 		if *path == "" || *directory == "" || *socket == "" || flags.NArg() != 0 {
 			return errors.New("serve requires --config, --session-directory and --socket")
+		}
+		if args[0] == "exec" && (*promptFile == "" || *sessionID == "" || !permission.Mode(*mode).Valid()) {
+			return errors.New("exec requires --prompt-file, --session and a valid --permission-mode")
 		}
 		config, err := readServeConfiguration(*path)
 		if err != nil {
@@ -85,7 +93,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			if defaults := defaultSubagents(config); defaults != nil {
 				maximum := withChildTools(*config.PermissionModes.Maximum)
 				config.PermissionModes.Maximum = &maximum
-				config.Subagents, builtinSubagents = defaults, true
+				config.Subagents, builtinSubagents = defaults, config.SubagentDefaults == nil
 			}
 		}
 		policy, err := permission.New(withClaudeCodeRecord(config.Permissions))
@@ -120,13 +128,18 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			auth = authflow.New(manager)
 		}
 		var codexPath string
-		if *codexFile != "" || needsExternalCodex(config) {
+		credentialConfig := config
+		if builtinSubagents {
+			credentialConfig.Subagents = nil
+		} // defaults resolve the Session's chosen connection at start
+		if *codexFile != "" || needsExternalCodex(credentialConfig) {
 			codexPath, err = externalCodexAuthFile(*codexFile, os.Getenv)
 			if err != nil {
 				return err
 			}
 			resolver = withExternalCodexCredentials(resolver, codexPath)
 		}
+		resolver = credential.WithSources(resolver, config.apiKeySources(), os.Getenv)
 		if normalMode && codexPath == "" {
 			resolver = withCodexDiscoveryCredentials(resolver, *codexFile, os.Getenv)
 		}
@@ -155,11 +168,20 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		if claudeAgent != nil {
 			catalogs[claudeagent.ProviderID] = func(readCtx context.Context) (modelcatalog.Catalog, error) { return claudeAgent.read(readCtx, false) }
 		}
+		apiReads := map[string]func(context.Context, bool) (modelcatalog.Catalog, error){}
+		apiRuntimes := cloneBackends(config.Providers)
+		apiRuntimes[config.Runtime.Provider.Provider] = agentrunner.ProviderRuntime{Provider: config.Runtime.Provider, ReasoningEffort: config.Runtime.ReasoningEffort, Claude: config.Runtime.Claude}
+		for id, p := range apiRuntimes {
+			if b := apiBackend(p, config.apiKeySources()[id]); b.Catalog != nil {
+				apiReads[id], health[id] = b.Catalog, b.Check
+				catalogs[id] = func(ctx context.Context) (modelcatalog.Catalog, error) { return b.Catalog(ctx, false) }
+			}
+		}
 		var discovered *agentrunner.DiscoveredBackends
 		if normalMode {
 			discovered = &agentrunner.DiscoveredBackends{}
 		}
-		runtimeConfig, templates, err := withParentSubagents(agentrunner.RuntimeConfig{Context: config.Context, Claude: config.Claude, Identity: config.Runtime, SessionDirectory: *directory, Providers: registry, Credentials: resolver, LanguageTools: languageTools, DebugAdapters: config.DebugAdapters, Backends: config.Providers, Health: health, Catalogs: catalogs, Discovered: discovered}, config.Subagents, capabilityPolicy, *credentials, codexPath)
+		runtimeConfig, templates, err := withParentSubagents(agentrunner.RuntimeConfig{CredentialSources: config.apiKeySources(), BuiltinSubagents: builtinSubagents, Context: config.Context, Claude: config.Claude, Identity: config.Runtime, SessionDirectory: *directory, Providers: registry, Credentials: resolver, LanguageTools: languageTools, DebugAdapters: config.DebugAdapters, Backends: config.Providers, Health: health, Catalogs: catalogs, Discovered: discovered}, config.Subagents, capabilityPolicy, *credentials, codexPath)
 		if err != nil {
 			return err
 		}
@@ -167,6 +189,9 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			return err
 		}
 		runtimeConfig.ClaudeSubagents.Available = func(ctx context.Context) bool {
+			if config.SubagentDefaults != nil {
+				return providerAvailable(ctx, runtimeConfig, config.SubagentDefaults.Provider)
+			}
 			return providerAvailable(ctx, runtimeConfig, "openai-codex")
 		}
 		if normalMode {
@@ -226,8 +251,11 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		}
 		gatewayConfig := withViewer(gateway.Config{Host: owner, Policy: policy, Configuration: identity, Auth: auth, Workspace: workspace}, *directory)
 		binding := launcherHostBinding{Configuration: absolutePath(*path), Sessions: absolutePath(*directory), Credentials: absolutePath(*credentials), CodexFile: absolutePath(*codexFile), Normal: *normal}
-		models := modelUI{rediscover: rediscover, supported: config.providerStatuses, binding: &binding, owner: owner, runtime: runtimeConfig, templates: templates, policy: policy, codexRead: codexRead, claudeAgent: claudeAgent, next: gatewayConfig.Extension}
+		models := modelUI{apiReads: apiReads, rediscover: rediscover, supported: config.providerStatuses, binding: &binding, owner: owner, runtime: runtimeConfig, templates: templates, policy: policy, codexRead: codexRead, claudeAgent: claudeAgent, next: gatewayConfig.Extension}
 		gatewayConfig.Extension = models
+		if args[0] == "exec" {
+			return executeHeadless(ctx, *socket, gatewayConfig, session.ID(*sessionID), *promptFile, permission.Mode(*mode))
+		}
 		return gateway.ListenAndServe(ctx, *socket, gatewayConfig)
 	case "attach":
 		id := flags.String("session", "", "session ID; optional with --mode create")

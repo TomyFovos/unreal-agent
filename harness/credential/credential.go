@@ -58,6 +58,7 @@ func (s Secret) GoString() string             { return "credential.Secret{[redac
 func (s Secret) MarshalJSON() ([]byte, error) { return json.Marshal("[redacted]") }
 
 type Material struct {
+	Source       Source `json:"-"` // operator-owned location, outside immutable Session identity
 	Token        Secret
 	RefreshToken Secret
 	AccountID    string

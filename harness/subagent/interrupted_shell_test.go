@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -307,10 +308,29 @@ func TestInterruptedChildShellRecoveryDoesNotReplaySideEffect(t *testing.T) {
 				t.Fatal("invented shell completion", restored, err)
 			}
 			payload, _ := json.Marshal("continue")
-			if _, err = child.Submit(t.Context(), child.Generation, inbox.Input{ID: "recovery-barrier", Kind: inbox.InputExternal, Payload: payload}); err != nil {
+			recoveryContext, recoveryCancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer recoveryCancel()
+			if err = child.Wait(recoveryContext); err != nil {
 				t.Fatal(err)
 			}
-			assertUnknown()
+			if finish := child.Finish(); finish == nil || finish.Result.Status != "failed" || finish.ModelTurnID == "" {
+				t.Fatal("empty recovery response must end without fabricating a tool report", finish)
+			}
+			if _, err = child.Submit(t.Context(), child.Generation, inbox.Input{ID: "recovery-barrier", Kind: inbox.InputExternal, Payload: payload}); !errors.Is(err, host.ErrStopped) {
+				t.Fatal("terminal child accepted new work", err)
+			}
+			child, err = childHost.Resume(t.Context(), host.Options{ID: childID, Lifecycle: "child", Configuration: configuration, Policy: permission.Unrestricted()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = child.Wait(recoveryContext); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-requests:
+				t.Fatal("terminal recovery repeated inference")
+			default:
+			}
 			data, err := os.ReadFile(filepath.Join(dir, "effect"))
 			if err != nil || !bytes.Equal(data, []byte("effect\n")) {
 				t.Fatal("shell side effect replayed", string(data), err)

@@ -118,7 +118,7 @@ func TestScrollRealPTYWheelKeyboardResizeAndDetach(t *testing.T) {
 		}
 	}
 	readUntil(func(s string) bool { return strings.Contains(s, "LAST_SCROLL_LINE") })
-	if !strings.Contains(out.text(), "10.0 tok/s") || !strings.Contains(out.text(), "文脈 100") {
+	if !strings.Contains(out.text(), "10.0 tok/s") || !strings.Contains(out.text(), "コンテキスト 100") {
 		t.Fatal("PTY statistics not below composer", out.text())
 	}
 	if !strings.Contains(out.rawText(), "\x1b[?1006h") || !strings.Contains(out.rawText(), "\x1b[?1000h") {

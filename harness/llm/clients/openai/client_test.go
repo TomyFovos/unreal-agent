@@ -2,8 +2,11 @@ package openai
 
 import (
 	"encoding/json/v2"
+	"errors"
+	"github.com/unreallabsai/unreal-agent/harness/llm/responsesapi"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -79,5 +82,55 @@ func TestClientCallsResponsesAPI(t *testing.T) {
 	<-requestSeen
 	if response.ID != "resp-1" || response.Stop != llm.StopComplete {
 		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestExplicitEffortsAreSentUnchangedAndRejectionsExplainSelection(t *testing.T) {
+	for _, effort := range []llm.ReasoningEffort{"low", "medium", "high", "xhigh", "max"} {
+		t.Run(string(effort), func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				var body struct {
+					Reasoning struct {
+						Effort string `json:"effort"`
+					} `json:"reasoning"`
+				}
+				if json.UnmarshalRead(r.Body, &body) != nil || body.Reasoning.Effort != string(effort) {
+					t.Error("selected effort changed")
+				}
+				w.WriteHeader(400)
+				w.Write([]byte(`{"error":{"type":"invalid_request_error","code":"unsupported_value","param":"reasoning.effort","message":"effort is not accepted; fake-effort-key"}}`))
+			}))
+			defer server.Close()
+			client, err := NewClient(Config{APIKey: "fake-effort-key", BaseURL: server.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			_, err = client.Respond(t.Context(), llm.Request{Model: llm.Model{ID: "gpt-test", ReasoningEffort: effort}}, llm.RequestOptions{})
+			if err == nil || !strings.Contains(err.Error(), "reasoning.effort="+string(effort)) || !strings.Contains(err.Error(), "unsupported_value") || !strings.Contains(err.Error(), "not accepted") || strings.Contains(err.Error(), "fake-effort-key") || calls != 1 {
+				t.Fatalf("rejection or retry changed: %v calls=%d", err, calls)
+			}
+		})
+	}
+}
+
+func TestEffortSelectionPreservesContextOverflowClassification(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(400)
+		w.Write([]byte(`{"error":{"code":"context_length_exceeded","message":"context window exceeded","param":"input"}}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(Config{APIKey: "fake-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_, err = client.Respond(t.Context(), llm.Request{Model: llm.Model{ID: "gpt-test", ReasoningEffort: "max"}}, llm.RequestOptions{})
+	var effort *EffortError
+	var api *responsesapi.APIError
+	if errors.As(err, &effort) || !errors.As(err, &api) || api.Code != "context_length_exceeded" {
+		t.Fatal("effort reporting replaced context overflow", err)
 	}
 }

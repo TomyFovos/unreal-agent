@@ -45,6 +45,9 @@ type Config struct {
 	Theme            *Theme
 	Viewer           func(time.Time) viewer.PanelSnapshot
 	ViewChanged      func(ViewMode) // frontend read-only observation scope
+	// ViewSelected reports the view the person chose with /view, for reuse
+	// when the Session is opened again. Narrow fallbacks and exit do not call it.
+	ViewSelected func(ViewMode)
 	// InitialView is the first view; empty means Split, which narrow
 	// terminals show as Chat until they reach 120 columns.
 	InitialView         ViewMode
@@ -126,6 +129,7 @@ func Run(ctx context.Context, c Config) error {
 	if c.InitialView != "" {
 		u.View = c.InitialView
 	}
+	chosenView := u.View
 	files := newFileCompletion(ctx)
 	defer files.close(&u)
 	if c.Theme != nil {
@@ -315,6 +319,12 @@ func Run(ctx context.Context, c Config) error {
 			}
 			if c.ViewChanged != nil && frame.View != previousView {
 				c.ViewChanged(frame.View)
+			}
+			if u.View != chosenView {
+				chosenView = u.View
+				if c.ViewSelected != nil {
+					c.ViewSelected(chosenView)
+				}
 			}
 			if u.Picker != nil {
 				u.Picker.Offset = frame.PickerOffset

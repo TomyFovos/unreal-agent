@@ -70,7 +70,7 @@ func TestStatisticsFooterSourcesUnknownAndResponsiveComposer(t *testing.T) {
 				if size[0] >= 44 && !strings.Contains(bar, "10.0 tok/s") {
 					t.Fatal("rate/effort missing", bar)
 				}
-				if size[0] >= 80 && (!strings.Contains(f.Lines[0], "fixture-model") || !strings.Contains(f.Lines[0], "high") || !strings.Contains(bar, "文脈 120") || strings.Contains(bar, "累計")) {
+				if size[0] >= 80 && (!strings.Contains(f.Lines[0], "fixture-model") || !strings.Contains(f.Lines[0], "high") || !strings.Contains(bar, "コンテキスト 120") || strings.Contains(bar, "累計")) {
 					t.Fatal("model/usage missing", bar)
 				}
 				if size[1] >= 14 && f.CursorY != size[1]-2 {
@@ -91,7 +91,7 @@ func TestStatisticsFooterSourcesUnknownAndResponsiveComposer(t *testing.T) {
 		t.Fatal(text)
 	}
 	s.LastGeneration = nil
-	if text := statisticsBar(s, u, makeLayout(120, 24)).plain(); !strings.Contains(text, "速度 —") || !strings.Contains(text, "文脈 —") {
+	if text := statisticsBar(s, u, makeLayout(120, 24)).plain(); !strings.Contains(text, "速度 —") || !strings.Contains(text, "コンテキスト —") {
 		t.Fatal("unknown fabricated", text)
 	}
 	u.Theme.ASCII = true
@@ -110,7 +110,7 @@ func TestStatisticsStreamingCompletionReconnectAndCopyIsolation(t *testing.T) {
 	m.state = statsFixture("claude-code")
 	m.state.Progress = &host.Progress{TurnID: "turn", Epoch: 1, Mode: "streaming", Statistics: &llm.GenerationStatistics{Model: "fixture-model", Source: "client_clock", DurationMicros: 1_000_000, Tokens: llm.TokenCounts{Input: 12, Output: 3, InputKnown: true, OutputKnown: true}}}
 	u := UIState{Theme: Theme{Plain: true}}
-	if bar := statisticsBar(m.Snapshot(), u, makeLayout(120, 24)).plain(); !strings.Contains(bar, "~3.0 tok/s") || !strings.Contains(bar, "文脈 12") {
+	if bar := statisticsBar(m.Snapshot(), u, makeLayout(120, 24)).plain(); !strings.Contains(bar, "~3.0 tok/s") || !strings.Contains(bar, "コンテキスト 12") {
 		t.Fatal(bar)
 	}
 	response := llm.Response{Model: "fixture-model", Generation: &llm.GenerationStatistics{Model: "fixture-model", Source: "provider_api", DurationMicros: 2_000_000, Tokens: llm.TokenCounts{Input: 20, Output: 10, InputKnown: true, OutputKnown: true}}}
@@ -120,7 +120,7 @@ func TestStatisticsStreamingCompletionReconnectAndCopyIsolation(t *testing.T) {
 	}
 	m.status("disconnected", false)
 	bar := statisticsBar(m.Snapshot(), u, makeLayout(120, 24)).plain()
-	if !strings.Contains(bar, "5.0 tok/s") || !strings.Contains(bar, "文脈 20") {
+	if !strings.Contains(bar, "5.0 tok/s") || !strings.Contains(bar, "コンテキスト 20") {
 		t.Fatal("completed rate lost on detach", bar)
 	}
 	if err := m.apply(v); err != nil {

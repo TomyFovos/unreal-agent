@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
+	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
@@ -108,8 +109,8 @@ func TestRunMainHeartbeatReleasesWaitingBashAndReplays(t *testing.T) {
 	heartbeats := 0
 	decoder := jsontext.NewDecoder(&stdout)
 	for {
-		var item sessionstore.Item
-		if err := json.UnmarshalDecode(decoder, &item); err != nil {
+		var item host.HistoryItem
+		if err := decodeCanonicalRunnerItem(decoder, &item); err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}

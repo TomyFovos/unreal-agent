@@ -248,14 +248,14 @@ func TestLiveHeaderUnknownPartialAndAnimationBudget(t *testing.T) {
 	s, u := idleSnapshot(), plainUI()
 	u.Parent = &viewer.Row{Elapsed: viewer.Duration{Known: true, Value: 42 * time.Second}, Usage: viewer.Usage{Known: true, Partial: true, Input: 2000, Output: 30}}
 	f := RenderFrame(s, u, 80, 24)
-	if !strings.Contains(f.Lines[0], "42s") || strings.Contains(f.Lines[0], "~") || strings.Contains(f.Lines[len(f.Lines)-1], "累計") || !strings.Contains(f.Lines[len(f.Lines)-1], "文脈 —") {
+	if !strings.Contains(f.Lines[0], "42s") || strings.Contains(f.Lines[0], "~") || strings.Contains(f.Lines[len(f.Lines)-1], "累計") || !strings.Contains(f.Lines[len(f.Lines)-1], "コンテキスト —") {
 		t.Fatal("known/partial metrics lost")
 	}
 	s.Connected = false
 	s.Status = "disconnected"
 	s.OfflineSince = time.Unix(90, 0)
 	f = RenderFrame(s, u, 80, 24)
-	if strings.Contains(f.Lines[0], "42s") || !strings.Contains(f.Lines[0], "切断") || strings.Contains(f.Lines[len(f.Lines)-1], "累計") || !strings.Contains(f.Lines[len(f.Lines)-1], "文脈 —") {
+	if strings.Contains(f.Lines[0], "42s") || !strings.Contains(f.Lines[0], "切断") || strings.Contains(f.Lines[len(f.Lines)-1], "累計") || !strings.Contains(f.Lines[len(f.Lines)-1], "コンテキスト —") {
 		t.Fatal("offline metrics stale/unknown")
 	}
 	u.Busy = true

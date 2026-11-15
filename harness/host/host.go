@@ -40,6 +40,7 @@ var (
 
 type Runtime struct {
 	InterruptedInput  func(operation.Operation) (*inbox.Input, error)
+	CompletedInput    func(operation.Operation) (*inbox.Input, error)
 	ContextEngine     *contextengine.Engine
 	Selection         *sessionstore.RuntimeSelection
 	ApplySelection    func(sessionstore.RuntimeSelection) error
@@ -481,14 +482,19 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	}
 	pending := s.pendingStop()
 	dependencies := coordinator.Dependencies{SessionID: o.ID, Inbox: s.inbox, Restored: restored,
+		CacheKey:           s.modelCacheKey(),
 		RecordActivity:     s.recordActivity,
 		RetryModelFailures: s.lifecycle == "child",
 		InterruptedInput:   s.runtime.InterruptedInput,
+		CompletedInput:     s.runtime.CompletedInput,
 		ContextBuilt:       s.contextBuilt,
 		BeforeTurn:         s.beginTurn,
 		BeforeGeneration:   s.runtime.BeforeGeneration,
 		Sessions:           &serializedStore{s}, ContextBuilder: s.runtime.Builder, LLM: s.runtime.LLM, Tools: s.runtime.Tools,
 		Finished: func() bool { return s.Finish() != nil }, Operations: s.runtime.Operations, ToolHeartbeatInterval: o.Heartbeat, RestoredStop: pending, InitialInputs: initial}
+	if o.Lifecycle == "child" && !o.TextOnlyChild {
+		dependencies.OnIdle = s.commitUnreportedFinish
+	}
 	if o.TextOnlyChild {
 		if o.Lifecycle != "child" {
 			return nil, fmt.Errorf("text completion requires child lifecycle")

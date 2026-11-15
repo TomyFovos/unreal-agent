@@ -59,3 +59,26 @@ func TestProviderWithoutIdleMaintenanceDoesNotConstructClient(t *testing.T) {
 	}}
 	a.Idle(t.Context(), llm.Request{}, llm.RequestOptions{})
 }
+
+func TestProviderCloseCancelsBackgroundFromSelectedConnection(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		started, canceled := make(chan struct{}), make(chan struct{})
+		a := &adapter{processes: &processRequests{cancels: make(map[*context.CancelFunc]context.CancelFunc)}}
+		options := a.usageOptions(llm.RequestOptions{StartBackground: func(work func(context.Context)) bool { go work(t.Context()); return true }})
+		if !options.StartBackground(func(ctx context.Context) { close(started); <-ctx.Done(); close(canceled) }) {
+			t.Fatal("background not admitted")
+		}
+		<-started
+		if err := a.Close(); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-canceled:
+		default:
+			t.Fatal("old connection background survived provider switch")
+		}
+		if options.StartBackground(func(context.Context) { t.Error("closed connection started work") }) {
+			t.Fatal("closed connection admitted background work")
+		}
+	})
+}

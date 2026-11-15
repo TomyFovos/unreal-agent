@@ -53,7 +53,7 @@ type coordinator struct {
 	deferredContext    []sessionstore.Item
 	contextRetry       bool
 	forceCompaction    bool
-	restoredInputIDs   map[inbox.ID]bool
+	recordedInputIDs   map[inbox.ID]bool
 	idleRequest        llm.Request
 	idleOptions        llm.RequestOptions
 	idlePending        bool
@@ -63,6 +63,7 @@ type coordinator struct {
 	peerBatch          *time.Timer
 	peerBatchDue       <-chan time.Time
 	batchedReports     int
+	completedChildren  []operation.Operation
 }
 
 type stopState struct {
@@ -233,6 +234,9 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 	callModel, err := current.processEvents(ctx)
 	if err != nil {
 		return err
+	}
+	if current.finished() && !current.hasPendingOperations() {
+		return nil
 	}
 	if current.stop.request.Mode == inbox.StopHard {
 		stopped, err := current.handleStop(ctx)
@@ -410,6 +414,21 @@ func (current *coordinator) processEvents(ctx context.Context) (bool, error) {
 	if err := current.recordContextRedactions(ctx); err != nil {
 		return false, err
 	}
+	if current.cancelModel == nil {
+		for len(current.completedChildren) > 0 {
+			op := current.completedChildren[0]
+			input, err := current.dependencies.CompletedInput(op)
+			if err != nil {
+				return false, err
+			}
+			if input != nil && !current.recordedInputIDs[input.ID] {
+				if err := current.handleInboxInputs(ctx, []inbox.Input{*input}); err != nil {
+					return false, err
+				}
+			}
+			current.completedChildren = current.completedChildren[1:]
+		}
+	}
 	if current.cancelModel != nil && current.bridgeActive {
 		return false, nil
 	}
@@ -425,7 +444,13 @@ func (current *coordinator) processEvents(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	current.state.interrupted = false
-	return current.state.callModel || (current.wakingInputs() > 0 && current.cancelModel == nil && len(current.state.graceToolCalls) == 0), nil
+	callModel := current.state.callModel || (current.wakingInputs() > 0 && current.cancelModel == nil && len(current.state.graceToolCalls) == 0)
+	if !callModel && current.isIdle() && !current.finished() && current.dependencies.OnIdle != nil {
+		if err := current.dependencies.OnIdle(ctx, current.state.currentTurnID); err != nil {
+			return false, err
+		}
+	}
+	return callModel, nil
 }
 
 // held reports whether /stop main keeps the model waiting for the user.
@@ -554,7 +579,7 @@ func (current *coordinator) handleStop(ctx context.Context) (bool, error) {
 }
 
 func (current *coordinator) isIdle() bool {
-	return current.cancelModel == nil && current.batchedReports == 0 && current.wakingInputs() == 0 &&
+	return current.cancelModel == nil && current.modelRetry == nil && !current.state.callModel && len(current.completedChildren) == 0 && current.batchedReports == 0 && current.wakingInputs() == 0 &&
 		len(current.state.toolCalls) == 0 && !current.hasPendingOperations()
 }
 
@@ -733,7 +758,7 @@ func (current *coordinator) requestModelResponse(
 		persist := func(r sessionstore.ContextRecord) error {
 			return current.persistContext(ctx, r)
 		}
-		if err := b.PrepareContext(ctx, current.dependencies.LLM, llm.RequestOptions{CacheKey: string(current.dependencies.SessionID)}, persist, current.forceCompaction); err != nil {
+		if err := b.PrepareContext(ctx, current.dependencies.LLM, llm.RequestOptions{CacheKey: current.cacheKey()}, persist, current.forceCompaction); err != nil {
 			return fmt.Errorf("prepare context: %w", err)
 		}
 		current.forceCompaction = false
@@ -779,12 +804,12 @@ func (current *coordinator) requestModelResponse(
 	current.idlePending = false
 	current.idleRequest = built.Request
 	current.idleOptions = llm.RequestOptions{
-		CacheKey: string(current.dependencies.SessionID),
+		CacheKey: current.cacheKey(),
 		Identity: llm.RequestIdentity{SessionID: string(current.dependencies.SessionID), TurnID: string(turn.ID), RuntimeRevision: turn.RuntimeRevision},
 	}
 	go func() {
 		response, err := current.dependencies.LLM.Respond(requestContext, built.Request, llm.RequestOptions{
-			CacheKey:   string(current.dependencies.SessionID),
+			CacheKey:   current.cacheKey(),
 			Identity:   llm.RequestIdentity{SessionID: string(current.dependencies.SessionID), TurnID: string(turn.ID), RuntimeRevision: turn.RuntimeRevision},
 			Tools:      current.toolRendezvous(requestContext, turn.ID),
 			BeginTools: current.beginToolRendezvous(requestContext, turn.ID),
@@ -800,6 +825,13 @@ func (current *coordinator) requestModelResponse(
 		}
 	}()
 	return nil
+}
+
+func (current *coordinator) cacheKey() string {
+	if current.dependencies.CacheKey != "" {
+		return current.dependencies.CacheKey
+	}
+	return string(current.dependencies.SessionID)
 }
 
 func (current *coordinator) persistContext(ctx context.Context, r sessionstore.ContextRecord) error {
@@ -843,6 +875,10 @@ func (current *coordinator) handleInboxInput(ctx context.Context, input inbox.In
 	if err := current.storeItemInSessionStore(ctx, item); err != nil {
 		return err
 	}
+	if current.recordedInputIDs == nil {
+		current.recordedInputIDs = map[inbox.ID]bool{}
+	}
+	current.recordedInputIDs[input.ID] = true
 	if input.Kind == inbox.InputControl {
 		request, err := input.DecodeControlMessage()
 		if err != nil {
@@ -986,12 +1022,19 @@ func (current *coordinator) handleOperationUpdate(
 	if err := current.storeOperationInSessionStore(ctx, update); err != nil {
 		return err
 	}
+	current.queueChildCompletion(update)
 	return nil
+}
+
+func (current *coordinator) queueChildCompletion(op operation.Operation) {
+	if current.dependencies.CompletedInput != nil && subagentOperation(op) && operationIsTerminal(op.Status) {
+		current.completedChildren = append(current.completedChildren, op)
+	}
 }
 
 func (current *coordinator) restore(ctx context.Context) error {
 	current.pendingCancels = map[operation.ID]string{}
-	current.restoredInputIDs = map[inbox.ID]bool{}
+	current.recordedInputIDs = map[inbox.ID]bool{}
 	if err := current.loadHistory(ctx); err != nil {
 		return err
 	}
@@ -1027,7 +1070,7 @@ func (current *coordinator) restore(ctx context.Context) error {
 				}
 				// Before the terminal checkpoint: if this Host also dies here,
 				// the stable input ID prevents another notice on restoration.
-				if input != nil && !current.restoredInputIDs[input.ID] {
+				if input != nil && !current.recordedInputIDs[input.ID] {
 					if err := current.handleInboxInputs(ctx, []inbox.Input{*input}); err != nil {
 						return err
 					}
@@ -1057,8 +1100,11 @@ func (current *coordinator) restore(ctx context.Context) error {
 			if err := current.handleOperationUpdate(ctx, value); err != nil {
 				return err
 			}
-		} else if b, ok := current.dependencies.ContextBuilder.(interface{ ObserveOperation(operation.Operation) }); ok {
-			b.ObserveOperation(value)
+		} else {
+			if b, ok := current.dependencies.ContextBuilder.(interface{ ObserveOperation(operation.Operation) }); ok {
+				b.ObserveOperation(value)
+			}
+			current.queueChildCompletion(value)
 		}
 	}
 	// There is no executing model call after restoration. When its previous
@@ -1131,8 +1177,8 @@ func (current *coordinator) loadHistory(ctx context.Context) (result error) {
 }
 
 func (current *coordinator) restoreItem(item sessionstore.Item) error {
-	if input, ok := item.Data.(inbox.Input); ok && current.restoredInputIDs != nil {
-		current.restoredInputIDs[input.ID] = true
+	if input, ok := item.Data.(inbox.Input); ok && current.recordedInputIDs != nil {
+		current.recordedInputIDs[input.ID] = true
 	}
 	status, ok := item.Data.(sessionstore.ToolCallStatus)
 	if item.Kind == sessionstore.ItemToolCallStatus && ok && toolCallRequiresTranslator(status) {

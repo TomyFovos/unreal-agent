@@ -85,7 +85,7 @@ func TestSubagentPromptNamesTheCommandAndRoles(t *testing.T) {
 	if strings.Contains(prompt, "ultra") {
 		t.Fatal("prompt advertises disabled effort", prompt)
 	}
-	for _, want := range []string{"run the project", "GPT does the work", "over-implementation", "collector template (gpt-6-luna)", "never to a gpt-6.1-sol worker", "/opt/unreal/bin/unreal subagent start --template lead <<'EOF'", "/opt/unreal/bin/unreal subagent wait HANDLE --timeout 60s", "end your turn; do not wait", "Agent and Monitor are unavailable", "You decide; children do the work", "writing documents and commits", "within tens of seconds", "at most --timeout 60s", "ignore versioned command paths", "【報告】", "【要確認】", "one-line title", "subagent approve HANDLE REQUEST allow|deny", "gpt-6.1-sol at max effort", "worker-low through worker-max", "lead, worker-high", "every permission mode, Read Only included"} {
+	for _, want := range []string{"run the project", "GPT does the work", "over-implementation", "collector template (gpt-6-luna)", "never to a gpt-6.1-sol worker", "/opt/unreal/bin/unreal subagent start --template lead <<'EOF'", "/opt/unreal/bin/unreal subagent wait HANDLE --timeout 60s", "end your turn; do not wait", "Monitor is unavailable", "Agent tool only when a Claude model is wanted", "You decide; children do the work", "writing documents and commits", "within tens of seconds", "at most --timeout 60s", "ignore versioned command paths", "【報告】", "【要確認】", "one-line title", "subagent approve HANDLE REQUEST allow|deny", "gpt-6.1-sol at max effort", "worker-low through worker-max", "lead, worker-high", "every permission mode, Read Only included"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt lacks %q", want)
 		}
@@ -144,5 +144,16 @@ func TestCurrentSubagentCommandRewritesOtherUnrealPaths(t *testing.T) {
 	updated, _ := out["updatedInput"].(map[string]any)
 	if out["permissionDecision"] != "allow" || updated["command"] != cli+" subagent list" || updated["description"] != "list" {
 		t.Fatalf("gate answer = %v", answer)
+	}
+}
+
+func TestNativeAgentUsesExplicitOperatorModelAndEffort(t *testing.T) {
+	a := approver{agentModel: "sonnet", agentEffort: "high"}
+	input := hookInput{ToolName: "Agent", ToolInput: []byte(`{"prompt":"review","model":"haiku","effort":"low","run_in_background":false}`)}
+	answer := a.gate(t.Context(), input)
+	output := answer["hookSpecificOutput"].(map[string]any)
+	updated := output["updatedInput"].(map[string]any)
+	if updated["model"] != "sonnet" || updated["effort"] != "high" || updated["run_in_background"] != false || updated["prompt"] != "review" {
+		t.Fatal("native selection changed", updated)
 	}
 }

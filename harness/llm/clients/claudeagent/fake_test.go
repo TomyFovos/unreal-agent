@@ -96,6 +96,13 @@ func hookOutput(answer map[string]any, field string) string {
 }
 
 func fakeCLI(scenario string, args []string) int {
+	if strings.HasPrefix(scenario, "api_") && os.Getenv("ANTHROPIC_API_KEY") != "chosen-api-test-key" {
+		return 2
+	}
+	if scenario == "api_stderr" {
+		fmt.Fprintln(os.Stderr, os.Getenv("ANTHROPIC_API_KEY"))
+		return 1
+	}
 	if path := os.Getenv("CLAUDEAGENT_ARGS"); path != "" {
 		_ = os.WriteFile(path, []byte(strings.Join(args, "\n")), 0o600)
 	}
@@ -117,7 +124,7 @@ func fakeCLI(scenario string, args []string) int {
 	f := &fake{in: bufio.NewReader(os.Stdin)}
 	initialize := f.next()
 	answer := map[string]any{}
-	if scenario == "catalog" {
+	if scenario == "catalog" || scenario == "api_catalog" {
 		answer = map[string]any{
 			"models": []any{
 				map[string]any{"value": "default", "resolvedModel": "claude-opus-5-5", "displayName": "Default (recommended)", "supportsEffort": true, "supportedEffortLevels": []any{"low", "high"}},
@@ -126,9 +133,12 @@ func fakeCLI(scenario string, args []string) int {
 			},
 			"account": map[string]any{"email": "user@example.test", "organization": "example", "subscriptionType": "Claude Team", "apiProvider": "firstParty"},
 		}
+		if scenario == "api_catalog" {
+			answer["account"] = map[string]any{}
+		}
 	}
 	f.emit(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "success", "request_id": initialize["request_id"], "response": answer}})
-	if scenario == "catalog" {
+	if scenario == "catalog" || scenario == "api_catalog" {
 		f.next()
 		return 0
 	}
@@ -146,6 +156,17 @@ func fakeCLI(scenario string, args []string) int {
 	f.emit(map[string]any{"type": "user", "isReplay": true, "parent_tool_use_id": nil, "message": user["message"]})
 	cwd := os.Getenv("CLAUDEAGENT_CWD")
 	switch scenario {
+	case "usage_recovery", "usage_recovery_failure":
+		return fakeUsageRecovery(f, scenario == "usage_recovery_failure")
+	case "output_limit_thinking", "output_limit_text", "output_limit_mixed", "output_limit_unknown", "output_limit_no_stream", "output_limit_message_only", "output_limit_recovered", "output_limit_unrelated":
+		return fakeOutputLimit(f, scenario)
+	case "stream_activity_continuous", "stream_activity_gap", "stream_activity_retry":
+		return fakeStreamActivity(f, scenario)
+	case "api_echo":
+		f.text("msg_api", os.Getenv("ANTHROPIC_API_KEY"))
+		f.result("ok")
+	case "api_error":
+		f.emit(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true, "errors": []any{os.Getenv("ANTHROPIC_API_KEY")}})
 	case "auto_compact", "auto_compact_no_usage", "auto_compact_failed":
 		f.step(200_000, 0, 0, 1, "Before")
 		f.emit(map[string]any{"type": "system", "subtype": "status", "status": "compacting"})

@@ -1,13 +1,16 @@
 package openai
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/responsesapi"
 	"github.com/unreallabsai/unreal-agent/harness/primitives"
+	"github.com/unreallabsai/unreal-agent/internal/secretguard"
 )
 
 type Config struct {
@@ -23,6 +26,31 @@ type Exchange = responsesapi.Exchange
 type Client struct {
 	llm.Adapter
 	remote *primitives.RemoteClient
+	key    string
+}
+
+// EffortError preserves the API's rejection of an explicitly chosen effort.
+// It contains no request headers, key material or arbitrary response bodies.
+type EffortError struct {
+	Model, Effort, Param, Code, Message string
+	cause                               error
+}
+
+func (e *EffortError) Error() string {
+	return fmt.Sprintf("OpenAI API rejected model=%s reasoning.effort=%s param=%s code=%s: %s", e.Model, e.Effort, e.Param, e.Code, e.Message)
+}
+func (e *EffortError) Unwrap() error { return e.cause }
+
+func (client *Client) Respond(ctx context.Context, request llm.Request, options llm.RequestOptions) (llm.Response, error) {
+	response, err := client.Adapter.Respond(ctx, request, options)
+	var api *responsesapi.APIError
+	if request.Model.ReasoningEffort != "" && errors.As(err, &api) && (api.StatusCode == 400 || api.StatusCode == 422) &&
+		(api.Param == "reasoning" || api.Param == "reasoning.effort" || strings.Contains(strings.ToLower(api.Message), "effort")) &&
+		api.Code != "context_length_exceeded" && api.Code != "context_window_exceeded" {
+		safe := func(s string) string { return secretguard.Redact(strings.ReplaceAll(s, client.key, "[redacted]")) }
+		return response, &EffortError{Model: safe(request.Model.ID), Effort: string(request.Model.ReasoningEffort), Param: safe(api.Param), Code: safe(api.Code), Message: safe(api.Message), cause: err}
+	}
+	return response, err
 }
 
 var _ llm.Adapter = (*Client)(nil)
@@ -55,7 +83,7 @@ func NewClient(config Config) (*Client, error) {
 		_ = remote.Close()
 		return nil, err
 	}
-	return &Client{Adapter: adapter, remote: remote}, nil
+	return &Client{Adapter: adapter, remote: remote, key: config.APIKey}, nil
 }
 
 func (client *Client) Close() error {

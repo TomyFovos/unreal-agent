@@ -2,6 +2,7 @@
 """Build an isolated, non-publishing Linux amd64 snapshot of the Fork."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -97,6 +98,18 @@ def inspect_archive(artifacts):
     return archive, metadata
 
 
+def write_archive_checksum(archive):
+    with archive.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    entry = f"{digest}  {archive.name}\n"
+    if entry not in (archive.parent / "SHA256SUMS").read_text().splitlines(keepends=True):
+        raise ValueError("snapshot checksum differs from GoReleaser")
+    sidecar = archive.with_name(archive.name + ".sha256")
+    with sidecar.open("x", encoding="utf-8") as stream:
+        stream.write(entry)
+    return sidecar
+
+
 def smoke_archive(archive, metadata, root, env):
     # Extract only inspected regular members into a new directory; no local
     # config/authentication, project files, or real inference is used.
@@ -109,6 +122,7 @@ def smoke_archive(archive, metadata, root, env):
             ("unreal", ["--help"], 0, "usage: unreal"),
             ("unreal-agent", ["serve", "-h"], 1, "Usage of unreal-agent serve"),
             ("unreal-agent-runner", ["-h"], 0, "unreal-agent-runner [options]"),
+            ("unreal-agent-runner", ["--version"], 0, metadata["revision"]),
             ("unreal-agent-auth", ["methods"], 0, "openai-codex"),
         )
         for name, args, expected_code, expected_text in checks:
@@ -125,7 +139,7 @@ def smoke_archive(archive, metadata, root, env):
             if "github.com/tree-sitter/go-tree-sitter" not in info:
                 raise ValueError(f"{name}: AST parser dependency missing")
         test_env = dict(env, UNREAL_SNAPSHOT_BIN_DIR=str(directory))
-        subprocess.run(["go", "test", "./cmd/unreal-agent", "-run", "^TestSnapshotPackaged", "-count=1", "-v"],
+        subprocess.run(["go", "test", "-p", "1", "./cmd/unreal-agent", "-run", "^TestSnapshotPackaged", "-count=1", "-v"],
                        cwd=root, env=test_env, check=True, timeout=120)
 
 
@@ -140,7 +154,9 @@ def build(root, executable):
                    cwd=root, env=env, check=True)
     archive, metadata = inspect_archive(output / "artifacts")
     smoke_archive(archive, metadata, root, env)
+    checksum = write_archive_checksum(archive)
     print(f"snapshot verified: {archive}", flush=True)
+    print(f"snapshot checksum: {checksum}", flush=True)
     print("archive contents, CGO/AST build metadata, and non-inference CLI smoke: PASS")
     return output
 

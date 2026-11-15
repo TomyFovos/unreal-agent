@@ -30,7 +30,8 @@ func assertClaudeDelegation(t *testing.T, cli *testclaude.Fixture, gpt bool) {
 		t.Fatal("missing tool allowlist")
 	}
 	agent := slices.Contains(strings.Split(call.Arguments[index+1], ","), "Agent")
-	if agent == gpt || strings.Contains(strings.Join(call.Arguments, "\n"), "Templates:") != gpt {
+	// Agent is always offered; GPT children appear only while Codex is usable.
+	if !agent || strings.Contains(strings.Join(call.Arguments, "\n"), "Templates:") != gpt {
 		t.Fatalf("gpt=%t Agent=%t args=%v", gpt, agent, call.Arguments)
 	}
 	if !gpt && !slices.Contains(call.Environment, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1") {

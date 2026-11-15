@@ -2,25 +2,38 @@
 
 **Language:** English | [日本語](ja/install.md)
 
-The Unreal Agent common kit runs on **Linux amd64** (including WSL and Linux Docker Sandboxes) and supports **Claude only, ChatGPT (Codex) only, or both** in a single installation.
+The Unreal Agent common kit runs on **Linux amd64** (including WSL and Linux Docker Sandboxes). One installation supports Claude and ChatGPT subscription logins and optional OpenAI / Anthropic API key connections.
 
 ## System Requirements
 
 - **OS / Architecture:** Linux amd64 (glibc version is checked automatically by `doctor.sh` against `KIT.json`)
 - **Required tools:** `bash`, `python3`, `git`, `tar`, `sha256sum`
-- **Provider login:** The official `claude` CLI for Claude, or `codex login` for ChatGPT. Codex inference can run without its CLI while valid authentication and a model catalog are available, including host-managed Docker Sandbox OAuth.
+- **Provider access:** Subscription login or an explicitly selected API key. Claude requires the official `claude` CLI for either authentication method. OpenAI API needs no Codex subscription login. ChatGPT uses `codex login`; Codex inference can run without its CLI while valid authentication and a model catalog are available, including host-managed Docker Sandbox OAuth.
 
 ---
 
 ## Step 1: Sign In to a Provider
 
-Prepare a subscription login for whichever provider you want to use inside the Linux environment where Unreal will run:
+For a subscription connection, prepare the login inside the Linux environment where Unreal will run. To use an API key instead, follow the optional registration below; a subscription login is unnecessary:
 
 - **Claude:** Install the official Claude Code CLI, run `claude` in Bash, and execute `/login` inside Claude Code with your Claude subscription.
 - **Codex:** Install the official Codex CLI and run `codex login` in Bash with your ChatGPT subscription.
 - **Docker Sandbox (host-managed Codex OAuth):** Prepare the host login instead. See [Providers — Docker Sandboxes Codex OAuth](providers.md#docker-sandboxes-codex-oauth).
 
-> **Note:** Unreal does not accept API keys in normal interactive use. Running `/login` inside Unreal displays these sign-in instructions. With neither provider ready, installation still succeeds (exit code `0`), and Unreal starts and shows login guidance on the first input. After a later login, run `/model refresh` and select the provider in `/model`; no reinstall is needed. If you explicitly disabled a provider, re-enable it with `bash development.sh --configure-providers --codex-auto` for Codex or `bash development.sh --configure-providers` for Claude.
+> **Note:** Running `/login` inside Unreal displays subscription sign-in instructions. With neither subscription ready, installation still succeeds (exit code `0`). After a later login, run `/model refresh` and select the connection; no reinstall is needed. If you explicitly disabled a subscription provider, re-enable it with `bash development.sh --configure-providers --codex-auto` for Codex or `bash development.sh --configure-providers` for Claude.
+
+### Optional: Register an API Key Connection
+
+Prepare key files with **0600** permissions and add either or both flags to the installation command:
+
+```bash
+chmod 600 /absolute/openai.key /absolute/anthropic.key
+bash development.sh --openai-api-key-file /absolute/openai.key --anthropic-api-key-file /absolute/anthropic.key
+```
+
+Settings store only the file paths, never key values. Files without permissions 0600 are rejected. Alternatively, explicitly name an environment source with `--openai-api-key-env NAME` or `--anthropic-api-key-env NAME`.
+
+**API billing is separate from the subscription.** Merely having `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` in the environment never enables API use. Registration does not select an API connection: after launch, choose `OpenAI API（API キー・別課金）` or `Claude（API キー・別課金）` in `/model`. This also applies when only API connections are registered. Sessions keep their selection, and expired subscriptions never fall back to API keys. See [Providers](providers.md#optional-api-key-connections) for explicit initial selection and nonsecret `runtime.json` references.
 
 ---
 
@@ -43,8 +56,8 @@ Prepare a subscription login for whichever provider you want to use inside the L
    . "$HOME/.config/unreal-agent-common/path.sh"
    ```
 
-3. Check the printed availability summary for Claude and Codex.
-   With both ready, a new installation starts with Claude; with one ready, it starts with that provider. Claude uses GPT children when Codex is available, otherwise Claude Code's Agent (`haiku` / `sonnet`). A GPT parent always uses GPT children and reports unavailable Codex with login guidance.
+3. Check the printed connection summary.
+   Among ready subscriptions, a new installation starts with Claude when both are ready, or the ready subscription. API connections require explicit selection in `/model`. Claude uses GPT children when Codex is available, otherwise Claude Code's Agent (`haiku` / `sonnet`). An OpenAI API parent uses the API connection for its built-in GPT children; other parents retain Codex. Unavailable authentication never triggers a connection switch.
 4. Navigate to your project directory and start a named Session:
 
    ```bash
@@ -119,3 +132,7 @@ Pass these flags to `bash development.sh` during installation or update (not to 
 | `--disable-codex` | Disable the Codex provider |
 | `--disable-claude` | Disable the Claude provider |
 | `--claude-binary <path>` | Specify a custom path to the `claude` executable |
+| `--openai-api-key-file <path>` | Register an optional OpenAI API connection using a 0600 key file; separate billing |
+| `--anthropic-api-key-file <path>` | Register an optional Claude API connection using a 0600 key file; separate billing |
+| `--openai-api-key-env <NAME>` | Explicitly choose the OpenAI key's environment variable name |
+| `--anthropic-api-key-env <NAME>` | Explicitly choose the Anthropic key's environment variable name |

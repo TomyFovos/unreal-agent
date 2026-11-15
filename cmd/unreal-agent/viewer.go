@@ -12,6 +12,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 func withViewer(config gateway.Config, directory string) gateway.Config {
@@ -23,7 +24,19 @@ func attachViewer(ctx context.Context, client *gateway.Client, id session.ID) er
 	observation := viewer.NewClient(remote, viewer.New(viewer.SubagentOptions()), remote)
 	panel := viewer.NewPanel(ctx, id, observation)
 	defer panel.Close()
+	readCtx, cancelRead := context.WithTimeout(ctx, 2*time.Second)
+	initial := tui.ViewMode(remote.SavedView(readCtx))
+	cancelRead()
 	return tui.Terminal(ctx, tui.Config{Client: client, ID: id, Viewer: panel.Snapshot, Command: childStartCommand(client, id, panel.Command), Updates: panel.Updates(),
+		InitialView: initial,
+		ViewSelected: func(mode tui.ViewMode) {
+			// Remember the choice without holding up the terminal.
+			go func() {
+				saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				defer cancel()
+				_ = remote.SaveView(saveCtx, string(mode))
+			}()
+		},
 		WatchPermissions: func(ctx context.Context, generation string) (permission.ControlConnection, error) {
 			return client.WatchPermissions(ctx, id, generation)
 		},

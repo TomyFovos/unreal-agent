@@ -15,6 +15,85 @@ import (
 
 type sessionContextKey struct{}
 
+// commitUnreportedFinish closes a tool-capable child that has no continuation.
+// It uses the same model-turn identity as text completion, without inventing a
+// Finish call. Coordinator invokes it only after work and waking inputs drain.
+func (s *Session) commitUnreportedFinish(ctx context.Context, turn session.TurnID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.finish != nil || turn == "" || s.awaitingParentReply() {
+		return nil
+	}
+	for i := len(s.items) - 1; i >= 0; i-- {
+		r, ok := s.items[i].Data.(sessionstore.ModelResponse)
+		if !ok || r.TurnID != turn {
+			continue
+		}
+		reason := "child ended its turn without Finish"
+		if r.Response.Stop != "" {
+			reason += " (stop=" + string(r.Response.Stop) + ")"
+		}
+		if r.Response.Failure != nil {
+			reason += ": " + r.Response.Failure.Code
+		}
+		f := sessionstore.FinishRecord{Version: 1, ModelTurnID: turn, Result: sessionstore.FinishResult{Status: "failed", Summary: reason, Blockers: []string{reason}}}
+		return s.store.AppendHostRecord(ctx, s.ID, sessionstore.HostRecord{Version: 1, Kind: "finish", Finish: &f})
+	}
+	return nil // No canonical response yet, including an explicit user interrupt.
+}
+
+// Only SendParent's decision/question kind establishes a reply wait. Progress
+// does not. Compare the first durable request with incoming parent messages;
+// an answer can arrive before the sending Operation's terminal checkpoint.
+// Caller holds s.mu; no text is interpreted as a scheduling instruction.
+func (s *Session) awaitingParentReply() bool {
+	var lineage struct{ ParentID string }
+	_ = json.Unmarshal(s.historyState.Configuration, &lineage)
+	seen := map[operation.ID]bool{}
+	waiting := false
+	request := func(op operation.Operation) {
+		if seen[op.ID] || op.Type != operation.TypeRemoteJob {
+			return
+		}
+		seen[op.ID] = true
+		latest, ok := s.operations[op.ID]
+		if !ok || latest.Status != operation.StatusCompleted {
+			return
+		}
+		state, err := operation.DecodeRemoteJobState(op)
+		var plan struct {
+			Action   string
+			Progress bool
+		}
+		if err == nil && state.Plan.Type == "subagent" && json.Unmarshal(state.Plan.Data, &plan) == nil && plan.Action == "parent" && !plan.Progress {
+			waiting = true
+		}
+	}
+	for _, item := range s.items {
+		switch d := item.Data.(type) {
+		case inbox.Input:
+			if d.Kind == inbox.InputPeer {
+				if peer, err := d.DecodePeerMessage(); err == nil && peer.Kind == "message" && peer.Sender == lineage.ParentID {
+					waiting = false
+				}
+			}
+			if d.Kind == inbox.InputExternal {
+				waiting = false
+			}
+			if d.Kind == inbox.InputControl {
+				if op, err := sessionstore.DecodeOperationIntent(d); err == nil {
+					request(op)
+				}
+			}
+		case sessionstore.ToolCallStatus:
+			for _, op := range d.Operations {
+				request(op)
+			}
+		}
+	}
+	return waiting
+}
+
 func (s *Session) commitTextFinish(ctx context.Context, turn session.TurnID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

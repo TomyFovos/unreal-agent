@@ -199,3 +199,33 @@ func TestNativeBashTimingRecordsActualHookBoundaries(t *testing.T) {
 		t.Fatal("duplicate completion", records)
 	}
 }
+
+func TestNativeAgentTranscriptAndMessageUsageAreLinkedAndDeduplicated(t *testing.T) {
+	var activities []llm.ActivityRecord
+	round := newTurn(t.Context(), func() {}, llm.RequestOptions{Identity: llm.RequestIdentity{TurnID: "turn"}, RecordActivity: func(_ context.Context, r llm.ActivityRecord) error { activities = append(activities, r); return nil }}, &writer{w: io.Discard}, observed.NewResults(), &approver{}, t.TempDir(), "session")
+	parent := "agent-call"
+	round.model = "opus-exact"
+	messages := []frame{
+		{Type: "assistant", Message: []byte(`{"id":"main","model":"opus-exact","content":[{"type":"text","text":"delegated"}],"usage":{"input_tokens":10,"output_tokens":2}}`)},
+		{Type: "assistant", ParentToolUseID: &parent, Message: []byte(`{"id":"child","model":"haiku-exact","content":[{"type":"text","text":"child result"}],"usage":{"input_tokens":3,"cache_read_input_tokens":4,"output_tokens":5}}`)},
+	}
+	for _, f := range messages {
+		round.handle(f)
+	}
+	round.handle(messages[1])
+	round.recordTurnUsage(&frame{Usage: &usage{InputTokens: 13, CacheReadInputTokens: 4, OutputTokens: 7}})
+	totals := map[string]llm.Usage{}
+	for _, r := range activities {
+		if r.Kind == "provider_usage" {
+			totals[r.Model] = *r.Usage
+		}
+	}
+	if totals["opus-exact"].InputTokens != 10 || totals["haiku-exact"].InputTokens != 7 || totals["haiku-exact"].OutputTokens != 5 {
+		t.Fatal("usage duplicated or native child lost", totals)
+	}
+	response := round.finish(&frame{})
+	encoded, _ := json.Marshal(response)
+	if !strings.Contains(string(encoded), "[Claude Code Agent agent-call]") || !strings.Contains(string(encoded), "child result") {
+		t.Fatal("native child not linked in public transcript")
+	}
+}

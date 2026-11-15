@@ -108,7 +108,7 @@ func TestUnavailableStartupGuidanceHasCommandsAndNoInternalCodes(t *testing.T) {
 		{unavailableProvider("openai-codex", modelcatalog.CLIMissing), unavailableProvider("claude", modelcatalog.CLIMissing)},
 	} {
 		text := (&normalRuntimeError{Code: "providers_unavailable", Providers: providers}).Error()
-		wants := []string{"unreal を起動", "Codex", "Claude"}
+		wants := []string{"unreal を起動", "ChatGPT（サブスク）", "Claude（サブスク）"}
 		if providers[0].Reason == modelcatalog.CLIMissing {
 			wants = append(wants, "をインストールしてから", "Codex CLI", "Claude Code")
 		} else {

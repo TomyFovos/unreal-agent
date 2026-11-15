@@ -127,6 +127,9 @@ type Row struct {
 	NeedsResync bool
 	Problem     string
 	LastUsage   Usage
+	// OutputTPS is the latest response's output tokens per second, when the
+	// provider reported its timing; zero when unknown.
+	OutputTPS float64 `json:",omitzero"`
 }
 type Detail struct {
 	Row         Row

@@ -109,6 +109,10 @@ func TestCLIChildDiscoversCurrentInstructions(t *testing.T) {
 					}
 					output = []any{map[string]any{"type": "function_call", "id": "finish", "call_id": "finish", "name": "Finish", "arguments": `{"status":"completed","summary":"CLI child finished","changedFiles":[],"tests":["fixture"],"blockers":[]}`}}
 					if scenario.control != "" && calls == 1 {
+						// Establish the canonical parent-reply wait. An empty first
+						// response now correctly terminates an unreported child.
+						output = []any{map[string]any{"type": "function_call", "id": "question", "call_id": "question", "name": "SendParent", "arguments": `{"text":"Waiting for viewer control","progress":false}`}}
+					} else if scenario.control != "" && calls == 2 {
 						output = []any{}
 					} else if scenario.control == "steer" && !strings.Contains(body, "VIEWER_STEER_INPUT") {
 						t.Error("viewer input did not reach child inbox")
@@ -264,7 +268,7 @@ func TestCLIChildDiscoversCurrentInstructions(t *testing.T) {
 				if completed.ID != "" {
 					break
 				}
-				if scenario.control != "" && !controlled && childCalls.Load() > 0 {
+				if scenario.control != "" && !controlled && childCalls.Load() >= 2 {
 					if err = observer.Refresh(ctx, "parent"); err != nil {
 						t.Fatal(err)
 					}
@@ -278,6 +282,11 @@ func TestCLIChildDiscoversCurrentInstructions(t *testing.T) {
 						}
 						if e = observer.Refresh(ctx, plan.ChildID); e != nil {
 							t.Fatal(e)
+						}
+						// Wait for the response after SendParent to be durable, so
+						// cancellation tests a waiting child, not an HTTP race.
+						if detail, ok := observer.Model.Detail(plan.ChildID, time.Now()); !ok || detail.Row.Usage.Responses < 2 {
+							continue
 						}
 						for range 2 {
 							if e = observer.Resume(ctx, plan.ChildID, "viewer-resume"); e != nil {
@@ -381,8 +390,11 @@ func TestCLIChildDiscoversCurrentInstructions(t *testing.T) {
 				}
 			}
 			wantCalls := int32(1)
-			if scenario.control == "steer" {
+			if scenario.control == "cancel" {
 				wantCalls = 2
+			}
+			if scenario.control == "steer" {
+				wantCalls = 3
 			}
 			if bindings != 1 || tasks != 1 || ready != 1 || childCalls.Load() != wantCalls {
 				t.Fatalf("bindings=%d tasks=%d ready=%d childCalls=%d", bindings, tasks, ready, childCalls.Load())

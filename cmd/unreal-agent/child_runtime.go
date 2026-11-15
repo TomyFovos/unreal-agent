@@ -14,11 +14,83 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
 )
 
+// Only built-in GPT defaults follow the parent's explicit connection choice.
+// Availability never selects a different connection. Explicit operator
+// templates and recorded children retain their own selections.
+func builtinGPTTemplate(c agentrunner.RuntimeConfig, template subagent.Template, id string) (subagent.Template, error) {
+	backend, err := c.ProviderRuntime(id)
+	if err != nil {
+		return template, &subagent.RuntimeError{Code: "provider_unavailable", Hint: modelcatalog.AuthRequired.ProviderHint(id)}
+	}
+	var identity agentrunner.RuntimeIdentity
+	if err = json.Unmarshal(template.Runtime, &identity); err != nil {
+		return template, err
+	}
+	model := identity.Provider.Model.ID
+	identity.Provider = backend.Provider
+	identity.Provider.Model.ID = model
+	identity.Claude = backend.Claude
+	registry, err := c.Providers.WithModel(identity.Provider)
+	if err != nil {
+		return template, err
+	}
+	_, raw, err := agentrunner.NewRuntimeFactory(agentrunner.RuntimeConfig{Identity: identity, Providers: registry, Credentials: c.Credentials, SessionDirectory: c.SessionDirectory})
+	if err != nil {
+		return template, err
+	}
+	template.Runtime = raw
+	if template.Default != nil {
+		choice := *template.Default
+		choice.Provider = id
+		template.Default = &choice
+	}
+	if len(template.Subagents) > 0 {
+		workers := make(map[string]subagent.Template, len(template.Subagents))
+		for name, worker := range template.Subagents {
+			workers[name], err = builtinGPTTemplate(c, worker, id)
+			if err != nil {
+				return template, err
+			}
+		}
+		template.Subagents = workers
+	}
+	return template, nil
+}
+
+func builtinGPTProvider(owner *host.Session) string {
+	active, _ := owner.RuntimeSelection()
+	if active != nil && active.Provider == "openai" {
+		return "openai"
+	}
+	return "openai-codex"
+}
+
 func childRuntimeResolver(c agentrunner.RuntimeConfig) subagent.RuntimeResolver {
 	return func(ctx context.Context, owner *host.Session, template subagent.Template, requested *subagent.RuntimeRequest) (subagent.Template, error) {
 		// The child follows the Session's mode; only its maximum bounds the start.
 		ctx = owner.WithCapabilityPolicy(ctx)
 		fail := func(code string) (subagent.Template, error) { return template, &subagent.RuntimeError{Code: code} }
+		if c.BuiltinSubagents {
+			id := builtinGPTProvider(owner)
+			if requested != nil && requested.Provider != "" {
+				id = requested.Provider
+			}
+			var err error
+			template, err = builtinGPTTemplate(c, template, id)
+			if err != nil {
+				return template, err
+			}
+			if requested != nil && requested.Provider == "" {
+				choice := *template.Default
+				if requested.Model != "" {
+					choice.Model = requested.Model
+				}
+				if requested.Effort != "" {
+					choice.Effort = requested.Effort
+				}
+				requested = &choice
+			}
+		}
 		if requested == nil {
 			requested = template.Default
 		}
@@ -97,7 +169,17 @@ func childTemplateValidator(c agentrunner.RuntimeConfig) func(subagent.Template,
 	return func(base, chosen subagent.Template) error {
 		fail := func() error { return &subagent.RuntimeError{Code: "configuration_mismatch"} }
 		var a, b agentrunner.RuntimeIdentity
-		if json.Unmarshal(base.Runtime, &a) != nil || json.Unmarshal(chosen.Runtime, &b) != nil {
+		if json.Unmarshal(chosen.Runtime, &b) != nil {
+			return fail()
+		}
+		if c.BuiltinSubagents {
+			var err error
+			base, err = builtinGPTTemplate(c, base, b.Provider.Provider)
+			if err != nil {
+				return fail()
+			}
+		}
+		if json.Unmarshal(base.Runtime, &a) != nil {
 			return fail()
 		}
 		backend, e := c.ProviderRuntime(b.Provider.Provider)

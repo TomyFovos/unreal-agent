@@ -88,7 +88,7 @@ func agent(dir string, args []string, c configuration) {
 	}
 	message, _ := user["message"].(map[string]any)
 	prompt, _ := message["content"].(string)
-	entry := call{Arguments: args, Environment: os.Environ(), PID: os.Getpid(), Input: prompt, InputAt: time.Now()}
+	entry := call{Arguments: args, Environment: safeEnvironment(), PID: os.Getpid(), Input: prompt, InputAt: time.Now()}
 	entry.Directory, _ = os.Getwd()
 	steps := c.AgentSteps
 	if previous, err := os.ReadFile(filepath.Join(dir, "calls.jsonl")); err == nil {
@@ -121,7 +121,11 @@ func agent(dir string, args []string, c configuration) {
 			model = args[i+1]
 		}
 	}
-	_ = out.Encode(map[string]any{"type": "system", "subtype": "init", "model": model, "apiKeySource": "none", "permissionMode": "default"})
+	apiKeySource := "none"
+	if os.Getenv("ANTHROPIC_API_KEY") != "" {
+		apiKeySource = "ANTHROPIC_API_KEY"
+	}
+	_ = out.Encode(map[string]any{"type": "system", "subtype": "init", "model": model, "apiKeySource": apiKeySource, "permissionMode": "default"})
 	if slices.Contains(args, "--replay-user-messages") {
 		_ = out.Encode(map[string]any{"type": "user", "isReplay": true, "parent_tool_use_id": nil, "message": message})
 	}

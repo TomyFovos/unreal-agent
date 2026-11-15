@@ -7,6 +7,10 @@ import (
 
 const requestHelp = `
 Request schema (JSON object; unknown fields are rejected):
+  profile: "conservative" | "development" (optional; default "conservative")
+    Runner composition; JSON takes precedence over -profile.
+  profile_id, profile_version, model_family (optional)
+    Existing versioned prompt profile selection, independent of composition.
   messages: array of {role: "user", content: string, message_id?: UUID string}
     Non-empty array of user messages delivered in order. role defaults to "user";
     message_id defaults to a generated UUID.
@@ -19,7 +23,7 @@ Request schema (JSON object; unknown fields are rejected):
     Overrides UNREAL_HARNESS_LLM_MAX_ATTEMPTS (default 5); 1 disables retries.
   system_prompt: string (optional)
     Replaces the default system prompt.
-  thinking_level: "low" | "medium" | "high" | "xhigh" | "max" (optional; default "high")
+  thinking_level: "none" | "low" | "medium" | "high" | "xhigh" | "max" (optional; default "high")
   session_id: non-empty string (optional)
     Creates or resumes a persisted session.
   disallowed_tools: array of non-empty strings (optional)

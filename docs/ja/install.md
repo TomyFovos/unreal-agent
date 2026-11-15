@@ -2,25 +2,38 @@
 
 **言語:** [English](../install.md) | 日本語
 
-Unreal Agent の共通キットは **Linux amd64**（WSL および Linux Docker Sandbox を含む）に対応しており、1つのキットで **Claude だけ・ChatGPT（Codex）だけ・両方**の構成を利用できます。
+Unreal Agent の共通キットは **Linux amd64**（WSL および Linux Docker Sandbox を含む）に対応します。1つのキットで Claude・ChatGPT のサブスクログインと、任意の OpenAI・Anthropic API キー接続を使えます。
 
 ## 動作要件
 
 - **OS / アーキテクチャ:** Linux amd64（最低 glibc バージョンは `KIT.json` に記録され、インストール時に `doctor.sh` が自動検査します）
 - **必要なコマンド:** `bash`, `python3`, `git`, `tar`, `sha256sum`
-- **プロバイダのログイン:** Claude は公式 `claude` CLI、ChatGPT は `codex login` を使用します。Codex は有効な認証とモデル一覧があれば CLI なしでも推論でき、Docker Sandbox のホスト管理 OAuth も利用できます。
+- **接続の準備:** サブスクのログイン、または明示的に選んだ API キーを使います。Claude はどちらの認証でも公式 `claude` CLI が必要です。OpenAI API に Codex のサブスクログインは不要です。ChatGPT は `codex login` を使い、有効な認証とモデル一覧があれば CLI なしでも推論できます。Docker Sandbox のホスト管理 OAuth も利用できます。
 
 ---
 
 ## ステップ 1: プロバイダへのログイン準備
 
-Unreal を動かす Linux 環境内で、利用したいプロバイダにサブスクリプションでログインします。
+サブスク接続では、Unreal を動かす Linux 環境内で利用したいプロバイダにログインします。API キーで使う場合は、この下の任意登録へ進んでください。サブスクのログインは不要です。
 
 - **Claude を使う場合:** 公式の Claude Code CLI をインストールし、Bash で `claude` を起動して `/login` を実行します（Claude サブスクリプションでログイン）。
 - **Codex を使う場合:** 公式の Codex CLI をインストールし、Bash で `codex login` を実行します（ChatGPT サブスクリプションでログイン）。
 - **Docker Sandbox のホスト管理 Codex OAuth を使う場合:** ホスト側で OAuth ログインを準備します。詳しくは [プロバイダ設定 — Docker Sandboxes Codex OAuth](providers.md#docker-sandboxes-codex-oauth) を参照してください。
 
-> **補足:** Unreal の通常利用では API キーは使用しません。Unreal 内の `/login` はログイン手順を表示します。両方未準備でもインストールは成功（終了コード `0`）し、起動後の最初の入力にログインを案内します。後からログインしたら `/model refresh` を実行し、`/model` で選択します。インストールのやり直しは不要です。明示的に無効化した場合は、Codex は `bash development.sh --configure-providers --codex-auto`、Claude は `bash development.sh --configure-providers` で再び有効にします。
+> **補足:** Unreal 内の `/login` はサブスクのログイン手順を表示します。両方のサブスクが未準備でもインストールは成功（終了コード `0`）します。後からログインしたら `/model refresh` を実行し、接続を選びます。インストールのやり直しは不要です。明示的に無効化したサブスク接続は、Codex は `bash development.sh --configure-providers --codex-auto`、Claude は `bash development.sh --configure-providers` で再び有効にします。
+
+### 任意: API キー接続を登録する
+
+キーを入れたファイルを **0600** にし、インストール時に片方または両方のフラグを追加します。
+
+```bash
+chmod 600 /absolute/openai.key /absolute/anthropic.key
+bash development.sh --openai-api-key-file /absolute/openai.key --anthropic-api-key-file /absolute/anthropic.key
+```
+
+設定に保存するのはファイルパスだけで、キーの値は保存しません。0600 でないファイルは拒否します。環境変数を使う場合は、`--openai-api-key-env NAME` または `--anthropic-api-key-env NAME` で変数名を明示します。
+
+**API はサブスクとは別課金です。** 環境変数 `OPENAI_API_KEY` や `ANTHROPIC_API_KEY` があるだけでは使いません。登録だけでは API を選択せず、起動後に `/model` の `OpenAI API（API キー・別課金）` または `Claude（API キー・別課金）` を選びます。API しか登録されていない場合も同じです。Session は選択を維持し、サブスクの認証切れでも API キーへ自動では切り替えません。初期接続の明示指定や `runtime.json` の参照先は [プロバイダ設定](providers.md#任意の-api-キー接続) を参照してください。
 
 ---
 
@@ -43,8 +56,8 @@ Unreal を動かす Linux 環境内で、利用したいプロバイダにサブ
    . "$HOME/.config/unreal-agent-common/path.sh"
    ```
 
-3. インストール完了後に表示される Claude / Codex の利用可能状態を確認します。
-   新規導入時は両方使えれば Claude、片方ならそのプロバイダで始まります。Claude は Codex が使えれば GPT の子、使えなければ Claude Code の Agent（`haiku` / `sonnet`）を使います。GPT の統括は常に GPT の子を使い、Codex が利用できない場合はログインを案内します。
+3. インストール完了後に表示される接続状態を確認します。
+   新規導入時は利用可能なサブスクを優先し、両方使えれば Claude、片方ならそのサブスクで始まります。API 接続は `/model` で明示的に選びます。Claude は Codex が使えれば GPT の子、使えなければ Claude Code の Agent（`haiku` / `sonnet`）を使います。OpenAI API を統括に選ぶと組み込みの GPT の子も API を使い、他の統括では Codex を維持します。認証が使えなくても別接続へ切り替えません。
 4. 開発したいプロジェクトのディレクトリへ移動し、名前付きセッションを起動します。
 
    ```bash
@@ -119,3 +132,7 @@ Windows 上で既存の Linux Docker Sandbox を使っている場合は、以�
 | `--disable-codex` | Codex プロバイダを無効化 |
 | `--disable-claude` | Claude プロバイダを無効化 |
 | `--claude-binary <path>` | `claude` 実行ファイルのパスを明示指定 |
+| `--openai-api-key-file <path>` | 0600 のキーファイルで任意の OpenAI API 接続を登録（別課金） |
+| `--anthropic-api-key-file <path>` | 0600 のキーファイルで任意の Claude API 接続を登録（別課金） |
+| `--openai-api-key-env <NAME>` | OpenAI キーを読む環境変数名を明示指定 |
+| `--anthropic-api-key-env <NAME>` | Anthropic キーを読む環境変数名を明示指定 |

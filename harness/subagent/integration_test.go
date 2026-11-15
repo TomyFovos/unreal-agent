@@ -86,7 +86,7 @@ func factory(c sub.Config, model llm.Adapter) host.Factory {
 		for _, d := range registry.StaticDefinitions() {
 			builder.AddTool(d.Tool)
 		}
-		return host.Runtime{InterruptedInput: manager.InterruptedInput, Builder: builder, LLM: model, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, manager), Close: manager.Close}, nil
+		return host.Runtime{InterruptedInput: manager.InterruptedInput, CompletedInput: manager.CompletedInput, Builder: builder, LLM: model, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, manager), Close: manager.Close}, nil
 	}
 }
 func TestChildServerHelper(t *testing.T) {
@@ -117,7 +117,8 @@ func TestChildServerHelper(t *testing.T) {
 		model := adapter(func(ctx context.Context, r llm.Request, _ llm.RequestOptions) (llm.Response, error) {
 			n := calls.Add(1)
 			if held.forgedMode != "" {
-				return llm.Response{}, nil
+				<-ctx.Done()
+				return llm.Response{}, ctx.Err()
 			}
 			if c.Task == "failed" {
 				return response("Finish", `{"status":"failed","summary":"child complete","changedFiles":[],"tests":[],"blockers":["cannot proceed"]}`), nil
@@ -126,7 +127,8 @@ func TestChildServerHelper(t *testing.T) {
 				os.Exit(17)
 			}
 			if c.Task == "wait" {
-				return llm.Response{}, nil
+				<-ctx.Done()
+				return llm.Response{}, ctx.Err()
 			}
 			if c.Task == "boundary-messages" {
 				for _, item := range r.Input {

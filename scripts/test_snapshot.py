@@ -83,6 +83,7 @@ class SnapshotTests(unittest.TestCase):
         (self.root / ".goreleaser.yaml").write_text("version: 2\ndist: dist/snapshot-direct\n")
         with patch.object(snapshot.subprocess, "run", side_effect=lambda *a, **kw: calls.append((a, kw))), \
                 patch.object(snapshot, "inspect_archive", return_value=(self.root / "archive", {})), \
+                patch.object(snapshot, "write_archive_checksum"), \
                 patch.object(snapshot, "smoke_archive"):
             output = snapshot.build(self.root, "fake-goreleaser")
         self.assertEqual(calls[0][0][0][:2], ["fake-goreleaser", "check"])
@@ -119,6 +120,20 @@ class SnapshotTests(unittest.TestCase):
     def test_archive_inventory_and_checksum(self):
         artifacts, archive = self.archive()
         self.assertEqual(snapshot.inspect_archive(artifacts)[0], archive)
+
+    def test_archive_checksum_sidecar_matches_goreleaser(self):
+        artifacts, archive = self.archive()
+        sidecar = snapshot.write_archive_checksum(archive)
+        self.assertEqual(sidecar.name, archive.name + ".sha256")
+        self.assertEqual(sidecar.read_text(), (artifacts / "SHA256SUMS").read_text())
+        with self.assertRaises(FileExistsError):
+            snapshot.write_archive_checksum(archive)
+
+    def test_archive_checksum_mismatch_is_reported(self):
+        artifacts, archive = self.archive()
+        (artifacts / "SHA256SUMS").write_text("0" * 64 + "  " + archive.name + "\n")
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            snapshot.write_archive_checksum(archive)
 
     def test_private_or_unrelated_file_is_not_packaged(self):
         artifacts, _ = self.archive("credential.json")

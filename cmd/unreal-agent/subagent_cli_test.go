@@ -50,8 +50,9 @@ func (g *fakeGPT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Input     []map[string]any `json:"input"`
-		Reasoning *struct {
+		Instructions string           `json:"instructions"`
+		Input        []map[string]any `json:"input"`
+		Reasoning    *struct {
 			Effort string `json:"effort"`
 		} `json:"reasoning"`
 	}
@@ -88,7 +89,7 @@ func (g *fakeGPT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	all := strings.Join(texts, "\n")
+	all := strings.Join(append(texts, request.Instructions), "\n")
 	if strings.Contains(all, "You are the implementation lead") {
 		g.mu.Lock()
 		hold := g.leadHold

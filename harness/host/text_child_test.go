@@ -6,10 +6,12 @@ import (
 	"testing"
 
 	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
+	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
 
@@ -37,44 +39,36 @@ func TestTextOnlyChildRecoveryCompletesCanonicalResponseWithoutInference(t *test
 				})}, nil
 			}
 			dir := t.TempDir()
+			// Seed the exact crash boundary: a durable response without its
+			// owner completion record. No running Host can now pause here.
+			store, err := localfile.New(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			o := Options{ID: "text-child", Lifecycle: "child", Configuration: []byte(`{"Provider":{"provider":"claude-code","model":{"id":"synthetic"}},"ReasoningEffort":"medium"}`)}
+			if _, err = store.Create(t.Context(), o.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err = store.AppendHostRecord(t.Context(), o.ID, sessionstore.HostRecord{Version: 1, Kind: "configuration", Configuration: o.Configuration}); err != nil {
+				t.Fatal(err)
+			}
+			if err = store.AppendInput(t.Context(), o.ID, inbox.Input{ID: "task", Kind: inbox.InputExternal, Payload: []byte(`"child-task"`)}); err != nil {
+				t.Fatal(err)
+			}
+			turn := session.TurnID("canonical-turn")
+			if err = store.AppendTurn(t.Context(), o.ID, session.Turn{ID: turn, Type: session.TurnRegular}); err != nil {
+				t.Fatal(err)
+			}
+			if err = store.AppendModelResponse(t.Context(), o.ID, sessionstore.ModelResponse{TurnID: turn, Response: llm.Response{Model: "synthetic-observed", Stop: test.stop, Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "canonical text"}}}}}); err != nil {
+				t.Fatal(err)
+			}
 			h, err := New(t.Context(), Config{Directory: dir, Build: f})
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer h.Close()
-			o := Options{ID: "text-child", Lifecycle: "child", Configuration: []byte(`{"Provider":{"provider":"claude-code","model":{"id":"synthetic"}},"ReasoningEffort":"medium"}`)}
-			s, err := h.Create(t.Context(), o)
-			if err != nil {
-				t.Fatal(err)
-			}
-			selectionSubmit(t, s, "child-task")
-			var turn session.TurnID
-			waitSelection(t, func() bool {
-				view, _ := s.Inspect(0, 128)
-				for _, item := range view.History.Items {
-					if response, ok := item.Data.(sessionstore.ModelResponse); ok {
-						turn = response.TurnID
-						return true
-					}
-				}
-				return false
-			})
-			// Exercise the durable state after response and before completion,
-			// without asking the model again or fabricating a Finish tool.
-			stop(t, s)
-			if s.Finish() != nil || calls.Load() != 1 {
-				t.Fatal("unexpected pre-recovery state")
-			}
-			if err = h.Close(); err != nil {
-				t.Fatal(err)
-			}
-			h, err = New(t.Context(), Config{Directory: dir, Build: f})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer h.Close()
 			o.TextOnlyChild = true
-			s, err = h.Resume(t.Context(), o)
+			s, err := h.Resume(t.Context(), o)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -82,7 +76,7 @@ func TestTextOnlyChildRecoveryCompletesCanonicalResponseWithoutInference(t *test
 				t.Fatal(err)
 			}
 			finish := s.Finish()
-			if finish == nil || finish.ModelTurnID != turn || finish.OperationID != "" || finish.Result.Status != test.status || finish.Result.Summary != "canonical text" || calls.Load() != 1 {
+			if finish == nil || finish.ModelTurnID != turn || finish.OperationID != "" || finish.Result.Status != test.status || finish.Result.Summary != "canonical text" || calls.Load() != 0 {
 				t.Fatal("text child recovery changed response or repeated inference")
 			}
 			view, _ := s.Inspect(0, 128)

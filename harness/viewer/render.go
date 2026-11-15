@@ -3,6 +3,7 @@ package viewer
 import (
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"slices"
 	"strings"
@@ -59,7 +60,7 @@ func RenderRows(rows []Row, selected session.ID) string {
 			fmt.Fprintf(&b, " (%s)", SafeText(r.Label))
 		}
 		if r.Selection != nil {
-			fmt.Fprintf(&b, " | %s / %s / %s", SafeText(r.Selection.Provider), SafeText(r.Selection.Model), SafeText(string(r.Selection.Effort)))
+			fmt.Fprintf(&b, " | %s / %s / %s", SafeText(modelcatalog.ProviderName(r.Selection.Provider)), SafeText(r.Selection.Model), SafeText(string(r.Selection.Effort)))
 		}
 		if r.ParentID != "" {
 			fmt.Fprintf(&b, " | parent op: %s", SafeText(string(r.ParentOperationStatus)))

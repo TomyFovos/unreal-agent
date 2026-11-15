@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 )
@@ -37,6 +39,10 @@ type cliModel struct {
 // Discover reads the models and login from Claude Code's initialize reply. It
 // starts no conversation and makes no model request.
 func Discover(ctx context.Context, binary string, environ func() []string) (modelcatalog.Catalog, Account, error) {
+	return discover(ctx, binary, environ, credential.Secret{})
+}
+
+func discover(ctx context.Context, binary string, environ func() []string, key credential.Secret) (modelcatalog.Catalog, Account, error) {
 	if environ == nil {
 		environ = os.Environ
 	}
@@ -48,7 +54,7 @@ func Discover(ctx context.Context, binary string, environ func() []string) (mode
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-prompt-tool", "stdio", "--no-session-persistence")
-	cmd.Dir, cmd.Env = dir, environment(environ())
+	cmd.Dir, cmd.Env = dir, authenticatedEnvironment(environ(), key)
 	isolate(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -58,7 +64,7 @@ func Discover(ctx context.Context, binary string, environ func() []string) (mode
 	if err != nil {
 		return modelcatalog.Catalog{}, Account{}, err
 	}
-	var stderr tail
+	stderr := tail{secret: key.Reveal()}
 	cmd.Stderr = &stderr
 	if err = cmd.Start(); err != nil {
 		return modelcatalog.Catalog{}, Account{}, &Error{Code: "cli_missing", Message: err.Error()}
@@ -92,6 +98,9 @@ func Discover(ctx context.Context, binary string, environ func() []string) (mode
 	reader := bufio.NewReaderSize(stdout, 64<<10)
 	for {
 		line, readErr := readLine(reader)
+		if key.Reveal() != "" {
+			line = []byte(strings.ReplaceAll(string(line), key.Reveal(), "[redacted]"))
+		}
 		var f struct {
 			Type     string `json:"type"`
 			Response struct {

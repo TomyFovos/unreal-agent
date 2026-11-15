@@ -24,10 +24,12 @@ type extensionRequest struct {
 	After    sessionstore.Sequence
 	Limit    int
 	Control  ControlRequest
+	Display  string `json:",omitzero"` // view.set: chat, orchestration or split
 }
 type extensionReply struct {
 	View    *host.View    `json:",omitzero"`
 	Receipt *host.Receipt `json:",omitzero"`
+	Display string        `json:",omitzero"` // view.get
 	Error   string        `json:",omitzero"`
 }
 type ExtensionError struct{ Code string }
@@ -117,6 +119,14 @@ func (h ExtensionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			} else {
 				out.View = &v
 			}
+		case "view.get":
+			if view, e := readViewPreference(h.Directory, q.ParentID); e == nil {
+				out.Display = view
+			} else if !errors.Is(e, fs.ErrNotExist) {
+				err = e
+			}
+		case "view.set":
+			err = writeViewPreference(h.Directory, q.ParentID, q.Display)
 		case "steer", "cancel", "resume", "approve":
 			controls := HostControls{Host: h.Host}
 			var receipt host.Receipt

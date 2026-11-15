@@ -49,25 +49,16 @@ type job struct {
 	approvals  []Approval // the child's requests waiting for this parent
 }
 type Manager struct {
-	ctx            context.Context
-	cancel         context.CancelFunc
-	config         Config
-	mu             sync.Mutex
-	jobs           map[operation.ID]*job
-	canceled       map[operation.ID]bool
-	changed        chan struct{}
-	updates        chan operation.Operation
-	closed         bool
-	workers        sync.WaitGroup
-	ended          []endedNotification
-	notifyingEnded bool
-}
-
-type endedNotification struct {
-	plan   Plan
-	id     operation.ID
-	status operation.Status
-	state  operation.RemoteJobState
+	ctx      context.Context
+	cancel   context.CancelFunc
+	config   Config
+	mu       sync.Mutex
+	jobs     map[operation.ID]*job
+	canceled map[operation.ID]bool
+	changed  chan struct{}
+	updates  chan operation.Operation
+	closed   bool
+	workers  sync.WaitGroup
 }
 
 func NewManager(ctx context.Context, c Config) (*Manager, error) {
@@ -301,75 +292,35 @@ func (m *Manager) run(j *job, p Plan) {
 	if updateErr == nil {
 		m.emit(*step.Operation)
 	}
-	if p.Action == "start" && p.Notify && status != operation.StatusCanceled {
-		m.notifyEnded(p, op.ID, status, state)
-	}
 }
 
-// notifyEnded tells the parent that a child it started with the subagent
-// command ended: its summary or error, as a peer message that wakes it.
-func (m *Manager) notifyEnded(p Plan, id operation.ID, status operation.Status, state operation.RemoteJobState) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.closed {
-		return
+// CompletedInput is called by the owning Coordinator after a model call ends.
+// Its terminal Operation is already canonical. Publishing the notice in that
+// event boundary prevents one-shot completion from racing a background sender.
+func (m *Manager) CompletedInput(op operation.Operation) (*inbox.Input, error) {
+	if op.Type != operation.TypeRemoteJob || op.Status != operation.StatusCompleted && op.Status != operation.StatusFailed && op.Status != operation.StatusCanceled {
+		return nil, nil
 	}
-	m.ended = append(m.ended, endedNotification{p, id, status, state})
-	if !m.notifyingEnded {
-		m.notifyingEnded = true
-		m.workers.Go(m.sendEnded)
+	p, err := DecodePlan(op)
+	if err != nil || p.Action != "start" || !p.Notify {
+		return nil, nil
 	}
-}
-
-func (m *Manager) sendEnded() {
-	for {
-		// A parent in the middle of a model call may read the end itself (Claude
-		// waits with the subagent command). Tell it only when that call ended
-		// without having seen it: a second turn for the same news is waste.
-		for {
-			busy, changed := m.config.Owner.ModelBusy()
-			if !busy {
-				break
-			}
-			select {
-			case <-m.ctx.Done():
-				return
-			case <-changed:
-			}
-		}
-		m.mu.Lock()
-		pending := m.ended
-		m.ended = nil
-		if len(pending) == 0 {
-			m.notifyingEnded = false
-			m.mu.Unlock()
-			return
-		}
-		m.mu.Unlock()
-		var texts []string
-		var first endedNotification
-		for _, ended := range pending {
-			if m.parentSaw(ended.id) {
-				continue
-			}
-			if len(texts) == 0 {
-				first = ended
-			}
-			texts = append(texts, endedText(ended.id, ended.status, ended.state))
-		}
-		if len(texts) == 0 {
-			continue
-		}
-		p, id := first.plan, first.id
-		sender := p.ChildID
-		if sender == "" {
-			sender = ChildID(p.ParentID, id)
-		}
-		payload, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(sender), Target: string(p.ParentID), Handle: string(id), Kind: "ended", Text: strings.Join(texts, "\n\n")})
-		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
-		_, _ = m.config.Owner.SubmitPeer(ctx, m.config.Owner.Generation, string(sender), string(id), inbox.Input{ID: inbox.ID("ended:" + string(id)), Kind: inbox.InputPeer, Payload: payload})
-		cancel()
+	if m.parentSaw(op.ID) {
+		return nil, nil
 	}
+	state, err := operation.DecodeRemoteJobState(op)
+	if err != nil {
+		return nil, err
+	}
+	sender := p.ChildID
+	if sender == "" {
+		sender = ChildID(p.ParentID, op.ID)
+	}
+	payload, err := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(sender), Target: string(p.ParentID), Handle: string(op.ID), Kind: "ended", Text: endedText(op.ID, op.Status, state)})
+	if err != nil {
+		return nil, err
+	}
+	return &inbox.Input{ID: inbox.ID("ended:" + string(op.ID)), Kind: inbox.InputPeer, Payload: payload}, nil
 }
 
 func endedText(id operation.ID, status operation.Status, state operation.RemoteJobState) string {
@@ -511,7 +462,7 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 	if err != nil {
 		return operation.StatusFailed, err
 	}
-	child := ChildConfig{MutationStateDirectory: allowed.MutationStateDirectory, ProjectInstructions: &snapshot, Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: j.operation.ID, SessionDirectory: m.config.Directory, Workspace: allowed.Workspace, Runtime: allowed.Runtime, Policy: allowed.Policy, Baseline: allowed.Baseline, Subagents: allowed.Subagents, ReadyID: inbox.ID("ready:" + string(j.operation.ID)), Task: p.Text}
+	child := ChildConfig{MutationStateDirectory: allowed.MutationStateDirectory, ProjectInstructions: &snapshot, Version: 1, ParentID: p.ParentID, Template: p.Template, ChildID: p.ChildID, OperationID: j.operation.ID, SessionDirectory: m.config.Directory, Workspace: allowed.Workspace, Runtime: allowed.Runtime, Policy: allowed.Policy, Baseline: allowed.Baseline, Subagents: allowed.Subagents, ReadyID: inbox.ID("ready:" + string(j.operation.ID)), Task: p.Text}
 	if s := sessionstore.SelectionFromConfiguration(allowed.Runtime); s != nil && s.Provider == "claude-code" {
 		child.TextOnly = !sessionstore.ToolBridgeEnabledFromConfiguration(child.Runtime)
 		child.ProviderProcess = true
@@ -564,6 +515,11 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 		}
 		if view.Configuration == nil || view.Configuration.ParentID != p.ParentID || view.Configuration.OperationID != j.operation.ID {
 			return false, fmt.Errorf("child canonical lineage mismatch")
+		}
+		// Older children have no template metadata. Keep their immutable
+		// creation identity when resuming them; new children share cache keys.
+		if view.Configuration.Template == "" {
+			child.Template = ""
 		}
 		// Config bytes bind provider/profile/workspace/policy across restarts.
 		got, _ := json.Marshal(view.Configuration)

@@ -36,7 +36,7 @@ builds:
     goos: [linux]
     goarch: [amd64]
     flags: [-mod=readonly, -trimpath, -buildvcs=true]
-    ldflags: [-s -w]
+    ldflags: [-s -w, '-X main.version={{ .FullCommit }}']
   - id: auth
     main: ./cmd/unreal-agent-auth
     binary: unreal-agent-auth

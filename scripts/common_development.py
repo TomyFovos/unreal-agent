@@ -45,19 +45,55 @@ def read_settings(home):
     return value
 
 
-def validate_status(status):
-    if not isinstance(status, list) or len(status) != 2:
+def validate_status(status, api_ids=()):
+    if not isinstance(status, list) or len(status) != 2 + len(api_ids):
         pilot.fail("common_preflight_invalid", "Expected two independent safe provider statuses.")
     ids = set()
     for entry in status:
         if (not isinstance(entry, dict) or set(entry) != {"ID", "Availability", "Reason"}
-                or entry["ID"] not in ("openai-codex", "claude", "claude-code") or entry["ID"] in ids
+                or entry["ID"] not in ("openai-codex", "claude", "claude-code", *api_ids) or entry["ID"] in ids
                 or entry["Availability"] not in ("available", "unavailable")
                 or entry["Reason"] not in PROVIDER_REASONS
                 or (entry["Availability"] == "available") != (entry["Reason"] == "")):
             pilot.fail("common_preflight_invalid", "Provider preflight returned an invalid safe status; body withheld.")
         ids.add(entry["ID"])
+    canonical = {"claude" if key == "claude-code" else key for key in ids}
+    if canonical != {"openai-codex", "claude", *api_ids}:
+        pilot.fail("common_preflight_invalid", "Provider status does not match explicit connections.")
     return status
+
+
+def api_key_sources(args, previous):
+    sources = dict(previous.get("APIKeys", {}) if previous else {})
+    for provider, prefix in (("openai", "openai"), ("claude-api", "anthropic")):
+        path = getattr(args, prefix + "_api_key_file", "")
+        env = getattr(args, prefix + "_api_key_env", "")
+        if path and env:
+            pilot.fail("common_api_key_source_invalid", "Choose a key file or an environment variable name, not both.")
+        if path:
+            path = Path(path).expanduser().resolve()
+            try:
+                info = path.stat()
+            except OSError:
+                pilot.fail("common_api_key_file_unreadable", "API key file is unreadable; value withheld.")
+            if not path.is_file() or info.st_mode & 0o777 != 0o600:
+                pilot.fail("common_api_key_file_requires_0600", "API key file must be a regular file with permissions 0600 (chmod 600).")
+            sources[provider] = {"file": str(path)}
+        elif env:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env):
+                pilot.fail("common_api_key_source_invalid", "Specify an environment variable name; no key values.")
+            sources[provider] = {"env": env}
+    return sources
+
+
+def api_key_arguments(settings):
+    result = []
+    for provider, prefix in (("openai", "openai"), ("claude-api", "anthropic")):
+        source = settings.get("APIKeys", {}).get(provider, {})
+        for kind in ("file", "env"):
+            if source.get(kind):
+                result += ["--" + prefix + "-api-key-" + kind, source[kind]]
+    return result
 
 
 def provider_choices(args, previous):
@@ -79,18 +115,19 @@ def preflight(settings):
     if settings["CodexRoute"] == "disabled": command.append("--codex-disabled")
     if settings["ClaudeDecision"] == "disabled": command.append("--claude-disabled")
     if settings["ClaudeBinary"]: command += ["--claude-binary", settings["ClaudeBinary"]]
+    command += api_key_arguments(settings)
     raw, code = pilot.bounded_probe(command, dict(os.environ))
     if code: pilot.fail("common_preflight_failed", "Native auth/catalog preflight failed; body withheld. No inference or fallback.")
     result = pilot.decode(raw)
     expected = {"Providers", "CodexRoute"} if settings["CodexRoute"] == "auto" else {"Providers"}
     if (not isinstance(result, dict) or set(result) != expected or not isinstance(result["Providers"], list)
-            or len(result["Providers"]) != 2 or any(not isinstance(p, dict) for p in result["Providers"])):
+            or len(result["Providers"]) != 2 + len(settings.get("APIKeys", {})) or any(not isinstance(p, dict) for p in result["Providers"])):
         pilot.fail("common_preflight_invalid", "Invalid native provider status; body withheld.")
-    statuses = validate_status([{"ID": p.get("ID"), "Availability": p.get("Availability"), "Reason": p.get("Reason", "")} for p in result["Providers"]])
+    statuses = validate_status([{"ID": p.get("ID"), "Availability": p.get("Availability"), "Reason": p.get("Reason", "")} for p in result["Providers"]], settings.get("APIKeys", {}))
     route = result.get("CodexRoute", settings["CodexRoute"])
     routes = ("auto", "external", "docker") if settings["CodexRoute"] == "auto" else (settings["CodexRoute"],)
     if route not in routes or (settings["CodexRoute"] == "auto" and
-            (statuses[0 if statuses[0]["ID"] == "openai-codex" else 1]["Availability"] == "available") != (route != "auto")):
+            (next(p for p in statuses if p["ID"] == "openai-codex")["Availability"] == "available") != (route != "auto")):
         pilot.fail("common_preflight_invalid", "Invalid native source decision; values withheld.")
     return statuses, route
 
@@ -205,6 +242,7 @@ def install(args, directory, meta):
         pilot.fail("common_binding_invalid", "Invalid executable reference; value withheld.")
     previous = read_settings(home) if os.path.lexists(settings_path(home)) else None
     choices = provider_choices(args, previous)
+    sources = api_key_sources(args, previous)
     content_id = hashlib.sha256(files.read_owned(directory / "SHA256SUMS", limit=4096)).hexdigest()[:16]
     installed = home / ".local/opt/unreal-agent-pilot/common" / (meta["baseline"][:7] + "-" + content_id)
     prior_version = previous_version(home, installed, previous)
@@ -227,6 +265,8 @@ def install(args, directory, meta):
         settings = {"Version": 3, "Home": str(home), "BinaryDirectory": str(installed), "Revision": meta["baseline"],
                     "DockerOAuth": route == "docker", "CodexRoute": route, "ClaudeDecision": decision,
                     "ClaudeBinary": args.claude_binary or (previous["ClaudeBinary"] if previous else "")}
+        if sources:
+            settings["APIKeys"] = sources
         if prior_version is not None:
             settings["PreviousBinaryDirectory"] = str(prior_version)
         old_settings = files.read_owned(settings_path(home), private=True) if previous else None
@@ -289,6 +329,12 @@ fi
 
 
 def provider_guidance(status):
+    if status["ID"] in ("openai", "claude-api"):
+        name = "OpenAI API" if status["ID"] == "openai" else "Claude API"
+        if status["Availability"] != "available":
+            hint = "Claude Code をインストールしてください" if status["Reason"] == "cli_missing_or_unsupported" else "選択したキーの参照先と 0600 のファイル権限を確認してください"
+            return name + "（API キー・別課金）: " + hint
+        return name + "（API キー・別課金）: /model で明示的に選ぶと使います"
     claude = status["ID"] in ("claude", "claude-code")
     name = "Claude" if claude else "Codex"
     cli = "Claude Code" if claude else "Codex CLI"
@@ -356,6 +402,7 @@ def command_for(settings, workspace, paths, session):
     if settings.get("CodexRoute") == "disabled": command.append("--bootstrap-codex-disabled")
     if settings.get("ClaudeDecision") == "disabled": command.append("--bootstrap-claude-disabled")
     if settings["ClaudeBinary"]: command.extend(("--bootstrap-claude-binary", settings["ClaudeBinary"]))
+    command += api_key_arguments(settings)
     command.append(session)
     return command
 
@@ -370,9 +417,18 @@ def prepare_repo(settings, workspace, instance):
     with daily.locked(p["root"]):
         files.publish_bytes(p["binding"], expected)
         if os.path.lexists(p["config"]):
-            config = pilot.decode(files.read_owned(p["config"], private=True))
+            old_config = files.read_owned(p["config"], private=True)
+            config = pilot.decode(old_config)
             if not isinstance(config, dict) or not isinstance(config.get("Runtime"), dict) or config["Runtime"].get("Workspace") != str(workspace):
                 pilot.fail("common_workspace_binding_mismatch", "Keep existing config/history; workspace changed. Use an explicit separate --instance.")
+            if settings.get("APIKeys"):
+                launcher = config.get("Launcher") or {"Version": 1}
+                config["Launcher"] = launcher
+                sources = launcher.setdefault("APIKeys", {})
+                if any(sources.get(key) != source for key, source in settings["APIKeys"].items()):
+                    sources.update(settings["APIKeys"])
+                    updated = (json.dumps(config, indent=2, ensure_ascii=True) + "\n").encode()
+                    daily.replace_owned(p["config"], updated, old_config, 0o600)
     return p
 
 
@@ -380,6 +436,8 @@ def provider_profile(settings):
     # Availability is transient; only explicit choices belong to the profile.
     value = {"CodexRoute": settings.get("CodexRoute", "docker" if settings["DockerOAuth"] else "external"),
              "ClaudeDecision": settings.get("ClaudeDecision", "enabled"), "ClaudeBinary": settings["ClaudeBinary"]}
+    if settings.get("APIKeys"):
+        value["APIKeys"] = settings["APIKeys"]
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
@@ -622,6 +680,9 @@ def main(argv=None):
     modes = parser.add_subparsers(dest="mode", required=True)
     install_args = modes.add_parser("install")
     install_args.add_argument("--configure-providers", action="store_true")
+    for prefix in ("openai", "anthropic"):
+        install_args.add_argument("--" + prefix + "-api-key-file", default="", metavar="PATH")
+        install_args.add_argument("--" + prefix + "-api-key-env", default="", metavar="NAME")
     install_args.add_argument("--external-codex", action="store_true")
     install_args.add_argument("--codex-auto", action="store_true")
     install_args.add_argument("--disable-codex", action="store_true")

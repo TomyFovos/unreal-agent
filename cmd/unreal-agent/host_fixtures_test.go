@@ -189,6 +189,11 @@ func startMultiChildCLI(t *testing.T, binary string, cfg serveConfiguration, dir
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, binary, "serve", "--config", path, "--session-directory", filepath.Join(directory, "sessions"), "--socket", filepath.Join(directory, "host.sock"))
 	var diagnostics credentialOutput
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Log("native Host diagnostics:", diagnostics.String())
+		}
+	})
 	cmd.Stdout = &diagnostics
 	cmd.Stderr = &diagnostics
 	if e = cmd.Start(); e != nil {

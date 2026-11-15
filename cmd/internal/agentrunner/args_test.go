@@ -3,6 +3,7 @@ package agentrunner
 import (
 	"bytes"
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -71,6 +72,16 @@ func TestRunMainRequestSources(t *testing.T) {
 	}
 }
 
+func TestRunnerVersionSkipsRequestAndEnvironment(t *testing.T) {
+	var output bytes.Buffer
+	config := testConfig(&fakeClient{})
+	config.Version = "0123456789abcdef"
+	code := RunMain(t.Context(), []string{"--version"}, func(string) string { t.Fatal("version read environment"); return "" }, func() []string { t.Fatal("version read environment"); return nil }, iotest.ErrReader(errors.New("version read input")), &output, io.Discard, config)
+	if code != 0 || output.String() != config.Version+"\n" {
+		t.Fatalf("code=%d output=%q", code, output.String())
+	}
+}
+
 func TestRunMainRejectsInvalidRequestArguments(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -97,7 +108,7 @@ func TestRunMainRejectsInvalidRequestArguments(t *testing.T) {
 				t.Fatalf("exit = %d, stderr = %s, want %q", code, stderr.String(), test.want)
 			}
 			var event errorEvent
-			if err := json.Unmarshal(stdout.Bytes(), &event); err != nil {
+			if err := json.UnmarshalDecode(jsontext.NewDecoder(&stdout), &event); err != nil {
 				t.Fatal(err)
 			}
 			if event.Type != "error" || !strings.Contains(event.Message, test.want) {
@@ -135,7 +146,7 @@ func TestRunMainUsageWriteFailure(t *testing.T) {
 				t.Fatalf("exit = %d, stdout = %q", code, stdout.String())
 			}
 			var event errorEvent
-			if err := json.Unmarshal(stdout.Bytes(), &event); err != nil {
+			if err := json.UnmarshalDecode(jsontext.NewDecoder(&stdout), &event); err != nil {
 				t.Fatal(err)
 			}
 			if event.Type != "error" || !strings.Contains(event.Message, test.want) ||

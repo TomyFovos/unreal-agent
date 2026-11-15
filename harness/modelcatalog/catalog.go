@@ -82,6 +82,9 @@ const (
 func (r AvailabilityReason) Hint() string { return r.ProviderHint("") }
 
 func (r AvailabilityReason) ProviderHint(id string) string {
+	if id == "openai" || id == "claude-api" {
+		return "選択した API キーの参照先と 0600 のファイル権限を確認してください（API は別課金）"
+	}
 	login := "codex login"
 	cli := "Codex CLI"
 	if strings.HasPrefix(id, "claude") {
@@ -116,13 +119,17 @@ type Capabilities struct {
 func ProviderName(id string) string {
 	switch id {
 	case "openai-codex":
-		return "OpenAI Codex"
+		return "ChatGPT（サブスク）"
+	case "openai":
+		return "OpenAI API（API キー・別課金）"
+	case "claude-api":
+		return "Claude（API キー・別課金）"
 	case "claude-code":
 		return "Claude Code"
 	case "claude-native":
 		return "Claude Native"
 	case "claude":
-		return "Claude"
+		return "Claude（サブスク）"
 	default:
 		return id
 	}

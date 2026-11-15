@@ -8,8 +8,8 @@ from tempfile import TemporaryDirectory
 from harbor.models.agent.context import AgentContext
 from harbor.models.task.config import MCPServerConfig
 
-from harness_harbor.agent import UnrealAgent
 from harness_harbor.bundle import Bundle
+from harness_harbor.runner import RunnerAgent as UnrealAgent
 
 
 class BundleTests(unittest.TestCase):

@@ -44,6 +44,8 @@ type RuntimeIdentity struct {
 	Claude                  *claudeagent.Config `json:",omitzero"`
 }
 type RuntimeConfig struct {
+	CredentialSources map[string]credential.Source // nonsecret Host-owned locations, never Session identity
+	BuiltinSubagents  bool                         // defaults follow the owning Session's explicit GPT connection
 	// Context is a versioned, disposable projection strategy. It is deliberately
 	// outside immutable runtime/auth identity, so old histories need no migration.
 	Context contextengine.Config
@@ -129,10 +131,10 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 	if c.Providers.RequiresResolver(c.Identity.Provider) && c.Credentials == nil {
 		return nil, nil, errors.New("runtime: credential resolver required")
 	}
-	if !c.Identity.ReasoningEffort.Valid() && !(c.Identity.Provider.Provider == claudeagent.ProviderID && c.Identity.ReasoningEffort == "") {
+	if c.Identity.ReasoningEffort != "" && !c.Identity.ReasoningEffort.Valid() {
 		return nil, nil, errors.New("runtime: invalid reasoning effort")
 	}
-	if c.Identity.Provider.Provider == claudeagent.ProviderID && (c.Identity.Claude == nil || !filepath.IsAbs(c.Identity.Claude.Binary)) {
+	if claudeagent.IsProvider(c.Identity.Provider.Provider) && (c.Identity.Claude == nil || !filepath.IsAbs(c.Identity.Claude.Binary)) {
 		return nil, nil, errors.New("runtime: Claude executable configuration required")
 	}
 	// A normal Host may discover a tool-capable provider after login.
@@ -148,10 +150,10 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 		if _, err = profile.Resolve(c.Identity.Profile, p.Provider); err != nil {
 			return nil, nil, err
 		}
-		if p.Provider.Provider == claudeagent.ProviderID && (p.Claude == nil || !filepath.IsAbs(p.Claude.Binary)) {
+		if claudeagent.IsProvider(p.Provider.Provider) && (p.Claude == nil || !filepath.IsAbs(p.Claude.Binary)) {
 			return nil, nil, errors.New("runtime: Claude executable configuration required")
 		}
-		if !p.ReasoningEffort.Valid() && !(p.Provider.Provider == claudeagent.ProviderID && p.ReasoningEffort == "") {
+		if p.ReasoningEffort != "" && !p.ReasoningEffort.Valid() {
 			return nil, nil, errors.New("runtime: invalid backend effort")
 		}
 		c.Backends[id] = p
@@ -328,7 +330,7 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 				// Claude Code runs its own tools: the Claude route only records
 				// them and hands refused commands to Bash (U21, U22). No other
 				// route sees the claude_code record tool.
-				if choice.Provider == claudeagent.ProviderID {
+				if claudeagent.IsProvider(choice.Provider) {
 					if name == tool.ClaudeCodeName {
 						return true
 					}
@@ -399,7 +401,7 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 			builder.SetModel(llm.Model{ID: choice.Model, ReasoningEffort: choice.Effort})
 			return nil
 		}
-		return host.Runtime{InterruptedInput: configured.InterruptedInput, ContextEngine: engine, Selection: &base, ValidateSelection: validate, ApplySelection: apply, BeforeGeneration: refreshPermission, Builder: builder, LLM: client, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, configured.RemoteJobs...), Close: closeRuntime}, nil
+		return host.Runtime{InterruptedInput: configured.InterruptedInput, CompletedInput: configured.CompletedInput, ContextEngine: engine, Selection: &base, ValidateSelection: validate, ApplySelection: apply, BeforeGeneration: refreshPermission, Builder: builder, LLM: client, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, configured.RemoteJobs...), Close: closeRuntime}, nil
 
 	}
 	return factory, identity, nil

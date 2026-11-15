@@ -46,6 +46,20 @@ type frame struct {
 	Errors     []string `json:"errors"`
 	StopReason string   `json:"stop_reason"`
 	Usage      *usage   `json:"usage"`
+
+	// system/api_retry and system/api_error. Error may be a string or object;
+	// only its numeric status is used for activity, never its message.
+	Attempt      int              `json:"attempt"`
+	MaxRetries   int              `json:"max_retries"`
+	RetryDelayMS int64            `json:"retry_delay_ms"`
+	ErrorStatus  *int             `json:"error_status"`
+	Error        jsontext.Value   `json:"error"`
+	NoResponse   *noResponseRetry `json:"no_response"`
+}
+
+type noResponseRetry struct {
+	WaitedMS    int64 `json:"waited_ms"`
+	RetryWaitMS int64 `json:"retry_wait_ms"`
 }
 
 type usage struct {
@@ -72,6 +86,8 @@ func (u usage) inputTokens() int64 {
 }
 
 type message struct {
+	Model   string  `json:"model"`
+	Usage   *usage  `json:"usage"`
 	ID      string  `json:"id"`
 	Content []block `json:"content"`
 }
@@ -88,16 +104,25 @@ type block struct {
 }
 
 type streamEvent struct {
-	Type  string `json:"type"`
-	Delta struct {
+	Type         string `json:"type"`
+	ContentBlock struct {
 		Type string `json:"type"`
-		Text string `json:"text"`
+	} `json:"content_block"`
+	Delta struct {
+		Type       string `json:"type"`
+		Text       string `json:"text"`
+		Thinking   string `json:"thinking"`
+		StopReason string `json:"stop_reason"`
 	} `json:"delta"`
 	// message_start carries the step's input usage; message_delta its output.
 	Message struct {
+		Model string `json:"model"`
 		Usage *usage `json:"usage"`
 	} `json:"message"`
 	Usage *usage `json:"usage"`
+	Error struct {
+		Type string `json:"type"`
+	} `json:"error"`
 }
 
 // controlRequest is a request the CLI sends to its host.

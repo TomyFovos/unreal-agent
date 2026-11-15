@@ -29,11 +29,11 @@ func TestLegacyUltraSelectionDisplaysMax(t *testing.T) {
 	}
 }
 
-func TestNoEffortRuntimeSelectionIsLimitedToClaude(t *testing.T) {
-	for _, provider := range []string{"claude-code", "openai-codex", "openai", "ollama", "openrouter", "fireworks"} {
+func TestNoEffortRuntimeSelectionRequiresOptionalEffortProvider(t *testing.T) {
+	for provider, optional := range map[string]bool{"claude-code": true, "claude-native": true, "claude": true, "claude-api": true, "openai": true, "openai-codex": true, "ollama": true, "openrouter": true, "fireworks": true} {
 		s := RuntimeSelection{Version: 1, Provider: provider, Model: "configured-model"}
-		if (s.Validate() == nil) != (provider == "claude-code") {
-			t.Fatalf("provider %s accepted an unsupported empty effort", provider)
+		if (s.Validate() == nil) != optional {
+			t.Fatalf("provider %s optional effort = %t; want %t", provider, s.Validate() == nil, optional)
 		}
 		s.Effort = "invented"
 		if s.Validate() == nil {

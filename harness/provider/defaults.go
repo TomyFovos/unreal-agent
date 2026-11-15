@@ -17,6 +17,9 @@ import (
 func Defaults(catalog map[string][]Model) []Descriptor {
 	caps := []string{"tools", "images", "reasoning"}
 	return []Descriptor{
+		{ID: claudeagent.APIProviderID, AuthMethods: []credential.Method{credential.APIKey}, Capabilities: []string{"reasoning"}, Models: catalog[claudeagent.APIProviderID], LocalProcess: true, IdleMaintenance: true, ToolCapability: func(c BuildConfig) bool { return c.ClaudeAgent.Binary != "" }, New: func(c BuildConfig, m credential.Material) (Client, error) {
+			return claudeagent.NewAPIClient(c.ClaudeAgent, m)
+		}},
 		// Claude Code runs its own tools; Unreal approves and records them (U21).
 		{ID: claudeagent.ProviderID, AuthMethods: []credential.Method{credential.OAuth}, Capabilities: []string{"reasoning"}, Models: catalog[claudeagent.ProviderID], LocalProcess: true, ExternalAuth: true, IdleMaintenance: true, ToolCapability: func(c BuildConfig) bool { return c.ClaudeAgent.Binary != "" }, New: func(c BuildConfig, _ credential.Material) (Client, error) {
 			return claudeagent.NewClient(c.ClaudeAgent)

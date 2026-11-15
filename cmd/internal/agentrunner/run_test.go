@@ -427,7 +427,7 @@ func TestRunMainEmitsValidationError(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d", code)
 	}
-	if got := eventTypes(t, stdout.String()); !slices.Equal(got, []string{"error"}) {
+	if got := eventTypes(t, stdout.String()); !slices.Equal(got, []string{"error", "session_end"}) {
 		t.Fatalf("event types = %#v", got)
 	}
 	if !strings.Contains(stderr.String(), "thinking_level must be one of") {
@@ -524,7 +524,7 @@ func assertItemSequence(t *testing.T, output string, want ...string) {
 	var kinds []string
 	for {
 		var item host.HistoryItem
-		if err := json.UnmarshalDecode(decoder, &item); err != nil {
+		if err := decodeCanonicalRunnerItem(decoder, &item); err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
@@ -562,7 +562,7 @@ func itemKinds(t *testing.T, output string) []sessionstore.ItemKind {
 	var kinds []sessionstore.ItemKind
 	for {
 		var item host.HistoryItem
-		if err := json.UnmarshalDecode(decoder, &item); err != nil {
+		if err := decodeCanonicalRunnerItem(decoder, &item); err != nil {
 			if errors.Is(err, io.EOF) {
 				return kinds
 			}
@@ -578,7 +578,7 @@ func inputIDs(t *testing.T, output string) []inbox.ID {
 	var ids []inbox.ID
 	for {
 		var item host.HistoryItem
-		if err := json.UnmarshalDecode(decoder, &item); err != nil {
+		if err := decodeCanonicalRunnerItem(decoder, &item); err != nil {
 			if errors.Is(err, io.EOF) {
 				return ids
 			}
@@ -604,6 +604,7 @@ func containsTool(tools []llm.Tool, name string) bool {
 
 func TestReasoningEffortMapsEveryThinkingLevel(t *testing.T) {
 	cases := map[string]llm.ReasoningEffort{
+		"none":   "",
 		"low":    llm.ReasoningEffortLow,
 		"medium": llm.ReasoningEffortMedium,
 		"high":   llm.ReasoningEffortHigh,
@@ -757,12 +758,41 @@ func decodeHostLogItems(t *testing.T, raw []byte) []host.HistoryItem {
 	var items []host.HistoryItem
 	for {
 		var item host.HistoryItem
-		if err := json.UnmarshalDecode(decoder, &item); err != nil {
+		if err := decodeCanonicalRunnerItem(decoder, &item); err != nil {
 			if errors.Is(err, io.EOF) {
 				return items
 			}
 			t.Fatal(err)
 		}
 		items = append(items, item)
+	}
+}
+
+// Keep canonical assertions exact while separately testing the runner's new
+// attachment-only records in projection_test.go.
+func decodeCanonicalRunnerItem(decoder *jsontext.Decoder, item *host.HistoryItem) error {
+	for {
+		var raw jsontext.Value
+		if err := json.UnmarshalDecode(decoder, &raw); err != nil {
+			return err
+		}
+		var envelope struct {
+			SourceSequence sessionstore.Sequence
+			Synthetic      bool
+			Type           string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			return err
+		}
+		if envelope.Synthetic || envelope.Type == "session_end" {
+			continue
+		}
+		if err := json.Unmarshal(raw, item); err != nil {
+			return err
+		}
+		if envelope.SourceSequence != 0 {
+			item.Sequence = envelope.SourceSequence
+		}
+		return nil
 	}
 }

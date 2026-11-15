@@ -2,22 +2,22 @@
 
 **Language:** English | [日本語](ja/providers.md)
 
-Unreal Agent supports **Claude only, ChatGPT (Codex) only, or both** under a single installation and `/model` menu. Both providers use your existing subscription logins. Unreal never switches providers automatically or falls back to an API key.
+Unreal Agent supports Claude and ChatGPT subscription logins, plus optional OpenAI and Anthropic API keys, under a single installation and `/model` menu. **API keys are used only when you explicitly choose an API connection and incur separate API billing.** Unreal never switches providers automatically or falls back from an expired subscription to an API key.
 
 ---
 
 ## Switching Models (`/model`)
 
-1. Run `/model` in the TUI and choose a provider (`Claude` or `Codex`).
-2. Select a model from the catalog, then choose a reasoning effort level.
+1. Run `/model` in the TUI and choose a connection: `ChatGPT（サブスク）`, `Claude（サブスク）`, `OpenAI API（API キー・別課金）`, or `Claude（API キー・別課金）`. API rows appear only after explicit registration.
+2. Select a model from that connection's catalog, then choose a reasoning effort level when available.
 3. After signing in later or updating an external CLI, run `/model refresh` to re-check authentication and reload models, then select the provider in `/model`. Reinstallation is unnecessary. An existing Session keeps its selected provider until you change it.
 
 > **Notes:**
-> - On first launch, Unreal defaults to **Claude** if both providers are ready, or whichever provider is available. (You can override the initial choice with `UNREAL_HARNESS_LLM_PROVIDER` and `UNREAL_HARNESS_LLM_MODEL`.)
+> - On first launch, Unreal prefers a ready subscription: **Claude** if both subscriptions are ready, or the ready one. Registering an API connection does not select it. Even with only API connections registered, open `/model` to choose one, or explicitly set `UNREAL_HARNESS_LLM_PROVIDER=openai` or `claude-api` for the initial selection. `UNREAL_HARNESS_LLM_MODEL` can also select its model.
 > - Unavailable providers remain listed with their status and login instructions so you can see why they are disabled.
-> - With neither provider ready, Unreal still starts and shows login instructions on the first input. `/login` displays the same sign-in steps.
+> - With neither subscription ready, Unreal still starts. The first input shows login instructions, or directs you to `/model` when an API connection is registered. `/login` displays subscription sign-in steps.
 > - Explicitly disabled providers remain disabled after login. Re-enable Codex with `bash development.sh --configure-providers --codex-auto`, or Claude with `bash development.sh --configure-providers`.
-> - Seeing a model in the catalog means the CLI advertised it; your subscription tier still determines whether the provider accepts inference requests for that model.
+> - Model visibility does not guarantee inference access: the selected subscription or API account determines model access. Listing connections in `/model` does not request an API catalog or run inference.
 
 ---
 
@@ -64,6 +64,39 @@ Unreal Agent supports **Claude only, ChatGPT (Codex) only, or both** under a sin
 
 ---
 
+## Optional API Key Connections
+
+Prepare key files with permissions **0600**, then register only the connections you want:
+
+```bash
+chmod 600 /absolute/openai.key /absolute/anthropic.key
+bash development.sh --openai-api-key-file /absolute/openai.key --anthropic-api-key-file /absolute/anthropic.key
+```
+
+Each flag is optional. OpenAI API (`openai`) uses Unreal's existing Responses adapter and does not require a Codex subscription login. Claude API (`claude-api`) requires the official Claude Code CLI and uses the same tools and permission handling as subscription Claude.
+
+- **Explicit source:** Settings contain only a file path, or an environment variable name explicitly chosen with `--openai-api-key-env NAME` / `--anthropic-api-key-env NAME`. Merely setting `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` never registers or selects an API connection. Key values are not written to configuration, logs, history, UI, or errors. Key files are reread when used; files without permissions 0600 are rejected.
+- **Selection:** After registration, choose the API row in `/model`. A Session retains its selected connection on resume and never switches between subscription and API authentication automatically. API labels in `/model` and status displays identify separate billing.
+- **Models:** After you open the OpenAI API connection, Unreal reads its [`GET /v1/models` catalog](https://developers.openai.com/api/reference/resources/models/methods/list). That response does not advertise reasoning effort levels, so Unreal omits the optional effort setting. Claude API models come from the selected Claude Code initialization handshake.
+- **Claude authentication:** `claudeagent` passes `ANTHROPIC_API_KEY` only for the selected API route; the subscription route continues to remove API key and auth-token variables. With Claude Code **2.1.322**, a fake API key alongside fake subscription OAuth produced `init.apiKeySource=ANTHROPIC_API_KEY` and an `x-api-key` request to a local fake server. No real inference was used. Additional settings flags are unnecessary; empty `--setting-sources` does not isolate OAuth, and `--bare` also changes instruction loading, so Unreal uses neither for this route.
+- **Usage:** Response `Usage.AuthMethod` and `claude_usage` connection metadata distinguish API keys from subscriptions and retain token counts. API cost calculation is not included.
+
+For an operator-managed `runtime.json`, the equivalent nonsecret references are:
+
+```json
+{
+  "Launcher": {
+    "Version": 1,
+    "APIKeys": {
+      "openai": {"file": "/absolute/openai.key"},
+      "claude-api": {"file": "/absolute/anthropic.key"}
+    }
+  }
+}
+```
+
+This fragment registers connections; it does not change the Session's active selection. Use `{"env": "CHOSEN_KEY_NAME"}` instead of `file` when explicitly choosing an environment source.
+
 ## Docker Sandboxes Codex OAuth
 
 If you run Unreal inside a **Docker Sandbox**, Unreal can use your host machine's OpenAI OAuth login through Docker's credential-forwarding proxy without copying tokens into the container.
@@ -79,7 +112,7 @@ If you run Unreal inside a **Docker Sandbox**, Unreal can use your host machine'
    ```bash
    bash development.sh --configure-providers --replace-pilot-launcher --docker-sandbox-oauth
    ```
-3. Start Unreal and select **Codex** in `/model`.
+3. Start Unreal and select **ChatGPT（サブスク）** in `/model`.
 
 ### Technical Details & Requirements
 
@@ -96,9 +129,11 @@ The Codex CLI is unnecessary when the proxy route is valid and a model catalog i
 
 ## Delegated GPT work
 
-When Codex is configured or enabled for discovery, Permission Modes are enabled with a configured `Maximum`, and no explicit `Subagents` configuration replaces the defaults, Unreal prepares built-in GPT templates, including for a later Codex login. Each template uses a fixed Codex model and reasoning effort independent of the parent Session's active model:
+When Codex is configured or enabled for discovery, or an OpenAI API connection is explicitly registered, Unreal prepares built-in GPT templates if Permission Modes have a configured `Maximum` and no explicit `Subagents` configuration replaces the defaults. Template models are independent of the parent Session's active model.
 
-Claude is guided to use these GPT children only while Codex authentication and its model catalog are available in that Session. Otherwise it uses Claude Code's Agent tool with `haiku` or `sonnet`. A GPT parent continues to use GPT children; unavailable Codex produces login guidance and never switches its children to Claude.
+An **OpenAI API** parent uses `openai` for its built-in GPT children and their workers. Other parents retain the `openai-codex` subscription route. Availability never changes that choice. API children keep the template models but omit effort because the API catalog does not advertise it; the subscription efforts below remain unchanged. Explicit operator templates and existing children retain their recorded connections.
+
+Claude is guided to use GPT children only while Codex authentication and its model catalog are available. Otherwise it uses Claude Code's Agent tool with `haiku` or `sonnet`. An unavailable selected GPT connection produces guidance without switching to another connection.
 
 | Template / Role | Model & Effort | Purpose |
 | --- | --- | --- |

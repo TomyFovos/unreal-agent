@@ -75,19 +75,27 @@ func claudeSignIn() error {
 // claudeCatalog serves /model from Claude Code's initialize reply, read at most
 // once a minute.
 type claudeCatalog struct {
-	binary string
-	mu     sync.Mutex
-	at     time.Time
-	result modelcatalog.Catalog
-	err    error
+	binary    string
+	apiSource credential.Source
+	mu        sync.Mutex
+	at        time.Time
+	result    modelcatalog.Catalog
+	err       error
 }
 
 func (c *claudeCatalog) read(ctx context.Context, refresh bool) (modelcatalog.Catalog, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if refresh || c.at.IsZero() || time.Since(c.at) > time.Minute {
-		catalog, account, err := claudeagent.Discover(ctx, c.binary, nil)
-		if err == nil && !account.Subscription() {
+		var catalog modelcatalog.Catalog
+		var account claudeagent.Account
+		var err error
+		if c.apiSource != (credential.Source{}) {
+			catalog, account, err = claudeagent.DiscoverAPI(ctx, c.binary, nil, c.apiSource)
+		} else {
+			catalog, account, err = claudeagent.Discover(ctx, c.binary, nil)
+		}
+		if err == nil && c.apiSource == (credential.Source{}) && !account.Subscription() {
 			err = claudeSignIn()
 		}
 		c.result, c.err, c.at = catalog, err, time.Now()

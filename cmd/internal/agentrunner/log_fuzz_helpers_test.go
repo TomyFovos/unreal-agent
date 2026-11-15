@@ -116,9 +116,23 @@ func decodeLogItems(t *testing.T, encoded []byte) []sessionstore.Item {
 	}
 	var items []sessionstore.Item
 	for index, line := range bytes.Split(encoded[:len(encoded)-1], []byte{'\n'}) {
+		var envelope struct {
+			Synthetic      bool
+			Type           string `json:"type"`
+			SourceSequence sessionstore.Sequence
+		}
+		if err := json.Unmarshal(line, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Synthetic || envelope.Type == "session_end" {
+			continue
+		}
 		var item sessionstore.Item
 		if err := json.Unmarshal(line, &item); err != nil {
 			t.Fatalf("decode JSONL line %d: %v", index+1, err)
+		}
+		if envelope.SourceSequence != 0 {
+			item.Sequence = envelope.SourceSequence
 		}
 		items = append(items, item)
 	}

@@ -2,22 +2,22 @@
 
 **言語:** [English](../providers.md) | 日本語
 
-Unreal Agent は1つのインストール環境と共通の `/model` メニューで **Claude だけ・ChatGPT（Codex）だけ・両方**の構成に対応しています。どちらも既存のサブスクリプションログインを使用し、プロバイダの自動切替や API キーへのフォールバックは行いません。
+Unreal Agent は1つのインストール環境と共通の `/model` メニューで、Claude・ChatGPT のサブスクリプションログインに加え、任意の OpenAI・Anthropic API キーに対応します。**API キーは API 接続を明示的に選んだときだけ使い、サブスクとは別に API 料金がかかります。** 接続先の自動切替や、サブスクの認証切れ時の API キーへのフォールバックは行いません。
 
 ---
 
 ## モデルの選択と切り替え (`/model`)
 
-1. TUI で `/model` を入力し、プロバイダ（`Claude` または `Codex`）を選択します。
-2. 利用可能なモデルを選び、続けて推論の深さ（effort）を選択します。
+1. TUI で `/model` を入力し、`ChatGPT（サブスク）`、`Claude（サブスク）`、`OpenAI API（API キー・別課金）`、`Claude（API キー・別課金）` から接続を選びます。API の行は明示的に登録した場合だけ表示されます。
+2. その接続のモデル一覧からモデルを選び、対応する場合は推論の深さ（effort）を選択します。
 3. 後からログインした場合や外部 CLI を更新した場合は、`/model refresh` で認証状態とモデル一覧を再検出し、`/model` で選択します。インストールのやり直しは不要です。既存 Session のプロバイダは自分で選び直すまで維持されます。
 
 > **補足:**
-> - 初回起動時は、両方使える場合は **Claude**、片方のみの場合は使える側のプロバイダが初期選択されます（環境変数 `UNREAL_HARNESS_LLM_PROVIDER` / `UNREAL_HARNESS_LLM_MODEL` で明示指定も可能）。
+> - 初回起動時は利用できるサブスクを優先し、両方使えれば **Claude**、片方ならその接続で始まります。API の登録だけでは API を選択しません。API しか登録されていない場合も、起動後に `/model` で選ぶか、初期接続を `UNREAL_HARNESS_LLM_PROVIDER=openai` または `claude-api` で明示します。`UNREAL_HARNESS_LLM_MODEL` でモデルも指定できます。
 > - 未ログインのプロバイダもメニュー内に理由と準備手順付きで表示されます。
-> - 両方未準備でも起動し、最初の入力にログイン手順を案内します。`/login` でも手順を確認できます。
+> - サブスクが両方未準備でも起動します。最初の入力ではログイン手順を案内し、API 接続が登録済みなら `/model` へ案内します。`/login` でもサブスクの手順を確認できます。
 > - 明示的に無効化したプロバイダはログインだけでは有効になりません。Codex は `bash development.sh --configure-providers --codex-auto`、Claude は `bash development.sh --configure-providers` で再び有効にします。
-> - モデル一覧に表示されていても、実際に推論できるかはご自身のサブスクリプション契約プランに依存します。
+> - モデル一覧に表示されていても、実際の利用可否は選択したサブスクまたは API アカウントの権限に依存します。`/model` の接続一覧を表示するだけでは API のモデル一覧取得や推論を行いません。
 
 ---
 
@@ -64,6 +64,39 @@ Unreal Agent は1つのインストール環境と共通の `/model` メニュ�
 
 ---
 
+## 任意の API キー接続
+
+キーを入れたファイルを **0600** にし、使いたい接続だけ登録します。
+
+```bash
+chmod 600 /absolute/openai.key /absolute/anthropic.key
+bash development.sh --openai-api-key-file /absolute/openai.key --anthropic-api-key-file /absolute/anthropic.key
+```
+
+各フラグは任意です。OpenAI API（`openai`）は既存の Responses アダプタを使い、Codex のサブスクログインは不要です。Claude API（`claude-api`）は公式 Claude Code CLI が必要で、会話・ツール・権限の扱いはサブスクの Claude と共通です。
+
+- **参照先の明示:** 設定に保存するのはファイルパスか、`--openai-api-key-env NAME` / `--anthropic-api-key-env NAME` で明示した環境変数名だけです。`OPENAI_API_KEY` や `ANTHROPIC_API_KEY` が存在するだけでは API を登録・選択しません。キーの値は設定・ログ・履歴・画面・エラーへ書きません。ファイルは使用時に読み直し、0600 でないものは拒否します。
+- **選択:** 登録後、`/model` で API の行を選びます。選択した接続は Session の resume 後も維持され、サブスクと API の間では自動で切り替えません。`/model` とステータス表示の API ラベルで別課金を示します。
+- **モデル一覧:** OpenAI API の接続を開くと、その API の [`GET /v1/models`](https://developers.openai.com/api/reference/resources/models/methods/list) を参照します。この応答には effort 情報がないため、省略します。Claude API は選択した Claude Code の初期化応答から取得します。
+- **Claude の認証:** `claudeagent` が API 経路を選択したときだけ `ANTHROPIC_API_KEY` を渡します。サブスク経路では、従来どおり API キーと auth-token の環境変数を除去します。Claude Code **2.1.322** で偽 API キーと偽サブスク OAuth を同居させた試験では、`init.apiKeySource=ANTHROPIC_API_KEY`、ローカル偽サーバーへの認証は `x-api-key` でした。実推論は行っていません。追加の settings フラグは不要です。空の `--setting-sources` では OAuth を隔離できず、`--bare` は指示書の読み込みも変えるため、この経路では付けません。
+- **使用量:** 応答の `Usage.AuthMethod` と `claude_usage` の接続情報でサブスクと API キーを区別し、トークン数を残します。API 費用の計算は含みません。
+
+手動管理の `runtime.json` に記載する参照先は次の形です。
+
+```json
+{
+  "Launcher": {
+    "Version": 1,
+    "APIKeys": {
+      "openai": {"file": "/absolute/openai.key"},
+      "claude-api": {"file": "/absolute/anthropic.key"}
+    }
+  }
+}
+```
+
+この断片は接続の登録だけを行い、Session の選択は変えません。環境変数を明示する場合は `file` の代わりに `{"env": "CHOSEN_KEY_NAME"}` を使います。
+
 <a id="docker-sandboxes-codex-oauth"></a>
 ## Docker Sandboxes Codex OAuth
 
@@ -77,7 +110,7 @@ Unreal Agent は1つのインストール環境と共通の `/model` メニュ�
    ```
    詳しくは [Docker 公式の Codex セットアップ手順](https://docs.docker.com/ai/sandboxes/agents/codex/) を参照してください。
 2. **Sandbox 内:** [インストール手順](install.md) に従って共通キットを導入します。既定の自動判定（`--codex-auto`）でも認識されますが、明示的に指定する場合は `bash development.sh` に `--docker-sandbox-oauth` を追加します。
-3. Unreal を起動し、`/model` で **Codex** を選択します。
+3. Unreal を起動し、`/model` で **ChatGPT（サブスク）** を選択します。
 
 ### 検証条件とモデルキャッシュの仕組み
 
@@ -95,9 +128,11 @@ Unreal Agent は1つのインストール環境と共通の `/model` メニュ�
 <a id="delegated-gpt-work"></a>
 ## Delegated GPT work（GPT サブエージェントへの作業委譲）
 
-Codex が設定済み、または自動検出が有効で、Permission Modes と `Maximum` が設定されており、明示的な `Subagents` 設定で既定値が置き換えられていない場合、後からのログインにも備えて以下の GPT テンプレートを準備します。各テンプレートのモデルと推論の深さ（effort）は親セッションの選択モデルとは独立して固定されています。
+Codex が設定済みか自動検出が有効、または OpenAI API が明示的に登録済みで、Permission Modes の `Maximum` が設定されており、明示的な `Subagents` 設定がなければ、以下の GPT テンプレートを準備します。テンプレートのモデルは親 Session の選択モデルとは独立しています。
 
-Claude の統括が GPT の子を案内するのは、その Session で Codex の認証とモデル一覧が利用できる場合だけです。利用できなければ Claude Code の Agent（`haiku` / `sonnet`）を使います。GPT の統括は GPT の子を使い続け、Codex が利用できない場合はログインを案内します。Claude の子には自動で切り替えません。
+**OpenAI API** を統括に選んだ Session では、組み込みの GPT の子とその作業者も `openai` を使います。それ以外の統括では、従来どおりサブスクの `openai-codex` を使います。可用性を理由に接続を切り替えません。API の子はテンプレートのモデルを保ち、API の一覧に情報がない effort は省略します。サブスクでは下表の effort を維持します。利用者が設定したテンプレートや既存の子は記録された接続を保ちます。
+
+Claude の統括が GPT の子を案内するのは、その Session で Codex の認証とモデル一覧が使える場合だけです。使えなければ Claude Code の Agent（`haiku` / `sonnet`）を使います。選択した GPT 接続が使えない場合は手順を案内し、別の接続には切り替えません。
 
 | テンプレート / 役割 | モデル・Effort | 主な用途 |
 | --- | --- | --- |

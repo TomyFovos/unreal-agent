@@ -1,9 +1,10 @@
 // Package claudeagent runs the official Claude Code CLI on the user's own
-// subscription login as Unreal's Claude route (U21). Claude Code runs its own
+// subscription login, or an explicitly selected API key, as Unreal's Claude
+// route (U21). Claude Code runs its own
 // tools. Unreal decides their approvals with its permission mode, records
 // every call and result in the Session, and handles shell commands Claude
 // Code declines as ordinary Bash requests under that mode (U22). No MCP
-// server, mod or API key is involved.
+// server or mod is involved.
 package claudeagent
 
 import (
@@ -40,13 +41,17 @@ const maxLine = 64 << 20
 
 // Config names the CLI. The Session's runtime fills in the rest per Session.
 type Config struct {
+	apiKey    credential.Secret // request-time only, supplied by NewAPIClient
+	apiSource credential.Source // re-read before a deferred process starts
 	// CompactThresholdTokens defaults to 200,000 for CLI automatic compaction.
-	CompactThresholdTokens int64             `json:"-"` // injected from route settings; not immutable runtime identity
-	Binary                 string            // absolute path of the claude CLI
-	Directory              string            `json:"-"` // the workspace; Claude Code's working directory
-	Results                *observed.Results `json:"-"`
-	Environ                func() []string   `json:"-"` // nil means os.Environ
-	Subagents              SubagentCLI       `json:"-"`
+	CompactThresholdTokens int64               `json:"-"` // injected from route settings; not immutable runtime identity
+	Binary                 string              // absolute path of the claude CLI
+	AgentModel             string              `json:",omitzero"`
+	AgentEffort            llm.ReasoningEffort `json:",omitzero"`
+	Directory              string              `json:"-"` // the workspace; Claude Code's working directory
+	Results                *observed.Results   `json:"-"`
+	Environ                func() []string     `json:"-"` // nil means os.Environ
+	Subagents              SubagentCLI         `json:"-"`
 	// Namespace is the Host's Session store. Two instances can each have a
 	// Session of the same name; each needs its own Claude Code conversation.
 	Namespace string `json:"-"`
@@ -55,9 +60,11 @@ type Config struct {
 // SubagentCLI lets Claude drive the Session's children through Bash with the
 // Host's own "subagent" command (U21). Zero means the Session has none.
 type SubagentCLI struct {
-	Binary    string   // stable kit launcher, or the executable for a source build
-	Socket    string   // the Host's gateway socket
-	Templates []string // the child templates, for the prompt
+	Binary     string   // stable kit launcher, or the executable for a source build
+	Socket     string   // the Host's gateway socket
+	Templates  []string // the child templates, for the prompt
+	LeadModel  string
+	LeadEffort string
 	// Available checks the Host's existing provider health/catalog at each turn.
 	// Nil retains the explicitly configured CLI behavior.
 	Available func(context.Context) bool `json:"-"`
@@ -70,11 +77,17 @@ const (
 )
 
 type Client struct {
-	config        Config
-	approver      approver
-	mu            sync.Mutex
-	contextTokens map[string]int64
+	config           Config
+	approver         approver
+	mu               sync.Mutex
+	contextTokens    map[string]int64
+	activityInterval time.Duration
 }
+
+func (c Config) String() string    { data, _ := json.Marshal(c); return string(data) }
+func (c Config) GoString() string  { return c.String() }
+func (c *Client) String() string   { return "claudeagent.Client" }
+func (c *Client) GoString() string { return c.String() }
 
 func NewClient(config Config) (*Client, error) {
 	if !filepath.IsAbs(config.Binary) {
@@ -95,7 +108,7 @@ func NewClient(config Config) (*Client, error) {
 	if config.CompactThresholdTokens <= 0 {
 		config.CompactThresholdTokens = DefaultCompactThresholdTokens
 	}
-	return &Client{config: config, approver: approver{cli: config.Subagents.Binary}, contextTokens: map[string]int64{}}, nil
+	return &Client{config: config, approver: approver{cli: config.Subagents.Binary, agentModel: config.AgentModel, agentEffort: config.AgentEffort}, contextTokens: map[string]int64{}, activityInterval: streamActivityInterval}, nil
 }
 
 func (c *Client) Close() error { return nil }
@@ -178,8 +191,16 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	if err := ctx.Err(); err != nil {
 		return llm.Response{}, err
 	}
-	env := environment(c.config.Environ())
-	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--replay-user-messages"}
+	key := c.config.apiKey
+	if c.config.apiSource != (credential.Source{}) {
+		var err error
+		key, err = c.config.apiSource.Read(ctx, nil)
+		if err != nil {
+			return llm.Response{}, err
+		}
+	}
+	env := authenticatedEnvironment(c.config.Environ(), key)
+	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--replay-user-messages", "--forward-subagent-text"}
 	subagents := c.config.Subagents
 	if opt.Identity.SessionID == "" || subagents.Available != nil && !subagents.Available(ctx) {
 		subagents = SubagentCLI{}
@@ -224,7 +245,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	if err != nil {
 		return llm.Response{}, &Error{Code: "subprocess_failure", Message: err.Error()}
 	}
-	var stderr tail
+	stderr := tail{secret: key.Reveal()}
 	cmd.Stderr = &stderr
 	started := time.Now().UTC()
 	if err = cmd.Start(); err != nil {
@@ -234,6 +255,9 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	t := newTurn(ctx, cancel, opt, out, c.config.Results, &c.approver, c.config.Directory, session)
 	t.startup.process = started
 	t.subagents, t.environ = subagents, cmd.Env
+	streams, stopStreams := t.observeStreams(c.activityInterval)
+	t.streams = streams
+	defer stopStreams()
 	compacts := &compactEvents{client: c, turn: t}
 	defer compacts.finish()
 	stopInterrupt := context.AfterFunc(ctx, func() {
@@ -268,6 +292,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		cancel()
 		t.workers.Wait()
 		t.endNativeBashCalls()
+		t.endNativeToolCalls()
 	})
 	defer finishProcess()
 	hooks := map[string]any{
@@ -290,9 +315,13 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	var lastInput *int64
 	for result == nil {
 		line, readErr := readLine(reader)
+		if key.Reveal() != "" {
+			line = bytes.ReplaceAll(line, []byte(key.Reveal()), []byte("[redacted]"))
+		}
 		if len(line) > 0 {
 			var f frame
 			if json.Unmarshal(line, &f) == nil {
+				streams.observe(f)
 				if compact != nil {
 					t.recordStartup(f)
 					compact.handle(f)
@@ -355,6 +384,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		if len(result.Errors) > 0 {
 			message = strings.Join(result.Errors, "; ")
 		}
+		message = streams.outputLimitFailure(result, message)
 		if strings.Contains(message, "No conversation found") {
 			return llm.Response{}, &startError{kind: "missing", message: message}
 		}
@@ -458,8 +488,9 @@ func sessionUUID(namespace, session string) string {
 
 // tail keeps the end of the CLI's stderr for failure messages.
 type tail struct {
-	mu  sync.Mutex
-	buf []byte
+	secret string
+	mu     sync.Mutex
+	buf    []byte
 }
 
 func (t *tail) Write(p []byte) (int, error) {
@@ -475,7 +506,11 @@ func (t *tail) Write(p []byte) (int, error) {
 func (t *tail) String() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return string(t.buf)
+	text := string(t.buf)
+	if t.secret != "" {
+		text = strings.ReplaceAll(text, t.secret, "[redacted]")
+	}
+	return text
 }
 
 func lastLine(text string) string {

@@ -32,6 +32,9 @@ func registeredProviders(initial agentrunner.RuntimeIdentity, extra map[string]a
 }
 
 func (h modelUI) catalog(ctx context.Context, id string, refresh bool) (modelcatalog.Catalog, error) {
+	if read := h.apiReads[id]; read != nil {
+		return read(ctx, refresh)
+	}
 	if b, ok := h.runtime.Discovered.Lookup(id); ok && b.Catalog != nil {
 		return b.Catalog(ctx, refresh)
 	}
@@ -78,7 +81,16 @@ func (h modelUI) providers(ctx context.Context) []modelcatalog.Provider {
 			continue
 		}
 		e := h.runtime.CheckProvider(ctx, id)
-		c, catalogErr := h.catalog(ctx, id, false)
+		backend, _ := h.runtime.ProviderRuntime(id)
+		var c modelcatalog.Catalog
+		var catalogErr error
+		if backend.Provider.Auth.Method == credential.APIKey {
+			// A provider row is registration, not a Session's API selection.
+			// Read its catalog only after the user opens that API connection.
+			c = modelcatalog.Catalog{Available: e == nil, Source: "explicit API key (separate billing)"}
+		} else {
+			c, catalogErr = h.catalog(ctx, id, false)
+		}
 		if e == nil {
 			e = catalogErr
 		}

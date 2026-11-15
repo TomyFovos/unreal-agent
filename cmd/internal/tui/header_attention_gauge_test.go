@@ -159,14 +159,14 @@ func TestGaugeContextRateColorsAndOmission(t *testing.T) {
 		stats.Tokens.Output = rate
 		s.SpeedHistory = append(s.SpeedHistory, stats)
 	}
-	context := "文脈 ▕█████░░░░░░░▏394k (39%)"
+	context := "コンテキスト ▕█████░░░░░░░▏394k (39%)"
 	speed := "速度 ▁▂▃▄▅▆▇▇ ~69.0 tok/s"
 	cache := "キャッシュ ▕██████████▏98.00%"
 	for _, want := range []string{
 		context + " · " + speed + " · " + cache,
 		context + " · " + speed,
 		context + " · 速度 ~69.0 tok/s",
-		"文脈 394k (39%) · 速度 ~69.0 tok/s",
+		"コンテキスト 394k (39%) · 速度 ~69.0 tok/s",
 	} {
 		if got := statisticsBar(s, u, layout{width: textLine(want, normal).width()}).plain(); got != want {
 			t.Fatalf("gauge got %q, want %q", got, want)
@@ -177,7 +177,7 @@ func TestGaugeContextRateColorsAndOmission(t *testing.T) {
 	}
 	s.Selection.ContextWindow = 0
 	got := statisticsBar(s, u, layout{width: 200}).plain()
-	if !strings.HasPrefix(got, "文脈 394k · ") {
+	if !strings.HasPrefix(got, "コンテキスト 394k · ") {
 		t.Fatal("unknown context window fabricated a bar/percentage", got)
 	}
 	s.LastGeneration.Source = "provider_api"
@@ -218,7 +218,7 @@ func TestGaugeUsesLastContextAndSummedCacheUsage(t *testing.T) {
 			s.Progress = &host.Progress{Mode: "streaming", Statistics: s.LastGeneration}
 		}
 		got := statisticsBar(s, u, layout{width: 160}).plain()
-		if !strings.Contains(got, "文脈 ▕█████░░░░░░░▏394k (39%)") || !strings.Contains(got, "50.00%") || strings.Contains(got, "700k") {
+		if !strings.Contains(got, "コンテキスト ▕█████░░░░░░░▏394k (39%)") || !strings.Contains(got, "50.00%") || strings.Contains(got, "700k") {
 			t.Fatal("context must use the last call; cache keeps summed usage", got)
 		}
 	}

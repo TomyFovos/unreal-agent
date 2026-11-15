@@ -7,7 +7,8 @@ from tempfile import TemporaryDirectory
 
 from harbor.environments.base import ExecResult
 
-from harness_harbor.agent import APT_ARCHIVE_FALLBACK, UnrealAgent
+from harness_harbor.runner import APT_ARCHIVE_FALLBACK
+from harness_harbor.runner import RunnerAgent as UnrealAgent
 
 
 class ScriptedEnvironment:

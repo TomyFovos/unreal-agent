@@ -38,7 +38,7 @@ func needsExternalCodex(c serveConfiguration) bool {
 }
 
 // Discover only a file source, using the runner's official discovery semantics.
-// Inline tokens/account IDs and API keys are not sources for interactive Hosts.
+// Inline tokens/account IDs and API keys are not Codex subscription sources.
 // Resolve the path before a child changes directory or loses the parent's HOME.
 func externalCodexAuthFile(option string, getenv func(string) string) (string, error) {
 	config, err := openaicodex.EnvironmentConfig(func(key string) string {

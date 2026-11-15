@@ -52,6 +52,9 @@ class CommonDevelopmentTests(unittest.TestCase):
                 reply = {"Providers": [{"ID": "openai-codex", "Availability": "unavailable" if "--codex-disabled" in argv else "available", "Reason":"operator_disabled" if "--codex-disabled" in argv else ""}, {"ID":"claude-code", "Availability":"unavailable" if "--claude-disabled" in argv else "available", "Reason":"operator_disabled" if "--claude-disabled" in argv else ""}]}
                 if statuses is not None:
                     reply["Providers"] = statuses
+                for provider, prefix in (("openai", "openai"), ("claude-api", "anthropic")):
+                    if any("--" + prefix + "-api-key-" + kind in argv for kind in ("file", "env")):
+                        reply["Providers"].append({"ID": provider, "Availability": "available", "Reason": ""})
                 if "--codex-auto" in argv:
                     reply["CodexRoute"] = "external" if reply["Providers"][0]["Availability"] == "available" else "auto"
                 return json.dumps(reply).encode(),0
@@ -91,6 +94,62 @@ class CommonDevelopmentTests(unittest.TestCase):
                     self.assertIn("だけで使えます", output)
                 else:
                     self.assertIn("最初の入力にもログイン方法", output)
+
+    def test_api_keys_require_explicit_sources_and_persist_references_only(self):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "ambient-fake-key", "ANTHROPIC_API_KEY": "ambient-fake-key"}):
+            self.assertEqual(common.api_key_sources(self.args, None), {})
+        key = self.home / "openai.key"
+        key.write_text("private-fake-key"); key.chmod(0o600)
+        self.args.openai_api_key_file = str(key)
+        self.args.anthropic_api_key_env = "CHOSEN_ANTHROPIC_KEY"
+        settings = self.install()
+        self.assertEqual(settings["APIKeys"], {"openai": {"file": str(key)}, "claude-api": {"env": "CHOSEN_ANTHROPIC_KEY"}})
+        self.assertIn("--openai-api-key-file", self.preflight_calls[-1])
+        self.assertIn("--anthropic-api-key-env", self.preflight_calls[-1])
+        self.assertIn("別課金", self.install_output.getvalue())
+        raw = common.settings_path(self.home).read_text()
+        self.assertNotIn("private-fake-key", raw)
+        self.assertNotIn("ambient-fake-key", raw)
+        workspace = self.repo()
+        paths = common.prepare_repo(settings, workspace, "default")
+        command = common.command_for(settings, workspace, paths, "dev")
+        self.assertIn("--openai-api-key-file", command)
+        self.assertNotIn("private-fake-key", str(command))
+        first_profile = common.provider_profile(settings)
+        self.args.openai_api_key_file = ""
+        self.args.anthropic_api_key_env = ""
+        updated = self.install()
+        self.assertEqual(updated["APIKeys"], settings["APIKeys"])
+        self.assertEqual(common.provider_profile(updated), first_profile)
+
+    def test_api_key_file_requires_0600_before_installing(self):
+        key = self.home / "key"
+        key.write_text("private-fake-key"); key.chmod(0o644)
+        self.args.openai_api_key_file = str(key)
+        with self.assertRaisesRegex(pilot.PilotError, "0600"):
+            self.install()
+        self.assertEqual(self.preflight_calls, [])
+        self.assertFalse(common.settings_path(self.home).exists())
+        key.chmod(0o600)
+        self.args.openai_api_key_env = "ALSO_CHOSEN"
+        with self.assertRaises(pilot.PilotError):
+            common.api_key_sources(self.args, None)
+
+    def test_api_key_registration_adds_to_existing_runtime_without_selecting_it(self):
+        settings = self.install()
+        workspace = self.repo()
+        paths = common.prepare_repo(settings, workspace, "default")
+        original = {"Runtime": {"Workspace": str(workspace), "Provider": {"provider": "openai-codex"}},
+                    "Launcher": {"Version": 1, "CodexDisabled": True}, "Permissions": {"Tools": ["read"]}}
+        paths["config"].parent.mkdir(parents=True, exist_ok=True)
+        paths["config"].write_text(json.dumps(original)); paths["config"].chmod(0o600)
+        settings["APIKeys"] = {"openai": {"file": str(self.home / "explicit.key")}}
+        common.prepare_repo(settings, workspace, "default")
+        actual = json.loads(paths["config"].read_text())
+        self.assertEqual(actual["Runtime"], original["Runtime"])
+        self.assertEqual(actual["Permissions"], original["Permissions"])
+        self.assertTrue(actual["Launcher"]["CodexDisabled"])
+        self.assertEqual(actual["Launcher"]["APIKeys"], settings["APIKeys"])
 
     def test_one_inventory_same_product_no_credentials(self):
         with tarfile.open(self.archive) as archive:

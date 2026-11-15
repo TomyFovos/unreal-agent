@@ -151,6 +151,7 @@ type Response struct {
 // InputTokens includes CachedInputTokens and CacheWriteInputTokens.
 // OutputTokens includes ReasoningTokens.
 type Usage struct {
+	AuthMethod            string `json:",omitzero"` // api_key, oauth, or the selected subscription transport
 	InputTokens           int64
 	CachedInputTokens     int64
 	CacheWriteInputTokens int64

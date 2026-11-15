@@ -5,11 +5,12 @@ RUN go mod download
 COPY cmd/ cmd/
 COPY harness/ harness/
 COPY internal/ internal/
-RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -o /out/unreal-agent-runner ./cmd/unreal-agent-runner
+ARG REV=dev
+RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "-X main.version=${REV}" -o /out/unreal-agent-runner ./cmd/unreal-agent-runner
 
 # Debian 13.7 (trixie), image build 2026-09-18.
 FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
-RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates tini \
+RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates git tini \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /workspace /home/agent /state \
     && chmod 1777 /state \

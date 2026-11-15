@@ -47,6 +47,9 @@ func providerAvailable(ctx context.Context, runtime agentrunner.RuntimeConfig, i
 	if runtime.CheckProvider(ctx, id) != nil {
 		return false
 	}
+	if p, err := runtime.ProviderRuntime(id); err == nil && p.Provider.Auth.Method == credential.APIKey {
+		return true
+	}
 	catalog, err := runtime.Catalog(ctx, id)
 	return err == nil && catalog.Available
 }
@@ -80,6 +83,9 @@ func (a availabilityAdapter) Respond(ctx context.Context, request llm.Request, o
 	} else if err := a.runtime.CheckProvider(ctx, a.id); err != nil {
 		backend, _ := a.runtime.ProviderRuntime(a.id)
 		reason := providerFailureReason(err, isDockerSandboxCodex(backend.Provider.Auth))
+		if backend.Provider.Auth.Method == credential.APIKey {
+			return loginResponse(modelcatalog.ProviderName(a.id) + " を利用できません。" + reason.ProviderHint(a.id) + "。確認後は /model refresh を実行してください。"), nil
+		}
 		return loginResponse(modelcatalog.ProviderName(a.id) + " を利用できません。" + reason.ProviderHint(a.id) + "。/login で手順を確認し、ログイン後は /model refresh を実行してください。"), nil
 	}
 	return a.Adapter.Respond(ctx, request, options)

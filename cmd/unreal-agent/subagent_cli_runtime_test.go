@@ -154,3 +154,16 @@ func TestSubagentCommandRuntimeOverrides(t *testing.T) {
 		t.Fatal("invalid effort was not explained", out, err)
 	}
 }
+
+func TestClaudeModelNames(t *testing.T) {
+	for _, model := range []string{"fable", "Opus", "sonnet", "haiku", "claude-fable-5-1", "claude-opus-5-5"} {
+		if !claudeModel(model) {
+			t.Errorf("%q is a Claude model", model)
+		}
+	}
+	for _, model := range []string{"", "gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"} {
+		if claudeModel(model) {
+			t.Errorf("%q is not a Claude model", model)
+		}
+	}
+}

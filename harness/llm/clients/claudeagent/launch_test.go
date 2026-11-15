@@ -2,6 +2,7 @@ package claudeagent
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"os"
 	"path/filepath"
@@ -112,8 +113,8 @@ func TestLaunchKeepsProjectInstructionsNativeAndEnablesOnlyMeasuredTools(t *test
 	}
 }
 
-func TestLaunchToolsLeaveAgentToGPTChildren(t *testing.T) {
-	if got := launchTools(SubagentCLI{Binary: "/opt/unreal/bin/unreal"}); got != enabledTools {
+func TestLaunchToolsAlwaysOfferAgent(t *testing.T) {
+	if got := launchTools(SubagentCLI{Binary: "/opt/unreal/bin/unreal"}); got != enabledTools+",Agent" {
 		t.Fatal(got)
 	}
 	if got := launchTools(SubagentCLI{}); got != enabledTools+",Agent" {
@@ -146,8 +147,21 @@ func TestLaunchDelegationTracksProviderAvailabilityEachTurn(t *testing.T) {
 		args := strings.Split(string(data), "\n")
 		tools := args[slices.Index(args, "--tools")+1]
 		prompt := string(data)
-		if slices.Contains(strings.Split(tools, ","), "Agent") == ready || strings.Contains(prompt, "No GPT children are available") == ready || strings.Contains(prompt, "Templates: lead") != ready {
+		if !slices.Contains(strings.Split(tools, ","), "Agent") || strings.Contains(prompt, "No GPT children are available") == ready || strings.Contains(prompt, "Templates: lead") != ready {
 			t.Fatalf("available=%t tools=%s prompt=%s", ready, tools, prompt)
 		}
+	}
+}
+
+func TestGateKeepsAgentInsideTheTurn(t *testing.T) {
+	var a approver
+	answer := a.gate(t.Context(), hookInput{ToolName: "Agent", ToolInput: jsontext.Value(`{"description":"d","prompt":"p","model":"fable","run_in_background":true}`)})
+	out, _ := answer["hookSpecificOutput"].(map[string]any)
+	input, _ := out["updatedInput"].(map[string]any)
+	if out["permissionDecision"] != "allow" || input["run_in_background"] != false || input["model"] != "fable" {
+		t.Fatal(answer)
+	}
+	if answer := a.gate(t.Context(), hookInput{ToolName: "Agent", ToolInput: jsontext.Value(`{"prompt":"p","run_in_background":false}`)}); len(answer) != 0 {
+		t.Fatal("a foreground Agent call needs no rewrite", answer)
 	}
 }

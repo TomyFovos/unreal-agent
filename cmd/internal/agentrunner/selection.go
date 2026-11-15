@@ -51,7 +51,7 @@ func selectionClient(c RuntimeConfig, s sessionstore.RuntimeSelection, workspace
 		return nil, errors.New("runtime provider configuration mismatch")
 	}
 	selected := backend.Provider
-	if s.Model != selected.Model.ID && s.Provider != "openai-codex" && s.Provider != claudeagent.ProviderID {
+	if s.Model != selected.Model.ID && s.Provider != "openai-codex" && !claudeagent.IsProvider(s.Provider) && s.Provider != "openai" {
 		return nil, errors.New("model switching unavailable for this provider")
 	}
 	selected.Model.ID = s.Model

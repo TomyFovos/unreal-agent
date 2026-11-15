@@ -156,6 +156,7 @@ def convert(
     session_id: str,
     *,
     output_dir: Path | None = None,
+    product: bool = False,
 ) -> Trajectory:
     steps: list[Step] = []
     calls: dict[str, tuple[Step, str]] = {}
@@ -182,11 +183,15 @@ def convert(
         timestamp = item["RecordedAt"]
         extra = {"sequence": sequence}
         if kind == "host_record":
-            if data.get("Version") != 1 or data.get("Kind") not in (
-                "configuration",
-                "stop_complete",
-                "project_instructions",
-                "activity",
+            if data.get("Version") != 1 or (
+                not product
+                and data.get("Kind")
+                not in (
+                    "configuration",
+                    "stop_complete",
+                    "project_instructions",
+                    "activity",
+                )
             ):
                 raise ValueError("Unsupported Host metadata record")
             host_records.append({**extra, "timestamp": timestamp, "data": data})
@@ -251,7 +256,7 @@ def convert(
                 timestamp=timestamp,
                 message="\n\n".join(texts),
                 reasoning_content="\n\n".join(reasoning) or None,
-                model_name=agent.model_name,
+                model_name=response.get("Model") or agent.model_name,
                 tool_calls=tool_calls or None,
                 metrics=Metrics(
                     prompt_tokens=counts["prompt"],
@@ -260,6 +265,7 @@ def convert(
                     extra={
                         "reasoning_tokens": counts["reasoning"],
                         "cache_write_tokens": counts["cache_write"],
+                        "unknown_usage_fields": usage.get("Unknown", []),
                     },
                 ),
                 llm_call_count=1,
@@ -281,7 +287,18 @@ def convert(
                 content = bash_result(data)
             elif name == "ViewImage":
                 content = view_image_result(data, output_dir)
-            elif name in {"Read", "Write", "Edit", "Grep", "Glob"}:
+            elif name in {
+                "Read",
+                "Write",
+                "Edit",
+                "Grep",
+                "Glob",
+                "read",
+                "write",
+                "edit",
+                "grep",
+                "glob",
+            }:
                 content = native_result(data)
             elif name in {"ast_grep", "ast_edit"}:
                 content = ast_result(data)
@@ -289,6 +306,21 @@ def convert(
                 content = lsp_result(data)
             elif name == "DAP":
                 content = dap_result(data)
+            elif product and name == "claude_code":
+                values = [
+                    op.get("State", {}).get("Value", {})
+                    for op in data.get("Operations", [])
+                ]
+                content = data["Status"].get("Error") or "\n".join(
+                    v.get("content", "") for v in values
+                )
+            elif product:
+                content = data["Status"].get("Error") or "\n".join(
+                    op.get("State", {}).get("TerminalResult")
+                    or op.get("State", {}).get("TerminalError")
+                    or json.dumps(op.get("State", {}), ensure_ascii=False)
+                    for op in data.get("Operations", [])
+                )
             elif data["Status"].get("Error") and not data.get("Operations"):
                 content = data["Status"]["Error"]
             else:

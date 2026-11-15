@@ -51,6 +51,7 @@ type projection struct {
 	responses         map[responseKey]bool
 	usage             Usage
 	lastUsage         Usage
+	outputTPS         float64
 	finish            *Finish
 	activity          string
 	runtime           Liveness
@@ -371,6 +372,11 @@ func (m *Model) item(p *projection, item host.HistoryItem) error {
 			addUsage(&p.usage, data.Response.Usage)
 			p.lastUsage = Usage{}
 			addUsage(&p.lastUsage, data.Response.Usage)
+			if data.Response.Generation != nil && data.Response.Generation.Valid() {
+				if rate, known := data.Response.Generation.OutputTPS(); known {
+					p.outputTPS = rate
+				}
+			}
 		}
 		for _, out := range data.Response.Output {
 			if msg, ok := out.Data.(llm.Message); ok && msg.Role == llm.RoleAssistant {
@@ -511,6 +517,7 @@ func (m *Model) base(id session.ID, p *projection, now time.Time) Row {
 	}
 	r.Usage = p.usage
 	r.LastUsage = p.lastUsage
+	r.OutputTPS = p.outputTPS
 	r.Usage.Partial = r.Usage.Partial || p.more || p.resync
 	r.Cursor = p.cursor
 	r.More = p.more

@@ -697,6 +697,11 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 		input[i] = joined(input[i], textLine(strings.Repeat(" ", max(1, l.main-input[i].width()-len(shortHint)))+shortHint, meta)).clip(l.main)
 	}
 	full := l
+	if f.View == ViewChat {
+		// Chat is the conversation alone: use the whole width, not the
+		// 100-column reading width the other views keep.
+		l.text = max(1, l.main-2)
+	}
 	if f.View == ViewSplit {
 		l.rail = max(34, min(44, width*3/10))
 		if width >= 160 {

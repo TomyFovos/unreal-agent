@@ -67,6 +67,7 @@ type Provider struct {
 }
 
 type Request struct {
+	Profile        string `json:"profile"`
 	ProfileID      string `json:"profile_id"`
 	ProfileVersion int    `json:"profile_version"`
 	ModelFamily    string `json:"model_family"`
@@ -103,6 +104,8 @@ type sessionObserver struct {
 	err error
 }
 
+var errVersion = errors.New("version displayed")
+
 func RunMain(
 	ctx context.Context,
 	args []string,
@@ -113,28 +116,41 @@ func RunMain(
 	stderr io.Writer,
 	config Config,
 ) int {
-	err := Run(ctx, args, getenv, environ, input, output, stderr, config)
-	if err == nil {
+	projection := newRunnerProjection(output)
+	err := Run(ctx, args, getenv, environ, input, projection, stderr, config)
+	if errors.Is(err, flag.ErrHelp) || errors.Is(err, errVersion) {
 		return 0
 	}
-	if errors.Is(err, flag.ErrHelp) {
+	drainContext := context.WithoutCancel(ctx)
+	if err != nil {
+		err = errors.Join(err, projection.drainParent(drainContext))
+	}
+	err = errors.Join(err, projection.aggregateChildren(drainContext))
+	err = errors.Join(err, projection.endRemainingChildren(drainContext, context.Cause(ctx) != nil))
+	if err != nil {
+		encoded, encodeErr := json.Marshal(errorEvent{Type: "error", Message: err.Error()})
+		if encodeErr != nil {
+			err = errors.Join(err, encodeErr)
+		} else if _, writeErr := fmt.Fprintf(projection, "%s\n", encoded); writeErr != nil {
+			err = errors.Join(err, writeErr)
+		}
+	}
+	err = errors.Join(err, projection.finish(err != nil))
+	if projection.log != nil {
+		err = errors.Join(err, projection.log.Close())
+	}
+	if err == nil && !projection.parentFailure {
 		return 0
+	}
+	if err != nil {
+		prefix := ""
+		if config.Name != "" {
+			prefix = config.Name + ": "
+		}
+		fmt.Fprintf(stderr, "%s%v\n", prefix, err)
 	}
 	if context.Cause(ctx) != nil {
 		return 130
-	}
-	encoded, encodeErr := json.Marshal(errorEvent{Type: "error", Message: err.Error()})
-	if encodeErr != nil {
-		err = errors.Join(err, fmt.Errorf("encode error event: %w", encodeErr))
-	} else if _, writeErr := fmt.Fprintf(output, "%s\n", encoded); writeErr != nil {
-		err = errors.Join(err, fmt.Errorf("write error event: %w", writeErr))
-	}
-	prefix := ""
-	if config.Name != "" {
-		prefix = config.Name + ": "
-	}
-	if _, writeErr := fmt.Fprintf(stderr, "%s%v\n", prefix, err); writeErr != nil {
-		return 1
 	}
 	return 1
 }
@@ -170,6 +186,8 @@ func Run(
 	workspaceDirectory := flags.String("workspace", ".", "agent workspace and Bash working directory")
 	logDirectory := flags.String("log-directory", "", "optional session JSONL log directory; unset writes only to stdout")
 	toolHeartbeatInterval := flags.Duration("tool-heartbeat-interval", 10*time.Minute, "tool-wait heartbeat interval (0 disables)")
+	profileFlag := flags.String("profile", "", "runner composition: conservative or development")
+	showVersion := flags.Bool("version", false, "print the source revision")
 	if err := flags.Parse(args); err != nil {
 		if usageErr != nil {
 			if errors.Is(err, flag.ErrHelp) {
@@ -178,6 +196,12 @@ func Run(
 			return errors.Join(err, usageErr)
 		}
 		return err
+	}
+	if *showVersion {
+		if _, err := fmt.Fprintln(output, config.Version); err != nil {
+			return err
+		}
+		return errVersion
 	}
 	if flags.NArg() > 1 {
 		return errors.New("expected at most one positional JSON request")
@@ -203,6 +227,9 @@ func Run(
 	parsed, newTools, err := parseRequestContext(ctx, input, config.ParseRequest)
 	if err != nil {
 		return err
+	}
+	if parsed.Profile == "" {
+		parsed.Profile = strings.TrimSpace(*profileFlag)
 	}
 	if newTools == nil {
 		return errors.New("request parser returned no tool factory")
@@ -268,36 +295,48 @@ func Run(
 			)
 		}
 	}
-	client, resolvedProvider, err := buildSessionClient(selected, model, apiKey, configuredBaseURL, maxAttempts, getenv)
-	if err != nil {
-		return fmt.Errorf("create %s client: %w", selected.Name, err)
+	sessionID := session.ID(uuid.New().String())
+	if parsed.SessionID != nil {
+		sessionID = session.ID(strings.TrimSpace(*parsed.SessionID))
 	}
-	defer func() {
-		if err := client.Close(); err != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("close %s client: %w", selected.Name, err))
+	httpClient, err := runnerHTTPClient(getenv, string(sessionID), config.Version)
+	if err != nil {
+		return err
+	}
+	var client Client
+	var resolvedProvider provider.Selection
+	if parsed.Profile != "development" {
+		client, resolvedProvider, err = buildSessionClient(selected, model, apiKey, configuredBaseURL, maxAttempts, httpClient, getenv)
+		if err != nil {
+			return fmt.Errorf("create %s client: %w", selected.Name, err)
 		}
-	}()
+		defer func() {
+			if err := client.Close(); err != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("close %s client: %w", selected.Name, err))
+			}
+		}()
+	}
 
 	storeDirectory, err := resolveSessionDirectory(*sessionDirectory, getenv)
 	if err != nil {
 		return fmt.Errorf("resolve session directory: %w", err)
 	}
-	sessionID := session.ID(uuid.New().String())
-	if parsed.SessionID != nil {
-		sessionID = session.ID(strings.TrimSpace(*parsed.SessionID))
-	}
 	observedOutput := output
+	projection, structured := output.(*runnerProjection)
+	if structured {
+		projection.directory, projection.workspace, projection.parent = storeDirectory, workspace, sessionID
+	}
 	if directory := strings.TrimSpace(*logDirectory); directory != "" {
 		logFile, err := openDatetimeLog(directory, time.Now())
 		if err != nil {
 			return err
 		}
-		defer func() {
-			if err := logFile.Close(); err != nil {
-				runErr = errors.Join(runErr, fmt.Errorf("close session log: %w", err))
-			}
-		}()
-		observedOutput = io.MultiWriter(logFile, output)
+		if structured {
+			projection.output, projection.log = io.MultiWriter(logFile, projection.output), logFile
+		} else {
+			defer func() { runErr = errors.Join(runErr, logFile.Close()) }()
+			observedOutput = io.MultiWriter(logFile, output)
+		}
 	}
 
 	runContext, cancel := context.WithCancel(ctx)
@@ -305,6 +344,9 @@ func Run(
 	// The legacy sandbox runner explicitly preserves its unrestricted execution contract.
 	executionPolicy := permission.Unrestricted()
 	runContext = permission.WithPolicy(runContext, executionPolicy)
+	if parsed.Profile == "development" {
+		return runDevelopment(runContext, parsed, messages, newTools, selected, model, apiKey, configuredBaseURL, maxAttempts, httpClient, getenv, environ, config, storeDirectory, workspace, sessionID, observedOutput, *toolHeartbeatInterval)
+	}
 	operationDirectory := filepath.Join(storeDirectory, "operations", string(sessionID))
 	if err := os.MkdirAll(operationDirectory, 0o700); err != nil {
 		return fmt.Errorf("create operation directory: %w", err)
@@ -371,36 +413,10 @@ func Run(
 		}
 	}
 
-	var initialInputs []inbox.Input
-	settingsPayload, err := json.Marshal(inbox.ControlMessage{
-		Mode: inbox.UpdateSettings,
-		Parameters: inbox.Settings{
-			ReasoningEffort: reasoningEffort(parsed.ThinkingLevel),
-		},
-	})
+	initialInputs, err := requestInputs(parsed, messages)
 	if err != nil {
-		return fmt.Errorf("encode settings: %w", err)
+		return err
 	}
-	initialInputs = append(initialInputs, inbox.Input{ID: inbox.ID(uuid.New().String()), Kind: inbox.InputControl, Payload: settingsPayload})
-	for index, message := range messages {
-		payload, err := json.Marshal(message.Content)
-		if err != nil {
-			return fmt.Errorf("encode message %d: %w", index, err)
-		}
-		var messageID inbox.ID
-		if message.MessageID != nil {
-			messageID = inbox.ID(strings.TrimSpace(*message.MessageID))
-		} else {
-			messageID = inbox.ID(uuid.New().String())
-		}
-		initialInputs = append(initialInputs, inbox.Input{ID: messageID, Kind: inbox.InputExternal, Payload: payload})
-	}
-
-	stopPayload, err := json.Marshal(inbox.ControlMessage{Mode: inbox.StopWhenIdle})
-	if err != nil {
-		return fmt.Errorf("encode stop request: %w", err)
-	}
-	initialInputs = append(initialInputs, inbox.Input{ID: inbox.ID(uuid.New().String()), Kind: inbox.InputControl, Payload: stopPayload})
 
 	builder := contextbuilder.NewBuilder(registry.Skills()...)
 	builder.SetModel(llm.Model{
@@ -447,7 +463,7 @@ func Run(
 			}
 			return err
 		}
-		return host.Runtime{InterruptedInput: configuredTools.InterruptedInput, ContextEngine: engine, Builder: builder, LLM: client, Tools: registry, Close: closeRuntime, Operations: operation.NewLocalOperationManager(sessionContext, configuredTools.RemoteJobs...)}, nil
+		return host.Runtime{InterruptedInput: configuredTools.InterruptedInput, CompletedInput: configuredTools.CompletedInput, ContextEngine: engine, Builder: builder, LLM: client, Tools: registry, Close: closeRuntime, Operations: operation.NewLocalOperationManager(sessionContext, configuredTools.RemoteJobs...)}, nil
 	}})
 	if err != nil {
 		return err
@@ -507,13 +523,25 @@ func writeHostSession(ctx context.Context, current *host.Session, output io.Writ
 			sub.Cancel()
 			return err
 		}
-		for event := range sub.Events {
+	events:
+		for {
+			var event host.Event
+			select {
+			case <-ctx.Done():
+				sub.Cancel()
+				return ctx.Err()
+			case next, ok := <-sub.Events:
+				if !ok {
+					break events
+				}
+				event = next
+			}
 			if err = drain(); err != nil {
 				sub.Cancel()
 				return err
 			}
 			if event.Kind == "gap" {
-				break
+				break events
 			}
 			if err = context.Cause(ctx); err != nil {
 				sub.Cancel()
@@ -636,6 +664,12 @@ func loadDotEnv(path string, parent func(string) string) (func(string) string, e
 		}
 	}
 	return func(name string) string {
+		if name == "SANDBOX_EGRESS_PROXY" {
+			if value, present := values[name]; present {
+				return value
+			}
+			return parent(name)
+		}
 		if value := parent(name); value != "" && name != "SANDBOX_EGRESS_PROXY" {
 			return value
 		}
@@ -644,14 +678,17 @@ func loadDotEnv(path string, parent func(string) string) (func(string) string, e
 }
 
 func validateRequest(parsed Request) ([]RequestMessage, error) {
+	if parsed.Profile != "" && parsed.Profile != "conservative" && parsed.Profile != "development" {
+		return nil, errors.New("profile must be one of: conservative, development")
+	}
 	if parsed.SessionID != nil && strings.TrimSpace(*parsed.SessionID) == "" {
 		return nil, errors.New("session_id must not be empty")
 	}
 	if parsed.ThinkingLevel != "" {
 		switch parsed.ThinkingLevel {
-		case "low", "medium", "high", "xhigh", "max", "ultra":
+		case "none", "low", "medium", "high", "xhigh", "max", "ultra":
 		default:
-			return nil, errors.New("thinking_level must be one of: low, medium, high, xhigh, max")
+			return nil, errors.New("thinking_level must be one of: none, low, medium, high, xhigh, max")
 		}
 	}
 	for _, name := range append(parsed.ExtraAllowedTools, parsed.DisallowedTools...) {
@@ -687,6 +724,8 @@ func validateRequest(parsed Request) ([]RequestMessage, error) {
 
 func reasoningEffort(level string) llm.ReasoningEffort {
 	switch level {
+	case "none":
+		return ""
 	case "low":
 		return llm.ReasoningEffortLow
 	case "medium":
@@ -787,4 +826,41 @@ func parseRequestContext(ctx context.Context, input io.Reader, parse func(io.Rea
 	case parsed := <-results:
 		return parsed.request, parsed.tools, parsed.err
 	}
+}
+
+func requestInputs(parsed Request, messages []RequestMessage) ([]inbox.Input, error) {
+	var initialInputs []inbox.Input
+	if reasoningEffort(parsed.ThinkingLevel) != "" {
+		settingsPayload, err := json.Marshal(inbox.ControlMessage{
+			Mode: inbox.UpdateSettings,
+			Parameters: inbox.Settings{
+				ReasoningEffort: reasoningEffort(parsed.ThinkingLevel),
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("encode settings: %w", err)
+		}
+		initialInputs = append(initialInputs, inbox.Input{ID: inbox.ID(uuid.New().String()), Kind: inbox.InputControl, Payload: settingsPayload})
+	}
+	for index, message := range messages {
+		payload, err := json.Marshal(message.Content)
+		if err != nil {
+			return nil, fmt.Errorf("encode message %d: %w", index, err)
+		}
+		var messageID inbox.ID
+		if message.MessageID != nil {
+			messageID = inbox.ID(strings.TrimSpace(*message.MessageID))
+		} else {
+			messageID = inbox.ID(uuid.New().String())
+		}
+		initialInputs = append(initialInputs, inbox.Input{ID: messageID, Kind: inbox.InputExternal, Payload: payload})
+	}
+
+	stopPayload, err := json.Marshal(inbox.ControlMessage{Mode: inbox.StopWhenIdle})
+	if err != nil {
+		return nil, fmt.Errorf("encode stop request: %w", err)
+	}
+	initialInputs = append(initialInputs, inbox.Input{ID: inbox.ID(uuid.New().String()), Kind: inbox.InputControl, Payload: stopPayload})
+
+	return initialInputs, nil
 }

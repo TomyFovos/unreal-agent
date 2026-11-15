@@ -150,3 +150,15 @@ func TestAnalysisViewsResponsiveSanitizedScrolledAndCurrentHeader(t *testing.T) 
 		t.Fatal("model did not yield space on tiny terminal", header)
 	}
 }
+
+func TestOptionalEffortChoiceHasReadableLabelAndKeepsWireValue(t *testing.T) {
+	catalog := modelcatalog.Catalog{Available: true, Models: []modelcatalog.Model{{ID: "gpt-test", Name: "GPT test", Efforts: []llm.ReasoningEffort{"", "low", "max"}}}}
+	picker := modelPicker(catalog, nil).effort(nil)
+	if len(picker.Options) != 3 || picker.Options[0] != "No effort parameter" || picker.selectedEffort() != "" {
+		t.Fatal("optional effort not displayed or preserved", picker.Options, picker.selectedEffort())
+	}
+	picker.Selection = 2
+	if picker.selectedEffort() != "max" {
+		t.Fatal("display label changed effort sent to provider")
+	}
+}

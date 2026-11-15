@@ -77,6 +77,9 @@ func runSubagentCLI(ctx context.Context, args []string, stdin io.Reader, out io.
 		if rest, err := parseAll(flags, args[1:]); err != nil || len(rest) != 0 {
 			return errors.New(subagentUsage)
 		}
+		if claudeModel(*model) {
+			return fmt.Errorf("%q is a Claude model; subagent start runs its template's provider (ChatGPT). For a Claude model, use Claude Code's Agent tool with that model", *model)
+		}
 		var runtime *subagent.RuntimeRequest
 		if *model != "" || *effort != "" {
 			runtime = &subagent.RuntimeRequest{Model: *model, Effort: llm.ReasoningEffort(*effort).Normalize()}
@@ -480,7 +483,11 @@ func claudeSubagents(templates map[string]subagent.Template, socket string) (cla
 		return claudeagent.SubagentCLI{}, err
 	}
 	names := slices.Sorted(maps.Keys(templates))
-	return claudeagent.SubagentCLI{Binary: binary, Socket: socket, Templates: names}, nil
+	cli := claudeagent.SubagentCLI{Binary: binary, Socket: socket, Templates: names}
+	if lead, ok := templates["lead"]; ok && lead.Default != nil {
+		cli.LeadModel, cli.LeadEffort = lead.Default.Model, string(lead.Default.Effort)
+	}
+	return cli, nil
 }
 
 func subagentCLIPath(binary, home string) string {
@@ -494,4 +501,15 @@ func subagentCLIPath(binary, home string) string {
 		}
 	}
 	return binary
+}
+
+// claudeModel recognizes Claude model names and aliases, which no template's
+// provider (ChatGPT) serves; Claude models run through Claude Code's Agent tool.
+func claudeModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	switch model {
+	case "fable", "opus", "sonnet", "haiku":
+		return true
+	}
+	return strings.HasPrefix(model, "claude-") || strings.HasPrefix(model, "claude.")
 }

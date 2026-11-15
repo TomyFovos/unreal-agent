@@ -67,6 +67,7 @@ type Plan struct {
 type ChildConfig struct {
 	Version                uint32
 	ParentID               session.ID
+	Template               string `json:",omitzero"`
 	ChildID                session.ID
 	OperationID            operation.ID
 	SessionDirectory       string

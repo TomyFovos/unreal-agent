@@ -20,22 +20,6 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/tool/observed"
 )
 
-type endedAdapter struct{ entered, release chan struct{} }
-
-func (a *endedAdapter) Respond(ctx context.Context, _ llm.Request, _ llm.RequestOptions) (llm.Response, error) {
-	select {
-	case <-a.entered:
-	default:
-		close(a.entered)
-		select {
-		case <-a.release:
-		case <-ctx.Done():
-			return llm.Response{}, ctx.Err()
-		}
-	}
-	return llm.Response{}, nil
-}
-
 type endReportAdapter func(context.Context, llm.Request, llm.RequestOptions) (llm.Response, error)
 
 func (f endReportAdapter) Respond(ctx context.Context, request llm.Request, opt llm.RequestOptions) (llm.Response, error) {
@@ -43,7 +27,7 @@ func (f endReportAdapter) Respond(ctx context.Context, request llm.Request, opt 
 }
 func (endReportAdapter) RequiresFullToolBatch() bool { return true }
 
-func TestNotifyEndedSuppressesReadShowAndWaitReports(t *testing.T) {
+func TestCompletedInputSuppressesReadShowAndWaitReports(t *testing.T) {
 	for _, transport := range []string{"claude_code", "shell"} {
 		for _, action := range []string{"show", "wait", "unread", "running_show", "other_handle_prefix"} {
 			t.Run(transport+"/"+action, func(t *testing.T) {
@@ -118,99 +102,34 @@ func TestNotifyEndedSuppressesReadShowAndWaitReports(t *testing.T) {
 					view, _ := s.Inspect(0, 256)
 					t.Fatalf("parentSaw=%v, want %v; operations=%+v; history=%+v", got, saw, view.Operations, view.History.Items)
 				}
-				m.notifyEnded(Plan{ParentID: s.ID}, handle, operation.StatusCompleted, operation.RemoteJobState{})
+				spec, err := NewSpec(Plan{Version: 1, Action: "start", ParentID: s.ID, Template: "worker", Configuration: &Template{Workspace: workspace, Runtime: []byte(`{}`)}, Text: "task", Notify: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				op := operation.Operation{ID: handle, Type: spec.Type, Version: spec.Version, State: spec.State, MaxOutputLength: spec.MaxOutputLength, Status: operation.StatusReady}
+				state, _ := operation.DecodeRemoteJobState(op)
+				step, err := operation.UpdateRemoteJob(op, state, operation.StatusCompleted)
+				if err != nil {
+					t.Fatal(err)
+				}
+				op = *step.Operation
 				close(release)
-				m.workers.Wait()
-				view, _ := s.Inspect(0, 256)
-				count := 0
-				for _, item := range view.History.Items {
-					if input, ok := item.Data.(inbox.Input); ok && input.Kind == inbox.InputPeer {
-						peer, _ := input.DecodePeerMessage()
-						if peer.Kind == "ended" {
-							count++
-						}
+				// The owner invokes this after the turn ends. The callback
+				// retains the existing canonical show/wait deduplication.
+				input, err := m.CompletedInput(op)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if (input == nil) != saw {
+					t.Fatalf("completion notice=%+v, already read=%v", input, saw)
+				}
+				if input != nil {
+					peer, err := input.DecodePeerMessage()
+					if err != nil || peer.Kind != "ended" || peer.Handle != string(handle) || !strings.Contains(peer.Text, "ended: completed") {
+						t.Fatal(peer, err)
 					}
 				}
-				want := 1
-				if saw {
-					want = 0
-				}
-				if count != want {
-					t.Fatalf("ended notices=%d, want %d", count, want)
-				}
 			})
-		}
-	}
-}
-
-func TestNotifyEndedBatchesChildrenWhileParentBusy(t *testing.T) {
-	model := &endedAdapter{entered: make(chan struct{}), release: make(chan struct{})}
-	h, err := host.New(t.Context(), host.Config{Directory: t.TempDir(), Build: func(ctx context.Context, _ session.ID) (host.Runtime, error) {
-		return host.Runtime{Builder: contextbuilder.NewBuilder(), LLM: model, Tools: tool.NewRegistry(tool.StaticTranslators{}), Operations: operation.NewLocalOperationManager(ctx)}, nil
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer h.Close()
-	s, err := h.Create(t.Context(), host.Options{ID: "parent", Policy: permission.Unrestricted()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, _ := json.Marshal("working")
-	if _, err = s.Submit(t.Context(), s.Generation, inbox.Input{ID: "work", Kind: inbox.InputExternal, Payload: data}); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-model.entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("parent did not start")
-	}
-	m, err := NewManager(t.Context(), Config{Owner: s})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer m.Close()
-	for _, id := range []operation.ID{"child-one", "child-two"} {
-		m.notifyEnded(Plan{ParentID: s.ID}, id, operation.StatusCompleted, operation.RemoteJobState{TerminalError: "detail " + string(id)})
-	}
-	close(model.release)
-	deadline := time.After(5 * time.Second)
-	for {
-		view, err := s.Inspect(0, 256)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var messages []inbox.PeerMessage
-		for _, item := range view.History.Items {
-			if input, ok := item.Data.(inbox.Input); ok && input.Kind == inbox.InputPeer {
-				peer, _ := input.DecodePeerMessage()
-				if peer.Kind == "ended" {
-					messages = append(messages, peer)
-				}
-			}
-		}
-		if len(messages) > 0 {
-			if len(messages) != 1 || !strings.Contains(messages[0].Text, "Child child-one ended: completed") || !strings.Contains(messages[0].Text, "Child child-two ended: completed") || !strings.Contains(messages[0].Text, "detail child-two") {
-				t.Fatalf("ended messages = %+v", messages)
-			}
-			// Join the sender before checking that no second notification followed.
-			m.Close()
-			view, _ = s.Inspect(0, 256)
-			count := 0
-			for _, item := range view.History.Items {
-				if input, ok := item.Data.(inbox.Input); ok && input.Kind == inbox.InputPeer {
-					count++
-				}
-			}
-			if count != 1 {
-				t.Fatalf("peer messages = %d, want 1", count)
-			}
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatal("no completion notification")
-		case <-time.After(time.Millisecond):
 		}
 	}
 }

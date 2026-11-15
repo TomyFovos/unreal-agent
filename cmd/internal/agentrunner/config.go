@@ -16,6 +16,7 @@ type Config struct {
 	// Context selects the rebuildable strategy; zero uses bounded v1 defaults.
 	Context      contextengine.Config
 	Name         string
+	Version      string
 	Providers    []Provider
 	ParseRequest func(io.Reader) (Request, ToolFactory, error)
 }
@@ -34,6 +35,7 @@ type ToolConfig struct {
 
 type Tools struct {
 	InterruptedInput func(operation.Operation) (*inbox.Input, error)
+	CompletedInput   func(operation.Operation) (*inbox.Input, error)
 	Registry         tool.Registry
 	RemoteJobs       []operation.RemoteJobHandler
 	Close            func() error

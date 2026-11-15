@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 )
 
@@ -41,7 +42,7 @@ func (c *compaction) handle(f frame) {
 
 func (c *Client) lastContextTokens(session string, opt llm.RequestOptions) int64 {
 	if opt.ConversationTokens != nil {
-		return opt.ConversationTokens[ProviderID]
+		return opt.ConversationTokens[c.providerID()]
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -135,6 +136,15 @@ func (c *Client) compact(ctx context.Context, request llm.Request, opt llm.Reque
 }
 
 func (c *Client) recordConversation(ctx context.Context, opt llm.RequestOptions, session string, record llm.ConversationRecord) {
+	record.Provider = c.providerID()
+	if record.Usage != nil {
+		u := *record.Usage
+		u.AuthMethod = string(credential.OAuth)
+		if c.providerID() == APIProviderID {
+			u.AuthMethod = string(credential.APIKey)
+		}
+		record.Usage = &u
+	}
 	c.mu.Lock()
 	delete(c.contextTokens, session)
 	if record.InputKnown {

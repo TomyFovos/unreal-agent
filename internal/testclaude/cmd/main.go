@@ -45,6 +45,20 @@ type call struct {
 	InputAt                  time.Time
 }
 
+// Invocation fixtures record only the presence of API authentication, never
+// key values, including fake ones. Production always owns source selection.
+func safeEnvironment() []string {
+	env := os.Environ()
+	for i, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY":
+			env[i] = key + "=[redacted]"
+		}
+	}
+	return env
+}
+
 const help = "--safe-mode --restricted --setting-sources --settings --tools --disallowedTools --allowedTools --strict-mcp-config --mcp-config --disable-slash-commands --no-chrome --no-session-persistence --model --effort --input-format --output-format --verbose --include-partial-messages --permission-prompts --json-schema"
 const stream = `{"type":"system","subtype":"init","model":"claude-configured-a","tools":[],"permissionMode":"default","mcp_servers":[],"agents":["synthetic-catalog-agent"],"skills":["synthetic-catalog-skill"],"plugins":[{"name":"plugin-catalog-sensitive","path":"/plugin-catalog-sensitive","version":"version-catalog-sensitive"},{"name":"plugin-2-catalog-sensitive","path":"/plugin-2-catalog-sensitive"}]}
 {"type":"system","subtype":"status","status":"requesting","permissionMode":"default"}
@@ -90,7 +104,7 @@ func main() {
 		fmt.Println(c.Doctor)
 		return
 	case slices.Contains(args, "auth"):
-		entry := call{Arguments: args, Environment: os.Environ(), PID: os.Getpid()}
+		entry := call{Arguments: args, Environment: safeEnvironment(), PID: os.Getpid()}
 		entry.Directory, _ = os.Getwd()
 		log, err := os.OpenFile(filepath.Join(dir, "auth-calls.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 		if err != nil {
@@ -162,7 +176,7 @@ func main() {
 		_ = os.Setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=managed-telemetry-credential-sensitive")
 		_ = os.Setenv("OTEL_LOG_TOOL_DETAILS", "1")
 	}
-	entry := call{Arguments: args, Environment: os.Environ(), PID: os.Getpid()}
+	entry := call{Arguments: args, Environment: safeEnvironment(), PID: os.Getpid()}
 	entry.Directory, _ = os.Getwd()
 	input, _ := io.ReadAll(io.LimitReader(os.Stdin, 8<<20+1))
 	entry.Input = string(input)
@@ -227,7 +241,7 @@ func main() {
 }
 
 func catalog(dir, path string, args []string, c configuration) {
-	entry := call{Arguments: args, Environment: os.Environ(), PID: os.Getpid()}
+	entry := call{Arguments: args, Environment: safeEnvironment(), PID: os.Getpid()}
 	entry.Directory, _ = os.Getwd()
 	var child *exec.Cmd
 	if c.CatalogChild {

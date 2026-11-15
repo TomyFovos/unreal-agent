@@ -182,7 +182,11 @@ func (p *Picker) effort(current *sessionstore.RuntimeSelection) *Picker {
 		n.Hint = "catalog efforts unsupported by this harness are omitted"
 	}
 	for i, e := range m.Efforts {
-		n.Options = append(n.Options, string(e))
+		label := string(e)
+		if label == "" {
+			label = "No effort parameter"
+		}
+		n.Options = append(n.Options, label)
 		if e == m.DefaultEffort {
 			n.Selection = i
 		}

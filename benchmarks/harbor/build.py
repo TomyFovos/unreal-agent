@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import runpy
 import subprocess
 import tarfile
 from contextlib import ExitStack
@@ -50,9 +51,42 @@ def build(revision: str, output: Path, arch: str, runner: str) -> None:
             env={**os.environ, "GOOS": "linux", "GOARCH": arch, "CGO_ENABLED": cgo},
             check=True,
         )
+        host_binary = source / "unreal-agent"
+        subprocess.run(
+            [
+                "go",
+                "build",
+                "-trimpath",
+                "-buildvcs=false",
+                *build_flags,
+                "-o",
+                str(host_binary),
+                "./cmd/unreal-agent",
+            ],
+            cwd=source,
+            env={**os.environ, "GOOS": "linux", "GOARCH": arch, "CGO_ENABLED": cgo},
+            check=True,
+        )
+        assets = {
+            "unreal-agent": host_binary.read_bytes(),
+            "claude-install.py": (
+                source / "harness/llm/clients/claudeagent/install.py"
+            ).read_bytes(),
+        }
+        pins = runpy.run_path(
+            str(source / "harness/llm/clients/claudeagent/install.py")
+        )
         data = binary.read_bytes()
         manifest = {
+            "runtime": {
+                "node": pins["NODE_VERSION"],
+                "claude_code": pins["CLAUDE_VERSION"],
+            },
             "revision": commit,
+            "files": {
+                name: hashlib.sha256(value).hexdigest()
+                for name, value in assets.items()
+            },
             "runner": runner,
             "sha256": hashlib.sha256(data).hexdigest(),
             "goos": "linux",
@@ -63,6 +97,9 @@ def build(revision: str, output: Path, arch: str, runner: str) -> None:
         output.mkdir(parents=True)
         (output / "unreal-agent-runner").write_bytes(data)
         (output / "unreal-agent-runner").chmod(0o755)
+        for name, value in assets.items():
+            (output / name).write_bytes(value)
+        (output / "unreal-agent").chmod(0o755)
         (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"Built {commit} ({manifest['sha256']}) in {output}")
 

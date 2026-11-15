@@ -153,14 +153,7 @@ func TestRunContinuesAfterUnavailableToolCall(t *testing.T) {
 				t.Fatalf("corrective request omitted tool error: %#v", corrective.Input)
 			}
 			statuses := 0
-			for line := range strings.SplitSeq(stdout.String(), "\n") {
-				if line == "" {
-					continue
-				}
-				var item sessionstore.Item
-				if err := json.Unmarshal([]byte(line), &item); err != nil {
-					t.Fatal(err)
-				}
+			for _, item := range decodeHostLogItems(t, stdout.Bytes()) {
 				if item.Kind == sessionstore.ItemToolCallStatus {
 					status := item.Data.(sessionstore.ToolCallStatus)
 					if status.CallID != "unavailable-call" || status.Status.Error != wantError ||

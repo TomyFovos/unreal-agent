@@ -45,6 +45,7 @@ type modelReply struct {
 	Capabilities map[string]modelcatalog.Capabilities `json:",omitzero"`
 }
 type modelUI struct {
+	apiReads   map[string]func(context.Context, bool) (modelcatalog.Catalog, error)
 	rediscover func(context.Context) error
 	supported  []modelcatalog.Provider
 	binding    *launcherHostBinding
@@ -97,6 +98,22 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			out.Error = "session_unavailable"
 		} else {
 			if peek.Action == "child.start" {
+				templates := h.templates
+				if h.runtime.BuiltinSubagents && q.ChildRuntime != nil && q.ChildRuntime.Provider == "" {
+					templates = make(map[string]subagent.Template, len(h.templates))
+					for name, t := range h.templates {
+						templates[name] = t
+					}
+					if t, ok := templates[q.Template]; ok {
+						var err error
+						templates[q.Template], err = builtinGPTTemplate(h.runtime, t, builtinGPTProvider(s))
+						if err != nil {
+							out.Error = "provider_unavailable"
+							h.writeReply(w, out)
+							return
+						}
+					}
+				}
 				resolve := childRuntimeResolver(h.runtime)
 				if len(h.runtime.Backends) == 0 && h.runtime.Discovered == nil {
 					resolve = nil
@@ -104,7 +121,7 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// The resolver bounds the start by the Session's own capability;
 				// the gateway's read-only baseline would only narrow that, and the
 				// child then follows the Session's mode itself.
-				receipt, e := subagent.StartChild(r.Context(), s, q.Generation, q.InputID, q.Template, q.Task, h.templates, q.ChildRuntime, resolve)
+				receipt, e := subagent.StartChild(r.Context(), s, q.Generation, q.InputID, q.Template, q.Task, templates, q.ChildRuntime, resolve)
 				if e != nil {
 					out.Error = "child_start_failed"
 					var re *subagent.RuntimeError

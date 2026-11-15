@@ -37,6 +37,17 @@ func TestChildStartRecordsResolvedRuntimeInParent(t *testing.T) {
 		t.Fatal(err)
 	}
 	op := awaitChild(t, parent, true)
+	plan, err := sub.DecodePlan(op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := sub.ReadChild(t.Context(), dir, plan.ChildID, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.Configuration == nil || child.Configuration.Template != "worker-test" {
+		t.Fatal("child creation lost its template", child.Configuration)
+	}
 	v, err := parent.Inspect(0, 256)
 	if err != nil {
 		t.Fatal(err)

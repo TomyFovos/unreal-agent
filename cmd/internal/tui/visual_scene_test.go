@@ -154,7 +154,7 @@ func TestVisualWorkPaneFrames(t *testing.T) {
 		header := sgrRE.ReplaceAllString(f.Lines[0], "")
 		band := sgrRE.ReplaceAllString(f.Lines[size[1]-5], "")
 		gauge := sgrRE.ReplaceAllString(f.Lines[size[1]-1], "")
-		if !strings.Contains(header, "裏で作業中 子8") || !strings.Contains(band, "承認待ち 1件") || !strings.Contains(band, "+1") || !strings.Contains(gauge, "文脈") || !strings.Contains(gauge, "394k (39%)") || !strings.Contains(gauge, "~69.0 tok/s") {
+		if !strings.Contains(header, "裏で作業中 子8") || !strings.Contains(band, "承認待ち 1件") || !strings.Contains(band, "+1") || !strings.Contains(gauge, "コンテキスト") || !strings.Contains(gauge, "394k (39%)") || !strings.Contains(gauge, "~69.0 tok/s") {
 			t.Fatal("scene header/band/gauge missing", size, header, band, gauge)
 		}
 		if size[0] >= 120 && (!strings.Contains(gauge, "98.00%") || strings.Contains(gauge, "累計") || !strings.Contains(header, "Claude Opus 5.5 · max")) {

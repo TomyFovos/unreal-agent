@@ -14,6 +14,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openai"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openaicodex"
 	"github.com/unreallabsai/unreal-agent/harness/llm/responsesapi"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
@@ -261,10 +262,12 @@ func (a *adapter) Respond(ctx context.Context, req llm.Request, opt llm.RequestO
 		return llm.Response{}, normalize(err)
 	}
 	defer client.Close()
+	opt = a.usageOptions(opt)
 	response, err := client.Respond(ctx, req, opt)
 	if err != nil {
 		return llm.Response{}, normalize(err)
 	}
+	response.Usage.AuthMethod = string(a.config.Selection.Auth.Method)
 	// Provider failure messages may echo credential/header/request data. Keep codes
 	// from a closed vocabulary at the public adapter boundary.
 	if llm.IsContextOverflow(nil, response) {
@@ -273,6 +276,55 @@ func (a *adapter) Respond(ctx context.Context, req llm.Request, opt llm.RequestO
 		response.Failure = &llm.Failure{Code: "provider_failure", Message: "provider reported a failure"}
 	}
 	return response, nil
+}
+
+func (a *adapter) usageOptions(opt llm.RequestOptions) llm.RequestOptions {
+	// Background work belongs to this selected adapter as well as the Host.
+	// Switching connections closes it before another connection can take over.
+	if start := opt.StartBackground; start != nil && a.processes != nil {
+		opt.StartBackground = func(work func(context.Context)) bool {
+			selected, release, err := a.processes.begin(context.Background())
+			if err != nil {
+				return false
+			}
+			accepted := start(func(owner context.Context) {
+				defer release()
+				ctx, cancel := context.WithCancel(owner)
+				defer cancel()
+				stop := context.AfterFunc(selected, cancel)
+				defer stop()
+				if selected.Err() != nil {
+					cancel()
+				}
+				work(ctx)
+			})
+			if !accepted {
+				release()
+			}
+			return accepted
+		}
+	}
+	method := string(a.config.Selection.Auth.Method)
+	if tools := opt.Tools; tools != nil {
+		opt.Tools = func(ctx context.Context, response llm.Response) ([]llm.ToolOutcome, error) {
+			response.Usage.AuthMethod = method
+			return tools(ctx, response)
+		}
+	}
+	if record := opt.RecordActivity; record != nil {
+		opt.RecordActivity = func(ctx context.Context, activity llm.ActivityRecord) error {
+			if activity.Provider != "" {
+				activity.Provider = a.config.Selection.Provider
+			}
+			if activity.Usage != nil {
+				u := *activity.Usage
+				u.AuthMethod = method
+				activity.Usage = &u
+			}
+			return record(ctx, activity)
+		}
+	}
+	return opt
 }
 
 func (a *adapter) requestClient(ctx context.Context, req llm.Request) (Client, error) {
@@ -314,7 +366,7 @@ func (a *adapter) Idle(ctx context.Context, req llm.Request, opt llm.RequestOpti
 	}
 	defer client.Close()
 	if idle, ok := client.(llm.IdleAdapter); ok {
-		idle.Idle(ctx, req, opt)
+		idle.Idle(ctx, req, a.usageOptions(opt))
 	}
 }
 
@@ -359,6 +411,10 @@ func normalize(err error) error {
 	}
 	if errors.As(err, &ce) {
 		return ce
+	}
+	var effort *openai.EffortError
+	if errors.As(err, &effort) {
+		return effort
 	}
 	var pe *Error
 	if errors.As(err, &pe) {

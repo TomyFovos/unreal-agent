@@ -20,15 +20,16 @@ import (
 )
 
 type launchOptions struct {
-	config, state, sessions, socket, credentials, codexFile string
-	id                                                      session.ID
-	timeout                                                 time.Duration
-	help                                                    bool
-	normal                                                  bool
-	bootstrapDocker                                         bool
-	bootstrapAuto                                           bool
-	bootstrapClaude                                         string
-	bootstrapCodexDisabled, bootstrapClaudeDisabled         bool
+	openaiKeyFile, anthropicKeyFile, openaiKeyEnv, anthropicKeyEnv string
+	config, state, sessions, socket, credentials, codexFile        string
+	id                                                             session.ID
+	timeout                                                        time.Duration
+	help                                                           bool
+	normal                                                         bool
+	bootstrapDocker                                                bool
+	bootstrapAuto                                                  bool
+	bootstrapClaude                                                string
+	bootstrapCodexDisabled, bootstrapClaudeDisabled                bool
 }
 
 // Dependency hooks are local composition, not Host or gateway state.
@@ -169,6 +170,7 @@ func parseLaunchOptions(args []string, output io.Writer, getenv func(string) str
 	flags.BoolVar(&o.bootstrapDocker, "bootstrap-codex-docker-oauth", false, "first-run discovery: explicitly use Docker Sandbox OAuth and validated forward proxy")
 	flags.BoolVar(&o.bootstrapAuto, "bootstrap-codex-auto", false, "first-run discovery: validate native Codex routing; never fall back from an intended Docker source")
 	flags.StringVar(&o.bootstrapClaude, "bootstrap-claude-binary", "", "first-run discovery: optional external Claude executable")
+	apiKeyFlags(flags, &o)
 	flags.DurationVar(&o.timeout, "startup-timeout", o.timeout, "optional maximum wait for gateway readiness (0 waits until canceled)")
 	flags.BoolVar(&o.help, "help", false, "show usage")
 	flags.BoolVar(&o.help, "h", false, "show usage")
