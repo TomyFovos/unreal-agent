@@ -77,9 +77,6 @@ func runSubagentCLI(ctx context.Context, args []string, stdin io.Reader, out io.
 		if rest, err := parseAll(flags, args[1:]); err != nil || len(rest) != 0 {
 			return errors.New(subagentUsage)
 		}
-		if claudeModel(*model) {
-			return fmt.Errorf("%q is a Claude model; subagent start runs its template's provider (ChatGPT). For a Claude model, use Claude Code's Agent tool with that model", *model)
-		}
 		var runtime *subagent.RuntimeRequest
 		if *model != "" || *effort != "" {
 			runtime = &subagent.RuntimeRequest{Model: *model, Effort: llm.ReasoningEffort(*effort).Normalize()}
@@ -464,10 +461,15 @@ func firstLine(text string) string {
 }
 
 // claudeSubagents tells the Claude route how its Bash reaches this Host's
-// children: this executable's subagent command and the gateway socket.
-func claudeSubagents(templates map[string]subagent.Template, socket string) (claudeagent.SubagentCLI, error) {
+// children: this executable's subagent command and the gateway socket, and
+// the model chosen with /model-sub when modelFile is set.
+func claudeSubagents(templates map[string]subagent.Template, socket, modelFile string) (claudeagent.SubagentCLI, error) {
 	if len(templates) == 0 {
-		return claudeagent.SubagentCLI{}, nil
+		cli := claudeagent.SubagentCLI{}
+		if modelFile != "" {
+			cli.AgentModel = subagentAgentModel(modelFile)
+		}
+		return cli, nil
 	}
 	binary, err := os.Executable()
 	if err != nil {
@@ -487,6 +489,10 @@ func claudeSubagents(templates map[string]subagent.Template, socket string) (cla
 	if lead, ok := templates["lead"]; ok && lead.Default != nil {
 		cli.LeadModel, cli.LeadEffort = lead.Default.Model, string(lead.Default.Effort)
 	}
+	if modelFile != "" {
+		cli.Models = subagentModels(modelFile)
+		cli.AgentModel = subagentAgentModel(modelFile)
+	}
 	return cli, nil
 }
 
@@ -503,8 +509,8 @@ func subagentCLIPath(binary, home string) string {
 	return binary
 }
 
-// claudeModel recognizes Claude model names and aliases, which no template's
-// provider (ChatGPT) serves; Claude models run through Claude Code's Agent tool.
+// claudeModel recognizes Claude model names and aliases. The Host checks the
+// template's provider before refusing a Claude model on a GPT connection.
 func claudeModel(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	switch model {

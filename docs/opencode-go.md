@@ -1,0 +1,291 @@
+# OpenCode Go 接続
+
+OpenCode Go のモデル（取り込み元が実機で確かめた 24 個。先頭は DeepSeek V4.1 Flash）を、Claude の下で実装と調査を
+担当するモデルの選択肢として使うための接続の仕様です。
+
+## 目的
+
+現在の機能に影響を与えず、Claude の下で実装・調査を担当するモデルの選択肢として
+OpenCode のモデルを追加します。使えるのは、取り込み元が実機で確かめた 24 個のモデルで、先頭は DeepSeek V4.1 Flash
+（`deepseek-v4.1-flash`）です。何も設定しなければ、動作は今までと同じです。
+
+## 使い方
+
+`/model` で会話の相手（指揮者）を、`/model-sub` でサブエージェント（実装者と調査者の `lead`、
+`worker`、`collector`）を OpenCode Go に切り替えられます。`/model-sub` の選択肢は「OpenAI Codex」
+（既定）、「OpenCode Go」、「Claude」の 3 つです。OpenCode Go では取り込み元が実機で確かめた 24 個のモデルから選べ、
+「Claude」は `/model` に Claude が表示されているときに選べて、続けて `/model` と同じ Claude のモデルから
+選びます（動きは後述）。キーを保存しなければ、`/model` に OpenCode Go は表示されず、今までと同じです。
+
+キーの保存は接続先の登録だけで、OpenCode Go を自動選択しません。`/model` または `/model-sub` で明示的に選ぶか、初回の `UNREAL_HARNESS_LLM_PROVIDER=opencode-go` で選びます。保存キーのある Go だけが利用可能でも、初期接続の自動選択には含めません。
+
+### OpenCode 側の準備
+
+1. OpenCode Go を契約する。
+2. Extra Usage をオフにする。オンのままだと、上限を超えた分が従量課金になり、Unreal からは
+   気づけない。
+3. 従量課金の残高を 0 にし、自動チャージを使わない。
+4. Settings > Privacy > Regions で Global を有効にする（DeepSeek に必要）。
+5. 管理画面で Go の API キーを作る。
+
+### API キーの保存
+
+キーはチャットや画面に貼らず、ターミナルで管理ストアに保存します。キーを打ち込む方法は、画面に出るので
+受け付けません。`<Unreal の場所>` は `unreal` と同じディレクトリです。TUI の `/login` には、
+その環境での実際のコマンドが出ます。
+
+Mac では、キーをコピーしてから次を実行します。
+
+```sh
+pbpaste | <Unreal の場所>/unreal-agent-auth login --store ~/.local/state/unreal-agent/credentials --provider opencode-go --id primary --key-stdin
+```
+
+`pbpaste` がない環境（Linux など）では、次を実行してからキーを貼り付けて Enter を押します。入力は
+表示されません。
+
+```sh
+read -rs KEY && printf %s "$KEY" | <Unreal の場所>/unreal-agent-auth login --store ~/.local/state/unreal-agent/credentials --provider opencode-go --id primary --key-stdin; unset KEY
+```
+
+Unreal はキーを探すたびにこの保存場所を見ます。
+
+### 使い始める
+
+保存したら、Unreal の画面で `/model refresh` を実行します。`/model` に「OpenCode Go · available」が
+出れば使えます。Unreal を起動し直す必要はありません。Unreal が動いていなければ、`unreal` を起動すると
+最初から出ます。
+
+`/model` で「OpenCode Go」を選ぶと、モデルの一覧が出ます。取り込み元が実機で確かめた 24 個から選び、effort の段階が
+あるモデルは続けて effort も選びます（一覧に effort がないモデルは、その段階が出ません）。選んだモデルは
+次のターンから効き、話している相手（指揮者）が替わります。実装者（サブエージェント）は変わりません。
+
+長い会話を Claude から OpenCode Go のモデルへ替えたとき、会話が新しいモデルの文脈のしきい値を超えていると、
+最初に、新しいモデルが会話全体を読んで要約を書く要求が 1 回出ます（切り替えのたびではありません。
+`harness/contextbuilder/compaction.go` の `PrepareContext` と `harness/contextengine/types.go` の
+`Threshold`）。新しいプロバイダにはこの会話のキャッシュがないので、この 1 回はキャッシュが効きません。
+2026-11-06 の実測では、Claude の会話を `deepseek-v4-pro` に替えたとき、その 1 回が入力 465,564 トークン、
+キャッシュ 0（TUI の「キャッシュ」は 0%）、所要は約 1 分 40 秒で、`allowance` は 1.25、`list_cost` は 0.31 でした。
+
+### サブエージェントのモデルを選ぶ
+
+`/model-sub` を実行し、「OpenCode Go」を選んでから、モデルの一覧から 1 つ選びます。一覧は `/model` と
+同じ 24 個で、先頭が Flash です。次に起動する子からそのモデルで動きます。動いている途中の子はそのままです。
+選んだ内容は、同じインストールの shared state を使うすべての会話に効きます（Mac のフォルダ間も共有します）。「OpenAI Codex」（表示名は `ChatGPT（サブスク）`）を選ぶと、サブスクの Codex 接続に固定します。
+
+`/model-sub` の保存ファイルがまだなければ、従来の既定動作を保ちます。親が OpenAI API を明示選択している場合、組み込みの GPT の子もその API 接続を使い、他の親は Codex を使います。「OpenAI Codex」を保存した後は親が API でもサブスク接続です。指定先が使えない場合は失敗し、親の API 接続へは切り替えません。明示的な `Subagents`・`SubagentDefaults` はこの共有設定の対象外です。
+
+OpenCode Go を選んでいる間は、`subagent start` の `--model` と `--effort`（テンプレートのプロバイダは
+そのままで、モデルと effort だけを変える指定）は使えません。そのまま通すと `/model-sub` の選択を
+通らず、Codex（または Host 起動時に選んでいたモデル）で動いてしまうためです。指定すると
+`override_unavailable` で断り、Claude への案内にもこの指定は出しません。子のモデルを変えるときは
+`/model-sub` で選び直します。
+
+役割ごとの effort は選ぶ段階がなく、選んだモデルの一覧から決まります。`lead` と `worker-max` は一番高い
+effort、`worker-low` と `collector` は一番低い effort、他の worker は自分の effort（なければ既定の
+effort。既定が自分より低いときは、自分より低い中で一番高い effort。`qwen3.8-max` では `worker-high` が
+`medium`）です。一覧に effort がないモデルは、effort なしで動きます。DeepSeek V4.1 Flash では、次の表の
+とおりです。
+
+| テンプレート | モデル | effort |
+| --- | --- | --- |
+| `lead`、`worker-max` | `deepseek-v4.1-flash` | `max` |
+| `worker-high`、`worker-xhigh`、`worker-medium` | `deepseek-v4.1-flash` | `high` |
+| `worker-low`、`collector` | `deepseek-v4.1-flash` | `low` |
+
+OpenCode Go を選んでいるとき、Claude が子を案内するのは、OpenCode Go が登録されキーが保存されている間です
+（Codex が利用できるかどうかは見ません）。モデル一覧は子の起動時に読みます。
+
+接続先の自動検出が有効（既定）なら、Codex にログインしていなくてもテンプレートは用意されているので、選んだ
+内容は次に起動する子から使われます。Codex を無効にした Host や自動検出を切った Host で、Host 起動時に
+OpenCode Go を選んでいなかったときだけ、選んだ内容は保存され、Host が次に起動したときから使えます。
+`/model-sub` はそう表示します。Host は Ctrl-D や `/detach` では止まらないので、作業がないときに
+`pkill -f 'unreal-agent serve'` で止めてから `unreal` を起動します。
+
+「Claude」を選ぶと、Claude Code の Agent がそのモデルでサブエージェントを動かし、Unreal の子は作りません。
+Unreal は Claude Code の起動環境に `CLAUDE_CODE_SUBAGENT_MODEL` と `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`
+を設定し、委譲の案内でも `haiku` / `sonnet` の代わりにそのモデル名を出します。FORCE を付けると、組み込みの
+Explore / Plan を含むすべての Agent のサブエージェントがそのモデルで動き、Agent ツールから呼び出しごとの
+`model` がなくなるので、Claude は別のモデルを指定できません（Claude Code 2.1.257 以降が必要です）。Claude
+Code の文書によると、fork と、サブエージェントで動く `model: inherit` の skill は Claude 自身のモデルのまま
+です。選択は Claude の次のターンから効き、動いている途中の子はそのままです。Claude を選んでいる間、OpenCode
+Go や Codex の親が組み込みテンプレートの子を起動しようとすると
+`provider_unavailable` で断り、`/model-sub` で OpenAI Codex か OpenCode Go を選ぶよう案内します。別の
+プロバイダへ切り替えることはありません。`subagent start` の `--model` と `--effort` は OpenCode Go のときと
+同じく `override_unavailable` で断ります。実機の CLI で、環境変数が Claude Code の Agent のサブエージェント
+に届くことと、そのツール呼び出しが TUI に表示されることは、この取り込みでは live 試験を行っていません。
+
+Agent の認証は親 Session の明示した Claude 接続を使い、子モデルの選択では接続を替えません。子のツール呼び出しは進捗にインデントして表示し、E3 の子 transcript の観測記録も維持します。実行する Operation は親の Agent 呼び出しで、観測した子の呼び出しを再実行しません。
+
+### キーの削除
+
+```sh
+<Unreal の場所>/unreal-agent-auth logout --store ~/.local/state/unreal-agent/credentials --provider opencode-go --id primary
+```
+
+## 仕様
+
+変わるのは「Unreal → HTTP → プロバイダ」の末端です。Claude との関係、通知、承認、Operation は
+変わりません。
+
+### 接続先と要求
+
+- 接続先は `https://opencode.ai/inference/go/openai/v1/responses`。`/inference/go/` 配下だけを許可し、
+  従量課金の `/inference/openai/...`（OpenCode Zen）は拒否します。リダイレクトも拒否します。
+- 本文は既存の `responsesapi` が組み立てます（`store: false`、`stream: true`、
+  `include: ["reasoning.encrypted_content"]`、`reasoning.summary: "auto"`）。
+- ヘッダーは、API キーを Authorization ヘッダーで送る形、`Content-Type`、`User-Agent: unreal-agent`、
+  `x-opencode-session` です。`prompt_cache_key` は送りません（受け付けるかが未確認のため）。
+- `x-opencode-session` には、Session ごとのキャッシュキーの SHA-256 を入れます。要約を作る要求も含めて
+  すべての要求に付き、このヘッダーのない要求は 400 で断られます。
+- 文脈管理は追記型にします。追記型でないとキャッシュが外れ、Go の利用枠を急速に使います。
+- `ultra` は `max` として送ります。
+
+### モデル一覧と登録
+
+- 管理ストアに `opencode-go` / `api_key` / `primary` があるときだけ、公開のモデル一覧
+  （`https://opencode.ai/inference/go/v1/models`）を読んで `opencode-go` を登録します。一覧はキーを
+  送らず、リダイレクトを拒否し、20 秒で打ち切ります。
+- 選択肢に出すのは、取り込み元が実機で確かめた 24 個のモデルです。先頭が `deepseek-v4.1-flash` で、残りは一覧の順
+  です（一覧の順は OpenCode が決めているので、並べ替えません）。名前、effort、文脈長を読みます。一覧に
+  既定の effort がないので、`high` があれば `high` を既定にします。
+- 一覧に Unreal の effort（`low`〜`max`）がないモデルは、effort を選ばせず、要求にも `reasoning` を
+  付けません。`none`、`minimal`、`toggle` は扱いません。
+- 出さないモデルがあります。`mimo-v2.6-flash` はツールを呼ばず、続く段階を実行できていないためです。
+  Contributor の 2 個（送った内容が学習に使われる）と Free のモデル（`beam-free`、
+  `iceman-contributor-free`）は調べていません。
+- 一覧を読めなければ OpenCode Go だけを「使えない」と表示し、他へ切り替えません。キーがない人には、
+  通信も表示も増やしません。
+- キーは要求ごとに管理ストア（`~/.local/state/unreal-agent/credentials`）から読みます。保存し直した
+  場合は、Host を起動し直さなくてよいです。
+- 通常の Host は、起動時に必ず `https://opencode.ai` を通信の許可に加えます（設定ファイルには
+  書きません）。この許可を使うのはモデルへの要求と子の設定の確認だけで、AI が使うツールには関係
+  しません。キーがなければ何も送りません。
+
+### 上限とエラー
+
+Codex と同じ経路に乗せます。ただし共通の再試行の判定は、迷うと再試行する設計で、再試行しないコードは
+OpenAI の名前で固定されています。OpenCode が枯渇を別のコードで返すと一時的な制限と判定され、子が枠の
+回復まで再試行を続け、親にも通知が届きません。そのため `opencodego` で、枯渇を示すエラーを
+`usage_limit_reached` に変換します。形式が分かるまでの暫定として、429 で `Retry-After` が既存の上限
+（30 秒）を超えるものを枯渇として扱います。
+
+| | 一時的な制限 | 利用枠の枯渇 |
+| --- | --- | --- |
+| エラーの例 | `rate_limit_exceeded`、コード不明の 429、5xx | `usage_limit_reached`、`insufficient_quota` など |
+| API 呼び出し内の再試行 | 最大 5 回（ストリーム中は 6 回）。待ち時間は最大 30 秒で、`Retry-After` も 30 秒が上限 | しない |
+| 親 Session | 再試行が尽きると Session が失敗 | Session が失敗し、TUI に `provider rate limited` と表示 |
+| 子 Session | 2 秒後にモデル呼び出しをやり直す。回数の上限なし | 子が停止し、親に理由を通知 |
+
+共通: 上限や障害で、別のプロバイダや API キーへ自動で切り替えません（Codex へも切り替えません）。
+実行済みの Operation を再実行せず、枠の回復後に自動で再開することもありません。枠の回復時刻は
+表示しません。子の再試行に回数の上限がないこと、親が上限で Session 失敗になることは、Codex の
+現在の挙動に揃えています。
+
+### 接続検証（2026-11-02）
+
+`harness/llm/clients/opencodego/live_probe_test.go` で、Unreal が組み立てる Responses の要求を
+`deepseek-v4.1-flash` に 10 回送りました。匿名化した記録は
+`harness/llm/clients/opencodego/testdata/probe-2026-11-02.json` にあります（キーと Session の値が
+含まれないことはテスト内で確認済み）。
+
+| 確認項目 | 結果 |
+| --- | --- |
+| 応答 | 10 回とも 200。標準の Responses の SSE イベント（`response.created` から `response.completed` まで） |
+| 課金 | `usage.opencode.billing_source` は `go`、`usage.cost` は 0。Zen の従量課金ではない |
+| `include` と `reasoning.summary` | 受け付けた。推論は `reasoning` 項目の `summary` で返り、`encrypted_content` は返らない |
+| ツール往復 | 推論項目を送り返しても、送り返さなくても 200 で、ツールの結果を使って答えた。DeepSeek 単体で起きる 400 は出なかった |
+| 途中の system メッセージ | 受け付け、指示にも従った。ただしモデルの推論要約には、user ターンに埋め込まれた信頼できない指示として映った |
+| キャッシュ | 2 回目以降は共通部分がキャッシュから読まれた。追記で続けた会話でも読まれた |
+| effort | `low`、`medium`、`high`、`xhigh`、`max` のすべてを受け付け、応答にもそのまま返った |
+| 使用量 | `usage.input_tokens` はキャッシュ分を含む合計。`reasoning_tokens` は推論要約があっても常に 0 |
+| `opencode.allowance` | `response.usage.opencode.allowance` に 1 回分の数値。同じ場所に `billing_source`、`list_cost`、`tokens` がある |
+| 応答ヘッダー | 上限や残量を示すヘッダーはない。`X-Opencode-Log-Id`、`X-Zen-Model` がある |
+
+ここから分かったこと:
+
+- Responses で動くので、Chat Completions のアダプタは作りません。DeepSeek のネイティブ API は
+  chat-completions ですが、Unreal の要求は Responses のままで通ります。
+- 推論内容の再送は、Unreal の既存の扱い（`llm.Reasoning.Raw` をそのまま送り返す）で問題ありませんでした。
+- 途中の system メッセージは、OpenCode の変換で user ターン内の文として渡っている可能性が高いです。
+  ただし Unreal は途中に system メッセージを送らないので、影響はありません。
+- `x-opencode-session` が同じでないとキャッシュが効かないのかは、2026-11-05 に確かめました。値が違っても
+  効きます。このヘッダー自体は必須で、付けない要求は 400 で断られます。
+
+## テスト方針
+
+合格の条件は、次の 3 区分で定義します。
+
+| 区分 | 対象 | 合格条件 |
+| --- | --- | --- |
+| 既存テストの維持 | 全テスト（Go のテスト関数と Fuzz） | 期待値を変えずに全部通す |
+| OpenCode 専用テスト | ストリーム処理、文脈管理、Session の切替、子の実行、再試行、リダイレクト拒否など | Codex のテストと同じ観点の OpenCode 専用テストを新設して通す（一覧で回している `providers_stream_test.go` だけは既存の一覧に OpenCode の行を足す） |
+| 置き換え | OAuth と Docker Sandbox の 26 件、Codex CLI カタログの 15 件 | 同じ観点の OpenCode 版を新設する。Docker Sandbox 経路は対象外 |
+
+専用テストは Codex のテストが増えても自動ではついてこないので、Codex 側のテストを変えたときは、
+対応を見直します。
+
+偽のサーバーでは DeepSeek の実際の挙動までは証明できないので、次を加えています。
+
+- 接続検証で実際の通信を匿名化して記録し、テストの入力に使う。
+- `UNREAL_LIVE_OPENCODE_GO=1` のときだけ動く実機テストを用意する。CI では動かないので、手元で
+  実行する。
+
+実機テストは、どれも実際の API に要求を送るので、あらかじめ送る回数の上限を決めて実行します。
+上限を超えた分は送らずに断ります。キーはテストが読まず、Host かクライアントが保存場所から読みます。
+
+| テスト | 確かめること | 送る回数 |
+| --- | --- | --- |
+| `harness/llm/clients/opencodego` の `TestLiveOpenCodeGoResponsesProbe`（`UNREAL_OPENCODE_GO_CAPTURE` に匿名化した記録を書く） | 接続検証。Responses の要求が通るか | 10 回まで |
+| `harness/llm/clients/opencodego` の `TestLiveOpenCodeGoClient` | Session のヘッダー、キャッシュ、ツール往復 | 4 回（再試行しない） |
+| `cmd/unreal-agent` の `TestLiveOpenCodeGoThroughHost` | 実際のモデル一覧を読み、Host で 1 ターン送る | 1 回 |
+| `cmd/unreal-agent` の `TestLiveOpenCodeGoSubagentsThroughHost` | `lead` と worker を一周させる | 20 回まで |
+
+## 未確認事項
+
+2026-11-02 の接続検証で確かめた項目は「確認済み」とし、詳細は「接続検証（2026-11-02）」に書きました。
+
+- 確認済み: DeepSeek が Responses の変換経由でツール往復できる。推論項目を送り返しても、送り返さなくても動く
+- 未確認: OpenCode が送り返した推論要約を DeepSeek の `reasoning_content` として渡しているか
+- 確認済み: `reasoning.summary` と `include` は受け付ける。`encrypted_content` は返らない
+- 一部確認: effort の `medium`、`xhigh` は受け付け、そのまま返る。内部での扱いは未確認（Flash の一覧に
+  あるのは `low`、`high`、`max` だけ）
+- 確認済み: キャッシュは追記型の文脈で効く。新しい `x-opencode-session` の値でも、同じ前置きは初回から
+  キャッシュが効いた（2026-11-03）。キャッシュがどの単位で共有されるかは未確認
+- 未確認: `prompt_cache_key` を受け付けるか（送っていない）
+- 未確認: 画像入力（`images` は宣言していない）
+- 未確認: 途中の system メッセージがどう渡るか。user ターン内の文として渡っている可能性が高い。
+  Unreal は途中に system を送らないので影響しない
+- 未確認: 上限到達時のエラー形式
+- 確認済み: `opencode.allowance` の位置と形式（`response.usage.opencode.allowance`、1 回分の数値）。
+  値の意味（利用枠から使った米ドル額か）は未確認
+- 未確認: Linux での保存手順（`read -rs`）は、実際には試していない
+- 確認済み: 実際の API で、Flash の `lead` が `worker-low` を起動し、その報告を受けて終われる（2026-11-04。
+  設計者の役はテストが担った）
+- 確認済み: 実際のインストールで、Claude（設計者）から Flash の `lead` と `worker` まで一周できる（2026-11-04）
+- 確認済み: サブエージェントの要求でもキャッシュは効く。2 回目以降の要求に効いた（2026-11-04〜05）
+- 未確認: 実際のインストールでの確認で、キャッシュが 4 回とも 0 だった理由。OpenCode が返した値が 0 で、
+  同じ形の要求では再現しなかった
+- 確認済み: `x-opencode-session` のない要求は 400 になる。値を変えても、同じ前置きのキャッシュは効く
+- 未確認: モデル一覧の各項目（`capabilities.reasoning.effort`、`limit.context`）の意味は、公開の文書では
+  確かめていない。2026-11-03 の一覧の形から読んだ
+- 確認済み: 2026-11-05 の実機確認で、Flash 以外の 22 モデルが、実行した段階をすべて通った
+- 未確認: 各モデルは 1 回の実機確認しかしていない（同じモデルで繰り返していない）。繰り返したときの
+  安定性、負荷がかかったときの上限、時間帯による違いは未確認
+- 確認済み: Gemini 4 Argon は、2026-11-14 の実機確認で `plain` を含む 8 段階すべてが通った。
+  2026-11-05 の 429「Endpoint is unavailable」は再現しなかった
+- 未確認: 他のモデルの会話を Gemini 4 Argon に切り替えたときの引き継ぎ（Gemini の思考の署名を含む）
+- 未確認: MiMo-V2.6-Flash のツールの扱い。`tool_call` でツールを呼ばず、ツール結果、途中の system
+  メッセージ、追記の続きは実行していない
+- 未確認: `none`、`minimal`、`toggle` の扱い（Unreal は送らない）
+- 未確認: GLM-5.3 のキャッシュが 8 回とも 10〜50 のままだった理由（GLM-5.2 は約 2.3k まで増えた）
+- 確認済み: 実際の TUI で、同じ会話を `deepseek-v4-pro`、`kimi-k2.7-code`、Claude の順に切り替えても、
+  前の内容を引き継げた（2026-11-06）
+- 一部確認: Claude の会話を `deepseek-v4-pro` に替える向きは、新しいモデルが会話を読んで要約を書くところ
+  までと、その要約の内容が正しいところまで（2026-11-06、Claude が確認）。その要約から答えるかは未確認
+  （返事の前にターンを止めた）
+
+## 配布者による無効化
+
+既定は有効です。案件向けに禁止する場合は `make snapshot OPENCODE_GO_ENABLED=false` で作り、共通キットへ `--disable-opencode-go` を付けて再梱包してください。[ほかのビルド方法と記録](ja/distribution.md#opencode-go-を無効にした配布物)も参照してください。
+
+無効版は `/model`・`/model-sub`・discovery・モデル一覧・認証登録から接続全体を除外します。キーのファイル指定・環境変数指定も値を表示せず拒否します。環境変数・以前の設定・保存済みの選択では戻せず、ソースからの再ビルドが必要です。OpenCode Go を選んでいた Session はそのまま開いて `/model` でほかの接続を選ぶよう案内し、推論を拒否します。子の指定も案内つきで失敗し、自動切替は行いません。`KIT.json`・`SNAPSHOT.json` の `opencode_go_enabled` と各実行ファイルの `--version` で確認できます。

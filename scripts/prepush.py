@@ -88,7 +88,8 @@ def go_tests(root, paths):
         "go", "list", "-p", "1", "-deps", "-test",
         "-json=Dir,ImportPath,ForTest,Module,Imports", "./...",
     ], cwd=root, text=True)
-    return affected_packages(root, paths, list(json_objects(output)))
+    # go list reports symlink-resolved directories (macOS /tmp and /var).
+    return affected_packages(root.resolve(), paths, list(json_objects(output)))
 
 
 def run(command, root):

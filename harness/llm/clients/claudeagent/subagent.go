@@ -128,32 +128,47 @@ func literalWords(line string) (words []string, delimiter string, ok bool) {
 	return words, "", true
 }
 
-// subagentPrompt tells Claude its role and how to run the GPT implementers
-// (the user's structure: Claude designs, GPT implements).
+// subagentPrompt tells Claude its role and how to run the implementers (the
+// user's structure: Claude designs, GPT or the model chosen with /model-sub
+// implements).
 func subagentPrompt(s SubagentCLI) string {
 	if s.Binary == "" {
-		return claudeDelegationPrompt
+		return claudeDelegationPromptFor(s)
 	}
 	cli := s.Binary
 	if !literalCLI(cli) {
 		cli = "'" + cli + "'"
 	}
-	prompt := fmt.Sprintf("\n\nYour role in this Session is to run the project: you design, decide, keep the work moving and talk with the user; GPT does the work, because GPT models cost less than you. Keep your own reasoning to design and verification planning; do not solve the task yourself, including calculations, search, algorithm trials or substantial code. Delegate that work to the lead or a worker. Review what GPT delivers before accepting it, especially for over-implementation: limits, checks, abstractions or features nobody asked for, and changes beyond the task. Send back what goes beyond the specification, and keep the project moving rather than redoing GPT's work yourself.\n"+
-		"For implementation work, give your design to the implementation lead, which runs gpt-6.1-sol at max effort and works through its own GPT workers in parallel (worker-low through worker-max). For an investigation or another small task, start one worker directly instead (worker-low or worker-medium): each GPT agent reads the whole AGENTS.md again, and the lead at max costs most.\n"+
-		"Collector tasks, which must go to the collector template (gpt-6-luna) and never to a gpt-6.1-sol worker: fetching a URL or API (curl, gh api, gh pr/issue/run view) and reporting fields; checking CI or run status and pulling the failing log lines; listing or searching files (ls, find, rg, grep) and reporting matches; reading files or logs to extract specific values, counts or sections; read-only git summaries (status, log, diff, show); disk, process and environment checks (df, du, ps); summarizing an existing report or document. Give one collector several such questions at once. A single read-only command that answers your question directly you may still run yourself; do not split such a step off.\n"+
-		"Use unreal-agent subagent for parallel work and waits; Claude Code Monitor is unavailable. GPT children stay the default for implementation, investigation and review. Use Claude Code's Agent tool only when a Claude model is wanted for the task (for example a review the user asks to run on Fable): set its model, and it finishes within your turn. Hand the work over and end your turn; do not wait for it. While children work, the user can talk to you. When a child asks a question, asks for approval or ends, its message starts a new turn for you.\n"+
+	m := SubagentModels{Family: "GPT", Lead: "gpt-6.1-sol", Collector: "gpt-6-luna"}
+	overrides := " Add --model ID and --effort LEVEL to subagent start to override a template's model and reasoning effort."
+	if s.Models != nil {
+		if chosen := s.Models(); chosen.Family != "" && chosen.Lead != "" {
+			// The model chosen with /model-sub refuses those overrides.
+			m, overrides = chosen, ""
+		}
+	}
+	collector := "the collector template (" + m.Collector + ") and never to a " + m.Lead + " worker"
+	if m.Collector == "" {
+		collector = "the collector template (" + m.Lead + " at low effort) and never to a higher-effort worker"
+	}
+	prompt := fmt.Sprintf("\n\nYour role in this Session is to run the project: you design, decide, keep the work moving and talk with the user; %[3]s does the work, because %[3]s models cost less than you. Keep your own reasoning to design and verification planning; do not solve the task yourself, including calculations, search, algorithm trials or substantial code. Delegate that work to the lead or a worker. Review what %[3]s delivers before accepting it, especially for over-implementation: limits, checks, abstractions or features nobody asked for, and changes beyond the task. Send back what goes beyond the specification, and keep the project moving rather than redoing %[3]s's work yourself.\n"+
+		"For implementation work, give your design to the implementation lead, which runs %[4]s at max effort and works through its own %[3]s workers in parallel (worker-low through worker-max). For an investigation or another small task, start one worker directly instead (worker-low or worker-medium): each %[3]s agent reads the whole AGENTS.md again, and the lead at max costs most.\n"+
+		"Collector tasks, which must go to %[5]s: fetching a URL or API (curl, gh api, gh pr/issue/run view) and reporting fields; checking CI or run status and pulling the failing log lines; listing or searching files (ls, find, rg, grep) and reporting matches; reading files or logs to extract specific values, counts or sections; read-only git summaries (status, log, diff, show); disk, process and environment checks (df, du, ps); summarizing an existing report or document. Give one collector several such questions at once. A single read-only command that answers your question directly you may still run yourself; do not split such a step off.\n"+
+		"Use unreal-agent subagent for parallel work and waits; Claude Code Monitor is unavailable. %[3]s children stay the default for implementation, investigation and review. Use Claude Code's Agent tool only when a Claude model is wanted for the task (for example a review the user asks to run on Fable): set its model, and it finishes within your turn. Hand the work over and end your turn; do not wait for it. While children work, the user can talk to you. When a child asks a question, asks for approval or ends, its message starts a new turn for you.\n"+
 		"Turns that children's messages start run in the background: the user sees only their first line. Handle there what you can decide within the design and the permission mode: answer questions, approve or deny requests, send follow-up instructions, review results and have problems fixed. You decide; children do the work. Hand investigations, data analysis, log and file reading beyond the few files a decision needs, GitHub checks, builds and tests, writing documents and commits to the lead or a worker, and review what they report. In background turns, run yourself only commands that need no approval (reading files, read-only commands such as git diff), since your own other commands would stop the user for approval. Address the user only for what needs them, and start that message with 【報告】 (the work the user asked for is done, or failed in a way you cannot resolve) or 【要確認】 (a decision or approval beyond your authority, a change of requirements or design direction, publishing, or anything you are unsure about). When the user writes while a background turn runs, their message comes first.\n"+
 		"Begin each task you give a child with a one-line title on the first line; the views show it as what the child works on.\n"+
 		"Always use the command path shown below, including after an update; ignore versioned command paths in older messages. Run these commands with Bash exactly in these forms. Unreal Agent approves them itself in every permission mode, Read Only included; the children follow the mode, so in Read Only they read files and run read-only commands such as git log, git show or rg, which is enough for investigations:\n"+
 		"- Start the lead, with the task in a quoted heredoc: %[1]s subagent start --template lead <<'EOF' (then the title line, the goal, design, files and interfaces, constraints and how to verify, then a line EOF)\n"+
 		"- Answer a child's approval request: %[1]s subagent approve HANDLE REQUEST allow|deny. Children ask you instead of the user.\n"+
 		"- Send more instructions or answers: %[1]s subagent send HANDLE <<'EOF' (text, then EOF). Stop a child: %[1]s subagent cancel HANDLE. Active children and ended counts: %[1]s subagent list; all children: %[1]s subagent list --all. Report: %[1]s subagent show HANDLE; include its original instructions with --task. Do not use wait unless you know the result will arrive within tens of seconds; use at most --timeout 60s: %[1]s subagent wait HANDLE --timeout 60s.\n"+
-		"Templates: %[2]s (worker-<effort> starts one worker directly). Add --model ID and --effort LEVEL to subagent start to override a template's model and reasoning effort.", cli, strings.Join(s.Templates, ", "))
-	if s.LeadModel != "" {
-		prompt = strings.ReplaceAll(prompt, "gpt-6.1-sol", s.LeadModel)
-	}
-	if s.LeadEffort != "" {
-		prompt = strings.ReplaceAll(prompt, "at max effort", "at "+s.LeadEffort+" effort")
+		"Templates: %[2]s (worker-<effort> starts one worker directly).%[6]s", cli, strings.Join(s.Templates, ", "), m.Family, m.Lead, collector, overrides)
+	if m.Family == "GPT" {
+		if s.LeadModel != "" {
+			prompt = strings.ReplaceAll(prompt, "gpt-6.1-sol", s.LeadModel)
+		}
+		if s.LeadEffort != "" {
+			prompt = strings.ReplaceAll(prompt, "at max effort", "at "+s.LeadEffort+" effort")
+		}
 	}
 	return prompt
 }

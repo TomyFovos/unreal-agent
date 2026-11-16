@@ -158,6 +158,14 @@ func TestCodexCatalogModelMetadataValidation(t *testing.T) {
 }
 
 func TestCodexCLIProcessCacheRefreshEnvironmentAndCleanup(t *testing.T) {
+	// os.Getwd resolves macOS's /var alias. Use the physical temporary root
+	// so the exact argv comparison below has the same spelling as the child.
+	tempRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("UNREAL_CODEX_TEST_SECRET", "SECRET_MUST_NOT_BE_INHERITED")
 	home := t.TempDir()
 	binary := testcodex.Install(t, home, codexFrames(codexModelPage))
 	codexHome := filepath.Join(home, "codex-home")
@@ -198,10 +206,9 @@ func TestCodexCLIProcessCacheRefreshEnvironmentAndCleanup(t *testing.T) {
 		if _, err = os.Stat(record.Cwd); !errors.Is(err, os.ErrNotExist) {
 			t.Fatal("temporary CLI state was not cleaned up")
 		}
-		for key := range record.Env {
-			if key != "HOME" && key != "PATH" && key != "CODEX_HOME" && key != "NO_COLOR" && key != "SBX_CRED_OPENAI_MODE" && key != "LC_CTYPE" {
-				t.Fatal("unrelated environment inherited", key)
-			}
+		wantEnv := map[string]string{"HOME": home, "PATH": os.Getenv("PATH"), "CODEX_HOME": codexHome, "NO_COLOR": "1", "SBX_CRED_OPENAI_MODE": "oauth"}
+		if !reflect.DeepEqual(record.Env, wantEnv) {
+			t.Fatal("subprocess environment differs from the explicit allowlist")
 		}
 	}
 	cli.Validate = func(context.Context) error { return errors.New("private-denial") }

@@ -17,6 +17,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 )
 
 type launchOptions struct {
@@ -30,6 +31,17 @@ type launchOptions struct {
 	bootstrapAuto                                                  bool
 	bootstrapClaude                                                string
 	bootstrapCodexDisabled, bootstrapClaudeDisabled                bool
+	// defaultCredentials is STATE/credentials, where /login tells users to save
+	// the OpenCode Go key. It is not part of the Host binding: the Host looks
+	// for the key on each discovery, so saving it needs no restart.
+	defaultCredentials string
+	// subagentModel is STATE/subagent-model.json, /model-sub's choice for
+	// every conversation. Like defaultCredentials it is not part of the
+	// Host binding.
+	subagentModel string
+	// sharedState overrides where defaultCredentials and subagentModel live so
+	// every folder reads one login and one /model-sub choice; empty keeps STATE.
+	sharedState string
 }
 
 // Dependency hooks are local composition, not Host or gateway state.
@@ -76,6 +88,9 @@ func (l launcher) run(ctx context.Context, args []string, output io.Writer) (err
 		}
 		if errors.Is(err, fs.ErrNotExist) {
 			message = "起動設定が見つかりません。インストール手順を確認して unreal を起動し直してください。"
+		}
+		if errors.Is(err, buildfeatures.ErrOpenCodeGoDisabled) {
+			message = buildfeatures.OpenCodeGoDisabledMessage
 		}
 		if strings.Contains(err.Error(), "Host configuration does not match") {
 			message = "別の設定で起動中です。起動オプションを合わせて unreal を実行してください。"
@@ -164,6 +179,7 @@ func parseLaunchOptions(args []string, output io.Writer, getenv func(string) str
 	flags.StringVar(&o.sessions, "session-directory", "", "canonical sessions (default STATE/sessions)")
 	flags.StringVar(&o.socket, "socket", "", "private socket (default XDG_RUNTIME_DIR/unreal-agent/host.sock or STATE/run/host.sock)")
 	flags.StringVar(&o.credentials, "credential-directory", "", "optional managed API-key store")
+	flags.StringVar(&o.sharedState, "shared-state-directory", "", "share this directory's credentials and subagent-model.json (default STATE)")
 	flags.StringVar(&o.codexFile, "codex-auth-file", "", "external Codex auth file; uses existing Codex discovery by default")
 	flags.BoolVar(&o.bootstrapCodexDisabled, "bootstrap-codex-disabled", false, "first-run discovery: operator declines Codex")
 	flags.BoolVar(&o.bootstrapClaudeDisabled, "bootstrap-claude-disabled", false, "first-run discovery: operator declines Claude")
@@ -278,7 +294,7 @@ func parseLaunchOptions(args []string, output io.Writer, getenv func(string) str
 			o.socket = filepath.Join(o.state, "run", "host.sock")
 		}
 	}
-	for _, path := range []*string{&o.config, &o.state, &o.sessions, &o.socket, &o.credentials, &o.codexFile} {
+	for _, path := range []*string{&o.config, &o.state, &o.sessions, &o.socket, &o.credentials, &o.codexFile, &o.sharedState} {
 		if *path == "" {
 			continue
 		}
@@ -287,6 +303,12 @@ func parseLaunchOptions(args []string, output io.Writer, getenv func(string) str
 			return o, err
 		}
 		*path = absolute
+	}
+	o.defaultCredentials = filepath.Join(o.state, "credentials")
+	o.subagentModel = filepath.Join(o.state, "subagent-model.json")
+	if o.sharedState != "" {
+		o.defaultCredentials = filepath.Join(o.sharedState, "credentials")
+		o.subagentModel = filepath.Join(o.sharedState, "subagent-model.json")
 	}
 	return o, nil
 }

@@ -43,7 +43,12 @@ func runtimeProviders(identity agentrunner.RuntimeIdentity) (*provider.Registry,
 	models := []provider.Model{selected.Model}
 	return provider.New(provider.Defaults(map[string][]provider.Model{selected.Provider: models})...)
 }
-func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]childTemplate, parentPolicy *permission.Policy, credentialDirectory, codexAuthFile string) (agentrunner.RuntimeConfig, map[string]subagent.Template, error) {
+
+// withParentSubagents gives the Host's Sessions the templates. Children read
+// the same credential sources as the Host; defaultCredentialDirectory is the
+// launcher's store for OpenCode Go's key. subagentModelFile is /model-sub's
+// choice for built-in templates, empty for an operator's.
+func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]childTemplate, parentPolicy *permission.Policy, credentialDirectory, defaultCredentialDirectory, codexAuthFile, subagentModelFile string) (agentrunner.RuntimeConfig, map[string]subagent.Template, error) {
 	if len(configured) == 0 {
 		return c, nil, nil
 	}
@@ -106,13 +111,19 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 			return c, nil, err
 		}
 		arguments = append(arguments, "--credential-directory", credentialDirectory)
+	} else if defaultCredentialDirectory != "" {
+		defaultCredentialDirectory, err = filepath.Abs(defaultCredentialDirectory)
+		if err != nil {
+			return c, nil, err
+		}
+		arguments = append(arguments, "--default-credential-directory", defaultCredentialDirectory)
 	}
 	if codexAuthFile != "" {
 		arguments = append(arguments, "--codex-auth-file", codexAuthFile)
 	}
 	// An explicit nonempty, nonsecret environment prevents os/exec's nil-env
 	// inheritance, including provider tokens, .env overlays and proxy credentials.
-	execution := subagent.Config{Directory: directory, Binary: binary, Arguments: arguments, Environment: childEnvironment(c), Templates: templates, ResolveRuntime: childRuntimeResolver(c), ValidateTemplate: childTemplateValidator(c)}
+	execution := subagent.Config{Directory: directory, Binary: binary, Arguments: arguments, Environment: childEnvironment(c), Templates: templates, ResolveRuntime: childRuntimeResolver(c, subagentModelFile), ValidateTemplate: childTemplateValidator(c)}
 	if len(c.Backends) == 0 && c.Discovered == nil {
 		execution.ResolveRuntime = nil
 		execution.ValidateTemplate = nil
@@ -216,6 +227,7 @@ func runChild(ctx context.Context, args []string, diagnostics io.Writer) error {
 	flags.SetOutput(diagnostics)
 	stdio := flags.Bool("stdio", false, "serve one parent-bound child protocol connection")
 	directory := flags.String("credential-directory", "", "explicit managed credential store, never credential material")
+	defaultDirectory := flags.String("default-credential-directory", "", "the launcher's store OpenCode Go's key is read from, when it exists; never created")
 	codexFile := flags.String("codex-auth-file", "", "explicit existing private Codex auth file path, never credential material")
 	var apiOptions launchOptions
 	apiKeyFlags(flags, &apiOptions)
@@ -229,24 +241,37 @@ func runChild(ctx context.Context, args []string, diagnostics io.Writer) error {
 	if err != nil {
 		return err
 	}
-	var resolver credential.Resolver
-	if *directory != "" {
-		if !filepath.IsAbs(*directory) {
-			return errors.New("child credential directory must be absolute")
-		}
-		store, err := credential.OpenLocal(*directory)
-		if err != nil {
-			return err
-		}
-		resolver = credential.NewManager(store)
-	}
-	if *codexFile != "" {
-		if !filepath.IsAbs(*codexFile) {
-			return errors.New("child Codex auth file path must be absolute")
-		}
-		resolver = withExternalCodexCredentials(resolver, *codexFile)
+	resolver, err := childCredentials(*directory, *defaultDirectory, *codexFile)
+	if err != nil {
+		return err
 	}
 	return subagent.Serve(ctx, os.Stdin, os.Stdout, childFactory(credential.WithSources(resolver, sources, os.Getenv), *codexFile))
+}
+
+// childCredentials resolves a child's keys from the sources its Host passed.
+func childCredentials(directory, defaultDirectory, codexFile string) (credential.Resolver, error) {
+	var resolver credential.Resolver
+	for _, path := range []string{directory, defaultDirectory} {
+		if path != "" && !filepath.IsAbs(path) {
+			return nil, errors.New("child credential directory must be absolute")
+		}
+	}
+	if directory != "" {
+		store, err := credential.OpenLocal(directory)
+		if err != nil {
+			return nil, err
+		}
+		resolver = credential.NewManager(store)
+	} else if defaultDirectory != "" {
+		resolver = withDefaultOpenCodeGoStore(nil, defaultDirectory)
+	}
+	if codexFile != "" {
+		if !filepath.IsAbs(codexFile) {
+			return nil, errors.New("child Codex auth file path must be absolute")
+		}
+		resolver = withExternalCodexCredentials(resolver, codexFile)
+	}
+	return resolver, nil
 }
 
 // childApprovalTimeout keeps a child's request open until its parent answers

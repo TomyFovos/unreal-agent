@@ -21,6 +21,7 @@ builds:
     binary: unreal
     goos: [linux]
     goarch: [amd64]
+    tags: ['{{ if eq (index .Env "OPENCODE_GO_ENABLED") "false" }}disable_opencode_go{{ end }}']
     flags: [-mod=readonly, -trimpath, -buildvcs=true]
     ldflags: [-s -w]
   - id: host
@@ -28,6 +29,7 @@ builds:
     binary: unreal-agent
     goos: [linux]
     goarch: [amd64]
+    tags: ['{{ if eq (index .Env "OPENCODE_GO_ENABLED") "false" }}disable_opencode_go{{ end }}']
     flags: [-mod=readonly, -trimpath, -buildvcs=true]
     ldflags: [-s -w]
   - id: runner
@@ -35,6 +37,7 @@ builds:
     binary: unreal-agent-runner
     goos: [linux]
     goarch: [amd64]
+    tags: ['{{ if eq (index .Env "OPENCODE_GO_ENABLED") "false" }}disable_opencode_go{{ end }}']
     flags: [-mod=readonly, -trimpath, -buildvcs=true]
     ldflags: [-s -w, '-X main.version={{ .FullCommit }}']
   - id: auth
@@ -42,6 +45,7 @@ builds:
     binary: unreal-agent-auth
     goos: [linux]
     goarch: [amd64]
+    tags: ['{{ if eq (index .Env "OPENCODE_GO_ENABLED") "false" }}disable_opencode_go{{ end }}']
     flags: [-mod=readonly, -trimpath, -buildvcs=true]
     ldflags: [-s -w]
 

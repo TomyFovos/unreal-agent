@@ -144,6 +144,9 @@ func (s *RuntimeSelection) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	return nil
 }
 
+// A selection with no effort is valid where the provider can send no
+// reasoning field, including Claude, OpenAI API, and OpenCode Go models whose
+// catalogs advertise no effort (docs/opencode-go.md).
 func (s RuntimeSelection) Validate() error {
 	if len(s.Binding) > 128<<10 || s.Binding != "" && !jsontext.Value(s.Binding).IsValid() {
 		return errors.New("invalid provider binding")

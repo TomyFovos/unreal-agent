@@ -173,6 +173,16 @@ func startClaudeStreamHost(t *testing.T, config serveConfiguration, directory st
 
 func startMultiChildCLI(t *testing.T, binary string, cfg serveConfiguration, directory string, lifetime ...time.Duration) (*gateway.Client, func()) {
 	t.Helper()
+	limit := 30 * time.Second
+	if len(lifetime) > 0 {
+		limit = lifetime[0]
+	}
+	return startMultiChildCLIWith(t, binary, cfg, directory, limit)
+}
+
+// startMultiChildCLIWith starts the Host with more serve options.
+func startMultiChildCLIWith(t *testing.T, binary string, cfg serveConfiguration, directory string, limit time.Duration, options ...string) (*gateway.Client, func()) {
+	t.Helper()
 	raw, e := json.Marshal(cfg)
 	if e != nil {
 		t.Fatal(e)
@@ -181,13 +191,9 @@ func startMultiChildCLI(t *testing.T, binary string, cfg serveConfiguration, dir
 	if e = os.WriteFile(path, raw, 0600); e != nil {
 		t.Fatal(e)
 	}
-	limit := 30 * time.Second
-	if len(lifetime) > 0 {
-		limit = lifetime[0]
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	t.Cleanup(cancel)
-	cmd := exec.CommandContext(ctx, binary, "serve", "--config", path, "--session-directory", filepath.Join(directory, "sessions"), "--socket", filepath.Join(directory, "host.sock"))
+	cmd := exec.CommandContext(ctx, binary, append([]string{"serve", "--config", path, "--session-directory", filepath.Join(directory, "sessions"), "--socket", filepath.Join(directory, "host.sock")}, options...)...)
 	var diagnostics credentialOutput
 	t.Cleanup(func() {
 		if t.Failed() {

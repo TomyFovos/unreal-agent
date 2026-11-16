@@ -28,10 +28,12 @@ and by people working on this repository.
   Registry/Translator, the multi-provider runtime, Context Engine, Project
   Instructions, TUI/Orchestration, Markdown Export and the LSP/DAP boundaries.
 - No automatic fallback to another provider or to an API key.
-- Claude runs parallel work through `~/.local/bin/unreal-agent subagent`, not
-  Claude Code's Agent or Monitor: it hands work to a child, ends its turn and
-  resumes on the child's end notice. `wait` is only for results due within
-  seconds, with at most `--timeout 60s`.
+- Claude normally runs parallel work through `~/.local/bin/unreal-agent subagent`,
+  not Claude Code's Monitor: it hands work to a child, ends its turn and resumes
+  on the child's end notice. `wait` is only for results due within seconds,
+  with at most `--timeout 60s`. Claude Code's Agent may finish work within the
+  turn when a Claude model is explicitly wanted, `/model-sub` is Claude, or no
+  Unreal children are available.
 
 ## Build and test
 

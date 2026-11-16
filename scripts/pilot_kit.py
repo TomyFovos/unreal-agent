@@ -27,7 +27,7 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def binary_requirements(directory, revision):
+def binary_requirements(directory, revision, opencode_go_enabled=None):
     versions = set()
     for name in snapshot.BINARIES:
         binary = directory / name
@@ -35,6 +35,8 @@ def binary_requirements(directory, revision):
         for setting in ("CGO_ENABLED=1",):
             if setting not in info:
                 raise ValueError(f"{name}: embedded build metadata mismatch")
+        if opencode_go_enabled is not None and ("disable_opencode_go" in info) == opencode_go_enabled:
+            raise ValueError(f"{name}: OpenCode Go build choice differs from snapshot metadata")
         if name != "unreal-agent-auth" and "github.com/tree-sitter/go-tree-sitter" not in info:
             raise ValueError("CGO AST dependency missing")
         version_info = subprocess.check_output(["readelf", "--version-info", str(binary)], text=True)
@@ -43,7 +45,7 @@ def binary_requirements(directory, revision):
     return ".".join(map(str, minimum))
 
 
-def assemble(source, output, templates, *, revision=BASELINE, extra_files=None, readme=None, kit_name=None, kind=None, sandbox="asp"):
+def assemble(source, output, templates, *, revision=BASELINE, extra_files=None, readme=None, kit_name=None, kind=None, sandbox="asp", disable_opencode_go=False):
     extra_files = dict(extra_files or {})
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("expected a full source revision")
@@ -61,6 +63,8 @@ def assemble(source, output, templates, *, revision=BASELINE, extra_files=None, 
     archive_name = kit_root + ".tar.gz"
     files = (*FILES, *sorted(extra_files))
     archive, metadata = snapshot.inspect_archive(source.parent)
+    if disable_opencode_go and metadata.get("opencode_go_enabled", True):
+        raise ValueError("OpenCode Go is enabled in the snapshot; rebuild with snapshot.py build --disable-opencode-go")
     source_digest = digest(archive)
     package = output / kit_root
     package.mkdir(mode=0o700)
@@ -70,7 +74,7 @@ def assemble(source, output, templates, *, revision=BASELINE, extra_files=None, 
                 # The inspected source contains exactly seven regular members.
                 while chunk := stream.read(1024 * 1024):
                     target.write(chunk)
-    minimum = binary_requirements(package, revision)
+    minimum = binary_requirements(package, revision, metadata.get("opencode_go_enabled", True))
     values = {"MIN_GLIBC": minimum, "GLIBC_MAJOR": minimum.split(".")[0], "GLIBC_MINOR": minimum.split(".")[1],
               "REVISION": revision, "REVISION_SHORT": revision[:7], "ARCHIVE": archive_name, "KIT_ROOT": kit_root,
               "EXTRA_FILES": " ".join(sorted(extra_files))}
@@ -87,6 +91,7 @@ def assemble(source, output, templates, *, revision=BASELINE, extra_files=None, 
         (package / name).write_bytes(content)
     manifest = {"format_version": 1, "kind": kind or ("asp-oauth-kit" if extra_files else "asp-pilot-kit"), "baseline": revision,
                 "source_archive_sha256": source_digest, "minimum_glibc": minimum,
+                "opencode_go_enabled": metadata.get("opencode_go_enabled", True),
                 "target": "linux/amd64", "goamd64": "v1", "cgo_enabled": True, "formal_release": False}
     if kit_name is not None and sandbox:
         manifest["sandbox"] = sandbox
@@ -146,11 +151,12 @@ def copy_delivery(archive, destination, *, prefix=KIT_ROOT + "-"):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", required=True, type=Path)
+    parser.add_argument("--disable-opencode-go", action="store_true", help="require a snapshot built without OpenCode Go")
     parser.add_argument("--copy-to", type=Path, help="optional delivery parent; always reserves a new child directory")
     args = parser.parse_args()
     try:
         output = private_output(snapshot.ROOT)
-        archive = assemble(args.snapshot.resolve(), output, Path(__file__).with_name("pilot"))
+        archive = assemble(args.snapshot.resolve(), output, Path(__file__).with_name("pilot"), disable_opencode_go=args.disable_opencode_go)
         print(f"kit: {archive}")
         print(f"SHA256: {digest(archive)}")
         if args.copy_to:

@@ -4,6 +4,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"strings"
 	"testing"
 )
@@ -118,5 +119,23 @@ func TestManagedPolicyMetadataIsClosedAndNonsecret(t *testing.T) {
 		if ManagedPolicyModeFromConfiguration(raw) != "" || SelectionFromConfiguration(raw) == nil {
 			t.Fatal("malformed policy metadata authorized trust or broke existing model projection")
 		}
+	}
+}
+
+// Storage accepts models without effort; a reasoning model's catalog still
+// rejects an empty effort at selection, independently of its provider name.
+func TestOpenCodeGoNoEffortSelection(t *testing.T) {
+	noEffort := RuntimeSelection{Version: 1, Provider: "opencode-go", Model: "kimi-k2.7-code"}
+	if err := noEffort.Validate(); err != nil {
+		t.Fatal("a model without efforts was refused", err)
+	}
+	reasoning := modelcatalog.Model{ID: "gpt-6.1-sol", Efforts: []llm.ReasoningEffort{llm.ReasoningEffortMax}}
+	if reasoning.AllowsEffort(noEffort.Effort) {
+		t.Fatal("an empty effort was accepted for a reasoning model")
+	}
+	invalid := noEffort
+	invalid.Effort = "unsupported"
+	if invalid.Validate() == nil {
+		t.Fatal("an invalid effort was accepted")
 	}
 }

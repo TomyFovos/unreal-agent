@@ -26,6 +26,10 @@ import pilot_kit
 import pilot_provider as pilot
 from test_pilot_kit import source_archive
 
+# The Linux kit reads /proc and refuses symlinked private directories, and
+# macOS reaches its temporary directory through /var. These run on Linux CI.
+LINUX_ONLY = unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only kit behavior")
+
 
 class PermissionAcceptanceTests(unittest.TestCase):
     def setUp(self):
@@ -62,6 +66,7 @@ class PermissionAcceptanceTests(unittest.TestCase):
                 self.assertEqual(cfg["Runtime"]["ClaudeCode"]["ToolBridge"]["Mode"], "structured")
         self.assertEqual(gate.configuration("devlore",self.home,"opus","high")["Runtime"]["ClaudeCode"]["managedPolicyMode"], "trust")
 
+    @LINUX_ONLY
     def test_safe_setup_rerun_preserves_all_existing_settings_and_modified_work(self):
         keep = []
         for name in (".codex/auth.json", ".claude/credentials", ".config/unreal-agent/runtime.json", ".local/bin/unreal", ".local/state/unreal-agent/sessions/old", ".local/state/unreal-agent-pilot/devlore/launcher-v1/sessions/old"):
@@ -114,6 +119,7 @@ class PermissionAcceptanceTests(unittest.TestCase):
         output = io.StringIO()
         with contextlib.redirect_stdout(output): gate.readme(self.package)
         self.assertIn("日本語の受入手順", output.getvalue())
+    @LINUX_ONLY
     def test_failed_view_diagnostics_are_closed_and_read_only(self):
         self.setup_gate()
         (self.p["workspace"] / "sample.txt").write_bytes(b"after\n")
@@ -144,6 +150,7 @@ class PermissionAcceptanceTests(unittest.TestCase):
         # Failed sessions remain failed evidence, even if actual work succeeded.
         with patch.object(gate,"inspect_view",return_value=view),self.assertRaises(pilot.PilotError): gate.view(self.p,{"CodexFile":""},"gate-e")
 
+    @LINUX_ONLY
     def test_open_displays_and_confirms_instructions_before_exec(self):
         self.setup_gate()
         order=[]
@@ -164,6 +171,7 @@ class PermissionAcceptanceTests(unittest.TestCase):
             self.assertEqual(gate.main(["readme"]),0)
             show.assert_called_once_with(self.package)
 
+    @LINUX_ONLY
     def test_work_requires_exact_native_receipts_and_real_content_assertion(self):
         self.setup_gate(); root=self.p["workspace"]
         (root/"sample.txt").write_bytes(b"after\n")
@@ -190,6 +198,7 @@ class PermissionAcceptanceTests(unittest.TestCase):
         self.p["config_dir"].symlink_to(self.home)
         with self.assertRaises(pilot.PilotError): self.setup_gate()
 
+    @LINUX_ONLY
     def test_binding_rejects_configuration_mutation_and_claude_path_is_pinned(self):
         self.setup_gate()
         self.assertEqual(gate.binding(self.p,self.meta)["ConfigurationHash"],gate.digest(pilot.decode(self.p["config"].read_bytes())))
@@ -212,6 +221,7 @@ class PermissionAcceptanceTests(unittest.TestCase):
         v["Operations"].append(copy.deepcopy(v["Operations"][0]))
         with self.assertRaises(pilot.PilotError): gate.verify_stage(self.p,v,"deny")
 
+    @LINUX_ONLY
     def test_full_requires_actual_fail_fix_pass_and_unchanged_test(self):
         self.setup_gate();root=self.p["workspace"]
         (root/"answer.py").write_bytes(b"def answer():\n    return 42\n")
@@ -224,6 +234,7 @@ class PermissionAcceptanceTests(unittest.TestCase):
         (root/"test_answer.py").write_bytes(b"# bypass")
         with self.assertRaises(pilot.PilotError): gate.verify_stage(self.p,{"Operations":ops},"full")
 
+    @LINUX_ONLY
     def test_resume_history_and_no_duplicate_operations(self):
         self.setup_gate()
         for mode in ("read_only", "ask", "full_access"):
@@ -245,6 +256,7 @@ class PermissionAcceptanceTests(unittest.TestCase):
                 with self.assertRaises(pilot.PilotError):
                     gate.verify_stage(self.p,bad,"restart")
 
+    @LINUX_ONLY
     def test_pid_validation_rejects_current_non_host_without_signal(self):
         with patch.object(gate.os,"pidfd_open",side_effect=AssertionError("must not signal")),self.assertRaises(pilot.PilotError):
             gate.validate_pid(os.getpid(),self.package,self.p,{"CodexFile":"/unused/auth.json"})

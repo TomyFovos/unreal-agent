@@ -29,6 +29,15 @@ func (s *Service) ReadDir(ctx context.Context, path string) ([]Entry, error) {
 		if err != nil {
 			return nil, err
 		}
+		// The listed directory is a parent in the pinned walk below, so an
+		// outside one resolves like the parents of an outside file read.
+		if rel, err := filepath.Rel(s.root, path); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != path {
+				if path, err = s.path(resolved, false); err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
 	if err := s.authorize(ctx, path, false); err != nil {
 		return nil, err

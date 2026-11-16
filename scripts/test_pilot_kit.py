@@ -18,12 +18,13 @@ import snapshot
 TEMPLATES = Path(__file__).with_name("pilot")
 
 
-def source_archive(root, revision=pilot_kit.BASELINE, extra=None):
+def source_archive(root, revision=pilot_kit.BASELINE, extra=None, opencode_go_enabled=True):
     artifacts = root / "source"
     artifacts.mkdir()
     archive = artifacts / "snapshot.tar.gz"
     metadata = {"revision": revision, "kind": "local-snapshot", "formal_release": False,
-                "worktree_dirty": True, "target": "linux/amd64", "cgo_enabled": True}
+                "worktree_dirty": True, "target": "linux/amd64", "cgo_enabled": True,
+                "opencode_go_enabled": opencode_go_enabled}
     with tarfile.open(archive, "w:gz") as bundle:
         for name in sorted(snapshot.PACKAGE_FILES | ({extra} if extra else set())):
             data = json.dumps(metadata).encode() if name == "SNAPSHOT.json" else b"test fixture"
@@ -39,7 +40,8 @@ class KitBuilderTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="unreal-pilot-unit-")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        # Delivery refuses symlinked parents; the macOS temporary directory is one.
+        self.root = Path(self.temporary.name).resolve()
 
     def assemble(self, source):
         output = Path(tempfile.mkdtemp(prefix="output-", dir=self.root))

@@ -6,8 +6,10 @@ import (
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/opencodego"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 	"sort"
 )
 
@@ -32,6 +34,9 @@ func registeredProviders(initial agentrunner.RuntimeIdentity, extra map[string]a
 }
 
 func (h modelUI) catalog(ctx context.Context, id string, refresh bool) (modelcatalog.Catalog, error) {
+	if err := buildfeatures.CheckProvider(id); err != nil {
+		return modelcatalog.Catalog{}, err
+	}
 	if read := h.apiReads[id]; read != nil {
 		return read(ctx, refresh)
 	}
@@ -43,6 +48,9 @@ func (h modelUI) catalog(ctx context.Context, id string, refresh bool) (modelcat
 	}
 	if id == "openai-codex" && h.codexRead != nil {
 		return h.codexRead(ctx, refresh)
+	}
+	if id == opencodego.ProviderID && h.openCodeGo != nil {
+		return h.openCodeGo.read(ctx, refresh)
 	}
 	return modelcatalog.Catalog{Problem: "catalog unavailable"}, nil
 }
@@ -69,7 +77,7 @@ func (h modelUI) providers(ctx context.Context) []modelcatalog.Provider {
 	sort.Strings(ids)
 	var out []modelcatalog.Provider
 	for _, id := range ids {
-		if id == loginProvider {
+		if id == loginProvider || buildfeatures.Disabled(id) {
 			continue
 		}
 		if _, err := h.runtime.ProviderRuntime(id); err != nil {

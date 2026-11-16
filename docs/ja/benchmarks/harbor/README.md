@@ -291,3 +291,7 @@ smoke の既定は従来 runner と新しい3構成すべてです。
 従来の OpenAI / OpenRouter / Fireworks と `thinking_level` を使う runner 経路は、
 `-a harness_harbor.runner:RunnerAgent` と明示すれば利用できます。
 既存の Terminal-Bench の実行手順ではこのクラスを指定してください。
+
+### OpenCode Go を無効にして作る
+
+`make -C benchmarks/harbor build REVISION=HEAD OPENCODE_GO_ENABLED=false BUNDLE=/absolute/new-bundle`、または `build.py` の `--disable-opencode-go` を指定します。Host と runner の両方に `disable_opencode_go` が入り、`manifest.json` に `opencode_go_enabled: false` を記録します。`--version` でも確認でき、キー・設定・保存済み選択・子の指定で戻せません。ほかの provider は変えません。[配布手順](../../distribution.md#opencode-go-を無効にした配布物)も参照してください。

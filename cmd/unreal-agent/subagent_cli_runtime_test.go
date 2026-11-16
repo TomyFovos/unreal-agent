@@ -153,6 +153,14 @@ func TestSubagentCommandRuntimeOverrides(t *testing.T) {
 	if out, err := cli("start", "--template", "review", "--effort", "invented", "--task", "Review."); err == nil || !strings.Contains(out, `invalid effort "invented"`) {
 		t.Fatal("invalid effort was not explained", out, err)
 	}
+	if out, err := cli("start", "--template", "review", "--model", "claude-fable-5-1", "--task", "Review."); err == nil || !strings.Contains(out, "is a Claude model; subagent start runs its template's provider (ChatGPT)") {
+		t.Fatal("a Claude model on the Codex template was not explained", out, err)
+	}
+	select {
+	case got := <-requests:
+		t.Fatal("a refused override made an inference request", got)
+	default:
+	}
 }
 
 func TestClaudeModelNames(t *testing.T) {

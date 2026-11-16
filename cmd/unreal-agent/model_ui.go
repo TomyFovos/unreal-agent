@@ -5,15 +5,18 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
+	"slices"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/opencodego"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
@@ -21,6 +24,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 )
 
 type modelRequest struct {
@@ -43,6 +47,10 @@ type modelReply struct {
 	Hint         string                               `json:",omitzero"`
 	Receipt      *host.Receipt                        `json:",omitzero"`
 	Capabilities map[string]modelcatalog.Capabilities `json:",omitzero"`
+	// SubagentModel is /model-sub's choice; Pending means it applies once the
+	// Host starts again, because this one has no sub-agents.
+	SubagentModel *sessionstore.RuntimeSelection `json:",omitzero"`
+	Pending       bool                           `json:",omitzero"`
 }
 type modelUI struct {
 	apiReads   map[string]func(context.Context, bool) (modelcatalog.Catalog, error)
@@ -57,6 +65,12 @@ type modelUI struct {
 	runtime     agentrunner.RuntimeConfig
 	templates   map[string]subagent.Template
 	policy      *permission.Policy
+
+	// openCodeGo reads the OpenCode Go model list when its key was stored.
+	openCodeGo *openCodeGoCatalog
+	// subagentModel is the file of /model-sub's choice; empty without the
+	// launcher or with an operator's templates.
+	subagentModel string
 }
 
 func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -67,7 +81,7 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid local request", 400)
 		return
 	}
-	if peek.Action != "launcher.check" && peek.Action != "runtime.health" && peek.Action != "model.catalog" && peek.Action != "model.select" && peek.Action != "model.providers" && peek.Action != "child.start" {
+	if peek.Action != "launcher.check" && peek.Action != "runtime.health" && peek.Action != "model.catalog" && peek.Action != "model.select" && peek.Action != "model.providers" && peek.Action != "child.start" && peek.Action != "subagent.providers" && peek.Action != "subagent.select" {
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		h.next.ServeHTTP(w, r)
 		return
@@ -83,6 +97,9 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if peek.Action == "runtime.health" {
 		out.Capabilities = make(map[string]modelcatalog.Capabilities)
 		for id, c := range h.runtime.Capabilities {
+			if buildfeatures.Disabled(id) {
+				continue
+			}
 			out.Capabilities[id] = c
 		}
 		ids := append([]string{h.runtime.Identity.Provider.Provider}, h.runtime.Discovered.IDs()...)
@@ -90,6 +107,9 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ids = append(ids, id)
 		}
 		for _, id := range ids {
+			if buildfeatures.Disabled(id) {
+				continue
+			}
 			out.Capabilities[id] = modelcatalog.Capabilities{Tools: h.runtime.ProviderSupportsTools(id)}
 		}
 	} else {
@@ -99,14 +119,19 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			if peek.Action == "child.start" {
 				templates := h.templates
-				if h.runtime.BuiltinSubagents && q.ChildRuntime != nil && q.ChildRuntime.Provider == "" {
+				chosen, _ := readSubagentModel(h.subagentModel)
+				if h.runtime.BuiltinSubagents && q.ChildRuntime != nil && q.ChildRuntime.Provider == "" && chosen.Provider != opencodego.ProviderID && chosen.Provider != claudeagent.ProviderID {
 					templates = make(map[string]subagent.Template, len(h.templates))
 					for name, t := range h.templates {
 						templates[name] = t
 					}
 					if t, ok := templates[q.Template]; ok {
 						var err error
-						templates[q.Template], err = builtinGPTTemplate(h.runtime, t, builtinGPTProvider(s))
+						id := builtinGPTProvider(s)
+						if chosen.Provider == "openai-codex" {
+							id = chosen.Provider
+						}
+						templates[q.Template], err = builtinGPTTemplate(h.runtime, t, id)
 						if err != nil {
 							out.Error = "provider_unavailable"
 							h.writeReply(w, out)
@@ -114,14 +139,25 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
-				resolve := childRuntimeResolver(h.runtime)
+				resolve := childRuntimeResolver(h.runtime, h.subagentModel)
 				if len(h.runtime.Backends) == 0 && h.runtime.Discovered == nil {
 					resolve = nil
 				}
 				// The resolver bounds the start by the Session's own capability;
 				// the gateway's read-only baseline would only narrow that, and the
 				// child then follows the Session's mode itself.
-				receipt, e := subagent.StartChild(r.Context(), s, q.Generation, q.InputID, q.Template, q.Task, templates, q.ChildRuntime, resolve)
+				_, retry := s.OperationIntent(q.InputID)
+				var receipt host.Receipt
+				e := subagentOverrideRefusal(h.subagentModel, h.templates[q.Template], q.ChildRuntime, retry)
+				if e == nil && !retry && q.ChildRuntime != nil && q.ChildRuntime.Provider == "" && claudeModel(q.ChildRuntime.Model) {
+					selected := sessionstore.SelectionFromConfiguration(templates[q.Template].Runtime)
+					if selected != nil && (selected.Provider == "openai-codex" || selected.Provider == "openai") {
+						e = &subagent.RuntimeError{Code: "invalid_model", Hint: fmt.Sprintf("%q is a Claude model; subagent start runs its template's provider (ChatGPT). For a Claude model, use Claude Code's Agent tool with that model", q.ChildRuntime.Model)}
+					}
+				}
+				if e == nil {
+					receipt, e = subagent.StartChild(r.Context(), s, q.Generation, q.InputID, q.Template, q.Task, templates, q.ChildRuntime, resolve)
+				}
 				if e != nil {
 					out.Error = "child_start_failed"
 					var re *subagent.RuntimeError
@@ -132,6 +168,11 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				} else {
 					out.Receipt = &receipt
 				}
+				h.writeReply(w, out)
+				return
+			}
+			if peek.Action == "subagent.providers" || peek.Action == "subagent.select" {
+				h.subagentChoice(r.Context(), peek.Action == "subagent.select", q.Selection, &out)
 				h.writeReply(w, out)
 				return
 			}
@@ -157,6 +198,11 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if id == "" && active != nil {
 					id = active.Provider
 				}
+			}
+			if buildfeatures.Disabled(id) {
+				out.Error, out.Hint = buildfeatures.OpenCodeGoDisabledCode, buildfeatures.OpenCodeGoDisabledMessage
+				h.writeReply(w, out)
+				return
 			}
 			if peek.Action == "model.catalog" && id == loginProvider {
 				out.Catalog = &modelcatalog.Catalog{Problem: loginInstructions}
@@ -234,6 +280,80 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	h.writeReply(w, out)
 }
+
+// subagentChoice lists or saves the sub-agents' model for /model-sub:
+// Codex, the templates as built, an available OpenCode Go model, or a Claude
+// model for Claude Code's own Agent sub-agents.
+func (h modelUI) subagentChoice(ctx context.Context, save bool, selection sessionstore.RuntimeSelection, out *modelReply) {
+	if h.subagentModel == "" {
+		out.Error = "subagent_model_unavailable"
+		return
+	}
+	providers := h.subagentProviders(ctx)
+	if !save {
+		m, err := readSubagentModel(h.subagentModel)
+		if err != nil {
+			out.Error = "subagent_model_unreadable"
+			return
+		}
+		if m.Provider == "" {
+			m.Provider = "openai-codex"
+		}
+		out.Providers, out.SubagentModel = providers, &sessionstore.RuntimeSelection{Version: 1, Provider: m.Provider, Model: m.Model}
+		return
+	}
+	if buildfeatures.Disabled(selection.Provider) {
+		out.Error, out.Hint = buildfeatures.OpenCodeGoDisabledCode, buildfeatures.OpenCodeGoChildDisabledMessage
+		return
+	}
+	chosen := subagentModel{Version: 1, Provider: selection.Provider}
+	name := ""
+	switch selection.Provider {
+	case "openai-codex":
+	case opencodego.ProviderID, claudeagent.ProviderID:
+		available := slices.ContainsFunc(providers, func(p modelcatalog.Provider) bool { return p.ID == selection.Provider && p.Availability == "available" })
+		c, err := h.catalog(ctx, selection.Provider, false)
+		m, findErr := c.Find(selection.Model)
+		if !available || err != nil || findErr != nil {
+			out.Error = "selection_unavailable"
+			return
+		}
+		chosen.Model, name = m.ID, viewer.SafeText(m.Name)
+	default:
+		out.Error = "selection_unavailable"
+		return
+	}
+	if err := writeSubagentModel(h.subagentModel, chosen); err != nil {
+		out.Error = "subagent_model_unwritable"
+		return
+	}
+	out.SubagentModel = &sessionstore.RuntimeSelection{Version: 1, Provider: chosen.Provider, Model: chosen.Model, Name: name}
+	out.Pending = len(h.templates) == 0
+}
+
+// subagentProviders are the providers /model-sub offers, OpenCode Go also
+// before its key is saved, then Claude when /model lists it.
+func (h modelUI) subagentProviders(ctx context.Context) []modelcatalog.Provider {
+	all := h.providers(ctx)
+	var out []modelcatalog.Provider
+	for _, id := range []string{"openai-codex", opencodego.ProviderID} {
+		if buildfeatures.Disabled(id) {
+			continue
+		}
+		if i := slices.IndexFunc(all, func(p modelcatalog.Provider) bool { return p.ID == id }); i >= 0 {
+			out = append(out, all[i])
+		} else {
+			out = append(out, modelcatalog.Provider{ID: id, Name: modelcatalog.ProviderName(id), Availability: "unavailable", Reason: modelcatalog.AuthRequired})
+		}
+	}
+	// The Claude choice names Claude Code's Agent model, so it is offered only
+	// where /model lists Claude at all.
+	if i := slices.IndexFunc(all, func(p modelcatalog.Provider) bool { return p.ID == claudeagent.ProviderID }); i >= 0 {
+		out = append(out, all[i])
+	}
+	return out
+}
+
 func (h modelUI) writeReply(w http.ResponseWriter, out modelReply) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

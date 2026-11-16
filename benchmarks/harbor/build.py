@@ -12,7 +12,13 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 
-def build(revision: str, output: Path, arch: str, runner: str) -> None:
+def build(
+    revision: str,
+    output: Path,
+    arch: str,
+    runner: str,
+    disable_opencode_go: bool = False,
+) -> None:
     repo = Path(__file__).resolve().parents[2]
     commit = subprocess.check_output(
         ["git", "rev-parse", "--verify", f"{revision}^{{commit}}"], cwd=repo, text=True
@@ -26,6 +32,16 @@ def build(revision: str, output: Path, arch: str, runner: str) -> None:
         archive.flush()
         with tarfile.open(archive.name) as tree:
             tree.extractall(source, filter="data")
+        if (
+            disable_opencode_go
+            and not (
+                source / "internal/buildfeatures/opencode_go_disabled.go"
+            ).is_file()
+        ):
+            raise ValueError(
+                "This revision cannot disable OpenCode Go; "
+                "use a revision with build feature support"
+            )
         binary = source / "unreal-agent-runner"
         cgo = os.environ.get("CGO_ENABLED", "1")
         build_flags = []
@@ -36,6 +52,11 @@ def build(revision: str, output: Path, arch: str, runner: str) -> None:
                 "-tags=netgo,osusergo",
                 "-ldflags=-linkmode=external -extldflags=-static",
             ]
+        if disable_opencode_go:
+            if cgo == "1":
+                build_flags[0] += ",disable_opencode_go"
+            else:
+                build_flags.append("-tags=disable_opencode_go")
         subprocess.run(
             [
                 "go",
@@ -83,6 +104,7 @@ def build(revision: str, output: Path, arch: str, runner: str) -> None:
                 "claude_code": pins["CLAUDE_VERSION"],
             },
             "revision": commit,
+            "opencode_go_enabled": not disable_opencode_go,
             "files": {
                 name: hashlib.sha256(value).hexdigest()
                 for name, value in assets.items()
@@ -107,6 +129,7 @@ def build(revision: str, output: Path, arch: str, runner: str) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--revision", default="HEAD")
+    parser.add_argument("--disable-opencode-go", action="store_true")
     parser.add_argument(
         "--runner",
         default="unreal-agent-runner",
@@ -115,4 +138,4 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--arch", choices=("amd64", "arm64"), default="amd64")
     args = parser.parse_args()
-    build(args.revision, args.output, args.arch, args.runner)
+    build(args.revision, args.output, args.arch, args.runner, args.disable_opencode_go)

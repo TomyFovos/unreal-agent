@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -523,6 +524,170 @@ func TestSubagentCommandReachesTheHostWithoutApproval(t *testing.T) {
 			t.Fatalf("%s: the prompt does not name the command", mode)
 		}
 	}
+}
+
+// Claude Code's sandbox must let the Host's own socket through, or the
+// subagent command Claude runs fails with "gateway: disconnected". The
+// --settings value carries that beside upstream's instruction exclusions: the
+// user's sandbox stays on.
+func TestSubagentSocketIsAllowedThroughTheSandbox(t *testing.T) {
+	const cli = "/opt/unreal/bin/unreal"
+	h := newHarness(t, "echo")
+	h.client.config.Subagents = SubagentCLI{Binary: cli, Socket: "/tmp/x/host.sock"}
+	ctx, _, _ := withMode(t, permission.FullAccess)
+	if _, err := h.respond(ctx); err != nil {
+		t.Fatal(err)
+	}
+	settings := flagValue(strings.Split(read(t, h.args), "\n"), "--settings")
+	var decoded struct {
+		Sandbox struct {
+			Network struct {
+				AllowUnixSockets []string `json:"allowUnixSockets"`
+			} `json:"network"`
+		} `json:"sandbox"`
+	}
+	if err := json.Unmarshal([]byte(settings), &decoded); err != nil {
+		t.Fatalf("--settings is not JSON: %q (%v)", settings, err)
+	}
+	if sockets := decoded.Sandbox.Network.AllowUnixSockets; len(sockets) != 1 || sockets[0] != "/tmp/x/host.sock" {
+		t.Fatalf("allowUnixSockets = %q, want [%q]", sockets, "/tmp/x/host.sock")
+	}
+}
+
+// Without the subagent CLI, without a Session to reach, or when no providers
+// can run children, --settings carries no sandbox (it may still carry
+// upstream's claudeMdExcludes), and no environment names the Host and Session.
+func TestSubagentSandboxIsAbsentWithoutTheCLI(t *testing.T) {
+	const cli = "/opt/unreal/bin/unreal"
+	for _, tc := range []struct {
+		name     string
+		subagent SubagentCLI
+		session  string
+	}{
+		{"no CLI", SubagentCLI{Socket: "/tmp/x/host.sock"}, "session-1"},
+		{"no Session", SubagentCLI{Binary: cli, Socket: "/tmp/x/host.sock"}, ""},
+		{"unavailable", SubagentCLI{Binary: cli, Socket: "/tmp/x/host.sock", Available: func(context.Context) bool { return false }}, "session-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, "subagent", "CLAUDEAGENT_CLI="+cli)
+			h.client.config.Subagents = tc.subagent
+			h.client.approver.cli = tc.subagent.Binary
+			ctx, _, _ := withMode(t, permission.FullAccess)
+			response, err := h.client.Respond(ctx, llm.Request{Input: []llm.Item{user("hello")}}, llm.RequestOptions{
+				Identity: llm.RequestIdentity{SessionID: tc.session},
+				Tools:    h.tools,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings := flagValue(strings.Split(read(t, h.args), "\n"), "--settings"); settings != "" {
+				var decoded struct {
+					Sandbox jsontext.Value `json:"sandbox"`
+				}
+				if err := json.Unmarshal([]byte(settings), &decoded); err != nil {
+					t.Fatalf("--settings is not JSON: %q (%v)", settings, err)
+				}
+				if decoded.Sandbox != nil {
+					t.Fatalf("--settings names a sandbox with no children to reach: %q", settings)
+				}
+			}
+			if got := response.Output[len(response.Output)-1].Data.(llm.Message).Text; !strings.HasPrefix(got, "env::") {
+				t.Fatalf("the subagent command got an environment: %q", got)
+			}
+		})
+	}
+}
+
+// A turn without available children drops Unreal's subagent CLI but keeps the
+// Claude model chosen with /model-sub and its force flag, so Claude's own
+// Agent runs every sub-agent, Explore and Plan included, on it.
+func TestAgentModelSurvivesATurnWithoutChildren(t *testing.T) {
+	h := newHarness(t, "agent_model")
+	h.client.config.Subagents = SubagentCLI{AgentModel: func() string { return "opus" }, Available: func(context.Context) bool { return false }}
+	response, err := h.respond(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := response.Output[len(response.Output)-1].Data.(llm.Message).Text; got != "model:opus force:1" {
+		t.Fatalf("the Agent path got %q, want the chosen model forced on every sub-agent", got)
+	}
+}
+
+// Upstream's claudeMdExcludes and the fork's socket share the one --settings
+// flag, so Claude Code reads one object.
+func TestSubagentSandboxCombinesWithAncestorInstructionExclusions(t *testing.T) {
+	const cli = "/opt/unreal/bin/unreal"
+	const socket = "/tmp/x/host.sock"
+	h := newHarness(t, "echo")
+	parentInstructions := filepath.Join(filepath.Dir(h.workspace), "CLAUDE.local.md")
+	if err := os.WriteFile(parentInstructions, []byte("parent instructions"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h.client.config.Subagents = SubagentCLI{Binary: cli, Socket: socket}
+	ctx, _, _ := withMode(t, permission.FullAccess)
+	if _, err := h.respond(ctx); err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Split(read(t, h.args), "\n")
+	if count := strings.Count(read(t, h.args), "--settings"); count != 1 {
+		t.Fatalf("argv has %d --settings flags:\n%s", count, strings.Join(args, "\n"))
+	}
+	raw := flagValue(args, "--settings")
+	var settings struct {
+		Excludes []string `json:"claudeMdExcludes"`
+		Sandbox  struct {
+			Network struct {
+				AllowUnixSockets []string `json:"allowUnixSockets"`
+			} `json:"network"`
+		} `json:"sandbox"`
+	}
+	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
+		t.Fatalf("--settings is not JSON: %q (%v)", raw, err)
+	}
+	if !slices.Contains(settings.Excludes, parentInstructions) {
+		t.Fatalf("claudeMdExcludes = %q, want %q", settings.Excludes, parentInstructions)
+	}
+	if sockets := settings.Sandbox.Network.AllowUnixSockets; len(sockets) != 1 || sockets[0] != socket {
+		t.Fatalf("allowUnixSockets = %q, want [%q]", sockets, socket)
+	}
+}
+
+// A socket path with a quote and a backslash stays one JSON string.
+func TestSubagentSandboxEscapesTheSocketPath(t *testing.T) {
+	const socket = `/tmp/x/ho"st\sock`
+	h := newHarness(t, "echo")
+	h.client.config.Subagents = SubagentCLI{Binary: "/opt/unreal/bin/unreal", Socket: socket}
+	ctx, _, _ := withMode(t, permission.FullAccess)
+	if _, err := h.respond(ctx); err != nil {
+		t.Fatal(err)
+	}
+	raw := flagValue(strings.Split(read(t, h.args), "\n"), "--settings")
+	var settings struct {
+		Sandbox struct {
+			Network struct {
+				AllowUnixSockets []string `json:"allowUnixSockets"`
+			} `json:"network"`
+		} `json:"sandbox"`
+	}
+	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
+		t.Fatalf("--settings is not JSON: %q (%v)", raw, err)
+	}
+	if sockets := settings.Sandbox.Network.AllowUnixSockets; len(sockets) != 1 || sockets[0] != socket {
+		t.Fatalf("allowUnixSockets = %q, want [%q]", sockets, socket)
+	}
+	if !strings.Contains(raw, `\"`) || !strings.Contains(raw, `\\`) {
+		t.Fatalf("--settings does not escape the path: %q", raw)
+	}
+}
+
+// flagValue returns the argument that follows flag in a recorded argv.
+func flagValue(args []string, flag string) string {
+	for i, arg := range args {
+		if arg == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // Reading a file the user sent into ~/drop is allowed in every mode.

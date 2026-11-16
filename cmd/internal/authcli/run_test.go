@@ -104,6 +104,30 @@ func TestUnsupportedMethodsRedactionCancellationAndAnthropicConfiguration(t *tes
 		t.Fatal("support matrix missing")
 	}
 }
+func TestOpenCodeGoAPIKeyLoginOnly(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "credentials")
+	secret := rand.Text()
+	var out bytes.Buffer
+	if err := Run(t.Context(), []string{"login", "--store", dir, "--provider", "opencode-go", "--id", "primary", "--key-stdin"}, strings.NewReader(secret+"\n"), &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), secret) || !strings.Contains(out.String(), `"opencode-go"`) {
+		t.Fatal("login output changed", out.String())
+	}
+	store, err := credential.OpenLocal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	material, err := credential.NewManager(store).Resolve(t.Context(), credential.Reference{Provider: "opencode-go", ID: "primary", Method: credential.APIKey})
+	if err != nil || material.Token.Reveal() != secret || material.Owner != credential.Managed {
+		t.Fatal("stored key differs", err)
+	}
+	out.Reset()
+	err = Run(t.Context(), []string{"login", "--store", dir, "--provider", "opencode-go", "--id", "primary", "--method", "oauth", "--key-stdin"}, strings.NewReader(secret), &out)
+	if !credential.IsCode(err, "unsupported_auth_flow") || strings.Contains(out.String(), secret) || strings.Contains(err.Error(), secret) {
+		t.Fatal("OpenCode Go OAuth did not fail safely", err)
+	}
+}
 func TestEntitlementDenialAndPolicyTransport(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "credentials")
 	secret := rand.Text()

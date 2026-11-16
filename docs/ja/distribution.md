@@ -108,3 +108,37 @@ make prepush BASE=<rev>
 4. **結果の報告:** 検証したキット名・リビジョン・環境・実推論の結果（および未検証の経路があればその旨）を報告したうえで、[インストール手順](install.md) とともにキットを案内します。
 
 > **重要:** `build`、`doctor.sh`、パッケージのスモーク試験だけでは、実推論の受入確認にはなりません。
+
+## OpenCode Go を無効にした配布物
+
+既定は有効です。配布者は Go の build tag `disable_opencode_go` で OpenCode Go 接続全体を無効にできます。判定は実行ファイル内の定数です。利用者の環境変数・設定ファイル・保存済みキーでは戻せず、有効にするにはソースからの再ビルドが必要です。ほかの provider の動きは変えません。
+
+無効版の snapshot と共通キットを作るコマンド：
+
+```bash
+make snapshot OPENCODE_GO_ENABLED=false GORELEASER=/path/to/goreleaser | tee /tmp/unreal-disabled-snapshot.log
+unreal_snapshot=$(sed -n 's/^snapshot verified: //p' /tmp/unreal-disabled-snapshot.log)
+python3 scripts/common_development_bundle.py --snapshot "$unreal_snapshot" \
+  --revision "$(git rev-parse HEAD)" --disable-opencode-go
+```
+
+Python からは `python3 scripts/snapshot.py build --disable-opencode-go` です。`.goreleaser.yaml` はビルド環境の `OPENCODE_GO_ENABLED=false` を4つの実行ファイルすべての tag に反映します（snapshot のラッパーが設定します）。共通・pilot・permission キットの再梱包にも `--disable-opencode-go` を指定できます。有効版の snapshot を渡すと再ビルドを案内して拒否し、ラベルだけの無効化はしません。指定を省略しても元の snapshot の有効・無効は保持します。
+
+ほかのソースビルド：
+
+```bash
+make build OPENCODE_GO_ENABLED=false
+make -C benchmarks/harbor build REVISION=HEAD OPENCODE_GO_ENABLED=false BUNDLE=/absolute/new-harbor-bundle
+# Harbor の Python 版:
+python3 benchmarks/harbor/build.py --revision HEAD --output /absolute/another-new-bundle --disable-opencode-go
+make mac-install REV=HEAD OPENCODE_GO_ENABLED=false
+# または: sh scripts/mac/install.sh HEAD --disable-opencode-go
+# Docker ビルド:
+docker build --build-arg OPENCODE_GO_ENABLED=false -t unreal-agent-local .
+# Go で直接作る場合（配布する各実行ファイルに適用）:
+go build -tags=disable_opencode_go ./cmd/unreal-agent
+```
+
+Mac では同じ commit の有効版と無効版を別のディレクトリに置き、有効版を使い回しません。Release workflow は配布者のリポジトリ変数 `UNREAL_OPENCODE_GO_ENABLED=false` をビルド時に参照します。利用者の環境変数とは別です。
+
+`SNAPSHOT.json`・`KIT.json`・Harbor の `manifest.json` に真偽値 `opencode_go_enabled` を記録し、各実行ファイルの `--version` でも確認できます。無効版は discovery・モデル一覧・`/model`・`/model-sub`・認証方式一覧に OpenCode Go を表示しません。インストーラーへのキー指定はファイル・環境変数とも値を表示せず拒否します。OpenCode Go を選んでいた Session は選択を保持して開き、無効化の理由と「`/model` でほかの接続を選ぶ」案内を表示します。推論は行わず、自動切替もしません。OpenCode Go を指定した子も、`/model-sub` での選び直しを案内して失敗します。

@@ -17,6 +17,10 @@ def final_view(text):
         {"Kind": "model_response", "Data": {"Response": {"Stop": "complete", "Output": [
             {"Type": "message", "Data": {"Role": "assistant", "Text": text}}]}}}]}}
 
+# The Linux kit reads /proc and refuses symlinked private directories, and
+# macOS reaches its temporary directory through /var. These run on Linux CI.
+LINUX_ONLY = unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only kit behavior")
+
 
 class ProviderPilotTests(unittest.TestCase):
     def setUp(self):
@@ -115,6 +119,7 @@ class ProviderPilotTests(unittest.TestCase):
             probe.assert_not_called()
 
 
+    @LINUX_ONLY
     def test_changed_config_and_symlink_never_overwritten(self):
         folder = pilot.private_tree(self.home, "pilot")
         config = folder / "runtime.json"

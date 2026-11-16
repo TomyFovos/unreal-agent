@@ -16,6 +16,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/fireworks"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openai"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openaicodex"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/opencodego"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openrouter"
 	"github.com/unreallabsai/unreal-agent/harness/llm/responsesapi"
 )
@@ -38,6 +39,9 @@ func TestProvidersOnlyReturnTerminalResponse(t *testing.T) {
 		},
 		"openai-codex": func(url string, trace func(responsesapi.Exchange)) (streamingClient, error) {
 			return openaicodex.NewClient(openaicodex.Config{AccessToken: "subscription-token", AccountID: "account", BaseURL: url, Trace: trace})
+		},
+		"opencode-go": func(url string, trace func(responsesapi.Exchange)) (streamingClient, error) {
+			return opencodego.NewClient(opencodego.Config{APIKey: "test-key", BaseURL: url + "/inference/go/openai/v1", Trace: trace})
 		},
 	}
 	for name, newClient := range constructors {

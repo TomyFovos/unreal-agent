@@ -90,7 +90,7 @@ func runProviderPreflight(ctx context.Context, args []string, out io.Writer) err
 	if err := validateBootstrapChoices(o); err != nil {
 		return err
 	}
-	cfg, err := registerNormalProviders(ctx, bootstrapDiscovery(o), "", os.Getenv)
+	cfg, err := registerNormalProviders(ctx, bootstrapDiscovery(o), "", "", os.Getenv)
 	if err != nil {
 		return err
 	}

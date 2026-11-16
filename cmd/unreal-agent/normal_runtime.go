@@ -19,11 +19,13 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openaicodex"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/opencodego"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/profile"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 	"github.com/unreallabsai/unreal-agent/internal/privateexport"
 )
 
@@ -63,6 +65,9 @@ func (e *normalRuntimeError) Error() string {
 	case "initial_provider_unavailable":
 		return modelcatalog.ProviderName(e.Provider) + " を利用できません。" + modelcatalog.AuthRequired.ProviderHint(e.Provider) + "。ログイン後に unreal を起動してください。"
 	case "catalog_unavailable":
+		if e.Provider == opencodego.ProviderID {
+			return "OpenCode Go のモデル一覧を読み取れません。通信を確認してから unreal を起動してください。"
+		}
 		return "モデル一覧を読み取れません。CLI の起動・ログイン状態を確認してから unreal を起動してください。"
 	default:
 		return "起動設定を読み込めませんでした。設定を確認してから unreal を起動してください。"
@@ -139,7 +144,9 @@ func initialCatalogModel(c modelcatalog.Catalog, id string) (modelcatalog.Model,
 	return modelcatalog.Model{}, &normalRuntimeError{Code: "catalog_unavailable"}
 }
 
-func registerNormalProviders(ctx context.Context, config serveConfiguration, codexFile string, getenv func(string) string) (serveConfiguration, error) {
+// credentials is the managed store OpenCode Go's key is read from; empty skips
+// OpenCode Go.
+func registerNormalProviders(ctx context.Context, config serveConfiguration, codexFile, credentials string, getenv func(string) string) (serveConfiguration, error) {
 	discover := true
 	if config.Launcher != nil {
 		if config.Launcher.Version != 1 {
@@ -167,7 +174,10 @@ func registerNormalProviders(ctx context.Context, config serveConfiguration, cod
 	// Fixed traversal only controls registration order, never initial selection.
 	// Claude is the Claude Code route (U21); the older claude-code route is
 	// no longer discovered.
-	for _, id := range []string{"openai-codex", claudeagent.ProviderID} {
+	for _, id := range []string{"openai-codex", claudeagent.ProviderID, opencodego.ProviderID} {
+		if buildfeatures.Disabled(id) {
+			continue
+		}
 		if config.Runtime.Provider.Provider == id || config.Providers[id].Provider.Provider != "" {
 			config.providerStatuses = append(config.providerStatuses, modelcatalog.Provider{ID: id, Name: modelcatalog.ProviderName(id), Availability: "available"})
 			continue
@@ -178,7 +188,17 @@ func registerNormalProviders(ctx context.Context, config serveConfiguration, cod
 		}
 		var p agentrunner.ProviderRuntime
 		var err error
-		if id == "openai-codex" {
+		if id == opencodego.ProviderID {
+			// Only with its key stored: otherwise nothing remote is read and no
+			// status is shown, as before OpenCode Go (docs/opencode-go.md).
+			var stored bool
+			if stored, err = openCodeGoKeyStored(ctx, credentials); err == nil && !stored {
+				continue
+			}
+			if err == nil {
+				p, err = discoverOpenCodeGo(ctx)
+			}
+		} else if id == "openai-codex" {
 			if config.Launcher != nil && config.Launcher.CodexAuto {
 				p, err = discoverCodexAuto(ctx, codexFile, getenv)
 			} else {
@@ -230,7 +250,7 @@ func chooseInitialProvider(out io.Writer) initialProviderChooser {
 
 func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProviderChooser, getenv func(string) string) (serveConfiguration, error) {
 	config := bootstrapDiscovery(o)
-	config, err := registerNormalProviders(ctx, config, o.codexFile, getenv)
+	config, err := registerNormalProviders(ctx, config, o.codexFile, openCodeGoStore(o.credentials, o.defaultCredentials), getenv)
 	if err != nil {
 		return config, err
 	}
@@ -242,6 +262,9 @@ func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProvid
 	}
 	slices.Sort(ids)
 	id := getenv("UNREAL_HARNESS_LLM_PROVIDER")
+	if err := buildfeatures.CheckProvider(id); err != nil {
+		return config, err
+	}
 	if id == "" {
 		if len(ids) == 0 {
 			id = loginProvider
@@ -268,6 +291,8 @@ func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProvid
 		} else if id == "openai-codex" {
 			path, _ := externalCodexAuthFile(o.codexFile, getenv)
 			catalog, err = codexCatalogReader(path, isDockerSandboxCodex(p.Provider.Auth), getenv)(ctx, false)
+		} else if id == opencodego.ProviderID {
+			catalog = readOpenCodeGoModels(ctx)
 		}
 		m, e := initialCatalogModel(catalog, requested)
 		if err != nil || e != nil {
@@ -366,12 +391,14 @@ func resolveLauncherConfig(ctx context.Context, o launchOptions, choose initialP
 // normalRediscovery repeats the same explicit discovery policy as startup.
 // Published registrations are shared with existing runtime factories; executing
 // clients keep their own configuration until the next turn boundary.
-func normalRediscovery(config serveConfiguration, codexFile string, live *agentrunner.DiscoveredBackends, getenv func(string) string, diagnostics io.Writer) func(context.Context) error {
+// keyStore is looked up on each refresh, so OpenCode Go's key saved after the
+// Host started is found without a restart.
+func normalRediscovery(config serveConfiguration, codexFile string, keyStore func() string, live *agentrunner.DiscoveredBackends, getenv func(string) string, diagnostics io.Writer) func(context.Context) error {
 	return func(ctx context.Context) error {
 		fresh := config
 		fresh.Providers = nil
 		fresh.Runtime.Provider.Provider = ""
-		fresh, err := registerNormalProviders(ctx, fresh, codexFile, getenv)
+		fresh, err := registerNormalProviders(ctx, fresh, codexFile, keyStore(), getenv)
 		if err != nil {
 			return err
 		}
@@ -399,6 +426,8 @@ func normalRediscovery(config serveConfiguration, codexFile string, live *agentr
 					return err
 				}
 				b.Catalog = codexCatalogReader(path, isDockerSandboxCodex(runtime.Provider.Auth), getenv)
+			} else if id == opencodego.ProviderID {
+				b.Catalog = (&openCodeGoCatalog{}).read
 			}
 			live.Register(b)
 		}

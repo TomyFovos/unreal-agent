@@ -17,6 +17,7 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/host"
+	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
@@ -66,7 +67,8 @@ func TestAPIKeyBuiltInLeadAndGrandchildProcess(t *testing.T) {
 	maximum := permission.Config{Tools: tool.StaticNames(), FilesystemUnrestricted: true, NetworkUnrestricted: true, ProcessMode: permission.ProcessUnrestricted}
 	cfg.PermissionModes = &permission.ModesConfig{Enabled: true, Maximum: &maximum}
 	directory := privateCLIDirectory(t)
-	client, _ := startMultiChildCLI(t, binary, cfg, directory, 2*time.Minute)
+	modelFile := filepath.Join(directory, "subagent-model.json")
+	client, _ := startMultiChildCLIWith(t, binary, cfg, directory, 2*time.Minute, "--subagent-model-file", modelFile)
 	v, err := client.Open(t.Context(), host.Create, "api-parent")
 	if err != nil {
 		t.Fatal(err)
@@ -126,5 +128,21 @@ func TestAPIKeyBuiltInLeadAndGrandchildProcess(t *testing.T) {
 	if leadCalls == 0 || workerCalls == 0 {
 		t.Fatal("API lead and grandchild did not both use the API")
 	}
+	// An explicit /model-sub choice takes priority over the API parent's
+	// connection. Neither unavailable provider may fall back to that API.
+	for _, chosen := range []subagentModel{{Version: 1, Provider: "openai-codex"}, {Version: 1, Provider: "opencode-go", Model: "deepseek-v4.1-flash"}} {
+		if err := writeSubagentModel(modelFile, chosen); err != nil {
+			t.Fatal(err)
+		}
+		_, err := modelExchange(t.Context(), client.Extension, modelRequest{Action: "child.start", ID: "api-parent", Generation: v.Generation, InputID: "unavailable-" + inbox.ID(chosen.Provider), Template: "collector", Task: "This selected provider is unavailable."})
+		if err == nil || !strings.Contains(err.Error(), "provider_unavailable") {
+			t.Fatal("an unavailable /model-sub choice did not report its own failure", chosen.Provider, err)
+		}
+	}
+	gpt.mu.Lock()
+	if len(gpt.leadEfforts) != leadCalls || len(gpt.workerEffort) != workerCalls {
+		t.Error("an unavailable /model-sub choice used the parent's API connection")
+	}
+	gpt.mu.Unlock()
 	assertNoStoredCredentials(t, filepath.Join(directory, "sessions"), "fake-selected-key")
 }

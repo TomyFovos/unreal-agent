@@ -33,6 +33,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 	"github.com/unreallabsai/unreal-agent/harness/tool/bash"
 	"github.com/unreallabsai/unreal-agent/harness/tool/viewimage"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 )
 
 const (
@@ -198,7 +199,7 @@ func Run(
 		return err
 	}
 	if *showVersion {
-		if _, err := fmt.Fprintln(output, config.Version); err != nil {
+		if _, err := fmt.Fprintln(output, buildfeatures.Version(config.Version)); err != nil {
 			return err
 		}
 		return errVersion
@@ -580,6 +581,9 @@ func resolveMaxAttempts(requested *int, getenv func(string) string) (int, error)
 }
 
 func selectProvider(providers []Provider, name string) (Provider, error) {
+	if err := buildfeatures.CheckProvider(name); err != nil {
+		return Provider{}, err
+	}
 	for _, provider := range providers {
 		if provider.Name == name {
 			if provider.NewClient == nil {

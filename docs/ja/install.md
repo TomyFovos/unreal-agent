@@ -57,7 +57,7 @@ bash development.sh --openai-api-key-file /absolute/openai.key --anthropic-api-k
    ```
 
 3. インストール完了後に表示される接続状態を確認します。
-   新規導入時は利用可能なサブスクを優先し、両方使えれば Claude、片方ならそのサブスクで始まります。API 接続は `/model` で明示的に選びます。Claude は Codex が使えれば GPT の子、使えなければ Claude Code の Agent（`haiku` / `sonnet`）を使います。OpenAI API を統括に選ぶと組み込みの GPT の子も API を使い、他の統括では Codex を維持します。認証が使えなくても別接続へ切り替えません。
+   新規導入時は利用可能なサブスクを優先し、両方使えれば Claude、片方ならそのサブスクで始まります。API 接続は `/model` で明示的に選びます。Claude は Codex が使えれば GPT の子、使えなければ Claude Code の Agent（`haiku` / `sonnet`、`/model-sub` で Claude を選んだ場合はそのモデル）を使います。`/model-sub` が未指定の場合、OpenAI API を統括に選ぶと組み込みの GPT の子も API を使い、他の統括では Codex を維持します。`/model-sub` での明示選択があればその指定を優先します。認証が使えなくても別接続へ切り替えません。
 4. 開発したいプロジェクトのディレクトリへ移動し、名前付きセッションを起動します。
 
    ```bash
@@ -71,6 +71,40 @@ bash development.sh --openai-api-key-file /absolute/openai.key --anthropic-api-k
 - **実行コマンド:** `~/.local/bin/unreal` および `~/.local/bin/unreal-agent`
 - **シェル設定:** `~/.config/unreal-agent-common/path.sh`（新しい Bash シェル起動時に読み込まれ、`PATH` の追加と `ucd` 関数を提供します）
 - **ワークスペースの基準ディレクトリ:** Git 管理下では Git ワークツリーのルート、Git 外では現在のディレクトリが自動的にワークスペースになります。
+
+---
+
+## Mac: どのフォルダからでも `unreal NAME`
+
+macOS では、この Git チェックアウトでリビジョンをインストールします（`REV` は必須で、完全または短縮のコミットハッシュ、あるいはタグやブランチなど Git がコミットに解決できるリビジョンを指定できます）。
+
+```bash
+make mac-install REV=<commit>
+```
+
+ビルドは分離した worktree で行われ、`~/.local/opt/unreal-agent/<rev>` に配置されます。`current` リンクがそこへ切り替わり、`~/.local/bin/unreal` が書き込まれます。新しい版、それが置き換えた版、実行中のプロセスが使っている版は残し、それ以外の版は削除します。
+
+`~/.local/bin` が `PATH` に無い場合は、表示された1行を `~/.zshrc` に追加してシェルを開き直します。
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+あとはどのフォルダからでも実行できます。
+
+```bash
+unreal NAME             # そのフォルダで Session NAME を開く（どのフォルダにも無ければ作る）
+unreal                  # 全フォルダの Session を一覧し、番号で開く
+unreal --where NAME     # Session NAME があるフォルダを表示する
+```
+
+（`unreal-agent folders ...` がラッパー無しの同じサブコマンドです。）
+
+フォルダは、カレントディレクトリを含む Git worktree のルート（Git の外ならそのディレクトリ）で、シンボリックリンクは解決されます。フォルダごとに1つの Host が動き、設定 `~/.config/unreal-agent/folders/<ID>/runtime.json` と状態 `~/.local/state/unreal-agent/folders/<ID>/` を持ちます（`<ID>` は `r-` + フォルダパスの SHA-256 の先頭16桁の16進）。既定フォルダ（`~/.config/unreal-agent/runtime.json` の `Runtime.Workspace`）はそのファイルと `~/.local/state/unreal-agent` をそのまま使い、追加フラグ無しで起動します。Claude のログイン、OpenCode Go の API キー、`/model-sub` の選択は全フォルダで共有されます。Claude のサンドボックスはその Host の socket だけを許可するので、サブエージェント CLI も動きます。
+
+以前のリビジョンに戻すには `make mac-install REV=<older commit>` を実行します。
+
+入れ直しや戻しでは、動いている Host は替わりません。`unreal NAME` はその Host につながり、Host は起動したときの版のまま動きます。切り替えるには、すべての Session を切り離し（`Ctrl+D`）、`pkill -f 'unreal-agent serve'` で Host を止めてから `unreal NAME` を実行します。Host は入れた版で起動し直します。会話と設定はそのまま残ります。動いている子は、Host が止まると取り消されます。
 
 ---
 
@@ -136,3 +170,9 @@ Windows 上で既存の Linux Docker Sandbox を使っている場合は、以�
 | `--anthropic-api-key-file <path>` | 0600 のキーファイルで任意の Claude API 接続を登録（別課金） |
 | `--openai-api-key-env <NAME>` | OpenAI キーを読む環境変数名を明示指定 |
 | `--anthropic-api-key-env <NAME>` | Anthropic キーを読む環境変数名を明示指定 |
+
+### OpenCode Go のキーと配布時の選択
+
+有効版は `bash development.sh --opencode-go-api-key-file /absolute/go.key`（0600 のファイル）、または `--opencode-go-api-key-env MY_GO_KEY`（環境変数の名前）も受け付けます。キーを画面に出さず管理ストアへ保存し、利用時には `/model` で OpenCode Go を明示選択します。
+
+`KIT.json` の `opencode_go_enabled` が `false` の配布物は、どちらのキー指定も「この配布物では OpenCode Go は使えません」と案内して拒否します。`unreal-agent-auth` でのキー登録も拒否し、環境変数や設定ファイルでは有効に戻せません。以前の Session は選択を保持して開き、`/model` でほかの接続を選ぶよう案内します。実行ファイル自体の判定は `unreal-agent --version` で確認できます。変更にはソースからの再ビルドが必要です。[配布手順](distribution.md#opencode-go-を無効にした配布物)を参照してください。

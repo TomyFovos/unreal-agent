@@ -13,6 +13,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 	subtool "github.com/unreallabsai/unreal-agent/harness/tool/subagent"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 	"io"
 	"os"
 	"path/filepath"
@@ -92,6 +93,9 @@ func NewChildFactory(base RuntimeConfig, configure func(subagent.ChildConfig, *R
 		var identity RuntimeIdentity
 		if err := json.Unmarshal(c.Runtime, &identity, json.RejectUnknownMembers(true)); err != nil {
 			return nil, nil, errors.New("child runtime configuration is invalid")
+		}
+		if err := buildfeatures.CheckProvider(identity.Provider.Provider); err != nil {
+			return nil, nil, &subagent.RuntimeError{Code: buildfeatures.OpenCodeGoDisabledCode, Hint: buildfeatures.OpenCodeGoChildDisabledMessage}
 		}
 		if !filepath.IsAbs(identity.Workspace) || filepath.Clean(identity.Workspace) != filepath.Clean(c.Workspace) {
 			return nil, nil, errors.New("child runtime workspace mismatch")

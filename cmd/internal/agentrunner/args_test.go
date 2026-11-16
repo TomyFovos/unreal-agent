@@ -14,6 +14,7 @@ import (
 	"testing/iotest"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 )
 
 func TestRunMainRequestSources(t *testing.T) {
@@ -77,7 +78,7 @@ func TestRunnerVersionSkipsRequestAndEnvironment(t *testing.T) {
 	config := testConfig(&fakeClient{})
 	config.Version = "0123456789abcdef"
 	code := RunMain(t.Context(), []string{"--version"}, func(string) string { t.Fatal("version read environment"); return "" }, func() []string { t.Fatal("version read environment"); return nil }, iotest.ErrReader(errors.New("version read input")), &output, io.Discard, config)
-	if code != 0 || output.String() != config.Version+"\n" {
+	if code != 0 || output.String() != fmt.Sprintf("%s\nopencode_go_enabled=%t\n", config.Version, buildfeatures.OpenCodeGoEnabled) {
 		t.Fatalf("code=%d output=%q", code, output.String())
 	}
 }

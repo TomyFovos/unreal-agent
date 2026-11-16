@@ -2,22 +2,22 @@
 
 **Language:** English | [日本語](ja/providers.md)
 
-Unreal Agent supports Claude and ChatGPT subscription logins, plus optional OpenAI and Anthropic API keys, under a single installation and `/model` menu. **API keys are used only when you explicitly choose an API connection and incur separate API billing.** Unreal never switches providers automatically or falls back from an expired subscription to an API key.
+Unreal Agent supports Claude and ChatGPT subscription logins, optional OpenAI and Anthropic API connections, and OpenCode Go under a single installation and `/model` menu. **Connections authenticated with API keys are used only after explicit selection.** OpenAI and Anthropic API connections incur separate API billing; OpenCode Go uses its subscription key. Unreal never switches providers automatically or falls back from an expired subscription to an API key. See [OpenCode Go](#opencode-go-api-key).
 
 ---
 
 ## Switching Models (`/model`)
 
-1. Run `/model` in the TUI and choose a connection: `ChatGPT（サブスク）`, `Claude（サブスク）`, `OpenAI API（API キー・別課金）`, or `Claude（API キー・別課金）`. API rows appear only after explicit registration.
+1. Run `/model` in the TUI and choose a connection: `ChatGPT（サブスク）`, `Claude（サブスク）`, `OpenAI API（API キー・別課金）`, or `Claude（API キー・別課金）`. `OpenCode Go` appears after its key is saved. API connections require explicit registration.
 2. Select a model from that connection's catalog, then choose a reasoning effort level when available.
 3. After signing in later or updating an external CLI, run `/model refresh` to re-check authentication and reload models, then select the provider in `/model`. Reinstallation is unnecessary. An existing Session keeps its selected provider until you change it.
 
 > **Notes:**
-> - On first launch, Unreal prefers a ready subscription: **Claude** if both subscriptions are ready, or the ready one. Registering an API connection does not select it. Even with only API connections registered, open `/model` to choose one, or explicitly set `UNREAL_HARNESS_LLM_PROVIDER=openai` or `claude-api` for the initial selection. `UNREAL_HARNESS_LLM_MODEL` can also select its model.
+> - On first launch, Unreal prefers a ready Claude or ChatGPT login: **Claude** if both subscriptions are ready, or the ready one. Registering an API connection does not select it. Even with only API connections registered, open `/model` to choose one, or explicitly set `UNREAL_HARNESS_LLM_PROVIDER=openai` or `claude-api` for the initial selection. `UNREAL_HARNESS_LLM_MODEL` can also select its model.
 > - Unavailable providers remain listed with their status and login instructions so you can see why they are disabled.
 > - With neither subscription ready, Unreal still starts. The first input shows login instructions, or directs you to `/model` when an API connection is registered. `/login` displays subscription sign-in steps.
 > - Explicitly disabled providers remain disabled after login. Re-enable Codex with `bash development.sh --configure-providers --codex-auto`, or Claude with `bash development.sh --configure-providers`.
-> - Model visibility does not guarantee inference access: the selected subscription or API account determines model access. Listing connections in `/model` does not request an API catalog or run inference.
+> - Model visibility does not guarantee inference access: the selected subscription or API account determines model access. Listing connections in `/model` does not run inference. OpenAI API catalogs are requested only after choosing that connection; Go discovery reads its public catalog without a key.
 
 ---
 
@@ -125,15 +125,35 @@ If you run Unreal inside a **Docker Sandbox**, Unreal can use your host machine'
 
 The Codex CLI is unnecessary when the proxy route is valid and a model catalog is already available.
 
+## OpenCode Go (API key)
+
+Unreal can add OpenCode Go as an additional provider with an API key saved in the managed credential store. It connects only to the OpenCode Go subscription endpoint (`https://opencode.ai/inference/go/openai/v1`, Responses API), never the pay-as-you-go Zen endpoint. Unreal offers the 24 models the fork's live survey verified through that endpoint, DeepSeek V4.1 Flash (`deepseek-v4.1-flash`) first. MiMo-V2.6-Flash, the two Contributor models (prompts are used for training) and the Free models are not offered.
+
+### Setup
+
+1. Save the key in the managed store (`~/.local/state/unreal-agent/credentials`, provider `opencode-go`, id `primary`) with `unreal-agent-auth login ... --key-stdin`. `/login` in the TUI shows the exact command for your installation.
+2. Run `/model refresh`. `/model` then lists `OpenCode Go · available`; no Host restart is needed.
+3. Choosing it in `/model` switches only the conversation's own model. Pick a model from the 24; models that list reasoning efforts then ask for the effort, and models whose list names none skip that step.
+
+### How It Works
+
+- **Provider ID:** `opencode-go`
+- **Registration:** No config is needed. The provider is registered only while a key is saved in the managed store; without one nothing changes, `/model` does not list it, and nothing is sent to OpenCode.
+- **Selection:** Saving a key only registers the connection. Choose OpenCode Go in `/model` or `/model-sub`, or set `UNREAL_HARNESS_LLM_PROVIDER=opencode-go` explicitly at first launch. It is excluded from automatic initial selection.
+- **Endpoint:** Requests go only to the Go subscription endpoint above. Unreal never switches to Zen, to another provider, or to an API key automatically: if the selected model is unavailable, the request fails.
+
+Full details: [OpenCode Go](opencode-go.md) (Japanese).
+
 ---
 
 ## Delegated GPT work
 
 When Codex is configured or enabled for discovery, or an OpenAI API connection is explicitly registered, Unreal prepares built-in GPT templates if Permission Modes have a configured `Maximum` and no explicit `Subagents` configuration replaces the defaults. Template models are independent of the parent Session's active model.
 
-An **OpenAI API** parent uses `openai` for its built-in GPT children and their workers. Other parents retain the `openai-codex` subscription route. Availability never changes that choice. API children keep the template models but omit effort because the API catalog does not advertise it; the subscription efforts below remain unchanged. Explicit operator templates and existing children retain their recorded connections.
+Without a saved `/model-sub` choice, an **OpenAI API** parent uses `openai` for its built-in GPT children and their workers. Other parents retain the `openai-codex` subscription route. Availability never changes that choice. API children keep their template models and configured effort; the subscription defaults below remain unchanged. Explicit operator templates and existing children retain their recorded connections.
 
-Claude is guided to use GPT children only while Codex authentication and its model catalog are available. Otherwise it uses Claude Code's Agent tool with `haiku` or `sonnet`. An unavailable selected GPT connection produces guidance without switching to another connection.
+Claude is guided to use GPT children only while Codex authentication and its model catalog are available. Otherwise it uses Claude Code's Agent tool with `haiku` or `sonnet`, or the Claude model chosen with `/model-sub`. An unavailable selected GPT connection produces guidance without switching to another connection.
+With OpenCode Go selected for sub-agents, availability follows its registered key; the catalog is read when a child starts. Explicit Claude-model work through Agent remains available alongside GPT children.
 
 | Template / Role | Model & Effort | Purpose |
 | --- | --- | --- |
@@ -149,3 +169,25 @@ Claude is guided to use GPT children only while Codex authentication and its mod
 4. Child agents inherit the parent Session's permission mode (bounded by the Host's maximum policy), and the parent agent mediates child approval requests. See [Permissions](permissions.md).
 
 > **Environment Inheritance:** Children inherit the Host environment (including `PATH`, `HOME`, and tool configuration), excluding `OPENAI_CODEX_ACCESS_TOKEN` and `OPENAI_CODEX_ACCOUNT_ID`. This is process inheritance, not environment isolation.
+
+### Choosing the sub-agents' model (`/model-sub`)
+
+`/model-sub` chooses the model sub-agents use: **OpenAI Codex** (the subscription connection, shown as `ChatGPT（サブスク）`), **OpenCode Go** then one of the 24 verified models (DeepSeek V4.1 Flash first), or **Claude**, which appears when Claude is registered (the same provider list `/model` shows) and then offers the same Claude models `/model` lists. The choice is stored in `STATE/subagent-model.json`, applies to every Session using the installation's shared state, and takes effect for children started afterwards; running children keep their model. Children started with an explicit runtime (`/children start ...`) and explicit `Subagents` templates or `SubagentDefaults` in the config file are not affected. `subagent start --model ID --effort LEVEL`, which changes only a template's model and effort and keeps its provider, works on the built-in templates only while `/model-sub` is OpenAI Codex: with OpenCode Go or Claude selected it is refused (`override_unavailable`) rather than run on Codex, and Claude's instructions leave it out.
+
+Without a saved choice, an OpenAI API parent keeps its explicitly selected API connection for built-in GPT children; other parents use Codex. Saving **OpenAI Codex** explicitly pins the subscription route, including for an API parent. An unavailable explicit choice fails without using the parent's API connection.
+
+With Claude selected, Claude Code's Agent tool runs the sub-agents on the chosen model instead of Unreal's children: Unreal sets `CLAUDE_CODE_SUBAGENT_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` in Claude Code's launch environment, and the delegation prompt names that model instead of `haiku` or `sonnet`. The force variable puts every Agent sub-agent, the built-in Explore and Plan included, on the chosen model and leaves the Agent tool without a per-call model, so Claude cannot pass another model per call; it needs Claude Code 2.1.257 or later. Per Claude Code's docs, a fork and a skill that runs in a sub-agent with `model: inherit` stay on Claude's own model. Agent uses the parent Session's selected Claude authentication; choosing a child model does not switch between subscription and API-key connections. A Claude parent gets no Unreal children, so the choice applies from Claude's next turn and running children keep their model. A parent on Codex or OpenCode Go that starts a built-in child template is refused with `provider_unavailable` and a hint to choose OpenAI Codex or OpenCode Go with `/model-sub`; Unreal never switches to another provider. Whether the environment variables reach Claude Code's Agent sub-agents on the real CLI, and whether their tool calls show in the TUI, is unconfirmed until a real check.
+
+With OpenCode Go selected, every template runs the model chosen in `/model-sub`. For DeepSeek V4.1 Flash the mapping is unchanged:
+
+| Template | Effort |
+| --- | --- |
+| `lead`, `worker-max` | `max` |
+| `worker-xhigh`, `worker-high`, `worker-medium` | `high` |
+| `worker-low`, `collector` | `low` |
+
+The effort for each role comes from the selected model's list: `lead` and `worker-max` take its highest effort, `worker-low` and `collector` its lowest, and the other workers their own effort when the model has it, otherwise the model's default (or, when that default is below their own, the highest effort the model offers below their own; `qwen3.8-max` runs `worker-high` at `medium`). Models whose list names no reasoning effort run without one. If the selected model is unavailable (limit reached, outage), the child start or request fails; Unreal never switches to Codex or another provider automatically. With OpenCode Go selected, Claude is offered the children while OpenCode Go is registered and its key is saved, instead of while Codex is available; the model list is read when a child starts. The templates are kept ready before a Codex login when provider discovery is on (the default), so a later choice applies from the next child start. Only on a Host with Codex disabled or discovery off, where OpenCode Go was not selected when the Host started, there are no templates: the choice is saved and used from the next Host start (`/model-sub` says so).
+
+### Distributor-disabled OpenCode Go
+
+A distribution built with `disable_opencode_go` omits the entire OpenCode Go connection from `/model`, `/model-sub`, discovery, model lists and auth methods. Environment variables, old configuration, keys and saved Session selections cannot enable it. Existing Sessions retain their choice, display why it is unavailable, and ask you to choose another connection with `/model`. Children fail with guidance to use `/model-sub`; no automatic fallback occurs. Check `--version` for `opencode_go_enabled=false`. See [disabled distribution builds](distribution.md#distribution-builds-without-opencode-go).

@@ -71,6 +71,7 @@ def prepare(root, env):
         "cgo_enabled": True,
         "go_version": command(["go", "version"], root, env),
         "formal_release": False,
+        "opencode_go_enabled": env.get("OPENCODE_GO_ENABLED", "true") != "false",
     }
     package = output / "package"
     package.mkdir(mode=0o700)
@@ -120,9 +121,12 @@ def smoke_archive(archive, metadata, root, env):
         smoke_env = {"PATH": env["PATH"], "HOME": str(directory / "home"), "NO_COLOR": "1"}
         checks = (
             ("unreal", ["--help"], 0, "usage: unreal"),
+            ("unreal", ["--version"], 0, "opencode_go_enabled=" + str(metadata.get("opencode_go_enabled", True)).lower()),
             ("unreal-agent", ["serve", "-h"], 1, "Usage of unreal-agent serve"),
             ("unreal-agent-runner", ["-h"], 0, "unreal-agent-runner [options]"),
             ("unreal-agent-runner", ["--version"], 0, metadata["revision"]),
+            ("unreal-agent", ["--version"], 0, "opencode_go_enabled=" + str(metadata.get("opencode_go_enabled", True)).lower()),
+            ("unreal-agent-auth", ["--version"], 0, "opencode_go_enabled=" + str(metadata.get("opencode_go_enabled", True)).lower()),
             ("unreal-agent-auth", ["methods"], 0, "openai-codex"),
         )
         for name, args, expected_code, expected_text in checks:
@@ -131,6 +135,8 @@ def smoke_archive(archive, metadata, root, env):
                                     capture_output=True, text=True, timeout=20)
             if result.returncode != expected_code or expected_text not in result.stdout + result.stderr:
                 raise ValueError(f"{name}: non-inference CLI smoke failed")
+            if args == ["--version"] and ("opencode_go_enabled=" + str(metadata.get("opencode_go_enabled", True)).lower()) not in result.stdout:
+                raise ValueError(f"{name}: OpenCode Go build choice differs from snapshot metadata")
             info = command(["go", "version", "-m", str(binary)], root, env)
             if "CGO_ENABLED=1" not in info:
                 raise ValueError(f"{name}: embedded build metadata mismatch")
@@ -143,8 +149,9 @@ def smoke_archive(archive, metadata, root, env):
                        cwd=root, env=test_env, check=True, timeout=120)
 
 
-def build(root, executable):
-    env = dict(os.environ, CGO_ENABLED="1", GOAMD64="v1", GIT_OPTIONAL_LOCKS="0")
+def build(root, executable, disable_opencode_go=False):
+    env = dict(os.environ, CGO_ENABLED="1", GOAMD64="v1", GIT_OPTIONAL_LOCKS="0",
+               OPENCODE_GO_ENABLED="false" if disable_opencode_go else "true")
     output = reserve_output(root)
     env["UNREAL_SNAPSHOT_ROOT"] = str(output)
     config = str(configuration(root, output))
@@ -165,6 +172,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("build", "prepare"))
     parser.add_argument("--goreleaser", default="goreleaser")
+    parser.add_argument("--disable-opencode-go", action="store_true",
+                        default=os.environ.get("OPENCODE_GO_ENABLED") == "false",
+                        help="compile without the OpenCode Go connection")
     parser.add_argument("--snapshot")
     parser.add_argument("--version")
     parser.add_argument("--commit")
@@ -175,10 +185,11 @@ def main():
             env = dict(os.environ, UNREAL_SNAPSHOT_IS_SNAPSHOT=args.snapshot or "",
                        UNREAL_SNAPSHOT_VERSION=args.version or "",
                        UNREAL_SNAPSHOT_COMMIT=args.commit or "",
-                       UNREAL_SNAPSHOT_DATE=args.date or "")
+                       UNREAL_SNAPSHOT_DATE=args.date or "",
+                       OPENCODE_GO_ENABLED="false" if args.disable_opencode_go else "true")
             prepare(ROOT, env)
         else:
-            build(ROOT, args.goreleaser)
+            build(ROOT, args.goreleaser, args.disable_opencode_go)
     except (OSError, ValueError, subprocess.SubprocessError, tarfile.TarError) as error:
         print(f"snapshot failed: {error}", file=sys.stderr)
         return 1

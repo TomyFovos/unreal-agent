@@ -19,11 +19,13 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/primitives"
 )
 
-func (adapter *adapter) exchange(ctx context.Context, body []byte, cacheKey string) (int, []byte, error) {
+// exchange returns the final HTTP status, the response or error body, and the
+// classified provider failure, if any.
+func (adapter *adapter) exchange(ctx context.Context, body []byte, cacheKey string) (int, []byte, *APIError, error) {
 	events := make(chan primitives.PrimitiveEvent)
 	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return 0, nil, err
+			return 0, nil, nil, err
 		}
 		emitProgress(ctx, llm.Progress{Attempt: uint64(attempt), Reset: true})
 		ctx = context.WithValue(ctx, attemptKey{}, uint64(attempt))
@@ -44,10 +46,10 @@ func (adapter *adapter) exchange(ctx context.Context, body []byte, cacheKey stri
 			case result.apiError == nil:
 				stage, reason = "stream_decode", "invalid_response"
 			}
-			return result.status, result.body, diagnosed(result.err, FailureDiagnostic{Stage: stage, Status: result.status, Reason: reason, Retryable: result.retry})
+			return result.status, result.body, result.apiError, diagnosed(result.err, FailureDiagnostic{Stage: stage, Status: result.status, Reason: reason, Retryable: result.retry})
 		}
 		if err := ctx.Err(); err != nil {
-			return result.status, nil, err
+			return result.status, nil, nil, err
 		}
 		now := time.Now()
 		delay := responseRetryDelay(request.RetryPolicy, attempt, result.apiError, result.headers, now, rand.Float64())
@@ -65,11 +67,11 @@ func (adapter *adapter) exchange(ctx context.Context, body []byte, cacheKey stri
 		switch event.Type {
 		case primitives.PrimitiveEventTimerFired:
 		case primitives.PrimitiveEventCanceled:
-			return result.status, nil, canceledError(ctx)
+			return result.status, nil, nil, canceledError(ctx)
 		case primitives.PrimitiveEventFailed:
-			return result.status, nil, remoteFailureError(ctx, event)
+			return result.status, nil, nil, remoteFailureError(ctx, event)
 		default:
-			return result.status, nil, fmt.Errorf("unexpected retry timer event %q", event.Type)
+			return result.status, nil, nil, fmt.Errorf("unexpected retry timer event %q", event.Type)
 		}
 	}
 }
@@ -155,6 +157,15 @@ func (adapter *adapter) exchangeAttempt(ctx context.Context, request primitives.
 			result.body, result.err = state.unwrap()
 			result.retry = errors.Is(result.err, io.ErrUnexpectedEOF)
 			return result
+		}
+		if adapter.classifyError != nil && result.apiError != nil {
+			if classified := adapter.classifyError(result.apiError, result.headers); classified != nil {
+				if result.err != nil {
+					// An in-stream error event is itself the failure.
+					result.err = classified
+				}
+				result.apiError = classified
+			}
 		}
 		result.retry = retryableResponseError(result.apiError, request.RetryPolicy.RetryableStatusCodes)
 		return result

@@ -237,3 +237,7 @@ were not tested on the development PC without Docker.
 For the former runner integration (OpenAI/OpenRouter/Fireworks and its original
 `thinking_level` argument), explicitly use `-a harness_harbor.runner:RunnerAgent`.
 It remains available for existing Terminal-Bench workflows.
+
+### Build without OpenCode Go
+
+Use `make -C benchmarks/harbor build REVISION=HEAD OPENCODE_GO_ENABLED=false BUNDLE=/absolute/new-bundle` or add `--disable-opencode-go` to `build.py`. Both the Host and runner receive `disable_opencode_go`; `manifest.json` records `opencode_go_enabled: false`, and `--version` reports the compiled choice. Keys, configuration, saved selections and child requests cannot restore this connection. Other providers are unchanged. See [distribution builds](../../docs/distribution.md#distribution-builds-without-opencode-go).

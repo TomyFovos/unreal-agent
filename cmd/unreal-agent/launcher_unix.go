@@ -113,9 +113,14 @@ func backgroundArguments(o launchOptions) []string {
 	}
 	if o.credentials != "" {
 		args = append(args, "--credential-directory", o.credentials)
+	} else if o.defaultCredentials != "" {
+		args = append(args, "--default-credential-directory", o.defaultCredentials)
 	}
 	if o.codexFile != "" {
 		args = append(args, "--codex-auth-file", o.codexFile)
+	}
+	if o.subagentModel != "" {
+		args = append(args, "--subagent-model-file", o.subagentModel)
 	}
 	return args
 }

@@ -16,7 +16,8 @@ class DailyDevelopmentTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="dd-", dir="/tmp")
         self.addCleanup(self.temp.cleanup)
-        self.home = Path(self.temp.name)
+        # git reports resolved roots; macOS /tmp is a symlink to /private/tmp.
+        self.home = Path(self.temp.name).resolve()
         self.env = {"HOME": str(self.home), "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"}
 
     def repo(self, name="workspace/project"):

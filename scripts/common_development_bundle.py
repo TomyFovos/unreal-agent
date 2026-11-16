@@ -12,11 +12,12 @@ import pilot_kit
 import snapshot
 
 
-def assemble(source, output, revision):
+def assemble(source, output, revision, disable_opencode_go=False):
     scripts = Path(__file__).parent
     templates = scripts / "pilot"
     return pilot_kit.assemble(source, output, templates, revision=revision, sandbox="",
         kit_name=f"unreal-agent-linux-amd64-{revision[:7]}", kind="common-development-kit",
+        disable_opencode_go=disable_opencode_go,
         readme=(templates / "common-README.md").read_text(encoding="utf-8"),
         extra_files={name: (templates / name if name.endswith(".sh") else scripts / name).read_bytes()
                      for name in common.EXTRAS})
@@ -26,10 +27,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", required=True, type=Path)
     parser.add_argument("--revision", required=True)
+    parser.add_argument("--disable-opencode-go", action="store_true", help="require a snapshot built without OpenCode Go")
     parser.add_argument("--copy-to", type=Path)
     args = parser.parse_args()
     try:
-        archive = assemble(args.snapshot.resolve(), pilot_kit.private_output(snapshot.ROOT), args.revision)
+        archive = assemble(args.snapshot.resolve(), pilot_kit.private_output(snapshot.ROOT), args.revision, args.disable_opencode_go)
         print(f"kit: {archive}\nSHA256: {pilot_kit.digest(archive)}")
         if args.copy_to:
             print("delivery: " + str(pilot_kit.copy_delivery(archive, args.copy_to,

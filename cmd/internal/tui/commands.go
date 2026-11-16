@@ -33,7 +33,7 @@ var commandCatalog = []commandCandidate{
 	{"/resume", "/resume", "resume this stopped session", noArguments},
 	{"/retry", "/retry", "resend the last uncertain input safely", noArguments},
 	{"/detach", "/detach", "leave; the session keeps running", noArguments},
-	{"/login", "/login", "show subscription login instructions for Codex and Claude", noArguments},
+	{"/login", "/login", "show login instructions for Codex, Claude and OpenCode Go", noArguments},
 	{"/children", "/children", "how to select a child", noArguments},
 	{"/child", "/child ID", "focus a child agent", requiredArguments},
 	{"/child-history", "/child-history [after] [limit]", "load a page of its history", optionalArguments},
@@ -58,6 +58,9 @@ var commandCatalog = []commandCandidate{
 	{"/copy", "/copy", "choose conversation messages to copy to the clipboard", noArguments},
 	{"/copy all", "/copy all", "copy the full public conversation as Markdown to the clipboard", noArguments},
 	{"/copy last", "/copy last", "copy the latest public agent response to the clipboard", noArguments},
+	// After the existing entries, so their menu positions stay; typing
+	// /model lists it next to /model.
+	{"/model-sub", "/model-sub", "choose the sub-agents' provider and model for every conversation", noArguments},
 	{"/help", "/help", "show commands and keys", noArguments},
 }
 
@@ -338,6 +341,6 @@ func helpSheet(t Theme, short bool) *Sheet {
 	lines = append(lines, "export   /export: latest response, full conversation, or choose a response")
 	lines = append(lines, "copy     /copy: choose messages; Space selects several; /copy all or /copy last also work")
 	lines = append(lines, "view     /view: Chat, Orchestration or Split (120+ columns)")
-	lines = append(lines, "login    Codex: codex login; Claude: run claude, then /login. Afterwards: /model refresh")
+	lines = append(lines, "login    Codex: codex login; Claude: run claude, then /login. Afterwards: /model refresh. OpenCode Go: see /login")
 	return &Sheet{Title: "help", Lines: lines}
 }

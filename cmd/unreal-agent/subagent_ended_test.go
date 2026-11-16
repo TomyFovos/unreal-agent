@@ -30,7 +30,7 @@ func TestSubagentWaitAndSendReturnImmediatelyForTerminalChildren(t *testing.T) {
 			}
 			op := operation.Operation{ID: "child-handle", ToolName: "SubagentStart", Type: spec.Type, Version: spec.Version, State: spec.State, MaxOutputLength: spec.MaxOutputLength, Status: status}
 			view := host.View{Generation: "generation", Operations: []operation.Operation{op}}
-			socket := filepath.Join(t.TempDir(), "host.sock")
+			socket := filepath.Join(privateCLIDirectory(t), "host.sock")
 			listener, err := net.Listen("unix", socket)
 			if err != nil {
 				t.Fatal(err)

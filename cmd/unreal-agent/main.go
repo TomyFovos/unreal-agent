@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 	"io"
 	"os"
 	"os/signal"
@@ -20,13 +21,19 @@ func main() {
 }
 
 func runExecutableWithStreams(ctx context.Context, name string, args []string, stdout, diagnostics io.Writer) error {
+	if len(args) == 1 && args[0] == "--version" {
+		_, err := fmt.Fprintln(stdout, buildfeatures.Version(""))
+		return err
+	}
 	if isSubagentCommand(name, args) {
 		return runSubagentCLI(ctx, args[1:], os.Stdin, stdout)
 	}
 	output := diagnostics
-	// The metadata-only subcommand is consumed by setup as machine JSON.
-	// Plain "unreal providers" remains a positional launcher session name.
-	if name != "unreal" && len(args) != 0 && args[0] == "providers" {
+	// The metadata-only subcommand is consumed by setup as machine JSON, and
+	// folders prints its listings for the terminal.
+	// Plain "unreal providers" and "unreal folders" remain positional launcher
+	// session names.
+	if name != "unreal" && len(args) != 0 && (args[0] == "providers" || args[0] == "folders") {
 		output = stdout
 	}
 	return runExecutable(ctx, name, args, output)

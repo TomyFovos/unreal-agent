@@ -10,6 +10,10 @@ import unittest
 import common_development as common
 import pilot_provider as pilot
 
+# The Linux kit reads /proc and refuses symlinked private directories, and
+# macOS reaches its temporary directory through /var. These run on Linux CI.
+LINUX_ONLY = unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only kit behavior")
+
 
 class SessionDiscoveryTests(unittest.TestCase):
     def setUp(self):
@@ -57,6 +61,7 @@ class SessionDiscoveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(next(row[7:] for row in result.stdout.splitlines() if row.startswith("NATIVE:")))
 
+    @LINUX_ONLY
     def test_named_session_from_unrelated_directory(self):
         workspace, paths = self.register("work space", "development")
         result = self.native(self.launch("development"))
@@ -64,6 +69,7 @@ class SessionDiscoveryTests(unittest.TestCase):
         self.assertEqual(result["args"][-1], "development")
         self.assertEqual(result["args"][1], str(paths["state"]))
 
+    @LINUX_ONLY
     def test_duplicate_name_asks_for_workspace(self):
         older, _ = self.register("older", "dev", 1000)
         newer, _ = self.register("newer", "dev", 2000)
@@ -72,6 +78,7 @@ class SessionDiscoveryTests(unittest.TestCase):
         self.assertIn(str(newer), result.stderr)
         self.assertIn(str(older), result.stderr)
 
+    @LINUX_ONLY
     def test_bare_launcher_lists_recent_main_sessions(self):
         older, _ = self.register("older", "old", 1000)
         newer, _ = self.register("newer", "recent", 2000)
@@ -83,6 +90,27 @@ class SessionDiscoveryTests(unittest.TestCase):
         self.assertIn("1970-", result.stderr)
         self.assertNotIn("child-hidden", result.stderr)
 
+    @LINUX_ONLY
+    def test_list_prints_sessions_newest_first_without_launching(self):
+        older, _ = self.register("older", "alpha", 1000)
+        newer, _ = self.register("newer", "beta", 2000)
+        self.register("newer", "child-x", 3000)
+        result = self.launch("--list")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("NATIVE:", result.stdout)
+        rows = result.stdout.splitlines()
+        self.assertEqual([row.split("  ")[0] for row in rows], ["beta", "alpha"])
+        self.assertIn(str(newer), rows[0])
+        self.assertIn(str(older), rows[1])
+
+    @LINUX_ONLY
+    def test_list_without_sessions_says_so(self):
+        result = self.launch("--list")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Session はありません", result.stdout)
+        self.assertNotIn("NATIVE:", result.stdout)
+
+    @LINUX_ONLY
     def test_where_prints_only_path_without_changing_state(self):
         workspace, _ = self.register("work space", "dev")
         before = {p: (p.stat().st_mtime_ns, p.stat().st_size) for p in self.home.rglob("*") if p.is_file()}
@@ -95,6 +123,7 @@ class SessionDiscoveryTests(unittest.TestCase):
         self.assertNotEqual(missing.returncode, 0)
         self.assertEqual(missing.stdout, "")
 
+    @LINUX_ONLY
     def test_registered_workspace_opens_existing_session_elsewhere(self):
         here, paths = self.register("here", "existing", when=2000)
         elsewhere, _ = self.register("elsewhere", "dev", when=1000)
@@ -114,6 +143,7 @@ class SessionDiscoveryTests(unittest.TestCase):
         self.assertEqual(listed["cwd"], str(elsewhere))
         self.assertEqual(listed["args"][-1], "dev")
 
+    @LINUX_ONLY
     def test_unmatched_name_requires_confirmation(self):
         self.register("elsewhere", "other")
         declined = self.launch("new")
@@ -130,12 +160,14 @@ class SessionDiscoveryTests(unittest.TestCase):
         self.assertIn("common_session_name_required", result.stderr)
         self.assertNotIn("NATIVE:", result.stdout)
 
+    @LINUX_ONLY
     def test_legacy_profile_state_is_used(self):
         workspace, paths = self.register("legacy", "history", instance="p-deadbeef")
         result = self.native(self.launch("history"))
         self.assertEqual(result["cwd"], str(workspace))
         self.assertEqual(result["args"][1], str(paths["state"]))
 
+    @LINUX_ONLY
     def test_where_prefers_current_workspace_and_prompts_elsewhere(self):
         here, _ = self.register("here", "dev", 1000)
         there, _ = self.register("there", "dev", 2000)

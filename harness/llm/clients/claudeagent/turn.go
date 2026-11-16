@@ -192,8 +192,11 @@ func (t *turn) handle(f frame) *frame {
 				t.text = append(t.text, llm.Item{ProviderID: itemPrefix + m.ID + "/" + strconv.Itoa(t.seq), Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: b.Text}})
 				t.mu.Unlock()
 			case b.Type == "tool_use" && f.ParentToolUseID == nil && t.opt.Progress != nil:
-				_, scope := approvalSubject(b.Name, b.Input)
-				t.opt.Progress(llm.Progress{Attempt: 1, Delta: "\n› " + scope + "\n"})
+				t.opt.Progress(llm.Progress{Attempt: 1, Delta: "\n› " + t.callSubject(b.Name, b.Input) + "\n"})
+			case b.Type == "tool_use" && f.ParentToolUseID != nil && t.opt.Progress != nil:
+				// A sub-agent's own tool calls, indented under the Agent call
+				// that started them. Its text stays in the recorded observations.
+				t.opt.Progress(llm.Progress{Attempt: 1, Delta: "\n" + subagentLinePrefix + t.callSubject(b.Name, b.Input) + "\n"})
 			}
 		}
 	case "user":
@@ -245,6 +248,17 @@ func (t *turn) handle(f frame) *frame {
 		return &f
 	}
 	return nil
+}
+
+// callSubject names one tool call in the progress stream. Claude's Agent calls
+// show the model and the task instead of their JSON input; every other call
+// keeps approvalSubject's text.
+func (t *turn) callSubject(name string, input jsontext.Value) string {
+	if name == "Agent" {
+		return agentCallSubject(input, t.subagents.agentModel)
+	}
+	_, scope := approvalSubject(name, input)
+	return scope
 }
 
 func (t *turn) approve(id string, req controlRequest) {

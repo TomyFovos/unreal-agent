@@ -13,6 +13,7 @@ This package manages developer/evaluation authentication methods and powers the 
 | Provider / Method | Status | Credential Owner & Inference Path |
 | --- | --- | --- |
 | **OpenAI API key** | Supported | Managed in harness private store; uses built-in Responses adapter |
+| **OpenCode Go API key** | Supported | Harness private store; explicitly selected OpenCode Go Responses adapter |
 | **Anthropic API key** | Configuration only | Stored in harness store; requires an explicitly registered Anthropic adapter for inference |
 | **Claude.ai Pro/Max OAuth** | Unsupported | Direct third-party OAuth mediation is not permitted by Anthropic policy |
 | **OpenAI Codex direct OAuth** | Deferred | Uses read-only external CLI credentials (`~/.codex/auth.json` or Docker Sandbox proxy) |
@@ -23,6 +24,7 @@ This package manages developer/evaluation authentication methods and powers the 
 - [OpenAI API Key & Responses Quickstart](https://developers.openai.com/api/docs/quickstart)
 - [Codex Authentication](https://learn.chatgpt.com/docs/auth)
 - [Anthropic API Authentication](https://platform.claude.com/docs/en/api/overview)
+- [OpenCode Go](https://opencode.ai/docs/go/)
 - [Claude Code Credential Policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
 - [GitHub Copilot SDK Authentication](https://docs.github.com/en/copilot/how-tos/copilot-sdk/auth/authenticate)
 

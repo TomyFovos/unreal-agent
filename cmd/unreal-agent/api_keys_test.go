@@ -215,7 +215,7 @@ func TestAPIKeyBuiltInChildrenFollowSelectedConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := agentrunner.RuntimeConfig{BuiltinSubagents: true, Identity: cfg.Runtime, Backends: cfg.Providers, Providers: registry, SessionDirectory: t.TempDir(), Credentials: credential.WithSources(nil, map[string]credential.Source{"openai": {File: key}}, nil)}
-	_, templates, err := withParentSubagents(runtime, defaultSubagents(cfg), permission.Unrestricted(), "", "")
+	_, templates, err := withParentSubagents(runtime, defaultSubagents(cfg, subagentModel{}), permission.Unrestricted(), "", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

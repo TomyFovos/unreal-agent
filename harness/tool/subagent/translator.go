@@ -22,7 +22,7 @@ type translator struct {
 	action    string
 	owner     session.ID
 	templates map[string]runtime.Template
-	resolve   func(runtime.Template, *runtime.RuntimeRequest) (runtime.Template, error)
+	resolve   func(string, runtime.Template, *runtime.RuntimeRequest) (runtime.Template, error)
 }
 
 // BindRuntime adds optional, provider-neutral runtime arguments. Translation is
@@ -36,8 +36,8 @@ func BindRuntime(extensions []tool.Extension, ctx context.Context, owner *host.S
 		if !ok || t.action != "start" {
 			continue
 		}
-		t.resolve = func(base runtime.Template, r *runtime.RuntimeRequest) (runtime.Template, error) {
-			return resolve(ctx, owner, base, r)
+		t.resolve = func(name string, base runtime.Template, r *runtime.RuntimeRequest) (runtime.Template, error) {
+			return resolve(ctx, owner, name, base, r)
 		}
 		params := extensions[i].Definition.Tool.Parameters
 		params["properties"].(map[string]any)["runtime"] = map[string]any{"type": "object", "properties": map[string]any{"provider": map[string]any{"type": "string"}, "model": map[string]any{"type": "string"}, "effort": map[string]any{"type": "string"}}, "required": []string{"provider", "model", "effort"}, "additionalProperties": false}
@@ -125,7 +125,7 @@ func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallSta
 		p.Template = args.Template
 		if t.resolve != nil {
 			var e error
-			config, e = t.resolve(config, args.Runtime)
+			config, e = t.resolve(args.Template, config, args.Runtime)
 			if e != nil {
 				return tool.ErrorStatus(e.Error(), 0)
 			}

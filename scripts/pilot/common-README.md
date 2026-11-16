@@ -1,6 +1,6 @@
 # Unreal Agent 共通開発キット
 
-**Codex か Claude のどちらか一方が使えれば始められます。** 同じ `/model` メニューで接続先・モデル・effort を選べます。API キーは使いません。
+**Codex か Claude のどちらか一方が使えれば始められます。** 同じ `/model` メニューで接続先・モデル・effort を選べます。Codex / Claude のサブスク接続には API キーは不要です。
 
 - **対応環境:** `asp` / `devlore` の両方で同じキットを使います。Linux amd64、glibc @MIN_GLIBC@ 以上、Python 3・Bash・Git が必要です。
 - **パッケージ内容:** ローカル snapshot（`@REVISION@`）です。認証情報は同梱しません。
@@ -60,6 +60,7 @@ unreal development
 | --- | --- |
 | `unreal NAME` | 同名 Session に接続し、見つからなければ現在の workspace に新規作成するか確認します（別のディレクトリからでも名前で接続でき、同名が複数あれば現在の workspace を優先、それ以外は番号で選択）。 |
 | `unreal`（引数なし） | 既存のメイン Session を新しい順に一覧表示し、番号で選びます（一覧から新規作成はしません）。 |
+| `unreal --list` | Session の一覧（名前・workspace・最終更新）を新しい順に表示します。 |
 | `unreal --where NAME` | その Session の workspace のパスを表示します。 |
 | `ucd NAME` | Bash でその Session の workspace ディレクトリへ移動します。 |
 
@@ -118,3 +119,7 @@ commit/push、shellによる編集、provider切替は禁止です。
 - 通常引用文を今回の実行結果にせず、現在の canonical receipt から受け取った本文 / revision / exit を観測値として確認します。
 - `read` / `edit` / `Bash` receipts、実ファイル、TPS / scroll、detach / attach 履歴を独立に確認してください。
 - この手順は推論を自動送信しません。実機受入は合成検証とは別です。
+
+## OpenCode Go の配布時設定
+
+`KIT.json` の `opencode_go_enabled` と `unreal-agent --version` で有効・無効を確認できます。有効版は `bash development.sh --opencode-go-api-key-file /absolute/go.key`（0600）、または `--opencode-go-api-key-env MY_GO_KEY` でキーを登録し、`/model` で明示選択します。無効版ではどちらも値を表示せず拒否します。無効版は `/model`・`/model-sub`・discovery・モデル一覧に OpenCode Go を出しません。古い設定や環境変数では戻せず、ソースからの再ビルドが必要です。保存済み Session は元の選択を保持し、`/model` でほかの接続を選ぶよう案内します。子も案内つきで失敗し、自動切替はしません。

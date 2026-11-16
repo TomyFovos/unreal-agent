@@ -95,6 +95,31 @@ func TestSubagentPromptNamesTheCommandAndRoles(t *testing.T) {
 	}
 }
 
+// The model chosen with /model-sub is named from the next turn on; without
+// a choice the GPT prompt above is unchanged.
+func TestSubagentPromptNamesTheChosenModel(t *testing.T) {
+	cli := SubagentCLI{Binary: "/opt/unreal/bin/unreal", Socket: "/run/host.sock", Templates: []string{"lead"}}
+	gpt := subagentPrompt(cli)
+	cli.Models = func() SubagentModels { return SubagentModels{} }
+	if subagentPrompt(cli) != gpt {
+		t.Fatal("no choice changed the GPT prompt")
+	}
+	cli.Models = func() SubagentModels { return SubagentModels{Family: "OpenCode Go", Lead: "deepseek-v4.1-flash"} }
+	prompt := subagentPrompt(cli)
+	for _, want := range []string{"OpenCode Go does the work, because OpenCode Go models cost less than you", "Review what OpenCode Go delivers", "redoing OpenCode Go's work", "runs deepseek-v4.1-flash at max effort", "its own OpenCode Go workers", "each OpenCode Go agent reads", "collector template (deepseek-v4.1-flash at low effort) and never to a higher-effort worker", "/opt/unreal/bin/unreal subagent start --template lead <<'EOF'"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt lacks %q", want)
+		}
+	}
+	if strings.Contains(prompt, "GPT") || strings.Contains(prompt, "gpt-6") {
+		t.Fatal("the prompt still names GPT", prompt)
+	}
+	// Overrides are offered only on GPT; the chosen model refuses them.
+	if !strings.Contains(gpt, "Add --model ID and --effort LEVEL to subagent start") || strings.Contains(prompt, "--model") || strings.Contains(prompt, "--effort") {
+		t.Fatal("the override line", prompt)
+	}
+}
+
 func TestUserReplyPromptAppliesWithAndWithoutSubagents(t *testing.T) {
 	for _, subagents := range []SubagentCLI{{}, {Binary: "/opt/unreal/unreal-agent"}} {
 		prompt := appendedPrompt("Read Only", subagents)

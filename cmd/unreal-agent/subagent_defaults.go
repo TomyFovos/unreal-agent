@@ -8,6 +8,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/openaicodex"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/opencodego"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/profile"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
@@ -40,18 +41,18 @@ var childToolNames = slices.Clone(agentrunner.ChildToolNames)
 // defaultSubagents gives a normal Host the lead and worker templates when the
 // operator configured none and Codex is registered or discovery is enabled.
 // They follow the Session's permission mode, bounded by its maximum.
-func defaultSubagents(config serveConfiguration) map[string]childTemplate {
+func defaultSubagents(config serveConfiguration, chosen subagentModel) map[string]childTemplate {
 	if config.DisableSubagents {
 		return nil
 	}
-	codex, ok := codexSelection(config)
+	route, ok := codexSelection(config)
 	model, effort := leadModel, leadEffort
 	if selected := config.SubagentDefaults; selected != nil {
 		if config.Runtime.Provider.Provider == selected.Provider {
-			codex, ok = config.Runtime.Provider, true
+			route, ok = config.Runtime.Provider, true
 		} else {
 			p, found := config.Providers[selected.Provider]
-			codex, ok = p.Provider, found
+			route, ok = p.Provider, found
 		}
 		if !ok {
 			return nil
@@ -66,10 +67,13 @@ func defaultSubagents(config serveConfiguration) map[string]childTemplate {
 	hasAPI := config.Runtime.Provider.Provider == "openai" || config.Providers["openai"].Provider.Provider == "openai"
 	if !ok && (hasAPI || config.Launcher != nil && !config.Launcher.CodexDisabled && (config.Launcher.DiscoverProviders == nil || *config.Launcher.DiscoverProviders)) {
 		// Keep templates ready for a later login. Runtime resolution binds the
-		// authenticated route at child start; Claude advertises them only while
-		// that route is available.
-		codex = provider.Selection{Version: 1, Provider: "openai-codex", Endpoint: openaicodex.BaseURL, Auth: credential.Reference{Provider: "openai-codex", Method: credential.OAuth, ID: "external-codex"}, MaxAttempts: openaicodex.DefaultMaxAttempts, Source: "built-in child template"}
+		// authenticated route at child start (or the model chosen with
+		// /model-sub); Claude advertises them only while that route is available.
+		route = provider.Selection{Version: 1, Provider: "openai-codex", Endpoint: openaicodex.BaseURL, Auth: credential.Reference{Provider: "openai-codex", Method: credential.OAuth, ID: "external-codex"}, MaxAttempts: openaicodex.DefaultMaxAttempts, Source: "built-in child template"}
 		ok = true
+	}
+	if !ok && chosen.Provider == opencodego.ProviderID {
+		route, ok = openCodeGoSelection(config, chosen.Model), true
 	}
 	if !ok || config.PermissionModes == nil || !config.PermissionModes.Enabled || config.PermissionModes.Maximum == nil {
 		return nil
@@ -88,7 +92,12 @@ func defaultSubagents(config serveConfiguration) map[string]childTemplate {
 		return p
 	}
 	runtime := func(model string, effort llm.ReasoningEffort, prompt string) agentrunner.RuntimeIdentity {
-		selection := codex
+		selection := route
+		if selection.Provider == opencodego.ProviderID && chosen.Provider == opencodego.ProviderID {
+			// Each start binds the effort and the prompt to the chosen model
+			// (childRuntimeResolver).
+			model = chosen.Model
+		}
 		selection.Model.ID = model
 		return agentrunner.RuntimeIdentity{Version: 1, Provider: selection, Profile: profile.Default(), Workspace: config.Runtime.Workspace, SystemPrompt: prompt, ReasoningEffort: effort}
 	}
@@ -115,6 +124,18 @@ func codexSelection(config serveConfiguration) (selection provider.Selection, ok
 		return p.Provider, true
 	}
 	return selection, false
+}
+
+// openCodeGoSelection is the registered OpenCode Go route, or the one
+// discovery registers once its key is saved.
+func openCodeGoSelection(config serveConfiguration, model string) provider.Selection {
+	if config.Runtime.Provider.Provider == opencodego.ProviderID {
+		return config.Runtime.Provider
+	}
+	if p, found := config.Providers[opencodego.ProviderID]; found && p.Provider.Provider == opencodego.ProviderID {
+		return p.Provider
+	}
+	return openCodeGoRoute(model)
 }
 
 // withChildTools lets a maximum cover the subagent tools the default

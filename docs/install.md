@@ -57,7 +57,7 @@ Settings store only the file paths, never key values. Files without permissions 
    ```
 
 3. Check the printed connection summary.
-   Among ready subscriptions, a new installation starts with Claude when both are ready, or the ready subscription. API connections require explicit selection in `/model`. Claude uses GPT children when Codex is available, otherwise Claude Code's Agent (`haiku` / `sonnet`). An OpenAI API parent uses the API connection for its built-in GPT children; other parents retain Codex. Unavailable authentication never triggers a connection switch.
+   Among ready subscriptions, a new installation starts with Claude when both are ready, or the ready subscription. API connections require explicit selection in `/model`. Claude uses GPT children when Codex is available, otherwise Claude Code's Agent (`haiku` / `sonnet`, or the Claude model chosen with `/model-sub`). Without a saved `/model-sub` choice, an OpenAI API parent uses its API connection for built-in GPT children; other parents retain Codex. An explicit `/model-sub` choice takes priority. Unavailable authentication never triggers a connection switch.
 4. Navigate to your project directory and start a named Session:
 
    ```bash
@@ -71,6 +71,40 @@ Settings store only the file paths, never key values. Files without permissions 
 - **Commands:** `~/.local/bin/unreal` and `~/.local/bin/unreal-agent`
 - **Shell helper:** `~/.config/unreal-agent-common/path.sh` (sourced automatically in new Bash shells; adds `~/.local/bin` to `PATH` and defines the `ucd` helper function)
 - **Workspace root:** Automatically set to the current Git worktree root, or the current directory if outside Git.
+
+---
+
+## Mac: `unreal NAME` from any folder
+
+On macOS, install a revision from this Git checkout (`REV` is required; it can be a full or abbreviated commit hash, or another revision Git resolves to a commit such as a tag or branch):
+
+```bash
+make mac-install REV=<commit>
+```
+
+The build runs in a detached worktree and installs to `~/.local/opt/unreal-agent/<rev>`; the `current` link is switched to it and `~/.local/bin/unreal` is written. The current version, the version it replaced and any version a running process still uses are kept; other versions are removed.
+
+If `~/.local/bin` is not in `PATH`, add the printed line to `~/.zshrc` and reopen the shell:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then, from any folder:
+
+```bash
+unreal NAME             # open Session NAME in this folder, creating it if no folder has it
+unreal                  # list every Session in every folder; pick a number to open one
+unreal --where NAME     # print the folder(s) that have Session NAME
+```
+
+(`unreal-agent folders ...` is the same subcommand without the wrapper.)
+
+The folder is the Git worktree root containing the current directory (the directory itself outside Git), with symlinks resolved. One Host runs per folder, with its own configuration `~/.config/unreal-agent/folders/<ID>/runtime.json` and state `~/.local/state/unreal-agent/folders/<ID>/` (`<ID>` is `r-` plus the first 16 hex characters of the SHA-256 of the folder path). The default folder — `Runtime.Workspace` in `~/.config/unreal-agent/runtime.json` — keeps that file and `~/.local/state/unreal-agent` and launches with no extra flags. The Claude login, the OpenCode Go API key and the `/model-sub` choice are shared by every folder; the Claude sandbox allows only that Host's socket, so the subagent CLI keeps working.
+
+Roll back with an older revision: `make mac-install REV=<older commit>`.
+
+Installing or rolling back does not change a Host that is already running: `unreal NAME` attaches to it, and it keeps the version it started with. To switch, detach every Session (`Ctrl+D`), stop the Hosts with `pkill -f 'unreal-agent serve'`, then run `unreal NAME`; the Host starts again from the installed version. Conversations and settings are kept; children still running are canceled when their Host stops.
 
 ---
 
@@ -136,3 +170,9 @@ Pass these flags to `bash development.sh` during installation or update (not to 
 | `--anthropic-api-key-file <path>` | Register an optional Claude API connection using a 0600 key file; separate billing |
 | `--openai-api-key-env <NAME>` | Explicitly choose the OpenAI key's environment variable name |
 | `--anthropic-api-key-env <NAME>` | Explicitly choose the Anthropic key's environment variable name |
+
+### OpenCode Go key and distributor build choice
+
+Enabled kits also accept `bash development.sh --opencode-go-api-key-file /absolute/go.key` (a 0600 file) or `--opencode-go-api-key-env MY_GO_KEY` (an explicitly named environment variable). The key is stored in Unreal’s managed store without printing it; select OpenCode Go explicitly with `/model`.
+
+A kit marked `opencode_go_enabled: false` in `KIT.json` rejects both options with a distribution-disabled message. Saving a key through `unreal-agent-auth` also fails in that build. Runtime settings and environment variables cannot restore the connection. An older Session choosing it stays open with guidance to use `/model` for another connection. Use `unreal-agent --version` to check the compiled choice; rebuilding from source is required to change it. See [distribution builds](distribution.md#distribution-builds-without-opencode-go).

@@ -188,8 +188,21 @@ func (s *Service) path(path string, workspace bool) (string, error) {
 		}
 	}
 	rel, err := filepath.Rel(s.root, path)
-	if workspace && (err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+	outside := err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	if workspace && (outside || rel == ".") {
 		return "", diagnosticError{ReasonWorkspaceBoundary}
+	}
+	if !workspace && outside {
+		if secretguard.CredentialPath(path) {
+			return "", &permission.Error{Code: permission.Denied, Capability: "filesystem", Reason: "provider credential files are excluded"}
+		}
+		// macOS reaches /tmp, /var and /etc through system symlinks. An outside
+		// read resolves its parent directories, so the policy, the checks below
+		// and the nofollow walk see the real location. The target itself, and
+		// every path in the workspace, still reject symlinks.
+		if parent, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
+			path = filepath.Join(parent, filepath.Base(path))
+		}
 	}
 	stateRel, err := filepath.Rel(s.state, path)
 	if err == nil && stateRel != ".." && !strings.HasPrefix(stateRel, ".."+string(filepath.Separator)) {

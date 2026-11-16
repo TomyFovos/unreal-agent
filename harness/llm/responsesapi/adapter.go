@@ -63,6 +63,11 @@ type Config struct {
 	// body, such as OpenRouter's automatic prompt caching and upstream routing.
 	// A key that names a standard Responses API field is rejected per request.
 	Extensions map[string]jsontext.Value
+	// ClassifyError lets a provider name a failure in its own format, such as
+	// an exhausted subscription allowance, before the shared retry policy
+	// reads it. It receives the HTTP response headers and may return the
+	// failure unchanged. Nil keeps the shared classification.
+	ClassifyError func(failure *APIError, headers http.Header) *APIError
 }
 
 type adapter struct {
@@ -74,6 +79,7 @@ type adapter struct {
 	maxAttempts       int
 	maxStreamAttempts int
 	extensions        map[string]jsontext.Value
+	classifyError     func(*APIError, http.Header) *APIError
 }
 
 var _ llm.Adapter = (*adapter)(nil)
@@ -108,6 +114,7 @@ func NewAdapter(remote *primitives.RemoteClient, config Config) (llm.Adapter, er
 		maxAttempts:       maxAttempts,
 		maxStreamAttempts: maxStreamAttempts,
 		extensions:        config.Extensions,
+		classifyError:     config.ClassifyError,
 	}, nil
 }
 
@@ -125,7 +132,7 @@ func (adapter *adapter) Respond(ctx context.Context, request llm.Request, option
 		return llm.Response{}, diagnosed(err, FailureDiagnostic{Stage: "request_build"})
 	}
 	ctx = context.WithValue(ctx, progressKey{}, options.Progress)
-	statusCode, responseBody, err := adapter.exchange(ctx, body, key)
+	statusCode, responseBody, failure, err := adapter.exchange(ctx, body, key)
 	if err != nil {
 		return llm.Response{}, err
 	}
@@ -133,7 +140,9 @@ func (adapter *adapter) Respond(ctx context.Context, request llm.Request, option
 		adapter.trace(Exchange{RequestBody: body, StatusCode: statusCode, ResponseBody: responseBody})
 	}
 	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
-		failure := providerError(statusCode, responseBody)
+		if failure == nil {
+			failure = providerError(statusCode, responseBody)
+		}
 		return llm.Response{}, diagnosed(fmt.Errorf("create response: %w", failure), FailureDiagnostic{Stage: "http_status", Status: statusCode, Retryable: retryableResponseError(failure, primitives.DefaultRemoteRequest("", "", "").RetryPolicy.RetryableStatusCodes)})
 	}
 	response, err := decodeResponse(responseBody)

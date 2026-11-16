@@ -2,11 +2,17 @@
 // Original errors remain in canonical history/diagnostics, never in this text.
 package usertext
 
-import "strings"
+import (
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
+	"strings"
+)
 
 func Login(provider string) string {
 	if strings.HasPrefix(provider, "claude") {
 		return "claude を起動して /login"
+	}
+	if provider == "opencode-go" {
+		return "/login の手順"
 	}
 	return "codex login"
 }
@@ -22,10 +28,17 @@ func Authentication(code, detail string) bool {
 func Failure(code, detail, provider string) string {
 	text := strings.ToLower(code + " " + detail)
 	switch {
+	case strings.Contains(text, buildfeatures.OpenCodeGoDisabledCode):
+		return buildfeatures.OpenCodeGoDisabledMessage
+	case Authentication(code, detail) && provider == "opencode-go":
+		// The key is read for each request, so saving it again needs no restart.
+		return "API キーが使えません。/login の手順で保存し直してから /resume するか、/model で切り替えてください。"
 	case Authentication(code, detail):
 		return "ログインが必要です。" + Login(provider) + " でログインし直すか、/model で切り替えて /resume。"
 	case strings.Contains(text, "provider_unavailable"), strings.Contains(text, "cli_missing"), strings.Contains(text, "proxy_unavailable"):
 		return "接続先を利用できません。" + Login(provider) + " を確認するか、/model で切り替えて /resume。"
+	case strings.Contains(text, "catalog_unavailable") && provider == "opencode-go":
+		return "OpenCode Go のモデル一覧を読み取れません。通信を確認し、/model refresh を実行してください。"
 	case strings.Contains(text, "catalog_unavailable"):
 		return "モデル一覧を読み取れません。CLI の起動・ログイン状態を確認し、/model refresh を実行してください。"
 	case strings.Contains(text, "disconnected"), strings.Contains(text, "transport_failed"):

@@ -12,6 +12,8 @@ concurrency:
 
 env:
   CGO_ENABLED: '1'
+  # Distributor repository variable; evaluated only while building artifacts.
+  OPENCODE_GO_ENABLED: ${{ vars.UNREAL_OPENCODE_GO_ENABLED || 'true' }}
 
 jobs:
   build:

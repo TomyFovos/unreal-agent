@@ -6,7 +6,9 @@ COPY cmd/ cmd/
 COPY harness/ harness/
 COPY internal/ internal/
 ARG REV=dev
-RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "-X main.version=${REV}" -o /out/unreal-agent-runner ./cmd/unreal-agent-runner
+ARG OPENCODE_GO_ENABLED=true
+RUN tags=""; if [ "$OPENCODE_GO_ENABLED" = false ]; then tags=disable_opencode_go; fi; \
+    CGO_ENABLED=1 go build -tags="$tags" -trimpath -buildvcs=false -ldflags "-X main.version=${REV}" -o /out/unreal-agent-runner ./cmd/unreal-agent-runner
 
 # Debian 13.7 (trixie), image build 2026-09-18.
 FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a

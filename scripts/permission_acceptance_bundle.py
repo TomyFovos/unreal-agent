@@ -11,7 +11,7 @@ import pilot_kit
 import snapshot
 
 
-def assemble(source, output, revision, sandbox):
+def assemble(source, output, revision, sandbox, disable_opencode_go=False):
     if sandbox not in ("asp", "devlore"):
         raise ValueError("invalid Sandbox")
     scripts = Path(__file__).parent
@@ -22,7 +22,7 @@ def assemble(source, output, revision, sandbox):
               "OPT_IN": "" if sandbox == "asp" else " --policy-audited --trust-managed-policy"}
     for key, value in values.items():
         readme = readme.replace("@"+key+"@", value)
-    return pilot_kit.assemble(source, output, templates, revision=revision, sandbox=sandbox,
+    return pilot_kit.assemble(source, output, templates, revision=revision, sandbox=sandbox, disable_opencode_go=disable_opencode_go,
         kit_name=root, kind="permission-acceptance-kit", readme=readme, extra_files={
             **{name: (scripts / name).read_bytes() for name in ("asp_oauth.py", "devlore_launcher.py", "permission_acceptance.py", "pilot_provider.py")},
             "gate.sh": (templates / "gate.sh").read_bytes()})
@@ -31,13 +31,14 @@ def assemble(source, output, revision, sandbox):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", required=True, type=Path)
+    parser.add_argument("--disable-opencode-go", action="store_true")
     parser.add_argument("--revision", required=True)
     parser.add_argument("--sandbox", choices=("asp", "devlore"), required=True)
     parser.add_argument("--copy-to", type=Path)
     args = parser.parse_args()
     try:
         output = pilot_kit.private_output(snapshot.ROOT)
-        archive = assemble(args.snapshot.resolve(), output, args.revision, args.sandbox)
+        archive = assemble(args.snapshot.resolve(), output, args.revision, args.sandbox, args.disable_opencode_go)
         print(f"kit: {archive}\nSHA256: {pilot_kit.digest(archive)}")
         if args.copy_to:
             print(f"delivery: {pilot_kit.copy_delivery(archive, args.copy_to, prefix=archive.name[:-7]+'-')}")

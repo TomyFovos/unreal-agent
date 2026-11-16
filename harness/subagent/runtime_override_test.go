@@ -63,7 +63,7 @@ func TestChildRuntimeOverrides(t *testing.T) {
 			// Explicit overrides do not inherit or resolve a different provider.
 			resolve := sub.RuntimeResolver(nil)
 			if tc.request != nil {
-				resolve = func(context.Context, *host.Session, sub.Template, *sub.RuntimeRequest) (sub.Template, error) {
+				resolve = func(context.Context, *host.Session, string, sub.Template, *sub.RuntimeRequest) (sub.Template, error) {
 					t.Error("template override invoked the parent's runtime resolver")
 					return template, errors.New("unexpected resolver")
 				}

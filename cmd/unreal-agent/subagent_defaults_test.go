@@ -45,7 +45,7 @@ func TestLegacyUltraRuntimeConfigurationAndChildTemplatesLoad(t *testing.T) {
 		Credentials: credential.ResolverFunc(func(context.Context, credential.Reference) (credential.Material, error) {
 			return credential.Material{}, nil
 		})}
-	_, templates, err := withParentSubagents(config, loaded.Subagents, permission.Unrestricted(), "", "")
+	_, templates, err := withParentSubagents(config, loaded.Subagents, permission.Unrestricted(), "", "", "", "")
 	if err != nil {
 		t.Fatal("legacy templates rejected", err)
 	}
@@ -98,7 +98,7 @@ func TestDefaultSubagentsLeadAtMaxWorkersUnchanged(t *testing.T) {
 	cfg.Permissions = permission.Config{Tools: []string{"read", "grep", "glob"}, ReadRoots: []string{workspace}}
 	maximum := permission.Config{Tools: append(tool.StaticNames(), tool.ClaudeCodeName), FilesystemUnrestricted: true, NetworkUnrestricted: true, ProcessMode: permission.ProcessUnrestricted}
 	cfg.PermissionModes = &permission.ModesConfig{Enabled: true, Maximum: &maximum}
-	templates := defaultSubagents(cfg)
+	templates := defaultSubagents(cfg, subagentModel{})
 	lead, ok := templates["lead"]
 	if !ok || len(templates) != 2+len(workerEfforts) {
 		t.Fatal("templates", len(templates))
@@ -146,12 +146,12 @@ func TestDefaultSubagentsLeadAtMaxWorkersUnchanged(t *testing.T) {
 	}
 	without := cfg
 	without.Providers = nil
-	if defaultSubagents(without) != nil {
+	if defaultSubagents(without, subagentModel{}) != nil {
 		t.Fatal("subagents without Codex")
 	}
 	without = cfg
 	without.PermissionModes = nil
-	if defaultSubagents(without) != nil {
+	if defaultSubagents(without, subagentModel{}) != nil {
 		t.Fatal("subagents without permission modes")
 	}
 }

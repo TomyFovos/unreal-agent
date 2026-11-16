@@ -7,11 +7,13 @@ import (
 	"path/filepath"
 
 	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 )
 
 // Compared through the existing private extension API. No credential values,
 // daemon metadata file, or replacement gateway protocol is introduced.
 type launcherHostBinding struct {
+	OpenCodeGoDisabled                              bool `json:",omitzero"`
 	Configuration, Sessions, Credentials, CodexFile string
 	Normal                                          bool
 }
@@ -25,7 +27,7 @@ func absolutePath(path string) string {
 }
 
 func checkLauncherHost(ctx context.Context, client *gateway.Client, o launchOptions) error {
-	binding := launcherHostBinding{Configuration: o.config, Sessions: o.sessions, Credentials: o.credentials, CodexFile: o.codexFile, Normal: o.normal}
+	binding := launcherHostBinding{Configuration: o.config, Sessions: o.sessions, Credentials: o.credentials, CodexFile: o.codexFile, Normal: o.normal, OpenCodeGoDisabled: !buildfeatures.OpenCodeGoEnabled}
 	request, err := json.Marshal(modelRequest{Action: "launcher.check", HostBinding: &binding})
 	if err != nil {
 		return err

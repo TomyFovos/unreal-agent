@@ -7,8 +7,10 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/opencodego"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 )
 
 // This local startup state performs no inference and is hidden from /model.
@@ -70,6 +72,9 @@ func (a availabilityAdapter) Respond(ctx context.Context, request llm.Request, o
 			a.id = active.Provider
 		}
 	}
+	if buildfeatures.Disabled(a.id) {
+		return llm.Response{}, buildfeatures.ErrOpenCodeGoDisabled
+	}
 	if a.id == loginProvider {
 		ids := a.runtime.Discovered.IDs()
 		for id := range a.runtime.Backends {
@@ -83,10 +88,10 @@ func (a availabilityAdapter) Respond(ctx context.Context, request llm.Request, o
 	} else if err := a.runtime.CheckProvider(ctx, a.id); err != nil {
 		backend, _ := a.runtime.ProviderRuntime(a.id)
 		reason := providerFailureReason(err, isDockerSandboxCodex(backend.Provider.Auth))
-		if backend.Provider.Auth.Method == credential.APIKey {
+		if backend.Provider.Auth.Method == credential.APIKey && a.id != opencodego.ProviderID {
 			return loginResponse(modelcatalog.ProviderName(a.id) + " を利用できません。" + reason.ProviderHint(a.id) + "。確認後は /model refresh を実行してください。"), nil
 		}
-		return loginResponse(modelcatalog.ProviderName(a.id) + " を利用できません。" + reason.ProviderHint(a.id) + "。/login で手順を確認し、ログイン後は /model refresh を実行してください。"), nil
+		return loginResponse(modelcatalog.ProviderName(a.id) + " を利用できません。" + providerGuidance(a.id, reason.ProviderHint(a.id), "。/login で手順を確認し、ログイン後は /model refresh を実行してください") + "。"), nil
 	}
 	return a.Adapter.Respond(ctx, request, options)
 }

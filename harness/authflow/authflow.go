@@ -4,9 +4,11 @@ package authflow
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	"github.com/unreallabsai/unreal-agent/harness/credential"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 )
 
 type Support struct {
@@ -21,15 +23,17 @@ type Support struct {
 }
 
 func Matrix() []Support {
-	return []Support{
+	matrix := []Support{
 		{Provider: "claude-native", Method: credential.OAuth, Status: "private_oauth", Owner: credential.Managed, Inference: "dedicated single-Team Messages dispatcher", Reviewed: "2026-10-24", Source: "https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan", Reason: "explicit Native service login; subscription-or-reject preflight; actual accounting UNKNOWN"},
 		{Provider: "openai", Method: credential.APIKey, Status: "supported", Owner: credential.Managed, Inference: "existing Responses adapter", Reviewed: "2026-09-27", Source: "https://developers.openai.com/api/docs/quickstart"},
 		{Provider: "anthropic", Method: credential.APIKey, Status: "configuration_only", Owner: credential.Managed, Inference: "requires an explicitly installed Anthropic adapter", Reviewed: "2026-09-27", Source: "https://platform.claude.com/docs/en/api/overview", Reason: "API-key storage is supported; this fork currently ships Responses adapters"},
+		{Provider: "opencode-go", Method: credential.APIKey, Status: "supported", Owner: credential.Managed, Inference: "Go subscription Responses endpoint, never pay-as-you-go Zen", Reviewed: "2026-11-03", Source: "https://opencode.ai/docs/go/"},
 		{Provider: "anthropic", Method: credential.OAuth, Status: "unsupported", Owner: credential.External, Reviewed: "2026-09-27", Source: "https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use", Reason: "Claude.ai subscription credential mediation is not permitted"},
 		{Provider: "openai-codex", Method: credential.OAuth, Status: "deferred", Owner: credential.External, Inference: "existing external read-only token source", Reviewed: "2026-09-27", Source: "https://learn.chatgpt.com/docs/auth", Reason: "no third-party direct OAuth client/exchange/refresh contract established; use explicitly owned external source"},
 		{Provider: "openai-codex", Method: credential.DockerSandboxOAuth, Status: "external_only", Owner: credential.DockerSandboxProxy, Inference: "explicit Docker Sandbox host-owned ChatGPT OAuth proxy", Reviewed: "2026-10-09", Source: "https://github.com/docker/sbx-kits-contrib/blob/eeaf96617172b3544e846378e6f7dca73c9db6c8/codex/spec.yaml", Reason: "kit mode/routing preflight required; no token import, managed login or refresh"},
 		{Provider: "github-copilot", Method: credential.OAuth, Status: "deferred", Owner: credential.External, Reviewed: "2026-09-27", Source: "https://docs.github.com/en/copilot/how-tos/copilot-sdk/auth/authenticate", Reason: "OAuth application authentication documented; inference adapter without competing runtime ownership not established"},
 	}
+	return slices.DeleteFunc(matrix, func(s Support) bool { return buildfeatures.Disabled(s.Provider) })
 }
 
 type Service struct{ manager *credential.Manager }
@@ -75,6 +79,9 @@ func (s *Service) List(ctx context.Context) ([]credential.Metadata, error) {
 
 // ValidateMethod rejects unavailable flows before a UI requests a secret.
 func ValidateMethod(ref credential.Reference) error {
+	if err := buildfeatures.CheckProvider(ref.Provider); err != nil {
+		return err
+	}
 	if err := ref.Validate(); err != nil {
 		return err
 	}

@@ -50,6 +50,22 @@ func TestRuntimeToolCapabilityIsExplicitAndPreservesCodex(t *testing.T) {
 		t.Fatal("Codex tool capability was downgraded")
 	}
 }
+func TestCatalogModelsKeepsExistingModelSwitching(t *testing.T) {
+	r, err := New(Defaults(nil)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{claudeagent.ProviderID, claudeagent.APIProviderID, "openai", "openrouter", "fireworks", "ollama", "openai-codex", "unregistered"} {
+		want := claudeagent.IsProvider(id) || id == "openai-codex" || id == "openai"
+		if r.CatalogModels(id) != want {
+			t.Fatal("catalog model switching changed", id)
+		}
+	}
+	copy, err := r.WithModel(Selection{Provider: "openai-codex", Model: Model{ID: "discovered"}})
+	if err != nil || !copy.CatalogModels("openai-codex") {
+		t.Fatal("catalog extension dropped the capability", err)
+	}
+}
 func TestFiveExistingProvidersResolveAtRequestTime(t *testing.T) {
 	for _, id := range []string{"openai", "openrouter", "fireworks", "ollama", "openai-codex"} {
 		t.Run(id, func(t *testing.T) {

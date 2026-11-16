@@ -85,6 +85,20 @@ func (r AvailabilityReason) ProviderHint(id string) string {
 	if id == "openai" || id == "claude-api" {
 		return "選択した API キーの参照先と 0600 のファイル権限を確認してください（API は別課金）"
 	}
+	if id == "opencode-go" {
+		switch r {
+		case "":
+			return ""
+		case AuthRequired:
+			return "/login の手順で API キーを保存し、/model refresh を実行してください"
+		case CatalogUnavailable:
+			return "モデル一覧を読み取れません。通信を確認し、/model refresh を実行してください"
+		case ProviderDisabled:
+			return "この接続先は設定で無効になっています"
+		default:
+			return "保存した API キーと通信を確認してください"
+		}
+	}
 	login := "codex login"
 	cli := "Codex CLI"
 	if strings.HasPrefix(id, "claude") {
@@ -130,6 +144,8 @@ func ProviderName(id string) string {
 		return "Claude Native"
 	case "claude":
 		return "Claude（サブスク）"
+	case "opencode-go":
+		return "OpenCode Go"
 	default:
 		return id
 	}

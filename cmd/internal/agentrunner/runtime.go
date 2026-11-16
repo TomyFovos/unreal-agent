@@ -24,6 +24,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/tool/bash"
 	"github.com/unreallabsai/unreal-agent/harness/tool/observed"
 	"github.com/unreallabsai/unreal-agent/harness/tool/viewimage"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -45,7 +46,7 @@ type RuntimeIdentity struct {
 }
 type RuntimeConfig struct {
 	CredentialSources map[string]credential.Source // nonsecret Host-owned locations, never Session identity
-	BuiltinSubagents  bool                         // defaults follow the owning Session's explicit GPT connection
+	BuiltinSubagents  bool                         // defaults follow /model-sub or the owning Session's explicit GPT connection
 	// Context is a versioned, disposable projection strategy. It is deliberately
 	// outside immutable runtime/auth identity, so old histories need no migration.
 	Context contextengine.Config
@@ -123,12 +124,14 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 	}
 	c.Identity.Workspace = workspace
 	c.Identity.DisallowedTools = slices.Clone(c.Identity.DisallowedTools)
-	c.Identity.Provider, err = c.Providers.Resolve(c.Identity.Provider)
+	if !buildfeatures.Disabled(c.Identity.Provider.Provider) {
+		c.Identity.Provider, err = c.Providers.Resolve(c.Identity.Provider)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
 	supportsTools := c.ProviderSupportsTools(c.Identity.Provider.Provider)
-	if c.Providers.RequiresResolver(c.Identity.Provider) && c.Credentials == nil {
+	if !buildfeatures.Disabled(c.Identity.Provider.Provider) && c.Providers.RequiresResolver(c.Identity.Provider) && c.Credentials == nil {
 		return nil, nil, errors.New("runtime: credential resolver required")
 	}
 	if c.Identity.ReasoningEffort != "" && !c.Identity.ReasoningEffort.Valid() {
@@ -140,6 +143,9 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 	// A normal Host may discover a tool-capable provider after login.
 	toolResources := supportsTools || c.Discovered != nil
 	for id, p := range c.Backends {
+		if buildfeatures.Disabled(id) {
+			continue
+		}
 		if id != p.Provider.Provider || id == c.Identity.Provider.Provider {
 			return nil, nil, errors.New("runtime: invalid backend registration")
 		}
@@ -316,6 +322,10 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 		}
 		configure := func(choice sessionstore.RuntimeSelection) error {
 			backend, e := c.ProviderRuntime(choice.Provider)
+			if buildfeatures.Disabled(choice.Provider) {
+				backend, e = ProviderRuntime{Provider: c.Identity.Provider}, nil
+				backend.Provider.Provider = choice.Provider
+			}
 			if e != nil {
 				return e
 			}
@@ -372,6 +382,20 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 			return e
 		}
 		apply := func(choice sessionstore.RuntimeSelection) error {
+			// Recorded disabled choices may replay, but never acquire a client.
+			if buildfeatures.Disabled(choice.Provider) {
+				if choice != active {
+					client.mu.Lock()
+					old := client.client
+					client.client = disabledProviderClient{}
+					client.mu.Unlock()
+					active = choice
+					if err := old.Close(); err != nil {
+						return err
+					}
+				}
+				return configure(choice)
+			}
 			if err := validate(choice); err != nil {
 				return err
 			}

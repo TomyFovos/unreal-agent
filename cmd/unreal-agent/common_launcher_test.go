@@ -127,9 +127,12 @@ func TestCommonBootstrapFlagsDoNotApproveOrOverwriteExistingConfig(t *testing.T)
 func TestLauncherBindingChecksConfigurationAndSessionPaths(t *testing.T) {
 	binding := launcherHostBinding{Configuration: "/synthetic/runtime.json", Sessions: "/synthetic/sessions"}
 	h := modelUI{binding: &binding}
-	for _, kind := range []string{"same", "other-config", "other-sessions"} {
+	for _, kind := range []string{"same", "other-config", "other-sessions", "other-build"} {
 		t.Run(kind, func(t *testing.T) {
 			copy := binding
+			if kind == "other-build" {
+				copy.OpenCodeGoDisabled = !binding.OpenCodeGoDisabled
+			}
 			if kind == "other-config" {
 				copy.Configuration = "/other/runtime.json"
 			}

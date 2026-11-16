@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 	"github.com/unreallabsai/unreal-agent/internal/usertext"
 	"strings"
 )
@@ -14,6 +15,9 @@ func attentionBand(s Snapshot, u UIState, l layout) []line {
 		role colorRole
 	}
 	var notices []notice
+	if s.Selection != nil && buildfeatures.Disabled(s.Selection.Provider) || s.PendingSelection != nil && buildfeatures.Disabled(s.PendingSelection.Provider) {
+		notices = append(notices, notice{"▲ " + buildfeatures.OpenCodeGoDisabledMessage, bandBad})
+	}
 	if s.Failure != "" || strings.Contains(s.Status, "failed") {
 		reason := s.Failure
 		if reason == "" {

@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json/v2"
 	"flag"
+	"fmt"
 	"io"
 	"strings"
 
 	"github.com/unreallabsai/unreal-agent/harness/authflow"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 )
 
 // Run never accepts a secret as a flag and never echoes input. The executable
@@ -21,6 +23,10 @@ func Run(ctx context.Context, args []string, input io.Reader, output io.Writer) 
 	}
 	if len(args) == 0 {
 		return &credential.Error{Code: "command_required"}
+	}
+	if args[0] == "--version" && len(args) == 1 {
+		_, err := fmt.Fprintln(output, buildfeatures.Version(""))
+		return err
 	}
 	if args[0] == "methods" {
 		if len(args) != 1 {
@@ -40,6 +46,11 @@ func Run(ctx context.Context, args []string, input io.Reader, output io.Writer) 
 	keyStdin := flags.Bool("key-stdin", false, "read API key from redirected standard input")
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
 		return &credential.Error{Code: "invalid_arguments"}
+	}
+	if args[0] == "login" {
+		if err := buildfeatures.CheckProvider(*provider); err != nil {
+			return err
+		}
 	}
 	if *directory == "" {
 		return &credential.Error{Code: "store_required"}

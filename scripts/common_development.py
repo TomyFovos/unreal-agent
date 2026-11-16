@@ -235,7 +235,36 @@ def prune_versions(home, installed, previous, proc=Path("/proc")):
     print(f"旧版を削除: {', '.join(removed) or 'なし'}（{freed / 1e6:.0f} MB 解放）")
 
 
+def open_code_go_key(args, meta):
+    path = getattr(args, "opencode_go_api_key_file", "")
+    env = getattr(args, "opencode_go_api_key_env", "")
+    if not path and not env:
+        return None
+    # Check the distributor choice before reading either source. No secret or
+    # source value is ever included in an error.
+    if not meta.get("opencode_go_enabled", True):
+        pilot.fail("opencode_go_disabled", "この配布物では OpenCode Go は使えません。キーは受け付けません。")
+    if path and env:
+        pilot.fail("common_api_key_source_invalid", "Choose a key file or an environment variable name, not both.")
+    if path:
+        try:
+            source = Path(path).expanduser()
+            if not source.is_file() or source.stat().st_mode & 0o777 != 0o600:
+                pilot.fail("common_api_key_file_requires_0600", "API key file must be a regular file with permissions 0600.")
+            raw = source.read_bytes()
+        except OSError:
+            pilot.fail("common_api_key_file_unreadable", "API key file is unreadable; value withheld.")
+    else:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env):
+            pilot.fail("common_api_key_source_invalid", "Specify an environment variable name; no key values.")
+        raw = os.environ.get(env, "").encode()
+    if not raw.strip() or len(raw) > 16384:
+        pilot.fail("common_api_key_source_invalid", "API key source is empty or invalid; value withheld.")
+    return raw
+
+
 def install(args, directory, meta):
+    go_key = open_code_go_key(args, meta)
     home = daily.home()
     if args.claude_binary and (len(args.claude_binary) > 4096 or any(
             ord(c) < 32 or ord(c) == 127 for c in args.claude_binary)):
@@ -306,6 +335,14 @@ def install(args, directory, meta):
         if any(kind != b"owned" or location != b"present" for kind, location in files.inspect_shell_paths({"home": home})):
             pilot.fail("common_shell_path_unavailable", "Keep installed files. Open a fresh Bash; current aliases/functions cannot be removed by this installer. Use $HOME/.local/bin/unreal explicitly.")
         prune_versions(home, installed, prior_version)
+    if go_key is not None:
+        state = Path(os.environ.get("XDG_STATE_HOME") or str(home / ".local/state"))
+        result = subprocess.run([str(installed / "unreal-agent-auth"), "login", "--store",
+                                 str(state / "unreal-agent/credentials"), "--provider", "opencode-go",
+                                 "--id", "primary", "--key-stdin"], input=go_key,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if result.returncode:
+            pilot.fail("common_api_key_install_failed", "OpenCode Go のキーを保存できませんでした。値は表示しません。")
     print_install_result(settings, home)
 
 
@@ -559,7 +596,7 @@ def discover_sessions(home, bindings=None):
     return sessions
 
 
-def choose_session(sessions, *, always_prompt=False):
+def unique_sessions(sessions):
     # A workspace can retain the same name in an older provider instance. Its
     # current instance wins; otherwise use the most recently updated copy.
     unique = {}
@@ -568,13 +605,30 @@ def choose_session(sessions, *, always_prompt=False):
         previous = unique.get(key)
         if previous is None or item["current"] and not previous["current"]:
             unique[key] = item
-    choices = sorted(unique.values(), key=lambda item: (-item["mtime"], str(item["workspace"]), item["name"]))
+    return sorted(unique.values(), key=lambda item: (-item["mtime"], str(item["workspace"]), item["name"]))
+
+
+def session_row(item):
+    when = datetime.fromtimestamp(item["mtime"]).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    return f"{item['name']}  {item['workspace']}  {when}"
+
+
+def list_sessions(settings):
+    """Print every main Session, newest first, without choosing or starting one."""
+    choices = unique_sessions(discover_sessions(Path(settings["Home"])))
+    if not choices:
+        print("Session はありません。新しく作るときは unreal NAME と名前を指定してください。")
+    for item in choices:
+        print(session_row(item))
+
+
+def choose_session(sessions, *, always_prompt=False):
+    choices = unique_sessions(sessions)
     if len(choices) == 1 and not always_prompt:
         return choices[0]
     print("Session を選んでください:", file=sys.stderr)
     for number, item in enumerate(choices, 1):
-        when = datetime.fromtimestamp(item["mtime"]).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-        print(f"{number}. {item['name']}  {item['workspace']}  {when}", file=sys.stderr)
+        print(f"{number}. {session_row(item)}", file=sys.stderr)
     while True:
         print("番号: ", end="", file=sys.stderr, flush=True)
         try:
@@ -658,6 +712,8 @@ def launch(args, directory):
     if args.acceptance_fixture:
         os.chdir(create_fixture())
     settings = read_settings(daily.home())
+    if getattr(args, "list", False):
+        list_sessions(settings); return
     workspace, session, instance = resolve_session(settings, args)
     if getattr(args, "where", None) is not None:
         print(workspace)
@@ -683,6 +739,8 @@ def main(argv=None):
     for prefix in ("openai", "anthropic"):
         install_args.add_argument("--" + prefix + "-api-key-file", default="", metavar="PATH")
         install_args.add_argument("--" + prefix + "-api-key-env", default="", metavar="NAME")
+    install_args.add_argument("--opencode-go-api-key-file", default="", metavar="PATH")
+    install_args.add_argument("--opencode-go-api-key-env", default="", metavar="NAME")
     install_args.add_argument("--external-codex", action="store_true")
     install_args.add_argument("--codex-auto", action="store_true")
     install_args.add_argument("--disable-codex", action="store_true")
@@ -697,6 +755,7 @@ def main(argv=None):
     launch_args = modes.add_parser("launch")
     launch_args.add_argument("session", nargs="?", default=None)
     launch_args.add_argument("--where", metavar="NAME", help="Print the workspace of an existing main Session")
+    launch_args.add_argument("--list", action="store_true", help="List main Sessions, newest first")
     launch_args.add_argument("--instance", default=None)
     launch_args.add_argument("--config", default=None)
     launch_args.add_argument("--readme", action="store_true")

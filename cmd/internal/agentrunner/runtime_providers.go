@@ -10,6 +10,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 )
 
 // ProviderRuntime is operator-owned, nonsecret backend configuration. The
@@ -23,6 +24,9 @@ type ProviderRuntime struct {
 }
 
 func (c RuntimeConfig) ProviderSupportsTools(id string) bool {
+	if buildfeatures.Disabled(id) {
+		return false
+	}
 	if observed, ok := c.Capabilities[id]; ok {
 		return observed.Tools
 	}
@@ -58,6 +62,9 @@ func (c RuntimeConfig) CheckProvider(ctx context.Context, id string) error {
 }
 
 func (c RuntimeConfig) ProviderRuntime(id string) (ProviderRuntime, error) {
+	if err := buildfeatures.CheckProvider(id); err != nil {
+		return ProviderRuntime{}, err
+	}
 	if b, ok := c.Discovered.Lookup(id); ok {
 		return b.Runtime, nil
 	}
@@ -90,6 +97,9 @@ func (c RuntimeConfig) BindSelection(s sessionstore.RuntimeSelection) (sessionst
 	return s, nil
 }
 func (c RuntimeConfig) Catalog(ctx context.Context, id string) (modelcatalog.Catalog, error) {
+	if err := buildfeatures.CheckProvider(id); err != nil {
+		return modelcatalog.Catalog{}, err
+	}
 	if b, ok := c.Discovered.Lookup(id); ok && b.Catalog != nil {
 		return b.Catalog(ctx, false)
 	}

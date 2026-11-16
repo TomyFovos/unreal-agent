@@ -110,3 +110,37 @@ Before handing out a kit:
 4. **Report verification details:** Record the tested kit filename, commit revision, environment, real inference result, and any unverified paths before sharing the kit with [Installation instructions](install.md).
 
 > **Important:** A successful build, `doctor.sh`, or packaging smoke test alone does not satisfy live inference acceptance.
+
+## Distribution builds without OpenCode Go
+
+OpenCode Go is enabled by default. A distributor can compile the entire connection out of use with the Go build tag `disable_opencode_go`. The resulting executables use a compiled constant; installed configuration files, saved keys, and environment variables cannot enable it again. Rebuild from source to change the choice. Other providers keep their existing behavior.
+
+Build a disabled snapshot and common kit:
+
+```bash
+make snapshot OPENCODE_GO_ENABLED=false GORELEASER=/path/to/goreleaser | tee /tmp/unreal-disabled-snapshot.log
+unreal_snapshot=$(sed -n 's/^snapshot verified: //p' /tmp/unreal-disabled-snapshot.log)
+python3 scripts/common_development_bundle.py --snapshot "$unreal_snapshot" \
+  --revision "$(git rev-parse HEAD)" --disable-opencode-go
+```
+
+The Python build entry point is `python3 scripts/snapshot.py build --disable-opencode-go`. `.goreleaser.yaml` applies the tag to all four binaries when its build environment has `OPENCODE_GO_ENABLED=false`; the snapshot wrapper supplies it. Common, pilot, and permission kit packagers accept `--disable-opencode-go` to require a disabled input snapshot. They preserve its choice and reject an enabled input rather than relabeling its binaries.
+
+Other source builds:
+
+```bash
+make build OPENCODE_GO_ENABLED=false
+make -C benchmarks/harbor build REVISION=HEAD OPENCODE_GO_ENABLED=false BUNDLE=/absolute/new-harbor-bundle
+# Equivalent Harbor builder:
+python3 benchmarks/harbor/build.py --revision HEAD --output /absolute/another-new-bundle --disable-opencode-go
+make mac-install REV=HEAD OPENCODE_GO_ENABLED=false
+# Or: sh scripts/mac/install.sh HEAD --disable-opencode-go
+# Docker build:
+docker build --build-arg OPENCODE_GO_ENABLED=false -t unreal-agent-local .
+# Direct Go builds (apply to every executable being distributed):
+go build -tags=disable_opencode_go ./cmd/unreal-agent
+```
+
+Mac installs keep enabled and disabled variants of the same commit in separate directories. The Release workflow uses the distributor's repository variable `UNREAL_OPENCODE_GO_ENABLED=false` at build time. This is independent of end-user environment variables.
+
+`SNAPSHOT.json`, `KIT.json`, and Harbor's `manifest.json` record the Boolean `opencode_go_enabled`. All product executables report `opencode_go_enabled=false` with `--version`. Disabled builds omit OpenCode Go from discovery, catalogs, `/model`, `/model-sub`, and authentication methods. The installer refuses its key file and key environment-variable options without printing the key. A Session saved with OpenCode Go remains inspectable with its original selection and a notice directing the user to choose another connection with `/model`; it sends no inference request and never automatically changes providers. A child requesting OpenCode Go fails with guidance to select another connection with `/model-sub`.
