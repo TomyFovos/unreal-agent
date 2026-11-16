@@ -20,6 +20,9 @@ import (
 )
 
 // A shared scene for the chat, cards, header, attention band and gauges.
+const visualSceneMaxWidth = 215
+const visualSceneBeads = visualSceneMaxWidth + 1 // overflow even the widest bead row
+
 func visualWorkScene() (Snapshot, UIState) {
 	s, u := idleSnapshot(), plainUI()
 	u.Now = time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
@@ -62,7 +65,7 @@ func visualWorkScene() (Snapshot, UIState) {
 		u.Viewer.Rows = append(u.Viewer.Rows, r)
 	}
 	// Creation follows the nine live lineages so their marks remain A through I.
-	for i := range 800 {
+	for i := range visualSceneBeads {
 		at := u.Now.Add(-11*time.Minute + time.Duration(i)*time.Second/2)
 		u.Viewer.Rows = append(u.Viewer.Rows, viewer.Row{ID: session.ID(fmt.Sprintf("internal-finished-%03d", i)), ParentID: s.ID, ParentOperationStatus: operation.StatusCompleted, Label: "終了した作業", CreatedAt: at.Add(-time.Second), Finish: &viewer.Finish{Status: "completed", RecordedAt: at}})
 	}
@@ -119,9 +122,10 @@ func writeVisualFrame(t *testing.T, frame Frame, name string) {
 }
 
 func TestVisualWorkPaneFrames(t *testing.T) {
+	t.Parallel()
 	s, u := visualWorkScene()
 	o := BuildOrchestration(s, u.Viewer, u.Now, 128)
-	if len(o.cards) != 10 || len(o.beads) != 800 {
+	if len(o.cards) != 10 || len(o.beads) != visualSceneBeads {
 		t.Fatalf("scene cards=%d beads=%d", len(o.cards), len(o.beads))
 	}
 	failed, stalled, grandchildren := 0, 0, 0
@@ -139,7 +143,7 @@ func TestVisualWorkPaneFrames(t *testing.T) {
 	if failed != 1 || stalled != 1 || grandchildren != 2 {
 		t.Fatalf("scene failed=%d stalled=%d grandchildren=%d", failed, stalled, grandchildren)
 	}
-	chat := chatText(s, u, 215)
+	chat := chatText(s, u, visualSceneMaxWidth)
 	for _, want := range []string{"✓ Read AGENTS.md", "✓ Write AGENTS.md", "✓ Bash ×3", "▸ Bash go test ./... 12s", "✗ Edit render.go 失敗", "old_string not found in file", "! Bash rm -rf build-cache 承認待ち", "▸ [A] T1", "┄ 裏の作業  2ターン · ツール3回 · 報告 [A][C]", "【要確認】", "ほかの作業は継続しています。"} {
 		if !strings.Contains(chat, want) {
 			t.Fatalf("chat scene missing %q:\n%s", want, chat)
@@ -148,7 +152,7 @@ func TestVisualWorkPaneFrames(t *testing.T) {
 	if len(s.Permissions.Pending) != 1 || strings.Count(chat, "【要確認】") != 1 || strings.Count(chat, "裏の作業") != 1 {
 		t.Fatal("scene must contain one approval, one attention report and one background group")
 	}
-	for _, size := range [][2]int{{215, 50}, {160, 40}, {120, 30}, {80, 24}, {45, 20}} {
+	for _, size := range [][2]int{{visualSceneMaxWidth, 50}, {160, 40}, {120, 30}, {80, 24}, {45, 20}} {
 		f := RenderFrame(s, u, size[0], size[1])
 		writeVisualFrame(t, f, fmt.Sprintf("work-pane-%dx%d", size[0], size[1]))
 		header := sgrRE.ReplaceAllString(f.Lines[0], "")
@@ -189,6 +193,7 @@ func TestVisualWorkPaneFrames(t *testing.T) {
 }
 
 func TestChildRailUsesSharedCards(t *testing.T) {
+	t.Parallel()
 	s, u := visualWorkScene()
 	l := layout{rail: 48, height: 40}
 	got := childRail(s, u, l, 32)

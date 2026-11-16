@@ -78,6 +78,7 @@ func requestText(r Result) string {
 }
 
 func TestCompactionProviderSwitchNativeToolsAndPrivateReasoning(t *testing.T) {
+	t.Parallel()
 	f := newContextFixture(t, "openai-codex", contextengine.Config{InputBudget: 12000})
 	f.b.AddTool(llm.Tool{Name: "read", Type: llm.ToolFunction})
 	f.user(t, "task", "Read public.txt")
@@ -137,6 +138,7 @@ func TestCompactionProviderSwitchNativeToolsAndPrivateReasoning(t *testing.T) {
 }
 
 func TestCompactionSecretExclusionsDeterminismAndReplay(t *testing.T) {
+	t.Parallel()
 	f := newContextFixture(t, "claude-code", contextengine.Config{InputBudget: 6500})
 	f.turn(t, "safe", "original safe task", "safe response")
 	f.turn(t, "secret", "access_token=secret-access-marker account_id=account-marker", "api_key=sk-private-marker")
@@ -187,6 +189,7 @@ func TestCompactionSecretExclusionsDeterminismAndReplay(t *testing.T) {
 }
 
 func TestCompactionSecretSourceBlocksUnlabelledReceipt(t *testing.T) {
+	t.Parallel()
 	f := newContextFixture(t, "openai-codex", contextengine.Config{})
 	f.turn(t, "old", "public task", "public answer")
 	f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "old", Response: llm.Response{Output: []llm.Item{{Type: llm.ItemToolCall, Data: llm.ToolCall{Name: "read", CallID: "secret-source", Arguments: `{"path":"/synthetic/.codex/auth.json"}`}}}}})
@@ -216,6 +219,7 @@ func TestCompactionSecretSourceBlocksUnlabelledReceipt(t *testing.T) {
 }
 
 func TestCompactionNativeImageIntactOrExplicitBudgetError(t *testing.T) {
+	t.Parallel()
 	for _, size := range []int{32, 10000} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			f := newContextFixture(t, "openai-codex", contextengine.Config{InputBudget: 6000, LargeToolTokens: 200})

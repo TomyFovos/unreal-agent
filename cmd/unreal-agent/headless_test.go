@@ -24,10 +24,7 @@ import (
 )
 
 func TestHeadlessHostRunsProductRuntimeAndChildren(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "unreal-agent")
-	if out, err := exec.CommandContext(t.Context(), "go", "build", "-p", "1", "-o", binary, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v %s", err, out)
-	}
+	binary := testCLI(t, false)
 	for _, configuration := range []string{"gpt", "claude", "claude-gpt"} {
 		t.Run(configuration, func(t *testing.T) {
 			workspace, directory := t.TempDir(), privateCLIDirectory(t)

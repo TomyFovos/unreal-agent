@@ -34,6 +34,7 @@ type fakeGPT struct {
 	t                         *testing.T
 	leadMarker, workerMarker  string
 	leadRuns                  bool // the lead runs a command itself first
+	routingOnly               bool // exercise provider binding without repeating approval scenarios
 	mu                        sync.Mutex
 	leadEfforts, workerEffort []string
 	refusedLead               bool
@@ -113,14 +114,14 @@ func (g *fakeGPT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.sawEmailInstruction = g.sawEmailInstruction || strings.Contains(all, "email=implementer@example.com")
 		g.leadEfforts = append(g.leadEfforts, effort)
 		switch {
-		case g.leadRuns && !calls["lead-bash"]:
+		case !g.routingOnly && g.leadRuns && !calls["lead-bash"]:
 			output = call("lead-bash", "Bash", map[string]string{"command": "printf lead > " + g.leadMarker})
-		case !calls["lead-start-lead"]:
+		case !g.routingOnly && !calls["lead-start-lead"]:
 			output = call("lead-start-lead", "SubagentStart", map[string]string{"template": "lead", "task": "another lead"})
 		case !calls["lead-start-worker"]:
 			g.refusedLead = strings.Contains(all, "Unknown child template")
 			output = call("lead-start-worker", "SubagentStart", map[string]string{"template": "worker-high", "task": "printf worker > " + g.workerMarker})
-		case !calls["lead-approve"] && strings.Contains(all, "asks for approval of request"):
+		case !g.routingOnly && !calls["lead-approve"] && strings.Contains(all, "asks for approval of request"):
 			for _, text := range texts {
 				header, body, ok := strings.Cut(text, "\n")
 				handle, _, _ := strings.Cut(strings.TrimPrefix(header, "Peer message from "), " (")
@@ -136,7 +137,7 @@ func (g *fakeGPT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	case strings.Contains(all, "You are a worker"):
 		g.workerEffort = append(g.workerEffort, effort)
-		if !calls["worker-bash"] {
+		if !g.routingOnly && !calls["worker-bash"] {
 			output = call("worker-bash", "Bash", map[string]string{"command": "printf worker > " + g.workerMarker})
 		} else if !calls["worker-finish"] {
 			output = call("worker-finish", "Finish", map[string]any{"status": "completed", "summary": "worker done", "changedFiles": []string{"worker"}, "tests": []string{}, "blockers": []string{}})
@@ -157,14 +158,12 @@ type gptHost struct {
 	gpt               *fakeGPT
 	claude            *testclaude.Fixture
 	stop              func()
+	environment       []string
 }
 
 func startGPTHost(t *testing.T, leadRuns bool) *gptHost {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "unreal-agent")
-	if out, err := exec.CommandContext(t.Context(), "go", "build", "-race", "-o", binary, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v %s", err, out)
-	}
+	binary := testCLI(t, true)
 	f := testclaude.New(t)
 	f.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentFinal: "noted"})
 	cfg := claudeRouteConfiguration(t, f)
@@ -181,14 +180,13 @@ func startGPTHost(t *testing.T, leadRuns bool) *gptHost {
 	if err := os.WriteFile(filepath.Join(auth, "models_cache.json"), []byte(cache), 0600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CODEX_HOME", auth)
-	t.Setenv("OPENAI_CODEX_AUTH_FILE", "")
+	environment := testCLIEnvironment(t)
 	codex := codexServeConfiguration(workspace, server.URL).Runtime
 	cfg.Providers = map[string]agentrunner.ProviderRuntime{"openai-codex": {Provider: codex.Provider, ReasoningEffort: codex.ReasoningEffort}}
 	cfg.Permissions.NetworkOrigins = []string{server.URL}
 	directory := privateCLIDirectory(t)
-	c, stop := startMultiChildCLI(t, binary, cfg, directory, 4*time.Minute)
-	return &gptHost{client: c, binary: binary, directory: directory, gpt: gpt, claude: f, stop: stop}
+	c, stop := startMultiChildCLIEnvironment(t, binary, cfg, directory, 4*time.Minute, environment, "--codex-auth-file", filepath.Join(auth, "auth.json"))
+	return &gptHost{client: c, binary: binary, directory: directory, gpt: gpt, claude: f, stop: stop, environment: environment}
 }
 
 // designer opens the Session in Ask, holding the human's control lease.
@@ -236,12 +234,13 @@ func (h *gptHost) check(t *testing.T) {
 // designer's Session (not the human) to approve its own command, starts a
 // worker at high, approves the worker itself, and reports.
 func TestSubagentCommandRunsLeadAndWorkers(t *testing.T) {
+	t.Parallel()
 	h := startGPTHost(t, true)
 	h.designer(t)
 	cli := func(stdin string, args ...string) string {
 		t.Helper()
 		cmd := exec.CommandContext(t.Context(), h.binary, append([]string{"subagent"}, args...)...)
-		cmd.Env = append(os.Environ(), "UNREAL_AGENT_SOCKET="+filepath.Join(h.directory, "host.sock"), "UNREAL_AGENT_SESSION=designer")
+		cmd.Env = append(slices.Clone(h.environment), "UNREAL_AGENT_SOCKET="+filepath.Join(h.directory, "host.sock"), "UNREAL_AGENT_SESSION=designer")
 		cmd.Stdin = strings.NewReader(stdin)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -278,22 +277,20 @@ func TestSubagentCommandRunsLeadAndWorkers(t *testing.T) {
 	}
 	// The designer need not wait: the lead's end arrives as a message that
 	// wakes it, with the summary.
-	ended := false
-	for end := time.Now().Add(30 * time.Second); !ended && time.Now().Before(end); time.Sleep(100 * time.Millisecond) {
-		view, err := h.client.Inspect(t.Context(), "designer", 0, 256)
-		if err != nil {
-			t.Fatal(err)
-		}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	_, err := waitSubscribedView(ctx, h.client, "designer", func(view host.View) bool {
 		for _, item := range view.History.Items {
 			if in, ok := item.Data.(inbox.Input); ok && in.Kind == inbox.InputPeer {
 				if peer, err := in.DecodePeerMessage(); err == nil && peer.Kind == "ended" && strings.Contains(peer.Text, "lead done") && peer.Handle == handle[1] {
-					ended = true
+					return true
 				}
 			}
 		}
-	}
-	if !ended {
-		t.Fatal("the lead's end did not reach the designer as a message")
+		return false
+	})
+	if err != nil {
+		t.Fatal("the lead's end did not reach the designer as a message", err)
 	}
 	if _, err := os.Stat(h.gpt.leadMarker); err != nil {
 		t.Fatal("the lead's approved command did not run", err)
@@ -305,6 +302,7 @@ func TestSubagentCommandRunsLeadAndWorkers(t *testing.T) {
 // Host and Session in its environment, Unreal lets the exact command through
 // in Ask without asking the human, and the report reaches Claude.
 func TestClaudeDrivesGPTThroughBash(t *testing.T) {
+	t.Parallel()
 	h := startGPTHost(t, false)
 	start := h.binary + " subagent start --template lead <<'EOF'\nImplement the feature. Git author email=implementer@example.com.\nEOF"
 	wait := h.binary + " subagent wait --timeout 120s"

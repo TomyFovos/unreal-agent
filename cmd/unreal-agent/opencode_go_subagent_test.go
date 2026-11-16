@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json/v2"
 	"io"
 	"net/http"
@@ -23,9 +24,12 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/authflow"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/host"
+	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/opencodego"
+	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/internal/testclaude"
 )
 
@@ -110,6 +114,7 @@ type openCodeGoChildren struct {
 	codexCalls       *atomic.Int32
 	cfg              serveConfiguration
 	store, modelFile string
+	codexAuth        string
 	started          bool
 	// limit is the Host's lifetime; 4 minutes when zero.
 	limit time.Duration
@@ -120,10 +125,7 @@ type openCodeGoChildren struct {
 // that counts the requests it should never get.
 func startOpenCodeGoChildren(t *testing.T, codex, leadRuns bool) *openCodeGoChildren {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "unreal-agent")
-	if out, err := exec.CommandContext(t.Context(), "go", "build", "-race", "-o", binary, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v %s", err, out)
-	}
+	binary := testCLI(t, true)
 	f := testclaude.New(t)
 	f.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentFinal: "noted"})
 	cfg := claudeRouteConfiguration(t, f)
@@ -140,8 +142,8 @@ func startOpenCodeGoChildren(t *testing.T, codex, leadRuns bool) *openCodeGoChil
 	route.Endpoint = endpoint.URL + "/inference/go/openai/v1"
 	cfg.Providers = map[string]agentrunner.ProviderRuntime{opencodego.ProviderID: {Provider: route, ReasoningEffort: "high"}}
 	cfg.Permissions.NetworkOrigins = []string{endpoint.URL}
-	calls := withFakeCodex(t, &cfg, codex)
-	h := &openCodeGoChildren{gptHost: &gptHost{binary: binary, gpt: gpt, claude: f}, server: server, codexCalls: calls, cfg: cfg}
+	calls, auth := fakeCodexSource(t, &cfg, codex)
+	h := &openCodeGoChildren{gptHost: &gptHost{binary: binary, gpt: gpt, claude: f, environment: testCLIEnvironment(t)}, server: server, codexCalls: calls, cfg: cfg, codexAuth: auth}
 	h.store = filepath.Join(privateCLIDirectory(t), "credentials")
 	storeKey(t, h.store, openCodeGoKey, "opencode-go-key-sensitive")
 	h.modelFile = filepath.Join(privateCLIDirectory(t), "subagent-model.json")
@@ -153,11 +155,17 @@ func startOpenCodeGoChildren(t *testing.T, codex, leadRuns bool) *openCodeGoChil
 // registers Codex on a server that counts the requests it should never get.
 func withFakeCodex(t *testing.T, cfg *serveConfiguration, codex bool) *atomic.Int32 {
 	t.Helper()
-	calls := &atomic.Int32{}
+	calls, auth := fakeCodexSource(t, cfg, codex)
 	t.Setenv("OPENAI_CODEX_AUTH_FILE", "")
-	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "no-codex"))
+	t.Setenv("CODEX_HOME", filepath.Dir(auth))
+	return calls
+}
+
+func fakeCodexSource(t *testing.T, cfg *serveConfiguration, codex bool) (*atomic.Int32, string) {
+	t.Helper()
+	calls := &atomic.Int32{}
 	if !codex {
-		return calls
+		return calls, filepath.Join(t.TempDir(), "no-codex", "auth.json")
 	}
 	codexServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -173,11 +181,10 @@ func withFakeCodex(t *testing.T, cfg *serveConfiguration, codex bool) *atomic.In
 	if err := os.WriteFile(filepath.Join(auth, "models_cache.json"), []byte(cache), 0600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("CODEX_HOME", auth)
 	c := codexServeConfiguration(cfg.Runtime.Workspace, codexServer.URL).Runtime
 	cfg.Providers["openai-codex"] = agentrunner.ProviderRuntime{Provider: c.Provider, ReasoningEffort: c.ReasoningEffort}
 	cfg.Permissions.NetworkOrigins = append(cfg.Permissions.NetworkOrigins, codexServer.URL)
-	return calls
+	return calls, filepath.Join(auth, "auth.json")
 }
 
 // start starts a Host in a new directory: the same configuration, key store
@@ -192,14 +199,14 @@ func (h *openCodeGoChildren) start(t *testing.T) {
 		limit = 4 * time.Minute
 	}
 	h.directory = privateCLIDirectory(t)
-	h.client, h.stop = startMultiChildCLIWith(t, h.binary, h.cfg, h.directory, limit, "--credential-directory", h.store, "--subagent-model-file", h.modelFile)
+	h.client, h.stop = startMultiChildCLIEnvironment(t, h.binary, h.cfg, h.directory, limit, h.environment, "--credential-directory", h.store, "--subagent-model-file", h.modelFile, "--codex-auth-file", h.codexAuth)
 	h.started = true
 }
 
 func (h *openCodeGoChildren) cli(t *testing.T, stdin string, args ...string) (string, error) {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), h.binary, append([]string{"subagent"}, args...)...)
-	cmd.Env = append(os.Environ(), "UNREAL_AGENT_SOCKET="+filepath.Join(h.directory, "host.sock"), "UNREAL_AGENT_SESSION=designer")
+	cmd.Env = append(slices.Clone(h.environment), "UNREAL_AGENT_SOCKET="+filepath.Join(h.directory, "host.sock"), "UNREAL_AGENT_SESSION=designer")
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
@@ -245,12 +252,16 @@ func (h *openCodeGoChildren) waitReport(t *testing.T, handle, summary string) st
 var childHandle = regexp.MustCompile(`as (child-start-[0-9a-f]+)\.`)
 
 // With Codex registered, choosing OpenCode Go with /model-sub runs the next
-// lead and its workers on Flash at the template efforts in docs/opencode-go.md,
-// without a restart and without a Codex request: the same run as
-// TestSubagentCommandRunsLeadAndWorkers.
-func TestSubagentCommandRunsLeadAndWorkersOnOpenCodeGo(t *testing.T) {
-	h := startOpenCodeGoChildren(t, true, true)
-	h.designer(t)
+// lead and its worker on Flash without restart or a Codex request. CLI approval,
+// shell execution and worker authority are covered by the provider-independent
+// TestSubagentCommandRunsLeadAndWorkers; this run checks the binding and wire.
+func TestOpenCodeGoSubagentSelectionAndRuntimeRouting(t *testing.T) {
+	t.Parallel()
+	h := startOpenCodeGoChildren(t, true, false)
+	h.gpt.mu.Lock()
+	h.gpt.routingOnly = true
+	h.gpt.mu.Unlock()
+	view := h.designer(t)
 	listed := h.providers(t)
 	if listed.SubagentModel.Provider != "openai-codex" || listed.Providers[0].Availability != "available" || listed.Providers[1].Availability != "available" || listed.Providers[1].Name != "OpenCode Go" {
 		t.Fatal("before a choice", listed.Providers, listed.SubagentModel)
@@ -270,31 +281,41 @@ func TestSubagentCommandRunsLeadAndWorkersOnOpenCodeGo(t *testing.T) {
 		t.Fatal("the choice was not kept", m)
 	}
 
-	started := h.mustCLI(t, "Implement the feature.\nVerify it.", "start", "--template", "lead")
-	handle := childHandle.FindStringSubmatch(started)
-	if handle == nil {
-		t.Fatal(started)
+	input := inbox.ID("routing-lead")
+	if _, err := modelExchange(t.Context(), h.client.Extension, modelRequest{Action: "child.start", ID: "designer", Generation: view.Generation, InputID: input, Template: "lead", Task: "Implement the feature.\nVerify it."}); err != nil {
+		t.Fatal(err)
 	}
-	waited := h.mustCLI(t, "", "wait", "--timeout", "60s")
-	request := regexp.MustCompile(`approval needed: request (\S+): Bash \$ printf lead`).FindStringSubmatch(waited)
-	if request == nil {
-		t.Fatal("the lead's request did not reach the designer\n", waited, h.mustCLI(t, "", "list"))
+	handle := subagent.StartOperationID("designer", input)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+	var completed operation.Operation
+	end, err := waitSubscribedView(ctx, h.client, "designer", func(v host.View) bool {
+		for _, op := range v.Operations {
+			if op.ID == handle && (op.Status == operation.StatusCompleted || op.Status == operation.StatusFailed || op.Status == operation.StatusCanceled) {
+				completed = op
+				return true
+			}
+		}
+		return false
+	})
+	if err != nil || completed.Status != operation.StatusCompleted || len(end.Permissions.Pending) != 0 {
+		t.Fatal("selected lead did not complete without a human request", err, completed.Status)
 	}
-	if out := h.mustCLI(t, "", "approve", handle[1], request[1], "allow"); !strings.Contains(out, "Allowed request") {
-		t.Fatal(out)
+	result, err := subagent.DecodeHandle(completed)
+	if err != nil || result.Finish == nil || result.Finish.Result.Status != "completed" || result.Finish.Result.Summary != "lead done" || !slices.Contains(result.Finish.Result.ChangedFiles, "worker") {
+		t.Fatal("selected lead's result", result, err)
 	}
-	report := h.waitReport(t, handle[1], "lead done")
-	if !strings.Contains(report, "result: completed") || !strings.Contains(report, "  - worker") {
-		t.Fatal(report)
-	}
-	if list := h.mustCLI(t, "", "list", "--all"); !strings.Contains(list, handle[1]+"  lead (deepseek-v4.1-flash max)  completed  lead done") {
+	if list := h.mustCLI(t, "", "list", "--all"); !strings.Contains(list, string(handle)+"  lead (deepseek-v4.1-flash max)  completed  lead done") {
 		t.Fatal(list)
 	}
-	if _, err := os.Stat(h.gpt.leadMarker); err != nil {
-		t.Fatal("the lead's approved command did not run", err)
+	// Both real model transports must carry the chosen model and effort,
+	// including the worker launched by this lead, not just a top-level worker.
+	h.gpt.mu.Lock()
+	leadEfforts, workerEfforts := slices.Clone(h.gpt.leadEfforts), slices.Clone(h.gpt.workerEffort)
+	h.gpt.mu.Unlock()
+	if len(leadEfforts) == 0 || slices.ContainsFunc(leadEfforts, func(e string) bool { return e != "max" }) || len(workerEfforts) == 0 || slices.ContainsFunc(workerEfforts, func(e string) bool { return e != "high" }) {
+		t.Fatal("selected lead/worker efforts", leadEfforts, workerEfforts)
 	}
-	// The lead at max, its worker-high at high, the lead refused as a worker.
-	h.check(t)
 	h.server.check(t)
 	h.server.mu.Lock()
 	leadRule, codexModels := h.server.leadRule, h.server.codexModels
@@ -311,6 +332,7 @@ func TestSubagentCommandRunsLeadAndWorkersOnOpenCodeGo(t *testing.T) {
 // OpenCode Go is registered and its key is saved, also while the public model
 // list cannot be read; once the key is removed it does the work itself.
 func TestClaudeIsOfferedOpenCodeGoChildrenWhileTheKeyIsSaved(t *testing.T) {
+	t.Parallel()
 	h := startOpenCodeGoChildren(t, true, false)
 	view := h.designer(t)
 	if _, err := h.choose(t, opencodego.ProviderID, "deepseek-v4.1-flash"); err != nil {
@@ -355,6 +377,7 @@ func TestClaudeIsOfferedOpenCodeGoChildrenWhileTheKeyIsSaved(t *testing.T) {
 // refused before anything is recorded or sent; on Codex it starts as
 // upstream's override does.
 func TestSubagentOverridesAreRefusedWhileOpenCodeGoIsChosen(t *testing.T) {
+	t.Parallel()
 	h := startOpenCodeGoChildren(t, true, false)
 	h.designer(t)
 	if _, err := h.choose(t, opencodego.ProviderID, "deepseek-v4.1-flash"); err != nil {
@@ -390,6 +413,7 @@ func TestSubagentOverridesAreRefusedWhileOpenCodeGoIsChosen(t *testing.T) {
 // Without Codex there are no sub-agents until OpenCode Go is chosen; the
 // choice says so, and the next Host runs a worker on Flash.
 func TestOpenCodeGoSubagentsWithoutCodexAfterHostRestart(t *testing.T) {
+	t.Parallel()
 	h := startOpenCodeGoChildren(t, false, false)
 	h.designer(t)
 	listed := h.providers(t)
@@ -436,6 +460,7 @@ func TestOpenCodeGoSubagentsWithoutCodexAfterHostRestart(t *testing.T) {
 // /model-sub offers Claude last on a Claude parent, and saves the chosen
 // Claude model for Claude Code's own Agent sub-agents.
 func TestClaudeIsOfferedAndSavedForClaudeCodeAgent(t *testing.T) {
+	t.Parallel()
 	h := startOpenCodeGoChildren(t, true, false)
 	h.designer(t)
 	listed := h.providers(t)
@@ -466,6 +491,7 @@ func TestClaudeIsOfferedAndSavedForClaudeCodeAgent(t *testing.T) {
 // Agent tool: a built-in child template is refused with what to do instead,
 // and nothing starts.
 func TestClaudeChoiceRefusesBuiltInChildStarts(t *testing.T) {
+	t.Parallel()
 	h := startOpenCodeGoChildren(t, true, false)
 	h.designer(t)
 	if _, err := h.choose(t, claudeagent.ProviderID, "claude-configured-a"); err != nil {

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/primitives"
 )
 
@@ -151,7 +152,7 @@ func (adapter *adapter) exchangeAttempt(ctx context.Context, request primitives.
 			result.apiError = providerError(result.status, result.body)
 		case transportErr != nil:
 			result.err = transportErr
-			result.retry = event.Type == primitives.PrimitiveEventFailed
+			result.retry = event.Type == primitives.PrimitiveEventFailed && permission.Failure(transportErr) == nil
 			return result
 		default:
 			result.body, result.err = state.unwrap()

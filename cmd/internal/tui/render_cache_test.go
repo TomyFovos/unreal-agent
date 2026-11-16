@@ -33,6 +33,7 @@ func cachedFrameOracle(t *testing.T, s Snapshot, u UIState, width, height int) F
 }
 
 func TestRenderCacheInvalidationMatchesFreshFrames(t *testing.T) {
+	t.Parallel()
 	s, u := orchestrationFixture()
 	s.Version, u.Viewer.Version = 1, 1
 	s.Progress = nil
@@ -89,6 +90,7 @@ func TestRenderCacheInvalidationMatchesFreshFrames(t *testing.T) {
 }
 
 func TestRenderCacheRetainsBodiesAndProtectsUpdatedLabels(t *testing.T) {
+	t.Parallel()
 	s, u := orchestrationFixture()
 	s.Version, u.Viewer.Version = 1, 1
 	u.cache = &bodyCache{}
@@ -114,15 +116,20 @@ func TestRenderCacheRetainsBodiesAndProtectsUpdatedLabels(t *testing.T) {
 }
 
 func TestWorkCardCacheClockUsesActiveRowsAndKeepsBeads(t *testing.T) {
-	s, u := largeRenderSession()
-	cachedFrameOracle(t, s, u, 160, 48)
+	t.Parallel()
+	const width, height = 160, 48
+	// Overflow both the card viewport and the bead row; the large benchmark
+	// keeps its original stress data. Two operations cover ready and completed.
+	const active, completed = height + 1, width + 1
+	s, u := renderSession(2, active, completed, 2)
+	cachedFrameOracle(t, s, u, width, height)
 	index := u.cache.work
-	if len(index.rows) != 61 || len(index.beads) != 800 {
+	if len(index.rows) != active+1 || len(index.beads) != completed {
 		t.Fatal("clock index includes completed children", len(index.rows), len(index.beads))
 	}
 	for _, delta := range []time.Duration{time.Second, 6 * time.Minute, 11 * time.Minute} {
 		u.Now = u.Now.Add(delta)
-		cachedFrameOracle(t, s, u, 160, 48)
+		cachedFrameOracle(t, s, u, width, height)
 		if u.cache.work != index {
 			t.Fatal("clock rebuilt static child ordering/beads")
 		}
@@ -130,6 +137,7 @@ func TestWorkCardCacheClockUsesActiveRowsAndKeepsBeads(t *testing.T) {
 }
 
 func TestProjectionVersionIncludesLocalPermissionAndConnectionUpdates(t *testing.T) {
+	t.Parallel()
 	m := NewModel("s")
 	initial := m.Version()
 	m.status("connected", true)
@@ -169,6 +177,7 @@ func (r *stoppedVersionReader) Version(context.Context, session.ID) (host.Observ
 }
 
 func TestStoppedTUIWatchUsesVersionAndObservesResume(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	f := newFake()

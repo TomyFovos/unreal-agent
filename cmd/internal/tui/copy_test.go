@@ -16,6 +16,7 @@ import (
 )
 
 func TestCopyPickerCanonicalStatementsAndSafety(t *testing.T) {
+	t.Parallel()
 	f := conversationFixture("first agent\nsecond line")
 	add := func(kind sessionstore.ItemKind, data any) {
 		f.view.History.Items = append(f.view.History.Items, host.HistoryItem{Sequence: sessionstore.Sequence(len(f.view.History.Items) + 1), Kind: kind, Data: data})
@@ -87,6 +88,7 @@ func TestCopyPickerCanonicalStatementsAndSafety(t *testing.T) {
 }
 
 func TestCopyPickerKeysWriteSelectedMessagesThroughOSC52(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"single", "multiple", "all"} {
 		t.Run(mode, func(t *testing.T) {
 			f := conversationFixture("earlier agent", "latest agent")
@@ -140,6 +142,7 @@ func TestCopyPickerKeysWriteSelectedMessagesThroughOSC52(t *testing.T) {
 }
 
 func TestCopyPickerReadsRecentPageAndSelectedSequences(t *testing.T) {
+	t.Parallel()
 	f := lazyFixture(3000)
 	p, err := loadCopyPicker(t.Context(), f, "s", 3000)
 	if err != nil {
@@ -167,6 +170,7 @@ func TestCopyPickerReadsRecentPageAndSelectedSequences(t *testing.T) {
 }
 
 func TestCopyPickerOlderPagesKeepSelectionOrderAndAll(t *testing.T) {
+	t.Parallel()
 	f := lazyFixture(3000)
 	p, err := loadCopyPicker(t.Context(), f, "s", 3000)
 	if err != nil {
@@ -223,6 +227,7 @@ func TestCopyPickerOlderPagesKeepSelectionOrderAndAll(t *testing.T) {
 }
 
 func TestCopyPickerPageDownLoadsOlderMessagesThroughOSC52(t *testing.T) {
+	t.Parallel()
 	f := lazyFixture(300)
 	keys, out, done := make(chan Key, 32), &screenObserver{}, make(chan error, 1)
 	go func() {
@@ -260,6 +265,7 @@ func TestCopyPickerPageDownLoadsOlderMessagesThroughOSC52(t *testing.T) {
 }
 
 func TestCopyPickerAllEmptyAndSingleMessage(t *testing.T) {
+	t.Parallel()
 	for _, n := range []int{0, 1} {
 		f := lazyFixture(n)
 		p, err := loadCopyPicker(t.Context(), f, "s", sessionstore.Sequence(n))
@@ -274,6 +280,7 @@ func TestCopyPickerAllEmptyAndSingleMessage(t *testing.T) {
 }
 
 func TestCopyPagesAndDirectBodiesMatchFullHistoryFilters(t *testing.T) {
+	t.Parallel()
 	var hiddenSequences []sessionstore.Sequence
 	client, through, _ := copySessionFixture(t, func(record func(sessionstore.ItemKind, any)) {
 		var sequence sessionstore.Sequence
@@ -315,11 +322,14 @@ func TestCopyPagesAndDirectBodiesMatchFullHistoryFilters(t *testing.T) {
 		response("first public statement", "second public statement\nmore text")
 		input(inbox.InputPeer, "ready")
 		input(inbox.InputPeer, "progress")
-		for range 140 {
+		// Each extra response adds a Turn and ModelResponse. Cross a whole
+		// page in each context, including pages with no copyable statements.
+		const responsesAcrossPage = historyPageItems/2 + 1
+		for range responsesAcrossPage {
 			response("public after quiet note")
 		}
 		startTurn("compact", session.TurnCompaction)
-		for range 140 {
+		for range responsesAcrossPage {
 			seq := response("private compaction")
 			if len(hiddenSequences) == 0 {
 				hiddenSequences = append(hiddenSequences, seq)
@@ -327,7 +337,7 @@ func TestCopyPagesAndDirectBodiesMatchFullHistoryFilters(t *testing.T) {
 		}
 		startTurn("background", session.TurnRegular)
 		input(inbox.InputPeer, "ended")
-		for range 140 {
+		for range responsesAcrossPage {
 			seq := response("private background")
 			if len(hiddenSequences) == 1 {
 				hiddenSequences = append(hiddenSequences, seq)

@@ -12,6 +12,7 @@
 .env.*
 *.test
 coverage.out
+/test-results.json
 __pycache__/
 *.py[cod]
 .venv/

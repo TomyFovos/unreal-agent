@@ -23,6 +23,7 @@ import (
 )
 
 func TestRunnerFileChangesUseAppliedTargets(t *testing.T) {
+	t.Parallel()
 	var output bytes.Buffer
 	p := newRunnerProjection(&output)
 	p.workspace = t.TempDir()
@@ -59,6 +60,7 @@ func TestRunnerFileChangesUseAppliedTargets(t *testing.T) {
 }
 
 func TestRunnerChildHistoryIsPagedWithoutTruncation(t *testing.T) {
+	t.Parallel()
 	directory := t.TempDir()
 	store, err := localfile.New(directory)
 	if err != nil {
@@ -106,6 +108,7 @@ func (w failSynthetic) Write(raw []byte) (int, error) {
 }
 
 func TestRunnerSyntheticWriteErrorsPropagate(t *testing.T) {
+	t.Parallel()
 	want := errors.New("output failed")
 	p := newRunnerProjection(failSynthetic{kind: "session_end", err: want})
 	if err := p.finish(false); !errors.Is(err, want) {
@@ -118,6 +121,7 @@ func TestRunnerSyntheticWriteErrorsPropagate(t *testing.T) {
 }
 
 func TestRunnerTerminationOnErrorsAndCancellation(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"invalid request", "provider failure", "canceled"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())

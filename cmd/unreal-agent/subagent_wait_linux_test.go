@@ -16,8 +16,12 @@ import (
 )
 
 func TestClaudeRunningSubagentWaitYieldsToUserInput(t *testing.T) {
+	t.Parallel()
 	for _, form := range []string{"literal", "variable", "timeout", "pipe"} {
-		t.Run(form, func(t *testing.T) { testClaudeRunningSubagentWait(t, form) })
+		t.Run(form, func(t *testing.T) {
+			t.Parallel()
+			testClaudeRunningSubagentWait(t, form)
+		})
 	}
 }
 

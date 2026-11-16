@@ -54,6 +54,7 @@ func observedPage(start, end sessionstore.Sequence, more bool) host.View {
 }
 
 func TestSubscribedObserverEventsAreOnlyWakeups(t *testing.T) {
+	t.Parallel()
 	events := make(chan host.Event, 2)
 	events <- host.Event{Kind: "item", Item: &host.HistoryItem{Sequence: 99}}
 	f := &observerFixture{subscribe: func() host.Subscription {
@@ -77,6 +78,7 @@ func TestSubscribedObserverEventsAreOnlyWakeups(t *testing.T) {
 }
 
 func TestSubscribedObserverGapAndDisconnectResync(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"gap", "disconnected", "closed"} {
 		t.Run(kind, func(t *testing.T) {
 			events := make(chan host.Event, 1)
@@ -103,6 +105,7 @@ func TestSubscribedObserverGapAndDisconnectResync(t *testing.T) {
 }
 
 func TestSubscribedObserverPagesAndFinalVerification(t *testing.T) {
+	t.Parallel()
 	f := &observerFixture{subscribe: func() host.Subscription {
 		return host.Subscription{Initial: observedPage(1, 1, true)}
 	}}
@@ -121,6 +124,7 @@ func TestSubscribedObserverPagesAndFinalVerification(t *testing.T) {
 }
 
 func TestSubscribedObserverFinalVerificationPagesBeyondInitialLimit(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	f := &observerFixture{subscribe: func() host.Subscription {
@@ -145,6 +149,7 @@ func TestSubscribedObserverFinalVerificationPagesBeyondInitialLimit(t *testing.T
 }
 
 func TestSubscribedObserverFinalVerificationRejectsIncompletePage(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"inspect_failure", "cancel", "non_advancing_page"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
@@ -179,6 +184,7 @@ func TestSubscribedObserverFinalVerificationRejectsIncompletePage(t *testing.T) 
 }
 
 func TestInteractiveObservationContainsOnlyClosedScalarState(t *testing.T) {
+	t.Parallel()
 	v := observedPage(1, 2, true)
 	v.Generation = "synthetic-private-generation"
 	v.Failure = "synthetic-private-failure-body"
@@ -196,6 +202,7 @@ func TestInteractiveObservationContainsOnlyClosedScalarState(t *testing.T) {
 }
 
 func TestSubscribedObserverTimeoutCancellationAndInspectFailure(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"timeout", "cancel", "inspect_failure", "initial_not_authoritative"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
@@ -234,6 +241,7 @@ func TestSubscribedObserverTimeoutCancellationAndInspectFailure(t *testing.T) {
 }
 
 func TestObservedHistoryRejectsRegressedSnapshots(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"generation", "revision", "duplicate", "cursor", "no_page_progress"} {
 		t.Run(mode, func(t *testing.T) {
 			v := observedPage(1, 1, false)
@@ -258,6 +266,7 @@ func TestObservedHistoryRejectsRegressedSnapshots(t *testing.T) {
 }
 
 func TestInteractiveRPCPredicateReceivesObserverDeadline(t *testing.T) {
+	t.Parallel()
 	waitInteractiveContext(t, func(ctx context.Context) bool {
 		deadline, ok := ctx.Deadline()
 		if !ok || time.Until(deadline) > 5*time.Second {
@@ -270,6 +279,7 @@ func TestInteractiveRPCPredicateReceivesObserverDeadline(t *testing.T) {
 // One actual Unix HTTP Inspect remains blocked until its request is canceled.
 // No successful view or second polling attempt can mask this failure.
 func TestInteractiveSingleBlockedGatewayInspectHonorsDeadline(t *testing.T) {
+	t.Parallel()
 	socket := filepath.Join(privateCLIDirectory(t), "blocked.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
@@ -329,6 +339,7 @@ func TestInteractiveSingleBlockedGatewayInspectHonorsDeadline(t *testing.T) {
 }
 
 func TestInteractiveSingleBlockedInspectHonorsDeadline(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
 	calls := 0
@@ -346,6 +357,7 @@ func TestInteractiveSingleBlockedInspectHonorsDeadline(t *testing.T) {
 }
 
 func TestInteractiveDiagnosticCaptureHasOwnBoundedContext(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
 	var called atomic.Bool
@@ -363,6 +375,7 @@ func TestInteractiveDiagnosticCaptureHasOwnBoundedContext(t *testing.T) {
 }
 
 func TestInteractiveBrokenDiagnosticCannotBlockObserver(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
 	started, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -384,6 +397,7 @@ func TestInteractiveBrokenDiagnosticCannotBlockObserver(t *testing.T) {
 }
 
 func TestCanonicalOnlyObserverProgressDoesNotReadHistory(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
 	events := make(chan host.Event, 64)
@@ -400,6 +414,7 @@ func TestCanonicalOnlyObserverProgressDoesNotReadHistory(t *testing.T) {
 }
 
 func TestCanonicalOnlyObserverKeepsMixedCanonicalWakeupsAndFreshVerification(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"item", "operation", "stopped"} {
 		t.Run(kind, func(t *testing.T) {
 			events := make(chan host.Event, 3)
@@ -418,6 +433,7 @@ func TestCanonicalOnlyObserverKeepsMixedCanonicalWakeupsAndFreshVerification(t *
 }
 
 func TestCanonicalOnlyObserverGapResyncAndCompletedInitialNeedNoFurtherWake(t *testing.T) {
+	t.Parallel()
 	for _, gap := range []bool{false, true} {
 		t.Run(map[bool]string{false: "completed-initial", true: "progress-gap"}[gap], func(t *testing.T) {
 			events := make(chan host.Event, 2)
@@ -445,6 +461,7 @@ func TestCanonicalOnlyObserverGapResyncAndCompletedInitialNeedNoFurtherWake(t *t
 }
 
 func TestSubscribedObserverRejectsLateSuccessfulSnapshots(t *testing.T) {
+	t.Parallel()
 	for _, stage := range []string{"subscribe", "inspect", "predicate"} {
 		t.Run(stage, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())

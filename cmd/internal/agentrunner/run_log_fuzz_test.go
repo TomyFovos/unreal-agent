@@ -31,6 +31,7 @@ func FuzzRunLogMatchesExecution(f *testing.F) {
 		if len(actions) > 16 || len(text) > 128<<10 || len(actions)*len(text) > 256<<10 {
 			t.Skip()
 		}
+		t.Parallel()
 		synctest.Test(t, func(t *testing.T) {
 			text = strings.ToValidUTF8(text, "\uFFFD")
 			usage := fuzzLogUsage(t, text, input, cached, written, output, reasoning)

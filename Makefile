@@ -1,4 +1,4 @@
-.PHONY: build test check prepush snapshot test-snapshot test-pilot-kit test-pilot-provider test-asp-oauth test-daily-development mac-install
+.PHONY: build test test-ci check prepush snapshot test-snapshot test-pilot-kit test-pilot-provider test-asp-oauth test-daily-development mac-install
 
 GORELEASER ?= goreleaser
 BIN_DIR ?= bin
@@ -40,6 +40,20 @@ build:
 
 test:
 	go test -race ./...
+
+# Keep the human test target unchanged. Only go test's status controls CI;
+# collecting/printing the duration summary never imposes a time budget.
+TEST_JSON ?= test-results.json
+export TEST_JSON
+test-ci:
+	@bash -c 'nice -n 19 go test -race -json ./... | tee "$$TEST_JSON"; \
+		status=$${PIPESTATUS[0]}; \
+		summary=$$(nice -n 19 python3 scripts/test_durations.py "$$TEST_JSON"); \
+		printf "%s\n" "$$summary"; \
+		if [ -n "$$GITHUB_STEP_SUMMARY" ]; then \
+			printf "%s\n" "$$summary" >> "$$GITHUB_STEP_SUMMARY" || :; \
+		fi; \
+		exit "$$status"'
 
 check:
 	go vet ./...

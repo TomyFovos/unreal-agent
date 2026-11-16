@@ -23,6 +23,7 @@ func epochCall(id, name, arguments string) llm.Item {
 }
 
 func TestOmittedOutputUsesReferencesAndStateWithoutArguments(t *testing.T) {
+	t.Parallel()
 	f := newContextFixture(t, "openai-codex", contextengine.Config{})
 	u := contextengine.Unit{ID: "unit-00000000000000000042"}
 	command := "printf " + strings.Repeat("long-command-", 500)
@@ -129,6 +130,7 @@ func epochPrunes(records []sessionstore.ContextRecord) []sessionstore.ContextRec
 }
 
 func TestToolEpochWaitsThenPrunesAllOldResultsAtOnce(t *testing.T) {
+	t.Parallel()
 	f := newContextFixture(t, "openai-codex", contextengine.Config{ToolResultKeepTokens: 1000, ToolResultMinPruneTokens: 3000})
 	f.user(t, "task", "Keep the task")
 	for i := range 3 {
@@ -164,6 +166,7 @@ func TestToolEpochWaitsThenPrunesAllOldResultsAtOnce(t *testing.T) {
 }
 
 func TestToolEpochMinimumIsInclusiveAndUsesNetSavings(t *testing.T) {
+	t.Parallel()
 	f := newContextFixture(t, "openai-codex", contextengine.Config{ToolResultKeepTokens: 1, ToolResultMinPruneTokens: 100000})
 	f.user(t, "task", "Inspect")
 	epochExchange(t, f, "old", "read", `{"path":"old.go"}`, strings.Repeat("x", 2000))
@@ -190,6 +193,7 @@ func TestToolEpochMinimumIsInclusiveAndUsesNetSavings(t *testing.T) {
 }
 
 func TestToolEpochObsoleteReadsInsideRecentWindow(t *testing.T) {
+	t.Parallel()
 	for _, old := range []struct{ name, args string }{{"read", `{"path":"src/foo.go","start_line":1,"lines":10}`}, {"Bash", `{"command":"sed -n '1,200p' src/foo.go"}`}} {
 		for _, later := range []struct {
 			name, args string
@@ -224,6 +228,7 @@ func TestToolEpochObsoleteReadsInsideRecentWindow(t *testing.T) {
 }
 
 func TestSimpleReadPathConservativeShellGrammar(t *testing.T) {
+	t.Parallel()
 	for _, command := range []string{"cat src/a.go", "sed -n '1,200p' src/a.go", "head src/a.go", "head -n 10 src/a.go", "tail -n 10 src/a.go", "nl -ba src/a.go", "nl -ba src/a.go | sed -n '1,20p'", "cat src/a.go|sed -n '1,20p'", `cat 'src/a.go'`} {
 		if got := simpleReadPath(command); got != "src/a.go" {
 			t.Errorf("%q = %q", command, got)
@@ -237,6 +242,7 @@ func TestSimpleReadPathConservativeShellGrammar(t *testing.T) {
 }
 
 func TestToolEpochProtectsUnreceivedRunningReasoningAndMessages(t *testing.T) {
+	t.Parallel()
 	f := newContextFixture(t, "openai-codex", contextengine.Config{ToolResultKeepTokens: 1, ToolResultMinPruneTokens: 1000})
 	f.user(t, "task", "User task preserved")
 	epochExchange(t, f, "old", "read", `{"path":"old.go"}`, strings.Repeat("old", 2000))
@@ -267,6 +273,7 @@ func TestToolEpochProtectsUnreceivedRunningReasoningAndMessages(t *testing.T) {
 }
 
 func TestToolEpochPersistFailureDoesNotChangeView(t *testing.T) {
+	t.Parallel()
 	f := newContextFixture(t, "openai-codex", contextengine.Config{ToolResultKeepTokens: 1, ToolResultMinPruneTokens: 1000})
 	f.user(t, "task", "Inspect")
 	epochExchange(t, f, "old", "read", `{"path":"old.go"}`, strings.Repeat("x", 3000))
@@ -281,6 +288,7 @@ func TestToolEpochPersistFailureDoesNotChangeView(t *testing.T) {
 }
 
 func TestToolEpochUsesRecordedMutationTargetsAndProtectsActiveOperations(t *testing.T) {
+	t.Parallel()
 	f := newContextFixture(t, "openai-codex", contextengine.Config{ToolResultKeepTokens: 100000, ToolResultMinPruneTokens: 1000})
 	f.user(t, "task", "Inspect")
 	epochExchange(t, f, "changed", "read", `{"path":"src/foo.go"}`, strings.Repeat("old", 2000))
@@ -311,6 +319,7 @@ func TestToolEpochUsesRecordedMutationTargetsAndProtectsActiveOperations(t *test
 }
 
 func TestToolEpochFailedRereadAndClaudeDoNotPrune(t *testing.T) {
+	t.Parallel()
 	for _, provider := range []string{"openai-codex", "claude-code"} {
 		f := newContextFixture(t, provider, contextengine.Config{ToolResultKeepTokens: 100000, ToolResultMinPruneTokens: 1000})
 		f.user(t, "task", "Inspect")
@@ -333,6 +342,7 @@ func TestToolEpochFailedRereadAndClaudeDoNotPrune(t *testing.T) {
 }
 
 func TestToolEpochCanonicalStoreReplayAndLegacyPrune(t *testing.T) {
+	t.Parallel()
 	f := newContextFixture(t, "openai-codex", contextengine.Config{ToolResultKeepTokens: 1, ToolResultMinPruneTokens: 1000})
 	f.user(t, "task", "Inspect")
 	for i := range 3 {
@@ -401,7 +411,18 @@ func TestToolEpochCanonicalStoreReplayAndLegacyPrune(t *testing.T) {
 }
 
 func TestToolEpochLongConversationReducesAverageInput(t *testing.T) {
-	config := contextengine.Config{FallbackWindow: 4000000, InputBudget: 4000000}
+	t.Parallel()
+	config, err := (contextengine.Config{FallbackWindow: 4000000, InputBudget: 4000000}).Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep the original 100k-token workload, but use one prune-sized result
+	// per call rather than 120 tiny results and quadratic fixture estimates.
+	const minimumGeneratedTokens = 100000
+	calls := int((minimumGeneratedTokens+config.ToolResultMinPruneTokens-1)/config.ToolResultMinPruneTokens) + 1
+	resultTokens := (minimumGeneratedTokens + calls - 1) / calls
+	const line = "source line\n"
+	body := strings.Repeat(line, (4*resultTokens+len(line)-1)/len(line))
 	baseline := newContextFixture(t, "openai-codex", config)
 	compacted := newContextFixture(t, "openai-codex", config)
 	baseline.b.contextConfig.ToolResultMinPruneTokens = 4000000
@@ -409,9 +430,9 @@ func TestToolEpochLongConversationReducesAverageInput(t *testing.T) {
 	var epochs int
 	for index, f := range []*contextFixture{baseline, compacted} {
 		f.user(t, "task", "Inspect a long synthetic conversation")
-		for i := range 120 {
+		for i := range calls {
 			id := fmt.Sprint(i)
-			epochExchange(t, f, id, "read", fmt.Sprintf(`{"path":"source%d.go"}`, i), strings.Repeat("source line\n", 400))
+			epochExchange(t, f, id, "read", fmt.Sprintf(`{"path":"source%d.go"}`, i), body)
 			// Synthetic measured usage is a quarter of the conservative JSON
 			// estimate. This exercises the same calibration as real Responses.
 			request := llm.Request{Model: f.b.request.Model, Tools: f.b.request.Tools, Input: f.b.deriveItems()}
@@ -430,12 +451,12 @@ func TestToolEpochLongConversationReducesAverageInput(t *testing.T) {
 			totals[index] += contextengine.Estimate(built.Request) / 4
 		}
 	}
-	generatedTokens := 120 * len(strings.Repeat("source line\n", 400)) / 4
-	if generatedTokens < 100000 {
+	generatedTokens := calls * len(body) / 4
+	if generatedTokens < minimumGeneratedTokens {
 		t.Fatal("fixture has fewer than 100k result tokens")
 	}
 	if totals[1] >= totals[0]*7/10 || epochs == 0 {
 		t.Fatal("average input did not fall substantially", totals, epochs)
 	}
-	t.Logf("120 calls, %d generated result tokens; average input %.0f -> %.0f (%.1f%% reduction), %d epochs", generatedTokens, float64(totals[0])/120, float64(totals[1])/120, 100*(1-float64(totals[1])/float64(totals[0])), epochs)
+	t.Logf("%d calls, %d generated result tokens; average input %.0f -> %.0f (%.1f%% reduction), %d epochs", calls, generatedTokens, float64(totals[0])/float64(calls), float64(totals[1])/float64(calls), 100*(1-float64(totals[1])/float64(totals[0])), epochs)
 }

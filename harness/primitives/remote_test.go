@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -17,6 +18,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 )
 
 func TestDefaultRemoteRequest(t *testing.T) {
@@ -637,6 +640,9 @@ func TestRemoteErrorRetryClassificationIsConservative(t *testing.T) {
 		{name: "connection reset", err: syscall.ECONNRESET, retryable: true},
 		{name: "network timeout", err: remoteTimeoutError{}, retryable: true},
 		{name: "caller cancellation", err: context.Canceled},
+		{name: "permission denial", err: &permission.Error{Code: permission.Denied}},
+		{name: "wrapped permission denial", err: &url.Error{Op: "Get", Err: &permission.Error{Code: permission.Denied}}},
+		{name: "denial with retryable cause", err: errors.Join(&permission.Error{Code: permission.Denied}, io.ErrUnexpectedEOF)},
 		{name: "unknown error", err: errors.New("permanent")},
 		{name: "untrusted certificate", err: x509.UnknownAuthorityError{}},
 	}

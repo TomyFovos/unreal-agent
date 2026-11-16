@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 	"testing/synctest"
-	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/session"
@@ -62,13 +61,6 @@ func TestChildProgressWaitsForNextParentTurn(t *testing.T) {
 						run.input(t, externalEvent(t, 1, "wake", "review the work"))
 					} else {
 						run.input(t, progressPeerInput(t, "wake", wake, "needs review"))
-					}
-					if wake == "ended" {
-						if run.modelCallCount() != 1 {
-							t.Fatal("ended report bypassed the idle batch")
-						}
-						synctest.Sleep(45 * time.Second)
-						synctest.Wait()
 					}
 					if run.modelCallCount() != 2 {
 						t.Fatalf("%s started %d calls, want 2", wake, run.modelCallCount())

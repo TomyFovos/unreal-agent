@@ -26,10 +26,7 @@ import (
 
 func TestAPIKeyBuiltInLeadAndGrandchildProcess(t *testing.T) {
 	workspace := t.TempDir()
-	binary := filepath.Join(t.TempDir(), "unreal-agent")
-	if output, err := exec.CommandContext(t.Context(), "go", "build", "-race", "-o", binary, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v %s", err, output)
-	}
+	binary := testCLI(t, true)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", "invalid-unselected-codex-source")
 	t.Setenv("OPENAI_CODEX_AUTH_FILE", "")
@@ -48,12 +45,39 @@ func TestAPIKeyBuiltInLeadAndGrandchildProcess(t *testing.T) {
 			return
 		}
 		var request struct {
-			Reasoning struct {
+			Instructions string           `json:"instructions"`
+			Input        []map[string]any `json:"input"`
+			Reasoning    struct {
 				Effort string `json:"effort"`
 			} `json:"reasoning"`
 		}
-		if json.Unmarshal(body, &request) != nil || (request.Reasoning.Effort != "max" && request.Reasoning.Effort != "high") {
-			t.Error("API child did not preserve its template effort")
+		if err := json.Unmarshal(body, &request); err != nil {
+			t.Error(err)
+			return
+		}
+		instructions := request.Instructions
+		for _, item := range request.Input {
+			if item["role"] == "system" {
+				if content, ok := item["content"].(string); ok {
+					instructions += "\n" + content
+				}
+			}
+		}
+		wantEffort := ""
+		switch {
+		case strings.Contains(instructions, "You are the implementation lead"):
+			wantEffort = "max"
+		case strings.Contains(instructions, "You are a worker"):
+			wantEffort = "high"
+		default:
+			// The completed lead now wakes the parent immediately. Its review
+			// uses the parent's effort, independently of either child template.
+			if !strings.Contains(string(body), "lead done") {
+				t.Error("API parent woke without the completed lead's report")
+			}
+		}
+		if request.Reasoning.Effort != wantEffort {
+			t.Errorf("API request effort = %q, want %q", request.Reasoning.Effort, wantEffort)
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		gpt.ServeHTTP(w, r)
@@ -84,7 +108,6 @@ func TestAPIKeyBuiltInLeadAndGrandchildProcess(t *testing.T) {
 		t.Fatal("API child start failed", err)
 	}
 	handle := subagent.StartOperationID("api-parent", "start-api-lead")
-	// The existing peer-report batch waits 45 seconds before resuming a lead.
 	// Match the normal lead/worker fixture's 120-second completion budget.
 	command := exec.CommandContext(t.Context(), binary, "subagent", "wait", string(handle), "--timeout", "120s")
 	command.Env = append(os.Environ(), subagentSocketEnv+"="+filepath.Join(directory, "host.sock"), subagentSessionEnv+"=api-parent")

@@ -48,15 +48,18 @@ func exportFrameBounds(t *testing.T, frame Frame, w, h int) {
 }
 
 func TestExportLastExactCanonicalBodyIndependentOfViewport(t *testing.T) {
+	t.Parallel()
+	const width, height = 44, 14
 	for name, text := range map[string]string{
 		"short": "short response", "four_kib": strings.Repeat("a", 4090),
-		"long":                  strings.Repeat("raw canonical line\n", 600),
+		"long":                  strings.Repeat("raw canonical line\n", height+1),
 		"markdown":              "# Heading\n\n**bold** [link](https://example.invalid)\n```go\n  fmt.Println(\"original\")\n```\n</script>",
-		"cjk_grapheme":          strings.Repeat("日本語 👩🏽‍💻 é\n", 200),
-		"beyond_display_bound":  strings.Repeat("original ", 9000),
+		"cjk_grapheme":          strings.Repeat("日本語 👩🏽‍💻 é\n", height+1),
+		"beyond_display_bound":  strings.Repeat("original ", messageDisplayBytes/len("original ")+1),
 		"beyond_old_copy_limit": strings.Repeat("line\n", (8<<20)/5+1),
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			f := conversationFixture("earlier response", text)
 			before, _ := json.Marshal(f.view.History.Items)
 			dir := filepath.Join(t.TempDir(), "exports")
@@ -78,9 +81,9 @@ func TestExportLastExactCanonicalBodyIndependentOfViewport(t *testing.T) {
 			}
 			for _, theme := range []Theme{{}, {Plain: true}, {Plain: true, ASCII: true}, {NoColor: true}} {
 				for _, scroll := range []int{0, 5000} {
-					frame := RenderFrame(m.Snapshot(), UIState{Theme: theme, Scroll: scroll}, 44, 14)
-					exportFrameBounds(t, frame, 44, 14)
-					if frame.CursorY != 12 {
+					frame := RenderFrame(m.Snapshot(), UIState{Theme: theme, Scroll: scroll}, width, height)
+					exportFrameBounds(t, frame, width, height)
+					if frame.CursorY != height-2 {
 						t.Fatal("composer no longer bottom")
 					}
 				}
@@ -102,6 +105,7 @@ func TestExportLastExactCanonicalBodyIndependentOfViewport(t *testing.T) {
 }
 
 func TestExportPickerExcludesNonPublicProtectedAndInternalRecords(t *testing.T) {
+	t.Parallel()
 	f := conversationFixture("public response")
 	add := func(kind sessionstore.ItemKind, data any) {
 		f.view.History.Items = append(f.view.History.Items, host.HistoryItem{Sequence: throughHistory(f) + 1, Kind: kind, Data: data})
@@ -158,6 +162,7 @@ func TestExportPickerExcludesNonPublicProtectedAndInternalRecords(t *testing.T) 
 }
 
 func TestExportLastNeverSilentlySelectsEarlierResponseWhenLatestIsProtected(t *testing.T) {
+	t.Parallel()
 	f := conversationFixture("earlier safe response", "api_key=synthetic-protected")
 	dir := filepath.Join(t.TempDir(), "exports")
 	path, err := ExportLastResponse(t.Context(), f, "s", throughHistory(f), dir)
@@ -175,6 +180,8 @@ func TestExportLastNeverSilentlySelectsEarlierResponseWhenLatestIsProtected(t *t
 }
 
 func TestExportAllCompleteCanonicalHistoryBeyondDisplayWindow(t *testing.T) {
+	t.Parallel()
+	const turns = transcriptDisplayEntries/2 + 1 // one user and agent entry per turn
 	f := &pagedTranscriptClient{fakeClient: newFake(), pageSize: 17}
 	add := func(kind sessionstore.ItemKind, data any, at time.Time) {
 		f.view.History.Items = append(f.view.History.Items, host.HistoryItem{Sequence: sessionstore.Sequence(len(f.view.History.Items) + 1), Kind: kind, Data: data, RecordedAt: at})
@@ -183,13 +190,13 @@ func TestExportAllCompleteCanonicalHistoryBeyondDisplayWindow(t *testing.T) {
 	initial := choice
 	add(sessionstore.ItemHostRecord, sessionstore.HostRecord{Kind: sessionstore.HostRuntimeApplied, Selection: &initial}, time.Time{})
 	at := time.Date(2026, 10, 5, 12, 30, 0, 0, time.UTC)
-	for i := range 650 { // 1950+ records and 1300 public messages, not a display page.
+	for i := range turns {
 		payload, _ := json.Marshal(fmt.Sprintf("user-%04d 日本語", i))
 		add(sessionstore.ItemInput, inbox.Input{Kind: inbox.InputExternal, Payload: payload}, at)
 		turn := session.TurnID(fmt.Sprintf("turn-%04d", i))
 		add(sessionstore.ItemTurn, session.Turn{ID: turn, RuntimeRevision: choice.Revision}, at)
 		add(sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: turn, Response: llm.Response{Model: "claude-observed-model", Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: fmt.Sprintf("agent-%04d 日本語 👩🏽‍💻", i)}}}}}, at)
-		if i == 300 {
+		if i == turns/2 {
 			choice = sessionstore.RuntimeSelection{Version: 1, Revision: 2, RequestID: "runtime-two", Provider: "openai-codex", Model: "synthetic-gpt", Effort: llm.ReasoningEffort("medium")}
 			copy := choice
 			add(sessionstore.ItemHostRecord, sessionstore.HostRecord{Kind: sessionstore.HostRuntimeApplied, Selection: &copy}, at)
@@ -200,7 +207,7 @@ func TestExportAllCompleteCanonicalHistoryBeyondDisplayWindow(t *testing.T) {
 	if err := m.apply(f.view); err != nil {
 		t.Fatal(err)
 	}
-	if !m.Snapshot().OlderDropped || len(m.Snapshot().Entries) > 1024 {
+	if !m.Snapshot().OlderDropped || len(m.Snapshot().Entries) > transcriptDisplayEntries {
 		t.Fatal("fixture did not exceed TUI window")
 	}
 	path, err := ExportConversation(t.Context(), f, "long-session", throughHistory(f), filepath.Join(t.TempDir(), "exports"))
@@ -208,11 +215,11 @@ func TestExportAllCompleteCanonicalHistoryBeyondDisplayWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := exportBody(t, path)
-	if strings.Count(got, "### You\n") != 650 || strings.Count(got, "### Agent\n") != 650 {
+	if strings.Count(got, "### You\n") != turns || strings.Count(got, "### Agent\n") != turns {
 		t.Fatal("full conversation truncated to display window")
 	}
 	position := 0
-	for i := range 650 {
+	for i := range turns {
 		for _, role := range []string{"user", "agent"} {
 			needle := fmt.Sprintf("%s-%04d", role, i)
 			n := strings.Index(got[position:], needle)
@@ -222,7 +229,7 @@ func TestExportAllCompleteCanonicalHistoryBeyondDisplayWindow(t *testing.T) {
 			position += n + len(needle)
 		}
 	}
-	for _, known := range []string{"## Turn 1\n", "## Turn 650\n", "Timestamp: 2026-10-05T12:30:00Z", "Provider: claude-code", "Model: sonnet", "Effort: high", "Provider: openai-codex", "Model: synthetic-gpt", "Effort: medium", "Observed model: claude-observed-model"} {
+	for _, known := range []string{"## Turn 1\n", fmt.Sprintf("## Turn %d\n", turns), "Timestamp: 2026-10-05T12:30:00Z", "Provider: claude-code", "Model: sonnet", "Effort: high", "Provider: openai-codex", "Model: synthetic-gpt", "Effort: medium", "Observed model: claude-observed-model"} {
 		if !strings.Contains(got, known) {
 			t.Fatal("known canonical metadata missing", known)
 		}
@@ -232,12 +239,13 @@ func TestExportAllCompleteCanonicalHistoryBeyondDisplayWindow(t *testing.T) {
 		t.Fatal("export changed canonical history/operations")
 	}
 	choices, err := ResponseChoices(t.Context(), f, "s", throughHistory(f))
-	if err != nil || len(choices) != 650 || choices[len(choices)-1].TurnNumber != 1 {
+	if err != nil || len(choices) != turns || choices[len(choices)-1].TurnNumber != 1 {
 		t.Fatal("picker lost pre-window public responses", err)
 	}
 }
 
 func TestExportUnknownMetadataSafeTextAndPublicMessageParts(t *testing.T) {
+	t.Parallel()
 	f := conversationFixture("first public part")
 	response := f.view.History.Items[2].Data.(sessionstore.ModelResponse)
 	legacy := response.Response.Output[1].Data.(llm.Message)
@@ -286,6 +294,7 @@ func (r *exportGapReader) Inspect(ctx context.Context, id session.ID, after sess
 }
 
 func TestExportHistoryGapPastSnapshotBoundaryCannotPublishPartialFile(t *testing.T) {
+	t.Parallel()
 	f := conversationFixture("first", "second")
 	r := &exportGapReader{pagedTranscriptClient: f}
 	dir := filepath.Join(t.TempDir(), "exports")
@@ -309,6 +318,7 @@ func (r *exportFailingReader) Inspect(ctx context.Context, id session.ID, after 
 }
 
 func TestExportHistoryFailureCleansPartialFileAndNeverLeaksRawError(t *testing.T) {
+	t.Parallel()
 	f := conversationFixture("first", "second")
 	// Three pages build the metadata index, then the first write page succeeds
 	// before the second write page fails. No partial final/temp file may remain.
@@ -326,6 +336,7 @@ func TestExportHistoryFailureCleansPartialFileAndNeverLeaksRawError(t *testing.T
 }
 
 func TestExportCanonicalPrefixBoundaryAndQueuedRuntimeDoesNotRewriteTurns(t *testing.T) {
+	t.Parallel()
 	f := conversationFixture("first response", "next response")
 	// A queued selection is not the identity of an earlier/current Turn.
 	queued := sessionstore.RuntimeSelection{Version: 1, Revision: 7, RequestID: "queued", Provider: "claude-code", Model: "synthetic-unapplied", Effort: "high"}
@@ -395,6 +406,7 @@ func TestExportSafeFailuresPrivatePathsAndDefaultDirectory(t *testing.T) {
 }
 
 func TestExportPickerNavigationResponsiveAndCommandDiscovery(t *testing.T) {
+	t.Parallel()
 	var texts []string
 	for i := range 30 {
 		texts = append(texts, fmt.Sprintf("response-%02d 日本語 👩🏽‍💻", i))

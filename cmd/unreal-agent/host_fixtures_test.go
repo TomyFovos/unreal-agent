@@ -183,6 +183,11 @@ func startMultiChildCLI(t *testing.T, binary string, cfg serveConfiguration, dir
 // startMultiChildCLIWith starts the Host with more serve options.
 func startMultiChildCLIWith(t *testing.T, binary string, cfg serveConfiguration, directory string, limit time.Duration, options ...string) (*gateway.Client, func()) {
 	t.Helper()
+	return startMultiChildCLIEnvironment(t, binary, cfg, directory, limit, nil, options...)
+}
+
+func startMultiChildCLIEnvironment(t *testing.T, binary string, cfg serveConfiguration, directory string, limit time.Duration, environment []string, options ...string) (*gateway.Client, func()) {
+	t.Helper()
 	raw, e := json.Marshal(cfg)
 	if e != nil {
 		t.Fatal(e)
@@ -194,6 +199,7 @@ func startMultiChildCLIWith(t *testing.T, binary string, cfg serveConfiguration,
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, binary, append([]string{"serve", "--config", path, "--session-directory", filepath.Join(directory, "sessions"), "--socket", filepath.Join(directory, "host.sock")}, options...)...)
+	cmd.Env = environment
 	var diagnostics credentialOutput
 	t.Cleanup(func() {
 		if t.Failed() {

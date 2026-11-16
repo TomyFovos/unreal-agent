@@ -570,10 +570,13 @@ func Wrap(s string, width int) []string {
 	for _, line := range strings.Split(SafeText(s), "\n") {
 		var b strings.Builder
 		cells := 0
-		g := uniseg.NewGraphemes(strings.ReplaceAll(line, "\t", "    "))
-		for g.Next() {
-			text := g.Str()
-			w := g.Width()
+		rest, state := strings.ReplaceAll(line, "\t", "    "), -1
+		for len(rest) > 0 {
+			var text string
+			var w int
+			// Wrapping uses cells and graphemes; sentence boundaries would
+			// repeatedly look ahead through long whitespace runs.
+			text, rest, w, state = uniseg.FirstGraphemeClusterInString(rest, state)
 			if cells+w > width && cells > 0 {
 				result = append(result, b.String())
 				b.Reset()

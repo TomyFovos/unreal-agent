@@ -62,9 +62,8 @@ func TestRealUnrealLauncherTTYDetachAndReattach(t *testing.T) {
 		}
 	})
 	binary := filepath.Join(privateCLIDirectory(t), "unreal")
-	build := exec.CommandContext(t.Context(), "go", "build", "-race", "-o", binary, ".")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build installed unreal: %v\n%s", err, output)
+	if err := os.Symlink(testCLI(t, true), binary); err != nil {
+		t.Fatal(err)
 	}
 	f := newLauncherFixture(t)
 	pid := 0

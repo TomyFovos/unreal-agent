@@ -43,8 +43,10 @@ func newHarness(t *testing.T, scenario string, env ...string) *harness {
 	}
 	h := &harness{t: t, results: observed.NewResults(), workspace: t.TempDir()}
 	h.args = filepath.Join(t.TempDir(), "args")
+	env = append([]string{"HOME=" + t.TempDir()}, env...)
 	env = append(env, "CLAUDEAGENT_FAKE="+scenario, "CLAUDEAGENT_ARGS="+h.args)
-	h.client, err = NewClient(Config{Binary: binary, Directory: h.workspace, Results: h.results, Environ: func() []string { return append(os.Environ(), env...) }})
+	environment := append(os.Environ(), env...)
+	h.client, err = NewClient(Config{Binary: binary, Directory: h.workspace, Results: h.results, Environ: func() []string { return slices.Clone(environment) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,6 +162,7 @@ func read(t *testing.T, path string) string {
 }
 
 func TestFullAccessEditRunsAndIsRecorded(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, "edit")
 	path := h.editScenario(t)
 	h.client.config.Environ = appendEnv(h.client.config.Environ, "CLAUDEAGENT_FILE="+path, "CLAUDEAGENT_CWD="+h.workspace)
@@ -214,6 +217,7 @@ func TestFullAccessEditRunsAndIsRecorded(t *testing.T) {
 }
 
 func TestMultipleStepsReportLastContextAndSummedUsage(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, "multiple_steps")
 	response, err := h.respond(t.Context())
 	if err != nil {
@@ -240,6 +244,7 @@ func TestMultipleStepsReportLastContextAndSummedUsage(t *testing.T) {
 }
 
 func TestReadOnlyDeniesTheEditAndRecordsTheDenial(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, "edit")
 	path := h.editScenario(t)
 	h.client.config.Environ = appendEnv(h.client.config.Environ, "CLAUDEAGENT_FILE="+path)
@@ -257,6 +262,7 @@ func TestReadOnlyDeniesTheEditAndRecordsTheDenial(t *testing.T) {
 }
 
 func TestAskWaitsForTheHumanDecision(t *testing.T) {
+	t.Parallel()
 	for _, allow := range []bool{true, false} {
 		h := newHarness(t, "edit")
 		path := h.editScenario(t)
@@ -265,9 +271,10 @@ func TestAskWaitsForTheHumanDecision(t *testing.T) {
 		done := make(chan error, 1)
 		go func() { _, err := h.respond(ctx); done <- err }()
 		var pending permission.Pending
-		deadline := time.Now().Add(10 * time.Second)
+		approvalContext, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
 		for {
-			snapshot := controller.Snapshot()
+			snapshot, changed := controller.Watch()
 			if len(snapshot.Pending) == 1 {
 				pending = snapshot.Pending[0]
 				if err := controller.Decide(key, snapshot.Revision, pending.ID, allow); err != nil {
@@ -275,10 +282,11 @@ func TestAskWaitsForTheHumanDecision(t *testing.T) {
 				}
 				break
 			}
-			if time.Now().After(deadline) {
+			select {
+			case <-changed:
+			case <-approvalContext.Done():
 				t.Fatal("no approval request reached Unreal")
 			}
-			time.Sleep(10 * time.Millisecond)
 		}
 		if pending.ID != "claude:toolu_1" || pending.Tool != tool.EditName || pending.Scope != "Claude Code Edit: "+path {
 			t.Fatalf("pending = %+v", pending)
@@ -297,6 +305,7 @@ func TestAskWaitsForTheHumanDecision(t *testing.T) {
 }
 
 func TestRefusedCommandRunsInUnrealsShell(t *testing.T) {
+	t.Parallel()
 	// A deny rule on the whole command and one on a part of it both count.
 	for _, reason := range []string{"rule", "subcommandResults"} {
 		t.Run(reason, func(t *testing.T) { testRefusedCommand(t, reason) })
@@ -305,6 +314,7 @@ func TestRefusedCommandRunsInUnrealsShell(t *testing.T) {
 
 // A shell call Unreal itself denied is not handed back to Unreal's shell.
 func TestUnrealsOwnDenialIsNotRunByUnreal(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, "refused", "CLAUDEAGENT_REASON=hook")
 	ctx, _, _ := withMode(t, permission.ReadOnly)
 	if _, err := h.respond(ctx); err != nil {
@@ -341,6 +351,7 @@ func testRefusedCommand(t *testing.T, reason string) {
 }
 
 func TestReadOnlyGateRefusesCommandsBeforeClaudeCodeRules(t *testing.T) {
+	t.Parallel()
 	for mode, want := range map[permission.Mode]string{permission.ReadOnly: "gate:deny", permission.Ask: "gate:pass", permission.FullAccess: "gate:pass"} {
 		h := newHarness(t, "gate")
 		ctx, _, _ := withMode(t, mode)
@@ -356,6 +367,7 @@ func TestReadOnlyGateRefusesCommandsBeforeClaudeCodeRules(t *testing.T) {
 
 // A command that only reads passes the Read Only gate, as in Codex.
 func TestReadOnlyGatePassesReadOnlyCommands(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, "gate", "CLAUDEAGENT_COMMAND=git log --oneline -5 && git status")
 	ctx, _, _ := withMode(t, permission.ReadOnly)
 	response, err := h.respond(ctx)
@@ -373,6 +385,7 @@ func TestReadOnlyGatePassesReadOnlyCommands(t *testing.T) {
 // Interrupting a turn asks Claude Code to stop, which ends the command it
 // runs, before the process is stopped.
 func TestInterruptAsksClaudeCodeToStop(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, "interrupt")
 	ctx, _, _ := withMode(t, permission.FullAccess)
 	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
@@ -388,6 +401,7 @@ func TestInterruptAsksClaudeCodeToStop(t *testing.T) {
 // After an interrupted run, a resumed Claude Code may first end work it queued
 // itself; the turn's answer is the one to Unreal's message.
 func TestResultBeforeTheMessageIsTakenUpIsSkipped(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, "stale")
 	ctx, _, _ := withMode(t, permission.FullAccess)
 	response, err := h.respond(ctx, user("hello"))
@@ -400,6 +414,7 @@ func TestResultBeforeTheMessageIsTakenUpIsSkipped(t *testing.T) {
 }
 
 func TestMissingConversationStartsAFreshOneWithContext(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, "missing")
 	ctx, _, _ := withMode(t, permission.FullAccess)
 	response, err := h.respond(ctx, user("first"), assistant("earlier answer", true), user("second"))
@@ -413,6 +428,7 @@ func TestMissingConversationStartsAFreshOneWithContext(t *testing.T) {
 }
 
 func TestSessionInUseIsResumed(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, "in_use")
 	ctx, _, _ := withMode(t, permission.FullAccess)
 	response, err := h.respond(ctx, user("hello"))
@@ -425,6 +441,7 @@ func TestSessionInUseIsResumed(t *testing.T) {
 }
 
 func TestLoginProblemAsksForReauthentication(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, "login")
 	ctx, _, _ := withMode(t, permission.FullAccess)
 	_, err := h.respond(ctx)
@@ -435,8 +452,10 @@ func TestLoginProblemAsksForReauthentication(t *testing.T) {
 }
 
 func TestDiscoverReadsModelsAndAccount(t *testing.T) {
+	t.Parallel()
 	binary, _ := os.Executable()
-	catalog, account, err := Discover(context.Background(), binary, func() []string { return append(os.Environ(), "CLAUDEAGENT_FAKE=catalog") })
+	environment := append(os.Environ(), "HOME="+t.TempDir(), "CLAUDEAGENT_FAKE=catalog")
+	catalog, account, err := Discover(context.Background(), binary, func() []string { return slices.Clone(environment) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,6 +471,7 @@ func TestDiscoverReadsModelsAndAccount(t *testing.T) {
 }
 
 func TestPromptPlan(t *testing.T) {
+	t.Parallel()
 	first := planPrompt([]llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleSystem, Text: "system"}}, user("hello")})
 	if first.resume || first.prompt != "hello" {
 		t.Fatalf("first turn = %+v", first)
@@ -475,6 +495,7 @@ func TestPromptPlan(t *testing.T) {
 }
 
 func TestEnvironmentKeepsTheSubscription(t *testing.T) {
+	t.Parallel()
 	got := environment([]string{"PATH=/usr/local/go/bin:/usr/bin", "HOME=/home/u", "ANTHROPIC_API_KEY=x", "ANTHROPIC_AUTH_TOKEN=y", "CLAUDE_CODE_USE_BEDROCK=1", "CLAUDECODE=1", "CLAUDE_CODE_SESSION_ID=s", "CLAUDE_CONFIG_DIR=/c", "CLAUDE_CODE_OAUTH_TOKEN=t", "CLAUDE_CODE_MAX_OUTPUT_TOKENS=9", "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=0"})
 	want := []string{"PATH=/usr/local/go/bin:/usr/bin", "HOME=/home/u", "CLAUDE_CONFIG_DIR=/c", "CLAUDE_CODE_OAUTH_TOKEN=t", "CLAUDE_CODE_MAX_OUTPUT_TOKENS=9", "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
@@ -483,6 +504,7 @@ func TestEnvironmentKeepsTheSubscription(t *testing.T) {
 }
 
 func TestSessionUUIDIsStableAndValid(t *testing.T) {
+	t.Parallel()
 	a, b := sessionUUID("", "session-1"), sessionUUID("", "session-1")
 	if a != b || a == sessionUUID("", "session-2") {
 		t.Fatalf("ids %s %s", a, b)
@@ -504,6 +526,7 @@ func appendEnv(environ func() []string, extra ...string) func() []string {
 // Claude Code gets the Host and Session in its environment, and Unreal lets
 // the exact command through without asking anyone, in every mode (U17).
 func TestSubagentCommandReachesTheHostWithoutApproval(t *testing.T) {
+	t.Parallel()
 	const cli = "/opt/unreal/bin/unreal"
 	for _, mode := range []permission.Mode{permission.ReadOnly, permission.Ask, permission.FullAccess} {
 		h := newHarness(t, "subagent", "CLAUDEAGENT_CLI="+cli)
@@ -531,6 +554,7 @@ func TestSubagentCommandReachesTheHostWithoutApproval(t *testing.T) {
 // --settings value carries that beside upstream's instruction exclusions: the
 // user's sandbox stays on.
 func TestSubagentSocketIsAllowedThroughTheSandbox(t *testing.T) {
+	t.Parallel()
 	const cli = "/opt/unreal/bin/unreal"
 	h := newHarness(t, "echo")
 	h.client.config.Subagents = SubagentCLI{Binary: cli, Socket: "/tmp/x/host.sock"}
@@ -558,6 +582,7 @@ func TestSubagentSocketIsAllowedThroughTheSandbox(t *testing.T) {
 // can run children, --settings carries no sandbox (it may still carry
 // upstream's claudeMdExcludes), and no environment names the Host and Session.
 func TestSubagentSandboxIsAbsentWithoutTheCLI(t *testing.T) {
+	t.Parallel()
 	const cli = "/opt/unreal/bin/unreal"
 	for _, tc := range []struct {
 		name     string
@@ -602,6 +627,7 @@ func TestSubagentSandboxIsAbsentWithoutTheCLI(t *testing.T) {
 // Claude model chosen with /model-sub and its force flag, so Claude's own
 // Agent runs every sub-agent, Explore and Plan included, on it.
 func TestAgentModelSurvivesATurnWithoutChildren(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, "agent_model")
 	h.client.config.Subagents = SubagentCLI{AgentModel: func() string { return "opus" }, Available: func(context.Context) bool { return false }}
 	response, err := h.respond(t.Context())
@@ -616,6 +642,7 @@ func TestAgentModelSurvivesATurnWithoutChildren(t *testing.T) {
 // Upstream's claudeMdExcludes and the fork's socket share the one --settings
 // flag, so Claude Code reads one object.
 func TestSubagentSandboxCombinesWithAncestorInstructionExclusions(t *testing.T) {
+	t.Parallel()
 	const cli = "/opt/unreal/bin/unreal"
 	const socket = "/tmp/x/host.sock"
 	h := newHarness(t, "echo")
@@ -654,6 +681,7 @@ func TestSubagentSandboxCombinesWithAncestorInstructionExclusions(t *testing.T) 
 
 // A socket path with a quote and a backslash stays one JSON string.
 func TestSubagentSandboxEscapesTheSocketPath(t *testing.T) {
+	t.Parallel()
 	const socket = `/tmp/x/ho"st\sock`
 	h := newHarness(t, "echo")
 	h.client.config.Subagents = SubagentCLI{Binary: "/opt/unreal/bin/unreal", Socket: socket}
@@ -705,6 +733,7 @@ func TestDroppedFilesAreReadableInReadOnly(t *testing.T) {
 }
 
 func TestStartupReasonWaitsForStderrAfterStdoutCloses(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range []string{"in_use_delayed", "login_delayed"} {
 		t.Run(scenario, func(t *testing.T) {
 			h := newHarness(t, scenario)
@@ -723,6 +752,7 @@ func TestStartupReasonWaitsForStderrAfterStdoutCloses(t *testing.T) {
 }
 
 func TestCatalogReasonWaitsForStderrAfterStdoutCloses(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, "login_delayed")
 	_, _, err := Discover(t.Context(), h.client.config.Binary, h.client.config.Environ)
 	var authentication *credential.Error
@@ -732,6 +762,7 @@ func TestCatalogReasonWaitsForStderrAfterStdoutCloses(t *testing.T) {
 }
 
 func TestExpiredSignInNeedsLogin(t *testing.T) {
+	t.Parallel()
 	for _, message := range []string{
 		"Failed to authenticate: OAuth session expired and could not be refreshed",
 		"Please run /login",

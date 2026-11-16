@@ -35,13 +35,13 @@ jobs:
             internal/apigen/go.sum
       - name: Check native parser compiler
         run: cc --version
-      - run: make test check build
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12'
+      - run: make test-ci check build
       - name: Test distribution scripts
         working-directory: scripts
-        run: python3 -m unittest discover -p 'test_*.py'
+        run: nice -n 19 python3 -m unittest discover -p 'test_*.py'
 
   harbor:
     runs-on: ubuntu-24.04

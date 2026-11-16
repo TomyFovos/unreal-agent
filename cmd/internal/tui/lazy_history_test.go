@@ -62,7 +62,9 @@ func lazyFixture(n int) *lazyHistoryClient {
 	return f
 }
 func TestLazyHistoryTailPrependOrderAndFullConsumers(t *testing.T) {
-	f := lazyFixture(3000)
+	t.Parallel()
+	const messages = max(transcriptDisplayEntries, historyPageItems) + 1
+	f := lazyFixture(messages)
 	m := NewModel("s")
 	v, err := f.InspectBefore(t.Context(), "s", 0, historyPageItems)
 	if err != nil {
@@ -72,7 +74,7 @@ func TestLazyHistoryTailPrependOrderAndFullConsumers(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := m.Snapshot()
-	if len(s.Entries) != historyPageItems || s.After != 3000 || s.HistoryFirst != 2873 || !s.OlderDropped || f.backwardItems != historyPageItems {
+	if len(s.Entries) != historyPageItems || s.After != messages || s.HistoryFirst != messages-historyPageItems+1 || !s.OlderDropped || f.backwardItems != historyPageItems {
 		t.Fatalf("initial tail: %d %+v", len(s.Entries), s.HistoryFirst)
 	}
 	if err = m.EnsureAnalysis(t.Context(), f); err != nil {
@@ -104,7 +106,7 @@ func TestLazyHistoryTailPrependOrderAndFullConsumers(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, body := range []string{text, string(exported)} {
-		if !strings.Contains(body, "entry-0000") || !strings.Contains(body, "entry-2999") || strings.Count(body, "entry-") != 3000 {
+		if !strings.Contains(body, "entry-0000") || !strings.Contains(body, fmt.Sprintf("entry-%04d", messages-1)) || strings.Count(body, "entry-") != messages {
 			t.Fatal("full consumer omitted messages")
 		}
 	}
@@ -115,7 +117,7 @@ func TestLazyHistoryTailPrependOrderAndFullConsumers(t *testing.T) {
 		}
 	}
 	s = m.Snapshot()
-	if len(s.Entries) != 3000 || s.After != after || s.Revision != revision {
+	if len(s.Entries) != messages || s.After != after || s.Revision != revision {
 		t.Fatal("prepend changed cursor or lost entries")
 	}
 	for i, e := range s.Entries {
@@ -132,6 +134,7 @@ func TestLazyHistoryTailPrependOrderAndFullConsumers(t *testing.T) {
 }
 
 func TestLazyHistoryWatchReconnectAndGap(t *testing.T) {
+	t.Parallel()
 	f := lazyFixture(3000)
 	m := NewModel("s")
 	ctx, cancel := context.WithCancel(t.Context())
@@ -176,6 +179,7 @@ func TestLazyHistoryWatchReconnectAndGap(t *testing.T) {
 }
 
 func TestLazyHistoryScrollLoadsAndShowsLoading(t *testing.T) {
+	t.Parallel()
 	f := lazyFixture(260)
 	gate := make(chan struct{})
 	entered := make(chan struct{}, 1)
@@ -264,6 +268,7 @@ func BenchmarkHistoryStartup(b *testing.B) {
 }
 
 func TestLazyHistorySummaryKeepsBackgroundTopologyAndReceipts(t *testing.T) {
+	t.Parallel()
 	f := lazyFixture(3000)
 	at := time.Unix(1000, 0)
 	payload, _ := json.Marshal("public input")
@@ -312,6 +317,7 @@ func TestLazyHistorySummaryKeepsBackgroundTopologyAndReceipts(t *testing.T) {
 }
 
 func TestLazyHistoryHomeReachesBeginning(t *testing.T) {
+	t.Parallel()
 	f := lazyFixture(400)
 	keys := make(chan Key, 4)
 	out := &screenObserver{}
@@ -374,6 +380,7 @@ func BenchmarkHistoryFirstFrame(b *testing.B) {
 }
 
 func TestBackgroundWorkPrefixStableAcrossLoadedRangeAndLiveAppend(t *testing.T) {
+	t.Parallel()
 	var entries []Entry
 	entries = append(entries, Entry{Sequence: 1, Role: "peer", PeerID: "child", PeerKind: "report", Text: "report"})
 	prefix := &host.HistoryWork{Entries: 301, Tools: 300, Reports: []session.ID{"child"}, Through: 301}
@@ -412,6 +419,7 @@ func TestBackgroundWorkPrefixStableAcrossLoadedRangeAndLiveAppend(t *testing.T) 
 }
 
 func TestLazyHistoryAttentionIndependentOfLoadedRangeAndClearedByReply(t *testing.T) {
+	t.Parallel()
 	f := lazyFixture(3000)
 	m := NewModel("s")
 	v, err := f.InspectBefore(t.Context(), "s", 0, 128)

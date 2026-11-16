@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json/jsontext"
@@ -20,6 +21,10 @@ import (
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/mutation"
+	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/session"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
+	"github.com/unreallabsai/unreal-agent/harness/subagent"
 )
 
 // The test executable serves the production child entrypoint, so these tests
@@ -54,6 +59,74 @@ func harnessEvents(t *testing.T, raw []byte) []harnessEvent {
 	return events
 }
 
+// The scripted four-response lead is an aggregation fixture, not a model that
+// can answer arbitrary sibling-completion wakeups. Let its second response
+// wait for both canonical child receipts. Tail the append-only log once rather
+// than repeatedly decoding the whole store or assuming a process-exit delay.
+func awaitHarnessChildren(ctx context.Context, directory string, parent session.ID) error {
+	store, err := localfile.New(directory)
+	if err != nil {
+		return err
+	}
+	_, _, operations, err := store.ReadSnapshot(ctx, parent)
+	if err != nil {
+		return err
+	}
+	var lead session.ID
+	for _, op := range operations {
+		if op.ToolName == "SubagentStart" {
+			lead = subagent.ChildID(parent, op.ID)
+		}
+	}
+	if lead == "" {
+		return fmt.Errorf("parent has no lead")
+	}
+	file, err := os.Open(filepath.Join(directory, string(lead)+".session.jsonl"))
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	reader := bufio.NewReader(file)
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	completed := map[operation.ID]bool{}
+	var pending []byte
+	for {
+		line, err := reader.ReadBytes('\n')
+		pending = append(pending, line...)
+		if err == io.EOF {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-tick.C:
+				continue
+			}
+		}
+		if err != nil {
+			return err
+		}
+		var record struct {
+			Type string                                  `json:"type"`
+			Data struct{ Operation operation.Operation } `json:"data"`
+		}
+		if err := json.Unmarshal(pending, &record); err != nil {
+			return err
+		}
+		pending = pending[:0]
+		if op := record.Data.Operation; record.Type == "operation" && op.ToolName == "SubagentStart" {
+			if op.Status == operation.StatusFailed || op.Status == operation.StatusCanceled {
+				return fmt.Errorf("nested child failed: %s", op.ID)
+			}
+			if op.Status == operation.StatusCompleted {
+				completed[op.ID] = true
+			}
+			if len(completed) == 2 {
+				return nil
+			}
+		}
+	}
+}
+
 func TestHarnessRunnerNestedChildren(t *testing.T) {
 	for _, thinking := range []string{"high", "none"} {
 		t.Run(thinking, func(t *testing.T) {
@@ -64,6 +137,7 @@ func TestHarnessRunnerNestedChildren(t *testing.T) {
 				t.Fatal(err)
 			}
 			var mu sync.Mutex
+			leadContinuation := make(chan struct{})
 			calls := map[string]int{}
 			headerIDs := map[string]string{}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -109,6 +183,24 @@ func TestHarnessRunnerNestedChildren(t *testing.T) {
 				mu.Unlock()
 				if header == "" || r.Header.Get("User-Agent") == "" || r.Header.Get("X-Harness") != "private-value" {
 					t.Error("child lost transport headers")
+				}
+				// Exercise both completion orders deterministically. The first
+				// finished child wakes the lead while its sibling still runs.
+				held := role == "collector" && thinking == "high" || role == "worker" && n == 2 && thinking == "none"
+				if held {
+					select {
+					case <-leadContinuation:
+					case <-r.Context().Done():
+						return
+					}
+				}
+				if role == "lead" && n == 2 {
+					close(leadContinuation)
+					if err := awaitHarnessChildren(r.Context(), sessions, "fixture"); err != nil {
+						t.Error("nested receipt barrier", err)
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
 				}
 				if n == 1 {
 					var names []string
@@ -171,7 +263,7 @@ func TestHarnessRunnerNestedChildren(t *testing.T) {
 			var output, diagnostics bytes.Buffer
 			ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 			defer cancel()
-			request := fmt.Sprintf(`{"prompt":"do the fixture","profile":"development","model":"fake-model","max_attempts":1,"thinking_level":%q}`, thinking)
+			request := fmt.Sprintf(`{"session_id":"fixture","prompt":"do the fixture","profile":"development","model":"fake-model","max_attempts":1,"thinking_level":%q}`, thinking)
 			code := agentrunner.RunMain(ctx, []string{"-workspace", workspace, "-session-directory", sessions, "-log-directory", logs}, func(name string) string { return environment[name] }, func() []string {
 				var entries []string
 				for k, v := range environment {

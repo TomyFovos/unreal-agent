@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 	"testing/synctest"
-	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -66,14 +65,12 @@ func TestStandaloneChildCompletionWakesBeforeWhenIdleStop(t *testing.T) {
 					if projected != 2 || len(run.store.appendedInputs) != 6 {
 						t.Fatal("lost durable completion notice", projected, len(run.store.appendedInputs))
 					}
-					synctest.Sleep(45*time.Second + 3*slurpIdleTimeout)
-					synctest.Wait()
 					if run.modelCallCount() != 2 || !strings.Contains(requestDump(t, run.calls[1].request), "stop=max_output_tokens") {
-						t.Fatalf("parent did not wake with reason: calls=%d wake=%d batch=%d pending=%d", run.modelCallCount(), run.current.wakingInputs(), run.current.batchedReports, run.current.pendingInputs())
+						t.Fatalf("parent did not wake immediately with reason: calls=%d wake=%d pending=%d", run.modelCallCount(), run.current.wakingInputs(), run.current.pendingInputs())
 					}
 					for _, id := range []string{"child-one", "child-two"} {
 						if strings.Count(requestDump(t, run.calls[1].request), id+" ended:") != 1 {
-							t.Fatal("batched turn lost or repeated a child report", id)
+							t.Fatal("turn lost or repeated a child report", id)
 						}
 					}
 					run.respond(t, 1, textResponse("final review"))
@@ -127,8 +124,6 @@ func TestStandaloneCompletionSurvivesCrashBeforeNoticeAndIsNotRepeated(t *testin
 		resumed.current.dependencies.RestoredStop = &inbox.ControlMessage{Mode: inbox.StopWhenIdle}
 		resumed.start(t)
 		resumed.assertRunning(t)
-		synctest.Sleep(45*time.Second + 3*slurpIdleTimeout)
-		synctest.Wait()
 		if resumed.modelCallCount() != 1 || !strings.Contains(requestDump(t, resumed.calls[0].request), "stop=max_output_tokens") {
 			t.Fatal("restored notice did not wake parent")
 		}

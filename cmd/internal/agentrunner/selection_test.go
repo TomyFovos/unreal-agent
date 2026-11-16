@@ -17,6 +17,7 @@ import (
 )
 
 func TestRunSelectsToolsFromStartupConfiguration(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name       string
 		skill      string
@@ -97,6 +98,7 @@ func TestRunSelectsToolsFromStartupConfiguration(t *testing.T) {
 }
 
 func TestRunContinuesAfterUnavailableToolCall(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"Bash", "unknown-tool"} {
 		t.Run(name, func(t *testing.T) {
 			workspace := t.TempDir()

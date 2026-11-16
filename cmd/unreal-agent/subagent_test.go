@@ -41,11 +41,8 @@ import (
 // Build and invoke the real CLI: serve -> RemoteJob -> child --stdio.
 // Only the provider HTTP response is a fixture; processes/IPC/stores are real.
 func TestCLIChildDiscoversCurrentInstructions(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "unreal-agent")
-	build := exec.CommandContext(t.Context(), "go", "build", "-race", "-o", binary, ".")
-	if data, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, data)
-	}
+	t.Parallel()
+	binary := testCLI(t, true)
 	for _, scenario := range []struct {
 		present   bool
 		control   string
@@ -54,6 +51,7 @@ func TestCLIChildDiscoversCurrentInstructions(t *testing.T) {
 	}{{present: true}, {}, {present: true, control: "steer"}, {control: "cancel"}, {present: true, provider: "openai-codex"}, {provider: "openai-codex", childOnly: true}, {present: true, provider: "openai"}} {
 		present := scenario.present
 		t.Run(fmt.Sprintf("present-%t-control-%s-provider-%s-childOnly-%t", present, scenario.control, scenario.provider, scenario.childOnly), func(t *testing.T) {
+			t.Parallel()
 			workspace := t.TempDir()
 			if err := os.Chmod(workspace, 0700); err != nil {
 				t.Fatal(err)
@@ -165,9 +163,10 @@ func TestCLIChildDiscoversCurrentInstructions(t *testing.T) {
 			})
 			socket := filepath.Join(socketDirectory, "host.sock")
 			cmd := exec.CommandContext(ctx, binary, "serve", "--config", path, "--session-directory", store, "--socket", socket)
+			cmd.Env = testCLIEnvironment(t)
 			if scenario.provider == "openai-codex" {
 				writeCodexAuth(t, authPath, token, account)
-				cmd.Env = append(os.Environ(), "OPENAI_CODEX_ACCESS_TOKEN=ambient-inline-token-sensitive", "OPENAI_CODEX_ACCOUNT_ID=ambient-inline-account-sensitive", "OPENAI_API_KEY=sk-ambient-sensitive", "OPENAI_CODEX_AUTH_FILE=")
+				cmd.Env = append(cmd.Env, "OPENAI_CODEX_ACCESS_TOKEN=ambient-inline-token-sensitive", "OPENAI_CODEX_ACCOUNT_ID=ambient-inline-account-sensitive", "OPENAI_API_KEY=sk-ambient-sensitive", "OPENAI_CODEX_AUTH_FILE=")
 				if scenario.childOnly {
 					cmd.Env = append(cmd.Env, "CODEX_HOME="+filepath.Dir(authPath))
 				} else {

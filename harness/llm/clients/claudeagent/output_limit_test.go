@@ -56,6 +56,7 @@ func fakeOutputLimit(f *fake, scenario string) int {
 }
 
 func TestOutputLimitFailureFakeCLI(t *testing.T) {
+	t.Parallel()
 	const advice = ". Its recovery attempts did not complete the response. Lowering effort or splitting the work among child agents may allow it to continue."
 	for _, tc := range []struct{ scenario, explanation string }{
 		{"thinking", "the output limit (128000 tokens) 4 times (thinking: 4)"},
@@ -66,6 +67,7 @@ func TestOutputLimitFailureFakeCLI(t *testing.T) {
 		{"no_stream", "the output limit (128000 tokens) at least once (no stream count was available)"},
 	} {
 		t.Run(tc.scenario, func(t *testing.T) {
+			t.Parallel()
 			for _, record := range []bool{false, true} {
 				h := newHarness(t, "output_limit_"+tc.scenario)
 				opt := llm.RequestOptions{Tools: h.tools}
@@ -84,10 +86,13 @@ func TestOutputLimitFailureFakeCLI(t *testing.T) {
 		})
 	}
 	for _, scenario := range []string{"recovered", "unrelated"} {
-		h := newHarness(t, "output_limit_"+scenario)
-		_, err := h.client.Respond(t.Context(), llm.Request{Input: []llm.Item{user("work")}}, llm.RequestOptions{Tools: h.tools})
-		if scenario == "recovered" && err != nil || scenario == "unrelated" && (err == nil || !strings.Contains(err.Error(), "unrelated execution failure")) {
-			t.Fatal(scenario, err)
-		}
+		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, "output_limit_"+scenario)
+			_, err := h.client.Respond(t.Context(), llm.Request{Input: []llm.Item{user("work")}}, llm.RequestOptions{Tools: h.tools})
+			if scenario == "recovered" && err != nil || scenario == "unrelated" && (err == nil || !strings.Contains(err.Error(), "unrelated execution failure")) {
+				t.Fatal(scenario, err)
+			}
+		})
 	}
 }

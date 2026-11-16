@@ -14,6 +14,7 @@ import (
 )
 
 func TestSessionObserverDoesNotStopOnTextResponse(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var output bytes.Buffer
@@ -36,6 +37,7 @@ func TestSessionObserverDoesNotStopOnTextResponse(t *testing.T) {
 }
 
 func TestSessionObserverStopsOnOutputFailure(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	want := errors.New("output unavailable")

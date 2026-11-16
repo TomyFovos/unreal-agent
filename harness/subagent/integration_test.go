@@ -692,10 +692,6 @@ func TestParallelChildrenCompleteWithoutWaitingForIdleSiblings(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
 	defer cancel()
-	// Automatic report batching with unfinished siblings is covered with a
-	// fake clock in coordinator. Keep this real-process test's 12s deadline:
-	// a user review flushes the batch while both idle siblings remain alive.
-	reviewed := false
 	for {
 		view, err := s.Inspect(0, 256)
 		if err != nil {
@@ -724,13 +720,6 @@ func TestParallelChildrenCompleteWithoutWaitingForIdleSiblings(t *testing.T) {
 		}
 		if waiting == 2 && finished == 1 && ready == 3 && progressed.Load() {
 			return
-		}
-		if waiting == 2 && finished == 1 && ready == 3 && !reviewed {
-			payload, _ := json.Marshal("review the completed child")
-			if _, err := s.Submit(ctx, s.Generation, inbox.Input{ID: "review", Kind: inbox.InputExternal, Payload: payload}); err != nil {
-				t.Fatal(err)
-			}
-			reviewed = true
 		}
 		select {
 		case <-ctx.Done():

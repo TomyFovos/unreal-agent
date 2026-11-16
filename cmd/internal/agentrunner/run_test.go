@@ -27,6 +27,7 @@ import (
 )
 
 func TestRunMainExecutesBatchedMessages(t *testing.T) {
+	t.Parallel()
 	requests := make(chan llm.Request, 1)
 	client := &fakeClient{
 		respond: func(_ context.Context, request llm.Request) (llm.Response, error) {
@@ -199,6 +200,7 @@ description: Review code.
 }
 
 func TestRunMainUsesProviderAuthenticationConfiguration(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name, keyEnvironment, genericKey, providerKey, wantKey string
 		wantError                                              bool
@@ -244,6 +246,7 @@ func TestRunMainUsesProviderAuthenticationConfiguration(t *testing.T) {
 }
 
 func TestRunMainUsesLLMConfigurationFromEnvironment(t *testing.T) {
+	t.Parallel()
 	client := &fakeClient{respond: func(_ context.Context, request llm.Request) (llm.Response, error) {
 		if request.Model.ID != "environment-model" {
 			return llm.Response{}, fmt.Errorf("model = %q", request.Model.ID)
@@ -414,6 +417,7 @@ func TestRunMainExecutesBashToolToCompletion(t *testing.T) {
 }
 
 func TestRunMainEmitsValidationError(t *testing.T) {
+	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	code := RunMain(
 		t.Context(), nil,
@@ -436,6 +440,7 @@ func TestRunMainEmitsValidationError(t *testing.T) {
 }
 
 func TestValidateRequestRejectsNonUUIDMessageID(t *testing.T) {
+	t.Parallel()
 	messageID := "message-1"
 	_, err := validateRequest(Request{
 		Messages: []RequestMessage{{Content: "hello", MessageID: &messageID}},
@@ -603,6 +608,7 @@ func containsTool(tools []llm.Tool, name string) bool {
 }
 
 func TestReasoningEffortMapsEveryThinkingLevel(t *testing.T) {
+	t.Parallel()
 	cases := map[string]llm.ReasoningEffort{
 		"none":   "",
 		"low":    llm.ReasoningEffortLow,

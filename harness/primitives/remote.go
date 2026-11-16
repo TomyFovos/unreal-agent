@@ -548,6 +548,9 @@ func isRetryableRemoteStatus(policy RemoteRetryPolicy, statusCode int) bool {
 }
 
 func isRetryableRemoteError(err error) bool {
+	if permission.Failure(err) != nil {
+		return false
+	}
 	if errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, io.EOF) ||
 		errors.Is(err, io.ErrUnexpectedEOF) {

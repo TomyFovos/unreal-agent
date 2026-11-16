@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -25,10 +24,8 @@ import (
 )
 
 func TestSubagentCommandRuntimeOverrides(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "unreal-agent")
-	if out, err := exec.CommandContext(t.Context(), "go", "build", "-race", "-o", binary, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v %s", err, out)
-	}
+	t.Parallel()
+	binary := testCLI(t, true)
 	const prompt = "Runtime override test worker."
 	type selection struct{ model, effort string }
 	requests := make(chan selection, 16)
@@ -62,8 +59,7 @@ func TestSubagentCommandRuntimeOverrides(t *testing.T) {
 	defer server.Close()
 	auth := t.TempDir()
 	writeCodexAuth(t, filepath.Join(auth, "auth.json"), "runtime-test-token", "runtime-test-account")
-	t.Setenv("CODEX_HOME", auth)
-	t.Setenv("OPENAI_CODEX_AUTH_FILE", "")
+	environment := testCLIEnvironment(t)
 	cfg := codexServeConfiguration(t.TempDir(), server.URL)
 	cfg.Runtime.Provider.Model.ID = "parent-model"
 	cfg.Runtime.ReasoningEffort = llm.ReasoningEffortMedium
@@ -74,13 +70,13 @@ func TestSubagentCommandRuntimeOverrides(t *testing.T) {
 	childRuntime.SystemPrompt = prompt
 	cfg.Subagents = map[string]childTemplate{"review": {Runtime: childRuntime, Pinned: true, Permissions: permission.Config{Tools: []string{"Finish"}, NetworkOrigins: []string{server.URL}}}}
 	directory := privateCLIDirectory(t)
-	client, _ := startMultiChildCLI(t, binary, cfg, directory, 2*time.Minute)
+	client, _ := startMultiChildCLIEnvironment(t, binary, cfg, directory, 2*time.Minute, environment, "--codex-auth-file", filepath.Join(auth, "auth.json"))
 	if _, err := client.Open(t.Context(), host.Create, "parent"); err != nil {
 		t.Fatal(err)
 	}
 	cli := func(args ...string) (string, error) {
 		cmd := exec.CommandContext(t.Context(), binary, append([]string{"subagent"}, args...)...)
-		cmd.Env = append(os.Environ(), subagentSocketEnv+"="+filepath.Join(directory, "host.sock"), subagentSessionEnv+"=parent")
+		cmd.Env = append(append([]string(nil), environment...), subagentSocketEnv+"="+filepath.Join(directory, "host.sock"), subagentSessionEnv+"=parent")
 		out, err := cmd.CombinedOutput()
 		return string(out), err
 	}
@@ -164,6 +160,7 @@ func TestSubagentCommandRuntimeOverrides(t *testing.T) {
 }
 
 func TestClaudeModelNames(t *testing.T) {
+	t.Parallel()
 	for _, model := range []string{"fable", "Opus", "sonnet", "haiku", "claude-fable-5-1", "claude-opus-5-5"} {
 		if !claudeModel(model) {
 			t.Errorf("%q is a Claude model", model)

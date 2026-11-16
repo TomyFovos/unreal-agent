@@ -12,6 +12,7 @@ import (
 )
 
 func TestRecordedToolProjectionUsesCallLimitAndKeepsTypedStateAfterReplay(t *testing.T) {
+	t.Parallel()
 	f := newContextFixture(t, "openai-codex", contextengine.Config{})
 	f.user(t, "task", "Inspect the output")
 	f.item(t, sessionstore.ItemTurn, session.Turn{ID: "turn", Type: session.TurnRegular})
@@ -52,6 +53,7 @@ func TestRecordedToolProjectionUsesCallLimitAndKeepsTypedStateAfterReplay(t *tes
 }
 
 func TestClaudeOwnHistoryDoesNotUseCodexCompactionBudget(t *testing.T) {
+	t.Parallel()
 	f := newContextFixture(t, "claude-code", contextengine.Config{InputBudget: 6000})
 	f.turn(t, "old", "Initial task", strings.Repeat("Claude Code keeps this history. ", 3000))
 	f.user(t, "new", "Next input")
@@ -61,6 +63,7 @@ func TestClaudeOwnHistoryDoesNotUseCodexCompactionBudget(t *testing.T) {
 }
 
 func TestMeasuredInputTakesPrecedenceOverByteEstimate(t *testing.T) {
+	t.Parallel()
 	f := newContextFixture(t, "openai-codex", contextengine.Config{})
 	f.b.SetContextRuntime(sessionstore.RuntimeSelection{Provider: "openai-codex", Model: "synthetic-model", ContextWindow: 200000}, true)
 	f.user(t, "task", "Continue this task")

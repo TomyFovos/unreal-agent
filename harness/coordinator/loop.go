@@ -29,8 +29,6 @@ const (
 
 const toolCallRunGracePeriod = time.Second
 
-const peerReportBatchDelay = 45 * time.Second
-
 const interruptedOperationResult = "中断されたため結果は不明。必要なら状態を確かめてから続けること"
 
 type coordinator struct {
@@ -60,9 +58,6 @@ type coordinator struct {
 	cancelIdle         context.CancelCauseFunc
 	idleDone           chan struct{}
 	modelRetry         <-chan time.Time
-	peerBatch          *time.Timer
-	peerBatchDue       <-chan time.Time
-	batchedReports     int
 	completedChildren  []operation.Operation
 }
 
@@ -153,7 +148,6 @@ func (current *coordinator) Run(ctx context.Context) error {
 }
 
 func (current *coordinator) runLoop(ctx context.Context) error {
-	defer current.clearPeerBatch()
 	if request := current.dependencies.RestoredStop; request != nil {
 		current.acceptStop(*request)
 	}
@@ -270,12 +264,6 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 			current.idleDone = nil
 
 		case <-current.modelRetry:
-			current.modelRetry = nil
-			current.state.callModel = true
-
-		case <-current.peerBatchDue:
-			current.clearPeerBatch()
-			current.stopIdle("peer_reports_due")
 			current.modelRetry = nil
 			current.state.callModel = true
 
@@ -579,7 +567,7 @@ func (current *coordinator) handleStop(ctx context.Context) (bool, error) {
 }
 
 func (current *coordinator) isIdle() bool {
-	return current.cancelModel == nil && current.modelRetry == nil && !current.state.callModel && len(current.completedChildren) == 0 && current.batchedReports == 0 && current.wakingInputs() == 0 &&
+	return current.cancelModel == nil && current.modelRetry == nil && !current.state.callModel && len(current.completedChildren) == 0 && current.wakingInputs() == 0 &&
 		len(current.state.toolCalls) == 0 && !current.hasPendingOperations()
 }
 
@@ -638,41 +626,7 @@ func (current *coordinator) wakingInputs() int {
 	if current.held() {
 		return 0
 	}
-	return max(current.pendingInputs()-current.state.quietInputs-current.batchedReports, 0)
-}
-
-// Only ended is unambiguously a report today. A message can also be a
-// question or approval request; never infer urgency from peer-written text.
-func batchablePeer(input inbox.Input) bool {
-	peer, err := input.DecodePeerMessage()
-	return err == nil && peer.Kind == "ended"
-}
-
-// Tool-based parents receive Finish as the terminal start Operation's receipt,
-// rather than an ended Input. Use the canonical plan, independent of providers
-// and model-visible tool aliases; control/approval receipts stay immediate.
-func childCompletion(operations []operation.Operation) bool {
-	if len(operations) != 1 || !subagentOperation(operations[0]) || !operationIsTerminal(operations[0].Status) {
-		return false
-	}
-	state, _ := operation.DecodeRemoteJobState(operations[0])
-	var plan struct{ Action string }
-	return json.Unmarshal(state.Plan.Data, &plan) == nil && plan.Action == "start"
-}
-
-func (current *coordinator) batchPeerReport() {
-	if current.peerBatch == nil {
-		current.peerBatch = time.NewTimer(peerReportBatchDelay)
-		current.peerBatchDue = current.peerBatch.C
-	}
-	current.batchedReports++
-}
-
-func (current *coordinator) clearPeerBatch() {
-	if current.peerBatch != nil {
-		current.peerBatch.Stop()
-	}
-	current.peerBatch, current.peerBatchDue, current.batchedReports = nil, nil, 0
+	return max(current.pendingInputs()-current.state.quietInputs, 0)
 }
 
 // quietPeer reports whether a peer input waits for the parent's next turn:
@@ -791,8 +745,6 @@ func (current *coordinator) requestModelResponse(
 		return err
 	}
 
-	// This request carries the queued reports even if another event woke it.
-	current.clearPeerBatch()
 	requestContext, cancel := context.WithCancel(ctx)
 	current.cancelModel = cancel
 	// A turn no new user input started runs in the background (agents'
@@ -911,9 +863,6 @@ func (current *coordinator) handleInboxInput(ctx context.Context, input inbox.In
 
 func (current *coordinator) handleInboxInputs(ctx context.Context, inputs []inbox.Input) error {
 	for _, input := range inputs {
-		if input.Kind == inbox.InputExternal || input.Kind == inbox.InputControl {
-			current.clearPeerBatch()
-		}
 		if err := current.handleInboxInput(ctx, input); err != nil {
 			return err
 		}
@@ -921,16 +870,9 @@ func (current *coordinator) handleInboxInputs(ctx context.Context, inputs []inbo
 			current.state.callModel = true
 		}
 		if input.Kind == inbox.InputPeer && !quietPeer(input) && current.cancelModel == nil {
-			if batchablePeer(input) && !current.state.callModel && current.wakingInputs() == 1 {
-				// The input is already durable and projected. Delay only its
-				// wakeup, without extending the first report's deadline.
-				current.batchPeerReport()
-			} else {
-				current.clearPeerBatch()
-				current.stopIdle("peer_input")
-				current.modelRetry = nil
-				current.state.callModel = true
-			}
+			current.stopIdle("peer_input")
+			current.modelRetry = nil
+			current.state.callModel = true
 		}
 		// The user comes first: a background turn or child wait of a provider that holds
 		// inputs until its turn ends (Claude Code) yields, and its messages
@@ -1669,9 +1611,6 @@ func (current *coordinator) reconcileToolCalls(
 		}
 		if _, exists := current.state.toolCalls[key]; !exists {
 			completed = append(completed, toolCallHandoff(status))
-			if current.cancelModel == nil && !current.state.callModel && current.wakingInputs() == 1 && childCompletion(operations) {
-				current.batchPeerReport()
-			}
 		}
 	}
 	return completed, nil

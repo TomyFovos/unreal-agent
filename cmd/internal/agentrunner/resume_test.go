@@ -17,6 +17,7 @@ import (
 )
 
 func TestRunResumesAfterOutputFailure(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name      string
 		kind      sessionstore.ItemKind
@@ -102,6 +103,7 @@ func TestRunResumesAfterOutputFailure(t *testing.T) {
 }
 
 func TestRunMainResumesInterruptedDeliveryWithDuplicateInput(t *testing.T) {
+	t.Parallel()
 	for _, withTool := range []bool{false, true} {
 		name := "first-response"
 		if withTool {
@@ -239,6 +241,7 @@ func TestRunMainResumesInterruptedDeliveryWithDuplicateInput(t *testing.T) {
 }
 
 func TestRunResumesSessionWithoutRecordedSettings(t *testing.T) {
+	t.Parallel()
 	workspace, sessions := t.TempDir(), t.TempDir()
 	store, err := localfile.New(sessions)
 	if err != nil {

@@ -32,12 +32,9 @@ import (
 )
 
 // Exercise the real headless attachment, Host, child processes, and both model
-// transports. The 45-second batching policy is unchanged; cases run in parallel.
+// transports. Completion reports wake idle parents immediately, including leads.
 func TestHeadlessUnreportedChildCompletion(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "unreal-agent")
-	if out, err := exec.CommandContext(t.Context(), "go", "build", "-p", "1", "-o", binary, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v %s", err, out)
-	}
+	binary := testCLI(t, false)
 	for _, route := range []string{"gpt", "claude"} {
 		for _, nested := range []bool{false, true} {
 			for _, stop := range []llm.StopReason{llm.StopMaxOutputTokens, llm.StopComplete} {

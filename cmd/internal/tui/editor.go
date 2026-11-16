@@ -80,20 +80,22 @@ func (e *Editor) Apply(k Key) {
 			}
 		}
 	}
-	boundaries := []int{0}
-	g := uniseg.NewGraphemes(string(e.data))
-	for g.Next() {
-		_, end := g.Positions()
-		boundaries = append(boundaries, end)
-	}
 	previous, next := 0, len(e.data)
-	for _, b := range boundaries {
-		if b < e.cursor {
-			previous = b
-		}
-		if b > e.cursor {
-			next = b
-			break
+	// Typing needs no boundary scan. Movement and deletion only need grapheme
+	// boundaries, not the full iterator's word/sentence lookahead.
+	switch k.Name {
+	case "left", "right", "delete", "backspace":
+		rest, state := e.data, -1
+		for len(rest) > 0 {
+			_, rest, _, state = uniseg.FirstGraphemeCluster(rest, state)
+			end := len(e.data) - len(rest)
+			if end < e.cursor {
+				previous = end
+			}
+			if end > e.cursor {
+				next = end
+				break
+			}
 		}
 	}
 	switch k.Name {
