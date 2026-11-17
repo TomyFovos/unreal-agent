@@ -24,6 +24,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
+	"github.com/unreallabsai/unreal-agent/internal/secretguard"
 )
 
 func FuzzCoordinatorFaults(f *testing.F) {
@@ -85,7 +86,8 @@ func FuzzCoordinatorFaults(f *testing.F) {
 					t.Fatal(err)
 				}
 				callID := fmt.Sprintf("call-%d", index)
-				results[callID] = plan.result
+				// ContextBuilder.Build redacts credential-shaped spans before model submission.
+				results[callID] = secretguard.Redact(plan.result)
 				wireCalls = append(wireCalls, map[string]any{
 					"type": "function_call", "id": "provider-" + callID, "call_id": callID,
 					"name": tool.SkillUseName, "arguments": string(faultJSON(t, map[string]string{"name": name})),
