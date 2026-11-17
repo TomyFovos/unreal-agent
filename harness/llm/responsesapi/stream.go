@@ -168,6 +168,9 @@ func (adapter *adapter) exchangeAttempt(ctx context.Context, request primitives.
 				result.apiError = classified
 			}
 		}
+		if result.apiError != nil {
+			usageResetHint(result.apiError, result.headers, time.Now())
+		}
 		result.retry = retryableResponseError(result.apiError, request.RetryPolicy.RetryableStatusCodes)
 		return result
 	}
@@ -241,7 +244,7 @@ func (state *responseState) observe(data []byte) error {
 		if kind == "" {
 			kind = "error"
 		}
-		state.err = &APIError{StatusCode: http.StatusOK, Code: code, Message: message, Param: param, Type: kind}
+		state.err = &APIError{StatusCode: http.StatusOK, Code: code, Message: message, Param: param, Type: kind, ResetAt: usageResetBody(data, time.Now())}
 	}
 	return nil
 }

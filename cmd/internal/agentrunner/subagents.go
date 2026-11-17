@@ -74,6 +74,7 @@ func WithSubagentTools(base ToolFactory, configuration subagent.Config, disabled
 		}
 		configured.RemoteJobs = append(configured.RemoteJobs, manager)
 		configured.InterruptedInput = manager.InterruptedInput
+		configured.RetainOperation = manager.RetainOperation
 		configured.CompletedInput = manager.CompletedInput
 		configured.Close = func() error {
 			var err error

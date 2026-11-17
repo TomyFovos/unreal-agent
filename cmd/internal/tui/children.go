@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
@@ -68,6 +69,8 @@ func childState(r viewer.Row, s Snapshot, t Theme) (string, string, style, bool)
 		return "?", "unknown", warningStyle, false
 	}
 	switch childVisualState(r, s) {
+	case stateUsageWait:
+		return t.symbol("◌", "."), llm.UsageLimitWaiting(r.UsageWaitUntil), warningStyle, false
 	case stateEnded:
 		return t.symbol("▪", "#"), "ended (no Finish)", meta, true
 	case stateCanceled:
@@ -90,6 +93,9 @@ func childState(r viewer.Row, s Snapshot, t Theme) (string, string, style, bool)
 func childElapsed(r viewer.Row, s Snapshot, u UIState) string {
 	if !s.Connected && r.Finish == nil {
 		return ""
+	}
+	if r.End != nil && r.Elapsed.Known {
+		return coarseDuration(r.Elapsed.Value)
 	}
 	for _, p := range u.Viewer.Rows {
 		if p.ID == r.ParentID {
@@ -117,6 +123,9 @@ func coarseDuration(d time.Duration) string {
 func focusRows(r viewer.Row, rows []viewer.Row, s Snapshot, u UIState, l layout) []line {
 	state := childVisualState(r, s)
 	_, word, st := state.presentation(u.Theme)
+	if state == stateUsageWait {
+		word = llm.UsageLimitWaiting(r.UsageWaitUntil)
+	}
 	marks := marksFor(u, s)
 	identity := "[" + marks[r.ID] + "] " + childTitle(r)
 	value := identity + "  " + word

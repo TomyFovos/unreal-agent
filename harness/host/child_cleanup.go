@@ -26,6 +26,16 @@ func (s *Session) cancelStoppedChildren(ctx context.Context, interrupted bool) e
 		if !unfinishedChild(op) {
 			continue
 		}
+		if interrupted && s.runtime.RetainOperation != nil {
+			live, err := s.runtime.RetainOperation(ctx, op)
+			if err != nil {
+				result = errors.Join(result, err)
+				continue
+			}
+			if live {
+				continue
+			}
+		}
 		if interrupted && s.runtime.InterruptedInput != nil {
 			input, err := s.runtime.InterruptedInput(op)
 			if err == nil && input != nil && s.submissions[input.ID] == nil {
@@ -76,7 +86,7 @@ func (h *Host) reconcileStoppedSessions(ctx context.Context, owner *Session) err
 		if err == nil {
 			for _, op := range ops {
 				if unfinishedChild(op) {
-					err = reconcileStoppedChildren(ctx, store, info.ID, owner.runtime.InterruptedInput)
+					err = reconcileStoppedChildren(ctx, store, info.ID, owner.runtime.InterruptedInput, owner.runtime.RetainOperation)
 					break
 				}
 			}
@@ -89,7 +99,7 @@ func (h *Host) reconcileStoppedSessions(ctx context.Context, owner *Session) err
 	return nil
 }
 
-func reconcileStoppedChildren(ctx context.Context, store *localfile.Store, id session.ID, notice func(operation.Operation) (*inbox.Input, error)) error {
+func reconcileStoppedChildren(ctx context.Context, store *localfile.Store, id session.ID, notice func(operation.Operation) (*inbox.Input, error), retain func(context.Context, operation.Operation) (bool, error)) error {
 	_, items, ops, err := store.ReadSnapshot(ctx, id)
 	if err != nil {
 		return err
@@ -103,6 +113,15 @@ func reconcileStoppedChildren(ctx context.Context, store *localfile.Store, id se
 	for _, op := range ops {
 		if !unfinishedChild(op) {
 			continue
+		}
+		if retain != nil {
+			live, err := retain(ctx, op)
+			if err != nil {
+				return err
+			}
+			if live {
+				continue
+			}
 		}
 		if notice != nil {
 			input, err := notice(op)
@@ -141,7 +160,7 @@ func ReconcileStoppedSession(ctx context.Context, directory string, id session.I
 	if err != nil {
 		return err
 	}
-	err = reconcileStoppedChildren(ctx, store, id, nil)
+	err = reconcileStoppedChildren(ctx, store, id, nil, nil)
 	if errors.Is(err, fs.ErrNotExist) {
 		err = nil // A failed process start need not have created a Session.
 	}

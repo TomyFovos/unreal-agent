@@ -49,16 +49,18 @@ type job struct {
 	approvals  []Approval // the child's requests waiting for this parent
 }
 type Manager struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	config   Config
-	mu       sync.Mutex
-	jobs     map[operation.ID]*job
-	canceled map[operation.ID]bool
-	changed  chan struct{}
-	updates  chan operation.Operation
-	closed   bool
-	workers  sync.WaitGroup
+	ctx         context.Context
+	cancel      context.CancelFunc
+	config      Config
+	mu          sync.Mutex
+	jobs        map[operation.ID]*job
+	canceled    map[operation.ID]bool
+	changed     chan struct{}
+	updates     chan operation.Operation
+	closed      bool
+	recovering  map[operation.ID]bool
+	restartEnds map[operation.ID]*sessionstore.EndRecord
+	workers     sync.WaitGroup
 }
 
 func NewManager(ctx context.Context, c Config) (*Manager, error) {
@@ -85,7 +87,7 @@ func NewManager(ctx context.Context, c Config) (*Manager, error) {
 		c.Child = &copy
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	return &Manager{ctx: ctx, cancel: cancel, config: c, jobs: map[operation.ID]*job{}, canceled: map[operation.ID]bool{}, changed: make(chan struct{}), updates: make(chan operation.Operation)}, nil
+	return &Manager{ctx: ctx, cancel: cancel, config: c, jobs: map[operation.ID]*job{}, canceled: map[operation.ID]bool{}, recovering: map[operation.ID]bool{}, restartEnds: map[operation.ID]*sessionstore.EndRecord{}, changed: make(chan struct{}), updates: make(chan operation.Operation)}, nil
 }
 func (m *Manager) RemoteJobPlanType() operation.RemoteJobPlanType       { return PlanType }
 func (m *Manager) RemoteJobPlanVersion() operation.RemoteJobPlanVersion { return PlanVersion }
@@ -117,6 +119,12 @@ func (m *Manager) InterruptedInput(op operation.Operation) (*inbox.Input, error)
 		sender = ChildID(p.ParentID, op.ID)
 	}
 	text := fmt.Sprintf("Child %s stopped because Unreal Agent restarted. Its partial report: subagent show %s. Start it again if the work is still needed.", op.ID, op.ID)
+	m.mu.Lock()
+	end := m.restartEnds[op.ID]
+	m.mu.Unlock()
+	if end != nil {
+		text += fmt.Sprintf(" ended_by=%s ended_at=%s", end.EndedBy, end.EndedAt.UTC().Format(time.RFC3339Nano))
+	}
 	payload, err := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(sender), Target: string(p.ParentID), Handle: string(op.ID), Kind: "ended", Text: text})
 	if err != nil {
 		return nil, err
@@ -206,7 +214,14 @@ func (m *Manager) run(j *job, p Plan) {
 	default:
 		switch p.Action {
 		case "start":
-			status, err = m.spawn(ctx, j, p, &state)
+			m.mu.Lock()
+			recovering := m.recovering[j.operation.ID]
+			m.mu.Unlock()
+			if recovering {
+				status, err = m.watchRecovered(ctx, j.operation.ID, p, &state)
+			} else {
+				status, err = m.spawn(ctx, j, p, &state)
+			}
 		case "send":
 			var connection *processChannel
 			connection, err = m.connection(ctx, p.Handle)
@@ -302,7 +317,19 @@ func (m *Manager) CompletedInput(op operation.Operation) (*inbox.Input, error) {
 		return nil, nil
 	}
 	p, err := DecodePlan(op)
-	if err != nil || p.Action != "start" || !p.Notify {
+	if err != nil || p.Action != "start" {
+		return nil, nil
+	}
+	m.mu.Lock()
+	end := m.restartEnds[op.ID]
+	m.mu.Unlock()
+	if end != nil {
+		if m.config.Owner.HasCommittedInput(inbox.ID("restarted:"+string(op.ID))) || m.config.Owner.HasCommittedInput(inbox.ID("ended:"+string(op.ID))) {
+			return nil, nil
+		}
+		return m.InterruptedInput(op)
+	}
+	if !p.Notify || m.config.Owner.HasCommittedInput(inbox.ID("restarted:"+string(op.ID))) {
 		return nil, nil
 	}
 	if m.parentSaw(op.ID) {

@@ -21,6 +21,7 @@ const (
 	stateFailed
 	stateCanceled
 	stateEnded
+	stateUsageWait
 )
 
 func operationVisualState(status operation.Status) visualState {
@@ -56,6 +57,12 @@ func childVisualState(r viewer.Row, s Snapshot) visualState {
 	}
 	if r.ParentOperationStatus == operation.StatusCompleted {
 		return stateEnded
+	}
+	if r.End != nil {
+		return stateEnded
+	}
+	if !r.UsageWaitUntil.IsZero() && !operationVisualState(r.ParentOperationStatus).ended() && r.ParentRuntime != viewer.RuntimeStopped {
+		return stateUsageWait
 	}
 	// Only a parent known to be stopped ends its children's display; an
 	// unknown parent (a brief re-sync) must not hide a running child.
@@ -103,6 +110,8 @@ func (s visualState) presentation(t Theme) (mark, word string, color style) {
 		mark, word, role = t.symbol("⊘", "-"), "取消", dimColor
 	case stateEnded:
 		mark, word, role = t.symbol("▪", "#"), "終了", dimColor
+	case stateUsageWait:
+		mark, word = t.symbol("◌", "."), "利用上限待ち"
 	default:
 		mark, word = "?", "不明"
 	}

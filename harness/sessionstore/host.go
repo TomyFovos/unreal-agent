@@ -6,6 +6,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
+	"time"
 )
 
 // HostRecord is canonical configuration, completion of a persisted stop, or
@@ -21,6 +22,16 @@ type HostRecord struct {
 	Context             *ContextRecord                `json:",omitzero"`
 	Selection           *RuntimeSelection             `json:",omitzero"`
 	Activity            *llm.ActivityRecord           `json:",omitzero"`
+	End                 *EndRecord                    `json:",omitzero"`
+}
+
+const HostEnded = "ended"
+
+// EndRecord records loss of an executor without inventing a model Finish.
+// EndedAt is the last canonical child timestamp, not the time of discovery.
+type EndRecord struct {
+	EndedBy string    `json:"ended_by"`
+	EndedAt time.Time `json:"ended_at"`
 }
 
 const HostProjectInstructions = "project_instructions"
@@ -38,6 +49,11 @@ func (r HostRecord) Validate() error {
 		return fmt.Errorf("unexpected runtime selection")
 	}
 	switch r.Kind {
+	case HostEnded:
+		if r.End == nil || r.End.EndedBy != "host_restart" || r.End.EndedAt.IsZero() {
+			return fmt.Errorf("invalid executor end record")
+		}
+		return nil
 	case HostActivity:
 		return nil
 	case HostContext:

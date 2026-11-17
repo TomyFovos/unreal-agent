@@ -10,6 +10,7 @@ type ActivityRecord struct {
 	ID        string            `json:",omitzero"`
 	StartedAt time.Time         `json:",omitzero"`
 	EndedAt   time.Time         `json:",omitzero"`
+	RetryAt   time.Time         `json:",omitzero"`
 	Revision  string            `json:",omitzero"`
 	Modified  bool              `json:",omitzero"`
 	Provider  string            `json:",omitzero"`

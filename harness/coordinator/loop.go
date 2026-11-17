@@ -15,6 +15,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/primitives"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
@@ -58,6 +59,7 @@ type coordinator struct {
 	cancelIdle         context.CancelCauseFunc
 	idleDone           chan struct{}
 	modelRetry         <-chan time.Time
+	usageRetryAt       time.Time
 	completedChildren  []operation.Operation
 }
 
@@ -143,6 +145,14 @@ func (current *coordinator) Run(ctx context.Context) error {
 	if err := current.restore(ctx); err != nil {
 		return err
 	}
+	if !current.usageRetryAt.IsZero() {
+		current.modelRetry = time.After(max(0, time.Until(current.usageRetryAt)))
+	}
+	defer func() {
+		if err := current.clearUsageWait(context.WithoutCancel(ctx)); err != nil {
+			slog.Warn("clear usage limit wait", "error", err)
+		}
+	}()
 
 	return current.runLoop(ctx)
 }
@@ -265,6 +275,9 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 
 		case <-current.modelRetry:
 			current.modelRetry = nil
+			if err := current.clearUsageWait(ctx); err != nil {
+				return err
+			}
 			current.state.callModel = true
 
 		case received, open := <-inboxOutput:
@@ -452,6 +465,9 @@ func (current *coordinator) held() bool {
 func (current *coordinator) interruptAgent(ctx context.Context, reason string) error {
 	current.stopIdle("user_interrupt")
 	current.modelRetry = nil
+	if err := current.clearUsageWait(ctx); err != nil {
+		return err
+	}
 	current.interruptModel()
 	current.state.interrupted, current.state.interruptExternals = true, current.state.externalInputs
 	for id, op := range current.state.operations {
@@ -506,6 +522,21 @@ func (current *coordinator) processModelResponse(ctx context.Context, modelRespo
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		var limited llm.UsageLimitFailure
+		if errors.As(modelResponse.err, &limited) {
+			if until, reached := limited.UsageLimitReset(); reached {
+				if !until.After(time.Now()) {
+					until = time.Now().Add(primitives.DefaultRemoteRequest("", "", "").RetryPolicy.MaxBackoff)
+				}
+				current.usageRetryAt = until
+				current.state.callModel = false
+				current.modelRetry = time.After(time.Until(until))
+				if publish := current.dependencies.ModelWaiting; publish != nil {
+					return publish(ctx, until)
+				}
+				return nil
+			}
+		}
 		var retryable interface{ RetryableModelFailure() bool }
 		if current.dependencies.RetryModelFailures && errors.As(modelResponse.err, &retryable) && retryable.RetryableModelFailure() {
 			if record := current.dependencies.RecordActivity; record != nil {
@@ -555,8 +586,23 @@ func (current *coordinator) clearToolGrace() {
 	current.state.grace = nil
 }
 
+func (current *coordinator) clearUsageWait(ctx context.Context) error {
+	if current.usageRetryAt.IsZero() {
+		return nil
+	}
+	current.usageRetryAt = time.Time{}
+	if publish := current.dependencies.ModelWaiting; publish != nil {
+		return publish(ctx, time.Time{})
+	}
+	return nil
+}
+
 func (current *coordinator) handleStop(ctx context.Context) (bool, error) {
 	if !current.stop.cancellationRequested {
+		current.modelRetry = nil
+		if err := current.clearUsageWait(ctx); err != nil {
+			return false, err
+		}
 		current.interruptModel()
 		if err := current.cancelOperations(ctx); err != nil {
 			return false, err
@@ -713,6 +759,12 @@ func (current *coordinator) requestModelResponse(
 			return current.persistContext(ctx, r)
 		}
 		if err := b.PrepareContext(ctx, current.dependencies.LLM, llm.RequestOptions{CacheKey: current.cacheKey()}, persist, current.forceCompaction); err != nil {
+			var limited llm.UsageLimitFailure
+			if errors.As(err, &limited) {
+				if _, reached := limited.UsageLimitReset(); reached {
+					return current.processModelResponse(ctx, modelResponseResult{turnID: current.state.currentTurnID, err: err})
+				}
+			}
 			return fmt.Errorf("prepare context: %w", err)
 		}
 		current.forceCompaction = false
@@ -815,7 +867,9 @@ func (current *coordinator) handleInboxInput(ctx context.Context, input inbox.In
 	}
 	if input.Kind == inbox.InputExternal {
 		current.stopIdle("user_input")
-		current.modelRetry = nil
+		if current.usageRetryAt.IsZero() {
+			current.modelRetry = nil
+		}
 	}
 	item, err := current.addItemToLocalState(sessionstore.Item{
 		Kind: sessionstore.ItemInput,
@@ -871,7 +925,9 @@ func (current *coordinator) handleInboxInputs(ctx context.Context, inputs []inbo
 		}
 		if input.Kind == inbox.InputPeer && !quietPeer(input) && current.cancelModel == nil {
 			current.stopIdle("peer_input")
-			current.modelRetry = nil
+			if current.usageRetryAt.IsZero() {
+				current.modelRetry = nil
+			}
 			current.state.callModel = true
 		}
 		// The user comes first: a background turn or child wait of a provider that holds
@@ -1004,6 +1060,15 @@ func (current *coordinator) restore(ctx context.Context) error {
 	// The previous executor lifetime ended. Close its unfinished operations once,
 	// without dispatching them again; normal reconciliation publishes the result.
 	for _, value := range current.state.operations {
+		if retain := current.dependencies.RetainOperation; retain != nil {
+			live, err := retain(ctx, value)
+			if err != nil {
+				return err
+			}
+			if live {
+				continue
+			}
+		}
 		if !operationIsTerminal(value.Status) {
 			if notice := current.dependencies.InterruptedInput; notice != nil {
 				input, err := notice(value)
@@ -1119,6 +1184,9 @@ func (current *coordinator) loadHistory(ctx context.Context) (result error) {
 }
 
 func (current *coordinator) restoreItem(item sessionstore.Item) error {
+	if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Activity != nil && record.Activity.Kind == "usage_limit_wait" {
+		current.usageRetryAt = record.Activity.RetryAt
+	}
 	if input, ok := item.Data.(inbox.Input); ok && current.recordedInputIDs != nil {
 		current.recordedInputIDs[input.ID] = true
 	}

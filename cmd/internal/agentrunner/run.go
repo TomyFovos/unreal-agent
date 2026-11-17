@@ -464,7 +464,7 @@ func Run(
 			}
 			return err
 		}
-		return host.Runtime{InterruptedInput: configuredTools.InterruptedInput, CompletedInput: configuredTools.CompletedInput, ContextEngine: engine, Builder: builder, LLM: client, Tools: registry, Close: closeRuntime, Operations: operation.NewLocalOperationManager(sessionContext, configuredTools.RemoteJobs...)}, nil
+		return host.Runtime{RetainOperation: configuredTools.RetainOperation, InterruptedInput: configuredTools.InterruptedInput, CompletedInput: configuredTools.CompletedInput, ContextEngine: engine, Builder: builder, LLM: client, Tools: registry, Close: closeRuntime, Operations: operation.NewLocalOperationManager(sessionContext, configuredTools.RemoteJobs...)}, nil
 	}})
 	if err != nil {
 		return err

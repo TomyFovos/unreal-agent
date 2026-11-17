@@ -94,6 +94,9 @@ func RenderDetail(d Detail) string {
 	if r.Failure != "" {
 		fmt.Fprintf(&b, "Runtime failure: %s\n", SafeText(r.Failure))
 	}
+	if r.End != nil {
+		fmt.Fprintf(&b, "Ended: %s at %s (no Finish)\n", SafeText(r.End.EndedBy), r.End.EndedAt.UTC().Format(time.RFC3339Nano))
+	}
 	for _, op := range r.Operations {
 		fmt.Fprintf(&b, "Operation %s [%s]: %s; elapsed %s\n", SafeText(string(op.ID)), SafeText(op.Tool), SafeText(string(op.Status)), FormatDuration(op.Elapsed))
 	}

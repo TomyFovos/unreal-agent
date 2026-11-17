@@ -425,7 +425,7 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 			builder.SetModel(llm.Model{ID: choice.Model, ReasoningEffort: choice.Effort})
 			return nil
 		}
-		return host.Runtime{InterruptedInput: configured.InterruptedInput, CompletedInput: configured.CompletedInput, ContextEngine: engine, Selection: &base, ValidateSelection: validate, ApplySelection: apply, BeforeGeneration: refreshPermission, Builder: builder, LLM: client, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, configured.RemoteJobs...), Close: closeRuntime}, nil
+		return host.Runtime{RetainOperation: configured.RetainOperation, InterruptedInput: configured.InterruptedInput, CompletedInput: configured.CompletedInput, ContextEngine: engine, Selection: &base, ValidateSelection: validate, ApplySelection: apply, BeforeGeneration: refreshPermission, Builder: builder, LLM: client, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, configured.RemoteJobs...), Close: closeRuntime}, nil
 
 	}
 	return factory, identity, nil

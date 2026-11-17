@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -391,6 +392,11 @@ type Error struct {
 	Code       string
 	Status     int
 	Diagnostic *responsesapi.FailureDiagnostic `json:",omitzero"`
+	ResetAt    time.Time                       `json:",omitzero"`
+}
+
+func (e *Error) UsageLimitReset() (time.Time, bool) {
+	return e.ResetAt, e.Diagnostic != nil && e.Diagnostic.Safe().Reason == "usage_limit_reached"
 }
 
 // RetryableModelFailure applies to inference only, never execution receipts.
@@ -455,7 +461,7 @@ func normalize(err error) error {
 		case 429:
 			code = "rate_limited"
 		}
-		return &Error{Code: code, Status: diagnostic.Status, Diagnostic: safe}
+		return &Error{Code: code, Status: diagnostic.Status, Diagnostic: safe, ResetAt: api.ResetAt}
 	}
 	// Keep host identity/recovery failures typed without retaining an arbitrary
 	// provider wrapper (which can contain request or credential material). Existing

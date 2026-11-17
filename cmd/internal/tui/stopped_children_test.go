@@ -3,10 +3,24 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
+
+func TestRestartEndedChildUsesCanonicalEndTime(t *testing.T) {
+	s, u := idleSnapshot(), plainUI()
+	r := viewer.Row{ID: "child", ParentID: s.ID, ParentOperationID: "start", ParentOperationStatus: operation.StatusCanceled, End: &sessionstore.EndRecord{EndedBy: "host_restart", EndedAt: u.Now.Add(-137 * time.Hour)}, Elapsed: viewer.Duration{Known: true, Value: 2 * time.Hour}}
+	u.Viewer.Rows = []viewer.Row{{ID: s.ID, Operations: []viewer.OperationRow{{ID: "start", Elapsed: viewer.Duration{Known: true, Value: 139 * time.Hour}}}}, r}
+	if got := childVisualState(r, s); got != stateEnded {
+		t.Fatal(got)
+	}
+	if got := childElapsed(r, s, u); got != "2h00m" {
+		t.Fatal("restart observation inflated duration", got)
+	}
+}
 
 func TestStoppedParentChildrenUseSameStateInAllDisplays(t *testing.T) {
 	for _, tc := range []struct {

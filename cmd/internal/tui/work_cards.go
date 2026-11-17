@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"slices"
 	"strings"
 	"time"
@@ -238,6 +239,9 @@ func newWorkCardIndex(s Snapshot, panel viewer.PanelSnapshot, now time.Time) *wo
 		seen[r.ID] = true
 		depth = max(depth, max(0, r.Depth-1))
 		card := workCard{id: r.ID, mark: marks[r.ID], title: childTitle(r), state: states[r.ID], depth: depth, elapsed: childElapsed(r, s, u), model: cardModel(r), stats: cardStats(r), now: currentChildOperation(r), observed: observed(r), activity: activityBuckets(r, now)}
+		if states[r.ID] == stateUsageWait {
+			card.now = llm.UsageLimitWaiting(r.UsageWaitUntil)
+		}
 		if childStalled(r, s, now) {
 			card.stalled = true
 			card.now = fmt.Sprintf("動きなし %d分", int(now.Sub(r.LastActivityAt)/time.Minute))
@@ -339,6 +343,9 @@ func mainCardPulse(s Snapshot, main viewer.Row, rows []viewer.Row, now time.Time
 	}
 	if !s.Running {
 		return "停止"
+	}
+	if p := s.Progress; p != nil && p.Mode == "usage_limit_wait" {
+		return llm.UsageLimitWaiting(p.RetryAt)
 	}
 	phase := ""
 	elapsed, known := time.Duration(0), false

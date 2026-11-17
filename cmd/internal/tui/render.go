@@ -223,6 +223,9 @@ func header(s Snapshot, u UIState, l layout) line {
 			if s.Progress != nil && s.Progress.Mode == "compacting" {
 				state, role = u.Theme.spinner(u.Now.UnixMilli())+" 会話を圧縮中", bandOK
 			}
+			if s.Progress != nil && s.Progress.Mode == "usage_limit_wait" {
+				state, role = llm.UsageLimitWaiting(s.Progress.RetryAt), bandWarn
+			}
 			if u.Parent != nil && u.Parent.Elapsed.Known {
 				elapsed = " " + coarseDuration(u.Parent.Elapsed.Value)
 			}

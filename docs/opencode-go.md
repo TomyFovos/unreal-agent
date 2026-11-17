@@ -171,15 +171,16 @@ OpenAI の名前で固定されています。OpenCode が枯渇を別のコー�
 
 | | 一時的な制限 | 利用枠の枯渇 |
 | --- | --- | --- |
-| エラーの例 | `rate_limit_exceeded`、コード不明の 429、5xx | `usage_limit_reached`、`insufficient_quota` など |
+| エラーの例 | `rate_limit_exceeded`、コード不明の 429、5xx | `usage_limit_reached`（code または type） |
 | API 呼び出し内の再試行 | 最大 5 回（ストリーム中は 6 回）。待ち時間は最大 30 秒で、`Retry-After` も 30 秒が上限 | しない |
-| 親 Session | 再試行が尽きると Session が失敗 | Session が失敗し、TUI に `provider rate limited` と表示 |
-| 子 Session | 2 秒後にモデル呼び出しをやり直す。回数の上限なし | 子が停止し、親に理由を通知 |
+| 親 Session | 再試行が尽きると Session が失敗 | 解除時刻まで待機して自動再開 |
+| 子 Session | 2 秒後にモデル呼び出しをやり直す。回数の上限なし | 解除時刻まで待機して自動再開。親にも待機状態を通知 |
 
 共通: 上限や障害で、別のプロバイダや API キーへ自動で切り替えません（Codex へも切り替えません）。
-実行済みの Operation を再実行せず、枠の回復後に自動で再開することもありません。枠の回復時刻は
-表示しません。子の再試行に回数の上限がないこと、親が上限で Session 失敗になることは、Codex の
-現在の挙動に揃えています。
+実行済みの Operation は再実行しません。利用上限では `resets_at` / `reset_at`、`resets_in_seconds`、
+`Retry-After`、`try again in` の解除ヒントを使い、TUI に `usage limit — waiting until <時刻>` を表示します。
+ヒントがない場合は既存バックオフの最長段階（30 秒）を使います。待機回数の上限はなく、`/stop` は直ちに反映されます。
+`insufficient_quota` など、利用上限以外の恒久エラーは従来どおり失敗を返します。
 
 ### 接続検証（2026-11-02）
 

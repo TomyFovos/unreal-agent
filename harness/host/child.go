@@ -172,6 +172,14 @@ func (s *Session) Finish() *sessionstore.FinishRecord {
 	return &r
 }
 
+// HasCommittedInput reads the canonical input identity index without replaying
+// history. It is used to deduplicate lifecycle notices across Host restarts.
+func (s *Session) HasCommittedInput(id inbox.ID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.submissions[id] != nil && s.submissions[id].committed
+}
+
 // CommitFinish commits a canonical report before a child can stop. The
 // invoking Finish operation is the only permitted unfinished operation.
 func (s *Session) CommitFinish(ctx context.Context, id operation.ID, result sessionstore.FinishResult) error {

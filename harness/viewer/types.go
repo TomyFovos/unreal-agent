@@ -113,8 +113,10 @@ type Row struct {
 	Runtime               Liveness
 	Generation            string
 	Finish                *Finish
+	End                   *sessionstore.EndRecord `json:",omitzero"`
 	Failure               string
 	Activity              string
+	UsageWaitUntil        time.Time `json:",omitzero"`
 	CreatedAt             time.Time
 	RecentActivity        []time.Time // canonical item timestamps within the last ten minutes
 	LastActivityAt        time.Time   // latest canonical activity, independent of the transcript cache

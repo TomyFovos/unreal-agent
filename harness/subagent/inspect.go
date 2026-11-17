@@ -9,12 +9,15 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	"os"
+	"time"
 )
 
 type ChildView struct {
-	View          host.View
-	Configuration *ChildConfig
-	Finish        *sessionstore.FinishRecord
+	View           host.View
+	Configuration  *ChildConfig
+	Finish         *sessionstore.FinishRecord
+	End            *sessionstore.EndRecord
+	LastRecordedAt time.Time
 }
 
 // ReadChild never acquires execution ownership. An empty generation means
@@ -54,11 +57,15 @@ func ReadChildSnapshot(ctx context.Context, directory string, id session.ID) (Ch
 		return ChildView{}, err
 	}
 	page := sessionstore.Page{Items: items, NextAfter: sessionstore.Sequence(len(items))}
-	result := ChildView{View: host.View{Session: snapshot, History: host.ProjectHistoryPage(page), Operations: ops}}
+	result := ChildView{View: host.View{Session: snapshot, History: host.ProjectHistoryPage(page), Operations: ops}, LastRecordedAt: snapshot.Session.CreatedAt}
 	for _, item := range items {
+		if item.RecordedAt.After(result.LastRecordedAt) {
+			result.LastRecordedAt = item.RecordedAt
+		}
 		if item.Kind == sessionstore.ItemFork {
 			result.Configuration = nil
 			result.Finish = nil
+			result.End = nil
 		}
 		if item.Kind != sessionstore.ItemHostRecord {
 			continue
@@ -75,6 +82,8 @@ func ReadChildSnapshot(ctx context.Context, directory string, id session.ID) (Ch
 			result.View.ProjectInstructions = &metadata
 		case "finish":
 			result.Finish = record.Finish
+		case sessionstore.HostEnded:
+			result.End = record.End
 		}
 	}
 	return result, nil

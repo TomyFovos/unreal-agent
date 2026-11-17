@@ -26,6 +26,13 @@ type APIError struct {
 	Message    string
 	Param      string
 	Type       string
+	ResetAt    time.Time
+}
+
+// UsageLimitReset separates an exhausted subscription from transient throttling.
+// A zero time means the provider supplied no usable reset hint.
+func (err *APIError) UsageLimitReset() (time.Time, bool) {
+	return err.ResetAt, err.Code == "usage_limit_reached" || err.Type == "usage_limit_reached"
 }
 
 func (err *APIError) Error() string {
@@ -145,6 +152,11 @@ func (adapter *adapter) Respond(ctx context.Context, request llm.Request, option
 		}
 		return llm.Response{}, diagnosed(fmt.Errorf("create response: %w", failure), FailureDiagnostic{Stage: "http_status", Status: statusCode, Retryable: retryableResponseError(failure, primitives.DefaultRemoteRequest("", "", "").RetryPolicy.RetryableStatusCodes)})
 	}
+	if failure != nil {
+		if _, limited := failure.UsageLimitReset(); limited {
+			return llm.Response{}, diagnosed(failure, FailureDiagnostic{Stage: "stream_error", Status: statusCode})
+		}
+	}
 	response, err := decodeResponse(responseBody)
 	return response, diagnosed(err, FailureDiagnostic{Stage: "response_decode", Status: statusCode, Reason: "invalid_response"})
 }
@@ -187,13 +199,14 @@ func providerError(statusCode int, body []byte) *APIError {
 			Type    string  `json:"type"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal(body, &envelope); err == nil && (envelope.Error.Message != "" || dereference(envelope.Error.Code) != "") {
+	if err := json.Unmarshal(body, &envelope); err == nil && (envelope.Error.Message != "" || dereference(envelope.Error.Code) != "" || envelope.Error.Type != "") {
 		return &APIError{
 			StatusCode: statusCode,
 			Code:       dereference(envelope.Error.Code),
 			Message:    envelope.Error.Message,
 			Param:      dereference(envelope.Error.Param),
 			Type:       envelope.Error.Type,
+			ResetAt:    usageResetBody(body, time.Now()),
 		}
 	}
 

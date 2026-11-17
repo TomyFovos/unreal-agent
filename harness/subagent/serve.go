@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	"golang.org/x/sys/unix"
@@ -186,6 +187,7 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 	if control != nil {
 		workers.Go(func() { forwardApprovals(ctx, ep, control) })
 	}
+	workers.Go(func() { forwardUsageWait(ctx, ep, child, config) })
 	// Ready has stable identity in canonical ChildConfig and is retryable after
 	// either side loses an ACK. Final completion never travels as a Peer input.
 	readyDone := make(chan error, 1)
@@ -226,6 +228,60 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 			}
 			return child.Wait(ctx)
 		}
+	}
+}
+
+// Waiting is a quiet parent progress input: visible without starting another
+// model request or blocking the child's Coordinator on a transport ACK.
+func forwardUsageWait(ctx context.Context, ep *endpoint, child *host.Session, config ChildConfig) {
+	var previous time.Time
+	for ctx.Err() == nil {
+		sub, err := child.Subscribe(0, 1, 64)
+		if err != nil {
+			return
+		}
+		publish := func(p *host.Progress) bool {
+			var until time.Time
+			if p != nil && p.Mode == "usage_limit_wait" {
+				until = p.RetryAt
+			}
+			if until.Equal(previous) {
+				return true
+			}
+			id := until
+			text := llm.UsageLimitWaiting(until)
+			if until.IsZero() {
+				id, text = previous, "usage limit wait ended"
+			}
+			payload, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(config.ChildID), Target: string(config.ParentID), Handle: string(config.OperationID), Kind: "progress", Text: text})
+			_, err := ep.send(ctx, inbox.Input{ID: inbox.ID(fmt.Sprintf("usage-wait:%s:%s:%t", config.OperationID, id.UTC().Format(time.RFC3339Nano), until.IsZero())), Kind: inbox.InputPeer, Payload: payload})
+			previous = until
+			return err == nil
+		}
+		if !publish(sub.Initial.Progress) {
+			sub.Cancel()
+			return
+		}
+		resync := false
+		for !resync {
+			select {
+			case <-ctx.Done():
+				sub.Cancel()
+				return
+			case e, open := <-sub.Events:
+				if !open {
+					sub.Cancel()
+					return
+				}
+				if e.Kind == "gap" {
+					resync = true
+				} else if e.Kind == "progress" && !publish(e.Progress) {
+					sub.Cancel()
+					return
+				}
+			}
+		}
+		sub.Cancel()
 	}
 }
 

@@ -162,7 +162,7 @@ func retryErrorEvent(kind, code, message string) string {
 
 func assertResponseError(t *testing.T, kind, code string, response llm.Response, err error) {
 	t.Helper()
-	if kind == "response.failed" {
+	if kind == "response.failed" && code != "usage_limit_reached" {
 		if err != nil || response.Failure == nil || response.Failure.Code != code || response.Failure.Message == "" {
 			t.Fatalf("response=%#v error=%v", response, err)
 		}
@@ -171,5 +171,10 @@ func assertResponseError(t *testing.T, kind, code string, response llm.Response,
 	apiErr, ok := errors.AsType[*APIError](err)
 	if !ok || apiErr.Code != code || strings.TrimSpace(apiErr.Message) == "" {
 		t.Fatalf("error=%v", err)
+	}
+	if code == "usage_limit_reached" {
+		if _, limited := apiErr.UsageLimitReset(); !limited || response.Failure != nil {
+			t.Fatal("usage limit must reach the Coordinator as a typed wait, not a terminal response", response, err)
+		}
 	}
 }

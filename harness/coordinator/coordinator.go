@@ -17,12 +17,15 @@ import (
 
 type Dependencies struct {
 	RecordActivity func(context.Context, llm.ActivityRecord) error
+	// ModelWaiting publishes the usage-limit wait; zero clears it.
+	ModelWaiting func(context.Context, time.Time) error
 	// Child Sessions keep their execution ownership after a transient inference
 	// failure. Other lifecycles retain their configured provider retry policy.
 	RetryModelFailures bool
 	// InterruptedInput supplies a peer notice for work lost with the previous
 	// executor. Restoration persists it before closing the Operation.
 	InterruptedInput func(operation.Operation) (*inbox.Input, error)
+	RetainOperation  func(context.Context, operation.Operation) (bool, error)
 	// CompletedInput projects a standalone child's terminal Operation after the
 	// current model call has ended, so a report it already read can be omitted.
 	CompletedInput func(operation.Operation) (*inbox.Input, error)

@@ -238,9 +238,7 @@ func TestInterruptedChildShellRecoveryDoesNotReplaySideEffect(t *testing.T) {
 			if start := awaitChild(t, owner, true); start.ID != "start" || start.Status != operation.StatusCanceled {
 				t.Fatal("unknown child start was resumed", start)
 			}
-			if !bytes.Equal(readLog(t, dir, childID), prefix) {
-				t.Fatal("parent automatically reopened its old child")
-			}
+			assertRestartEndOnly(t, dir, childID, prefix)
 			storedChild, err := sub.ReadChild(t.Context(), dir, childID, 0, 256)
 			if err != nil || storedChild.Configuration == nil {
 				t.Fatal(storedChild, err)

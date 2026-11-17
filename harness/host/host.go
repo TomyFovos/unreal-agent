@@ -39,6 +39,8 @@ var (
 )
 
 type Runtime struct {
+	// RetainOperation preserves work whose independent executor is still live.
+	RetainOperation   func(context.Context, operation.Operation) (bool, error)
 	InterruptedInput  func(operation.Operation) (*inbox.Input, error)
 	CompletedInput    func(operation.Operation) (*inbox.Input, error)
 	ContextEngine     *contextengine.Engine
@@ -484,8 +486,10 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	dependencies := coordinator.Dependencies{SessionID: o.ID, Inbox: s.inbox, Restored: restored,
 		CacheKey:           s.modelCacheKey(),
 		RecordActivity:     s.recordActivity,
+		ModelWaiting:       s.modelWaiting,
 		RetryModelFailures: s.lifecycle == "child",
 		InterruptedInput:   s.runtime.InterruptedInput,
+		RetainOperation:    s.runtime.RetainOperation,
 		CompletedInput:     s.runtime.CompletedInput,
 		ContextBuilt:       s.contextBuilt,
 		BeforeTurn:         s.beginTurn,
@@ -833,6 +837,16 @@ func (s *Session) rememberOwnedItem(item sessionstore.Item, notify bool) {
 	}
 	if item.Kind == sessionstore.ItemHostRecord {
 		r := item.Data.(sessionstore.HostRecord)
+		if a := r.Activity; a != nil && a.Kind == "usage_limit_wait" {
+			s.progress = nil
+			if !a.RetryAt.IsZero() {
+				s.progressEpoch++
+				s.progress = &Progress{TurnID: s.currentTurn(), Epoch: s.progressEpoch, Mode: "usage_limit_wait", RetryAt: a.RetryAt}
+			}
+			if notify {
+				s.broadcast(Event{Kind: "progress", Progress: s.progress})
+			}
+		}
 		if r.Kind == "configuration" && s.selection == nil {
 			s.selection = sessionstore.SelectionFromConfiguration(r.Configuration)
 		}

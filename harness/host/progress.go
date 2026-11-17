@@ -19,6 +19,11 @@ type Progress struct {
 	Mode, Text      string
 	Done, Truncated bool
 	Statistics      *llm.GenerationStatistics `json:",omitzero"`
+	RetryAt         time.Time                 `json:",omitzero"`
+}
+
+func (s *Session) modelWaiting(ctx context.Context, until time.Time) error {
+	return s.recordActivity(ctx, llm.ActivityRecord{Kind: "usage_limit_wait", StartedAt: time.Now().UTC(), RetryAt: until})
 }
 
 type progressAdapter struct {

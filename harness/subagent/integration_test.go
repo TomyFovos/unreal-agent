@@ -86,7 +86,7 @@ func factory(c sub.Config, model llm.Adapter) host.Factory {
 		for _, d := range registry.StaticDefinitions() {
 			builder.AddTool(d.Tool)
 		}
-		return host.Runtime{InterruptedInput: manager.InterruptedInput, CompletedInput: manager.CompletedInput, Builder: builder, LLM: model, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, manager), Close: manager.Close}, nil
+		return host.Runtime{RetainOperation: manager.RetainOperation, InterruptedInput: manager.InterruptedInput, CompletedInput: manager.CompletedInput, Builder: builder, LLM: model, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, manager), Close: manager.Close}, nil
 	}
 }
 func TestChildServerHelper(t *testing.T) {

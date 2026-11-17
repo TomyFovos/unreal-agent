@@ -53,7 +53,9 @@ type projection struct {
 	lastUsage         Usage
 	outputTPS         float64
 	finish            *Finish
+	end               *sessionstore.EndRecord
 	activity          string
+	usageWaitUntil    time.Time
 	runtime           Liveness
 	resync            bool
 	more              bool
@@ -334,6 +336,15 @@ func (m *Model) item(p *projection, item host.HistoryItem) error {
 	}
 	switch data := item.Data.(type) {
 	case sessionstore.HostRecord:
+		if data.Kind == sessionstore.HostEnded {
+			p.end = data.End
+		}
+		if a := data.Activity; a != nil && a.Kind == "host_start" {
+			p.end = nil
+		}
+		if a := data.Activity; a != nil && a.Kind == "usage_limit_wait" {
+			p.usageWaitUntil = a.RetryAt
+		}
 		if data.Kind == sessionstore.HostContext && data.Context != nil && data.Context.Conversation != nil && data.Context.Conversation.Usage != nil {
 			addUsage(&p.usage, *data.Context.Conversation.Usage)
 		}
@@ -506,6 +517,7 @@ func (m *Model) base(id session.ID, p *projection, now time.Time) Row {
 	r.Runtime = p.runtime
 	r.Failure = p.view.Failure
 	r.Activity = p.activity
+	r.UsageWaitUntil = p.usageWaitUntil
 	r.CreatedAt = p.view.Session.Session.CreatedAt
 	r.LastActivityAt = p.lastActivityAt
 	cutoff := now.Add(-10 * time.Minute)
@@ -524,9 +536,17 @@ func (m *Model) base(id session.ID, p *projection, now time.Time) Row {
 	r.NeedsResync = p.resync
 	r.Problem = p.problem
 	r.Finish = p.finish
+	if p.end != nil {
+		end := *p.end
+		r.End = &end
+		r.Runtime = RuntimeStopped
+		r.UsageWaitUntil = time.Time{}
+	}
 	end := time.Time{}
 	if p.finish != nil {
 		end = p.finish.RecordedAt
+	} else if p.end != nil {
+		end = p.end.EndedAt
 	}
 	r.Elapsed = elapsed(p.view.Session.Session.CreatedAt, end, now, p.runtime)
 	for _, op := range p.operations {

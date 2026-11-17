@@ -83,8 +83,8 @@ func TestRetryableFailureThenSuccess(t *testing.T) {
 	}
 }
 
-// An exhausted allowance is never retried: a child stops and reports instead
-// of retrying until the allowance renews (docs/opencode-go.md).
+// The adapter does not retry an exhausted allowance. The Coordinator waits
+// until the reset hint before starting the next model request.
 func TestExhaustedAllowanceIsNotRetried(t *testing.T) {
 	for name, failure := range map[string]func(now time.Time) *http.Response{
 		"retry_after_seconds": func(time.Time) *http.Response {

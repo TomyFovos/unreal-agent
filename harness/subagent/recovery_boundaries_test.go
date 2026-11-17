@@ -116,9 +116,7 @@ func TestChildFinishBeforeCommitIsNotReplayedOnParentResume(t *testing.T) {
 	if err != nil || view.Finish != nil {
 		t.Fatal(view, err)
 	}
-	if !bytes.Equal(readLog(t, dir, plan.ChildID), childLog) {
-		t.Fatal("parent resumed unfinished child work")
-	}
+	assertRestartEndOnly(t, dir, plan.ChildID, childLog)
 	finishes, turns := 0, 0
 	for _, item := range view.View.History.Items {
 		if item.Kind == sessionstore.ItemTurn {
@@ -166,9 +164,7 @@ func TestPersistedCancelChildRecoveryNeverRespawns(t *testing.T) {
 			if result := awaitChild(t, resumed, true); result.ID != "start" || result.Status != operation.StatusCanceled {
 				t.Fatal(result)
 			}
-			if !bytes.Equal(readLog(t, dir, childID), childLog) {
-				t.Fatal("canceled child executed again")
-			}
+			assertRestartEndOnly(t, dir, childID, childLog)
 			store, _ := localfile.New(dir)
 			lock, err := store.AcquireWriter(childID)
 			if err != nil {
@@ -212,9 +208,7 @@ func TestParentResumeDoesNotOpenUnconfiguredChild(t *testing.T) {
 	if result := awaitChild(t, resumed, true); result.Status != operation.StatusCanceled {
 		t.Fatal(result)
 	}
-	if !bytes.Equal(readLog(t, dir, childID), before) {
-		t.Fatal("unbound child history acquired and executed")
-	}
+	assertRestartEndOnly(t, dir, childID, before)
 }
 
 func awaitBoundary(t *testing.T, check func() bool) {
@@ -387,9 +381,7 @@ func TestSubagentMessageCommittedPrefixesAreNotReplayed(t *testing.T) {
 			if countInput(t, dir, "parent", "message") != expectedIntent || countInput(t, dir, childID, inbox.ID("send:"+string(sendID))) != expectedDelivery || countInput(t, dir, "parent", "ready:start") != 1 || countInput(t, dir, childID, "task:start") != 1 {
 				t.Fatal("committed inputs changed")
 			}
-			if !bytes.Equal(readLog(t, dir, childID), c.child) {
-				t.Fatal("child reopened during parent recovery")
-			}
+			assertRestartEndOnly(t, dir, childID, c.child)
 			store, _ := localfile.New(dir)
 			lock, err := store.AcquireWriter(childID)
 			if err != nil {
@@ -447,9 +439,7 @@ func TestChildToParentCommittedMessagesAreNotReplayed(t *testing.T) {
 			if result := awaitChild(t, resumed, true); result.ID != start.ID || result.Status != operation.StatusCanceled {
 				t.Fatal(result)
 			}
-			if !bytes.Equal(readLog(t, dir, plan.ChildID), intent) {
-				t.Fatal("parent resume replayed a child's unacknowledged send")
-			}
+			assertRestartEndOnly(t, dir, plan.ChildID, intent)
 			v, err := resumed.Inspect(0, 256)
 			if err != nil {
 				t.Fatal(err)
@@ -544,8 +534,8 @@ func TestSubagentSpawnCreateReadyPrefixesAreNotReplayed(t *testing.T) {
 				if _, e := os.Stat(filepath.Join(dir, string(childID)+".session.jsonl")); !os.IsNotExist(e) {
 					t.Fatal("child created by replay", e)
 				}
-			} else if !bytes.Equal(readLog(t, dir, childID), c.child) {
-				t.Fatal("existing child changed during parent recovery")
+			} else {
+				assertRestartEndOnly(t, dir, childID, c.child)
 			}
 			ready := 0
 			if c.name == "ready_append_after_ack_before_or_after" {

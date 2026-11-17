@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"time"
 )
 
@@ -51,6 +52,9 @@ func backgroundActive(s Snapshot, u UIState) bool {
 func pulse(s Snapshot, u UIState, l layout) line {
 	if !s.Connected || !s.Running || runtime(s) == "failed" {
 		return nil
+	}
+	if p := s.Progress; p != nil && p.Mode == "usage_limit_wait" {
+		return l.markedGutter(u.Theme.symbol("◌", "."), warningStyle, textLine(llm.UsageLimitWaiting(p.RetryAt), warningStyle))
 	}
 	phase := ""
 	runningTools := false

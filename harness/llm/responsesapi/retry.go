@@ -1,6 +1,8 @@
 package responsesapi
 
 import (
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"net/http"
 	"regexp"
 	"slices"
@@ -13,10 +15,79 @@ import (
 
 var retryAfterMessagePattern = regexp.MustCompile(`(?i)\btry again in\s*(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|seconds?)\b`)
 
+var usageRetryMessagePattern = regexp.MustCompile(`(?i)\btry again in\s*(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|seconds?|m|minutes?|h|hours?|d|days?)\b`)
+
+func usageResetBody(body []byte, now time.Time) time.Time {
+	var fields struct {
+		Error           jsontext.Value `json:"error"`
+		ResetsAt        jsontext.Value `json:"resets_at"`
+		ResetAt         jsontext.Value `json:"reset_at"`
+		ResetsInSeconds float64        `json:"resets_in_seconds"`
+	}
+	if json.Unmarshal(body, &fields) != nil {
+		return time.Time{}
+	}
+	if len(fields.Error) > 0 && string(fields.Error) != "null" {
+		return usageResetBody(fields.Error, now)
+	}
+	var reset time.Time
+	for _, raw := range []jsontext.Value{fields.ResetsAt, fields.ResetAt} {
+		var value string
+		if json.Unmarshal(raw, &value) != nil {
+			value = string(raw)
+		}
+		at, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			seconds, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				continue
+			}
+			at = time.Unix(seconds, 0)
+		}
+		if at.After(reset) {
+			reset = at
+		}
+	}
+	if reset.IsZero() && fields.ResetsInSeconds > 0 && fields.ResetsInSeconds < float64((1<<63-1)/time.Second) {
+		reset = now.Add(time.Duration(fields.ResetsInSeconds * float64(time.Second)))
+	}
+	return reset
+}
+
+func usageResetHint(err *APIError, headers http.Header, now time.Time) {
+	if _, limited := err.UsageLimitReset(); !limited {
+		return
+	}
+	delay := retryAfterHeader(headers.Get("Retry-After"), now)
+	if match := usageRetryMessagePattern.FindStringSubmatch(err.Message); match != nil {
+		value, _ := strconv.ParseFloat(match[1], 64)
+		unit := time.Second
+		switch strings.ToLower(match[2]) {
+		case "ms", "millisecond", "milliseconds":
+			unit = time.Millisecond
+		case "m", "minute", "minutes":
+			unit = time.Minute
+		case "h", "hour", "hours":
+			unit = time.Hour
+		case "d", "day", "days":
+			unit = 24 * time.Hour
+		}
+		if value > 0 && value < float64(1<<63-1)/float64(unit) {
+			delay = max(delay, time.Duration(value*float64(unit)))
+		}
+	}
+	if delay > 0 && now.Add(delay).After(err.ResetAt) {
+		err.ResetAt = now.Add(delay)
+	}
+}
+
 // Providers report failures inconsistently, so this classifier intentionally
 // fails open, favoring retries.
 func retryableResponseError(err *APIError, retryableStatuses []int) bool {
 	if err == nil {
+		return false
+	}
+	if _, limited := err.UsageLimitReset(); limited {
 		return false
 	}
 	switch err.Code {
