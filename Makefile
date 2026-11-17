@@ -1,4 +1,4 @@
-.PHONY: build test test-ci check prepush snapshot test-snapshot test-pilot-kit test-pilot-provider test-asp-oauth test-daily-development mac-install
+.PHONY: build test test-ci test-race-exit check prepush snapshot test-snapshot test-pilot-kit test-pilot-provider test-asp-oauth test-daily-development mac-install
 
 GORELEASER ?= goreleaser
 BIN_DIR ?= bin
@@ -38,15 +38,23 @@ build:
 	go build $(BUILD_FEATURE_FLAGS) -trimpath -o "$(BIN_DIR)/unreal-agent-runner" ./cmd/unreal-agent-runner
 	go build $(BUILD_FEATURE_FLAGS) -trimpath -o "$(BIN_DIR)/unreal-agent-auth" ./cmd/unreal-agent-auth
 
-test:
-	go test -race ./...
+# A race-built process normally sleeps 1 s at exit so late races can be
+# reported; every test and every race-built child it starts pays it. Routine
+# runs skip the sleep; the nightly workflow runs test-race-exit with it.
+RACE_FAST := GORACE=atexit_sleep_ms=0
 
-# Keep the human test target unchanged. Only go test's status controls CI;
+test:
+	$(RACE_FAST) go test -race ./...
+
+test-race-exit:
+	GORACE= go test -race -count=1 ./...
+
+# Keep the human test output unchanged. Only go test's status controls CI;
 # collecting/printing the duration summary never imposes a time budget.
 TEST_JSON ?= test-results.json
 export TEST_JSON
 test-ci:
-	@bash -c 'nice -n 19 go test -race -json ./... | tee "$$TEST_JSON"; \
+	@bash -c '$(RACE_FAST) nice -n 19 go test -race -json ./... | tee "$$TEST_JSON"; \
 		status=$${PIPESTATUS[0]}; \
 		summary=$$(nice -n 19 python3 scripts/test_durations.py "$$TEST_JSON"); \
 		printf "%s\n" "$$summary"; \

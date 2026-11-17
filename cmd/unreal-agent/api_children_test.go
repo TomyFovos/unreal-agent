@@ -82,7 +82,8 @@ func TestAPIKeyBuiltInLeadAndGrandchildProcess(t *testing.T) {
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		gpt.ServeHTTP(w, r)
 	}))
-	defer server.Close()
+	// Keep the backend alive until the Host cleanup has joined its sessions.
+	t.Cleanup(server.Close)
 	p, key := apiFixture(t, server.URL)
 	cfg := codexServeConfiguration(workspace, server.URL)
 	cfg.Runtime.Provider, cfg.Runtime.ReasoningEffort = p.Provider, ""
@@ -167,5 +168,12 @@ func TestAPIKeyBuiltInLeadAndGrandchildProcess(t *testing.T) {
 		t.Error("an unavailable /model-sub choice used the parent's API connection")
 	}
 	gpt.mu.Unlock()
+	// child.wait joins the lead, but its completion also wakes the parent.
+	// Drain that review before closing either the Host or its fake backend.
+	stopMultiSession(t, client, v)
+	parent, err := client.Inspect(t.Context(), "api-parent", 0, 256)
+	if err != nil || parent.Failure != "" || responseCount(parent) == 0 {
+		t.Fatalf("API parent review did not complete: error=%v failure=%q responses=%d", err, parent.Failure, responseCount(parent))
+	}
 	assertNoStoredCredentials(t, filepath.Join(directory, "sessions"), "fake-selected-key")
 }
