@@ -21,9 +21,9 @@ import (
 )
 
 // subagentModel is the sub-agents' model chosen with subagent model.
-// The launcher keeps it in one file under STATE, so every conversation shares
-// it, and each child start reads it. Without a choice, E1's GPT templates
-// follow an API parent's explicit connection. Choosing Codex pins its route.
+// The launcher keeps it in one file under shared STATE, so every conversation
+// and workspace shares it, and each child start reads it. Without a choice,
+// E1's GPT templates follow an API parent's explicit connection. Choosing Codex pins its route.
 // Claude names the model Claude Code's own Agent
 // sub-agents run on, instead of Unreal's children.
 type subagentModel struct {
@@ -51,10 +51,7 @@ var subagentModelMu sync.Mutex
 var subagentRoleGroups = []string{"lead", "worker", "collector"}
 
 func subagentRole(name string) string {
-	if strings.HasPrefix(name, "worker-") {
-		return "worker"
-	}
-	return name
+	return subagent.RoleGroup(name)
 }
 
 func (m subagentModel) choice(name string) subagentModelChoice {
@@ -133,6 +130,49 @@ func readSubagentModel(path string) (subagentModel, error) {
 		return subagentModel{}, errors.New("invalid sub-agent model file")
 	}
 	return m, nil
+}
+
+// migrateSubagentModel seeds shared state from the first launched repo with a
+// saved choice. Keep the original bytes and file, and never replace a shared
+// choice, including when another workspace launches concurrently.
+func migrateSubagentModel(legacy, shared string) error {
+	if legacy == shared {
+		return nil
+	}
+	if _, err := os.Lstat(shared); !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	// The shared directory is also needed for future model set commands when
+	// neither a key nor a legacy model choice has been saved yet.
+	if err := os.MkdirAll(filepath.Dir(shared), 0700); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(legacy)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(shared), ".subagent-model-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if _, err = f.Write(data); err != nil {
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if err = os.Link(f.Name(), shared); errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+	return err
 }
 
 // writeSubagentModel replaces the file whole, so a child start never reads a

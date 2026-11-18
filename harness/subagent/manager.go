@@ -250,6 +250,11 @@ func (m *Manager) run(j *job, p Plan) {
 					state.TerminalResult = "Allowed the child's request " + p.Request
 				}
 			}
+		case "review":
+			_, err = m.config.Owner.RecordChildReview(ctx, m.config.Owner.Generation, sessionstore.ChildReview{InputID: inbox.ID("review:" + string(op.ID)), Handle: string(p.Handle), ChildID: string(ChildID(p.ParentID, p.Handle)), Decision: p.Review, Reason: p.Text})
+			if err == nil {
+				state.TerminalResult = "Recorded " + p.Review + " review for " + string(p.Handle)
+			}
 		case "cancel":
 			_, err = m.ownedChild(p.Handle)
 			if err == nil {
@@ -584,7 +589,7 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 	if done, err := collect(false); done || err != nil {
 		return finishStatus(handle), err
 	}
-	started := llm.ActivityRecord{Kind: "child_start", ID: string(j.operation.ID), StartedAt: time.Now().UTC(), Template: p.Template}
+	started := llm.ActivityRecord{Kind: "child_start", ID: string(j.operation.ID), StartedAt: time.Now().UTC(), Template: p.Template, Layer: RoleGroup(p.Template)}
 	if selection := sessionstore.SelectionFromConfiguration(child.Runtime); selection != nil {
 		started.Provider, started.Model, started.Effort = selection.Provider, selection.Model, string(selection.Effort)
 	}

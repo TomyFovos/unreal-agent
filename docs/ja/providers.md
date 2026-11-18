@@ -130,7 +130,7 @@ OpenCode Go は、管理ストアに API キーを保存すると追加できる
 
 ### セットアップ手順
 
-1. 管理ストア（`~/.local/state/unreal-agent/credentials`、プロバイダ `opencode-go`、id `primary`）に、`unreal-agent-auth login ... --key-stdin` でキーを保存します。TUI の `/login` に、その環境での実際のコマンドが表示されます。
+1. 管理ストア（`~/.local/state/unreal-agent/credentials`、`XDG_STATE_HOME` 設定時は `$XDG_STATE_HOME/unreal-agent/credentials`、プロバイダ `opencode-go`、id `primary`）に、`unreal-agent-auth login ... --key-stdin` でキーを保存します。共通キットのインストーラーと Mac のランチャーもこの保存先を使います。TUI の `/login` に、その環境での実際のコマンドが表示されます。
 2. `/model refresh` を実行します。`/model` に「OpenCode Go · available」と表示され、Host の再起動は不要です。
 3. `/model` で選ぶと、その会話自身のモデルだけが切り替わります。モデルは 24 個から選び、effort があるモデルは続けて effort も選びます（一覧に effort がないモデルは、その段階が出ません）。
 
@@ -186,8 +186,11 @@ unreal-agent subagent model show --role worker
 collector は別設定で、変更しなければ `gpt-6-luna` / medium です。役割と provider の組み合わせは固定しません。
 API キー接続は利用者が明示した場合だけ使い、利用不能な provider から自動で切り替えません。
 
-設定・参照は Host 経由で処理し、Session に記録します。選択は従来の shared state の `subagent-model.json` に保存し、
-全 Session・フォルダで共有して再起動後も保持します。Version 1 の旧単一設定は全役割に適用し、役割別設定は Version 2 で保存します。
+設定・参照は Host 経由で処理し、Session に記録します。選択は `~/.local/state/unreal-agent/subagent-model.json`
+（`XDG_STATE_HOME` 設定時は `$XDG_STATE_HOME/unreal-agent/subagent-model.json`）に保存し、
+全 Session・フォルダ・instance で共有して再起動後も保持します。
+旧リポジトリ別設定は共有ファイルがないときに起動時に移行し、元ファイルを残します。既存の共有設定は上書きしません。
+Version 1 の旧単一設定は全役割に適用し、役割別設定は Version 2 で保存します。
 変更しない役割は以前の一括設定を引き継ぎます。次の子から有効で、実行中の子とその配下は記録済みの選択を維持します。
 明示的な `Subagents`、`SubagentDefaults`、明示 runtime の `/children start` は影響を受けません。
 

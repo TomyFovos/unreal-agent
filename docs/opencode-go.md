@@ -37,17 +37,19 @@ CLI 設定で明示的に選ぶか、初回の `UNREAL_HARNESS_LLM_PROVIDER=open
 Mac では、キーをコピーしてから次を実行します。
 
 ```sh
-pbpaste | <Unreal の場所>/unreal-agent-auth login --store ~/.local/state/unreal-agent/credentials --provider opencode-go --id primary --key-stdin
+pbpaste | <Unreal の場所>/unreal-agent-auth login --store "${XDG_STATE_HOME:-$HOME/.local/state}/unreal-agent/credentials" --provider opencode-go --id primary --key-stdin
 ```
 
 `pbpaste` がない環境（Linux など）では、次を実行してからキーを貼り付けて Enter を押します。入力は
 表示されません。
 
 ```sh
-read -rs KEY && printf %s "$KEY" | <Unreal の場所>/unreal-agent-auth login --store ~/.local/state/unreal-agent/credentials --provider opencode-go --id primary --key-stdin; unset KEY
+read -rs KEY && printf %s "$KEY" | <Unreal の場所>/unreal-agent-auth login --store "${XDG_STATE_HOME:-$HOME/.local/state}/unreal-agent/credentials" --provider opencode-go --id primary --key-stdin; unset KEY
 ```
 
-Unreal はキーを探すたびにこの保存場所を見ます。
+保存先は `~/.local/state/unreal-agent/credentials` です。`XDG_STATE_HOME` が設定されていれば
+`$XDG_STATE_HOME/unreal-agent/credentials` を使います。共通キットのインストーラー、TUI の `/login`、
+Mac のランチャーは同じ保存先を使い、同じ環境の全ワークスペース・instance の Host がキーを探すたびに参照します。
 
 ### 使い始める
 
@@ -96,11 +98,18 @@ unreal-agent subagent model set --role all --provider opencode-go --model deepse
 理由を返して失敗し、保存済み設定を変更しません。API キー接続も利用者が明示した場合だけ使い、別 provider への自動切替はしません。
 設定・参照は Host 経由で処理し、操作した Session に役割・provider・model・effort を記録します。
 
-選択は従来と同じ shared state の `subagent-model.json` に保存し、全 Session・フォルダで共有します。
+選択はキーと同じ共有ディレクトリの `~/.local/state/unreal-agent/subagent-model.json`
+（`XDG_STATE_HOME` が設定されていれば `$XDG_STATE_HOME/unreal-agent/subagent-model.json`）に保存し、
+全 Session・フォルダ・instance で共有します。
 Host 再起動後も保持します。Version 1 の旧単一設定は全役割への選択として読み込み、役割別設定は Version 2 で保存します。
 変更しない役割は以前の一括設定を引き継ぎます。設定は次の子から有効で、実行中の子は記録済みの選択を維持します。
 lead 配下の worker・collector も lead 開始時に選択を記録します。
 明示的な `Subagents`・`SubagentDefaults` と、runtime を明示した `/children start` は共有設定の対象外です。
+
+旧共通キットでリポジトリ別の State に保存した `subagent-model.json` は、共有ファイルがないときに
+そのリポジトリの起動時に内容を変えずに移行します。複数の旧設定があれば最初に起動したリポジトリの選択を共有し、
+元ファイルはすべて残します。共有ファイルがある場合はその選択を優先し、旧設定で上書きしません。
+Session・ログは従来のリポジトリ別 State に保持します。
 
 保存済み設定がない役割では、親が OpenAI API を明示選択していればその API、他の親では Codex を使います。
 Codex を明示した役割は、API の親からでもサブスク接続を使います。

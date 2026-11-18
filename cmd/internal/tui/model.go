@@ -73,6 +73,7 @@ type Model struct {
 	hasCompletedEpoch     bool
 	seenEpoch             uint64
 	analysis              *analysis.Accumulator
+	analysisTree          *analysis.Tree
 	historyMore           bool
 	analysisFull          bool
 	createdAt             time.Time
@@ -96,6 +97,9 @@ func (m *Model) Analysis(now time.Time, rows []viewer.Row) analysis.Report {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r := m.analysis.Snapshot(now, m.state.Connected, strings.Contains(m.state.Status, "resync"), rows, m.state.Operations)
+	if m.analysisTree != nil {
+		r.Tree = m.analysisTree.Snapshot(m.analysis)
+	}
 	if r.Selection != nil {
 		if c, ok := m.capabilities[r.Selection.Provider]; ok {
 			r.ToolBridgeEnabled, r.ToolBridgeStatus = c.Tools, c.ToolBridge

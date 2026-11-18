@@ -149,6 +149,7 @@ type ControlRequest struct {
 	Text             string
 	Request          string `json:",omitzero"`
 	Allow            bool   `json:",omitzero"`
+	Review           string `json:",omitzero"`
 }
 type Controls interface {
 	SteerChild(context.Context, ControlRequest) (host.Receipt, error)

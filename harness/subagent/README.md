@@ -44,5 +44,20 @@ Calls `subagent.Serve(ctx, os.Stdin, os.Stdout, childFactory)`:
 - `SteerChild` — Sends a follow-up message to a running child via a durable parent operation-intent input (with idempotent `InputID`).
 - `CancelChild` — Cancels a running child Operation.
 - `ResumeChild` — Verifies that a live parent Host owns and has recovered a non-terminal child (never spawns duplicate child processes).
+- `ReviewChild` — Optionally appends the parent's `accept` or `reject` assessment. It does not change the child's finish, permissions or scheduling. From the parent's shell: `unreal-agent subagent review HANDLE accept|reject [--reason TEXT]`. Reason is optional; retries with the same input identity are idempotent. A later assessment is another record, preserving earlier rejection events.
+
+Tool-capable leads use `SubagentReview` with `handle`, `decision` (`accept` or `reject`) and optional `reason`. This reaches the same parent writer without needing Claude's CLI socket environment.
 
 > **Control Validation:** All control requests validate the current parent ID/generation and the exact `SubagentStart` Operation/child pair using a stable non-empty `InputID`. Terminal (`completed`, `failed`, or `canceled`) children cannot be resumed.
+
+## 4. Layer and worker-model analysis
+
+`/analyze` → **Layers** reads the Session tree on demand, including archived children and grandchildren. The same statistics appear in its JSON and Markdown exports. New `HostRecord(version=1, kind=activity)` child-start records include the layer and resolved provider/model/effort. The role mapping used by model selection also derives layers for older starts; custom templates are `unknown`. Roles do not imply any particular provider.
+
+Generation TPS uses only reported output paired with response timing. `provider_api` timing is measured; `client_clock` timing is derived. Missing timing stays `unknown`, and requests without timing do not inflate the numerator of a timed TPS average. Separately recorded compaction usage contributes to volume. Request counts are canonical responses and recorded compactions; unreported provider-internal calls cannot be counted. Wait time uses `usage_limit_wait` start/clear pairs, never the planned retry deadline as measured duration. First response means the first completed response, not the first streamed token.
+
+Rework's denominator is normally ended workers with an explicit assessment. The latest accept/reject supplies the assessment counts; any explicit rejection or subsequent same-parent, same-title delegation contributes to the reviewed worker's rework share. Repeat-title inference is displayed separately and never creates an explicit review. Unreviewed normal ends, failed ends and cancellations are separate. Reuse the original one-line task title for rework. Record review decisions when useful and describe verification in the parent's report; neither is a completion requirement.
+
+Task chains are derived from those repeat-title relationships. Totals include all attempts and are attributed to the initial worker model; mixed-model tasks are flagged. Both summed worker wall time and task elapsed time including parent gaps are shown. Parent tokens cannot be reliably attributed to an individual task and remain in the layer totals. Reopening `/analyze` refreshes the descendant snapshot, whose observation time is displayed. Missing descendants mark totals partial.
+
+List-price USD is a derived equivalent, not actual subscription billing. The offline table currently knows the exact OpenCode Go `deepseek-v4.1-flash` and `qwen3.8-flash` identities from the checked-in 2026-11-05 public model-list snapshot (including DeepSeek's advertised time multiplier); other models and missing usage fields stay unknown. Analysis exports contain metadata/counters and opaque task IDs, excluding task bodies and review reasons.

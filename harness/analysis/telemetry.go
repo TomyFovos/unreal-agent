@@ -61,7 +61,10 @@ func TelemetryLines(r Report, kinds ...string) []string {
 				line += " modified=true"
 			}
 		case "child_start":
-			line += " template=" + viewer.SafeText(a.Template) + " model=" + viewer.SafeText(a.Model) + " effort=" + viewer.SafeText(a.Effort)
+			line += " template=" + viewer.SafeText(a.Template) + " provider=" + viewer.SafeText(a.Provider) + " model=" + viewer.SafeText(a.Model) + " effort=" + viewer.SafeText(a.Effort)
+			if a.Layer != "" {
+				line += " layer=" + viewer.SafeText(a.Layer) + " (recorded)"
+			}
 		case "native_bash":
 			elapsed := "unknown"
 			if !a.StartedAt.IsZero() && !a.EndedAt.IsZero() && !a.EndedAt.Before(a.StartedAt) {

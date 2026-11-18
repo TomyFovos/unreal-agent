@@ -175,4 +175,11 @@ Windows 上で既存の Linux Docker Sandbox を使っている場合は、以�
 
 有効版は `bash development.sh --opencode-go-api-key-file /absolute/go.key`（0600 のファイル）、または `--opencode-go-api-key-env MY_GO_KEY`（環境変数の名前）も受け付けます。キーを画面に出さず管理ストアへ保存し、利用時には `/model` で OpenCode Go を明示選択します。
 
+保存先は TUI の `/login` と同じ `~/.local/state/unreal-agent/credentials` です。
+`XDG_STATE_HOME` が設定されていれば `$XDG_STATE_HOME/unreal-agent/credentials` を使います。
+共通ランチャーはこの親ディレクトリを `--shared-state-directory` で渡し、同じ環境の全ワークスペース・instance で
+キーと `subagent-model.json` の役割別モデル選択を共有します。Mac のランチャーも同じ保存先です。
+旧リポジトリ別モデル設定は共有ファイルがないときに起動時に移行し、元ファイルを残します。
+共有済みの選択は上書きしません。Session・ログの保存先は従来どおりです。[詳細](../opencode-go.md#サブエージェントのモデルを選ぶ)。
+
 `KIT.json` の `opencode_go_enabled` が `false` の配布物は、どちらのキー指定も「この配布物では OpenCode Go は使えません」と案内して拒否します。`unreal-agent-auth` でのキー登録も拒否し、環境変数や設定ファイルでは有効に戻せません。以前の Session は選択を保持して開き、`/model` でほかの接続を選ぶよう案内します。実行ファイル自体の判定は `unreal-agent --version` で確認できます。変更にはソースからの再ビルドが必要です。[配布手順](distribution.md#opencode-go-を無効にした配布物)を参照してください。

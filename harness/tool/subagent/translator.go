@@ -44,8 +44,8 @@ func BindRuntime(extensions []tool.Extension, ctx context.Context, owner *host.S
 	}
 }
 
-// Extensions returns codecs for all six tools. A child advertises SendParent
-// and Finish, and a parent start/send/cancel/approve; a child with worker
+// Extensions returns codecs for the subagent tools. A child advertises SendParent
+// and Finish, and a parent start/send/cancel/approve/review; a child with worker
 // templates is both.
 func Extensions(owner session.ID, templates map[string]runtime.Template, child bool) ([]tool.Extension, error) {
 	data, err := json.Marshal(templates)
@@ -66,6 +66,7 @@ func Extensions(owner session.ID, templates map[string]runtime.Template, child b
 		{"SubagentSend", "send", "Message an owned child by operation handle; acknowledgement confirms receipt only.", map[string]any{"handle": map[string]any{"type": "string"}, "text": map[string]any{"type": "string"}}, []string{"handle", "text"}, false},
 		{"SubagentCancel", "cancel", "Cancel an owned child by operation handle.", map[string]any{"handle": map[string]any{"type": "string"}}, []string{"handle"}, false},
 		{"SubagentApprove", "approve", "Allow or deny an owned child request; escalate to your parent/user if unsure.", map[string]any{"handle": map[string]any{"type": "string"}, "request": map[string]any{"type": "string"}, "allow": map[string]any{"type": "boolean"}}, []string{"handle", "request", "allow"}, false},
+		{"SubagentReview", "review", "Optionally record your accept/reject assessment of an owned child for /analyze. Reason is optional; this does not change the child's finish.", map[string]any{"handle": map[string]any{"type": "string"}, "decision": map[string]any{"type": "string", "enum": []string{"accept", "reject"}}, "reason": map[string]any{"type": "string"}}, []string{"handle", "decision"}, false},
 		{"SendParent", "parent", "Message the parent; end the turn when awaiting a reply.", map[string]any{"text": map[string]any{"type": "string"}, "progress": map[string]any{"type": "boolean", "description": "True: progress does not wake the parent; delivered next turn. False (default): wakes it for a question or decision."}}, []string{"text"}, true},
 		{"Finish", "finish", "Record the final report and stop this child. Call alone after all other calls/operations finish.", map[string]any{"status": map[string]any{"type": "string", "enum": []string{"completed", "failed"}}, "summary": map[string]any{"type": "string"}, "changedFiles": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "tests": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "blockers": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, []string{"status", "summary", "changedFiles", "tests", "blockers"}, true},
 	}
@@ -91,6 +92,8 @@ func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallSta
 		Runtime      *runtime.RuntimeRequest `json:"runtime"`
 		Request      string                  `json:"request"`
 		Allow        bool                    `json:"allow"`
+		Decision     string                  `json:"decision"`
+		Reason       string                  `json:"reason"`
 	}
 	if err := json.Unmarshal([]byte(call.Arguments), &args, json.RejectUnknownMembers(true)); err != nil {
 		detail := "malformed JSON; send an object matching the tool schema"
@@ -116,6 +119,9 @@ func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallSta
 	}
 	if t.action == "approve" {
 		p.Request, p.Allow = args.Request, args.Allow
+	}
+	if t.action == "review" {
+		p.Review, p.Text = args.Decision, args.Reason
 	}
 	if t.action == "start" {
 		config, ok := t.templates[args.Template]

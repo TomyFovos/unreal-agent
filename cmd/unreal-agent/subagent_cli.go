@@ -46,6 +46,8 @@ const subagentUsage = `usage: unreal-agent subagent COMMAND
                                          start a child; the task is read from stdin without --task
   wait [HANDLE ...] [--timeout 9m]        wait until a child finishes or asks for approval
   approve HANDLE REQUEST allow|deny       answer a child's approval request
+  review HANDLE accept|reject [--reason TEXT]
+                                         optionally record the parent's assessment
   send HANDLE [--text TEXT]               send a child more instructions (stdin without --text)
   cancel HANDLE                           stop a child
   list [--all]                            show active children and ended counts; --all shows every child
@@ -106,6 +108,13 @@ func runSubagentCLI(ctx context.Context, args []string, stdin io.Reader, out io.
 			return errors.New(subagentUsage)
 		}
 		return c.control(ctx, "approve", args[1], viewer.ControlRequest{Request: args[2], Allow: args[3] == "allow"})
+	case "review":
+		reason := flags.String("reason", "", "optional review reason")
+		args, err := parseAll(flags, args[1:])
+		if err != nil || len(args) != 2 || args[1] != "accept" && args[1] != "reject" {
+			return errors.New(subagentUsage)
+		}
+		return c.control(ctx, "review", args[0], viewer.ControlRequest{Review: args[1], Text: *reason})
 	case "send":
 		text := flags.String("text", "", "message; read from stdin when empty")
 		handle, err := parseAll(flags, args[1:])
@@ -439,6 +448,8 @@ func (c subagentCLI) control(ctx context.Context, action, handle string, request
 	request.InputID = inbox.ID("cli-" + action + "-" + uuid.New().String())
 	remote := viewer.Remote{ParentID: c.parent, Call: c.client.Extension}
 	switch action {
+	case "review":
+		_, err = remote.ReviewChild(ctx, request)
 	case "send":
 		_, err = remote.SteerChild(ctx, request)
 	case "cancel":
@@ -453,6 +464,8 @@ func (c subagentCLI) control(ctx context.Context, action, handle string, request
 		return fmt.Errorf("could not %s %s: %w", action, handle, err)
 	}
 	switch {
+	case action == "review":
+		fmt.Fprintf(c.out, "Recorded %s review for %s.\n", request.Review, handle)
 	case action == "approve" && request.Allow:
 		fmt.Fprintf(c.out, "Allowed request %s of %s.\n", request.Request, handle)
 	case action == "approve":

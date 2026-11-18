@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-var Views = []string{"Overview", "Usage", "Turns", "Tools", "Agents", "Context", "Timeline", "Errors", "Export"}
+var Views = []string{"Overview", "Usage", "Turns", "Tools", "Agents", "Context", "Timeline", "Errors", "Layers", "Export"}
 
 func value(v int64, u viewer.Usage, field ...llm.UsageField) string {
 	if !u.Known || len(field) > 0 && slices.Contains(u.Unknown, field[0]) && v == 0 {
@@ -29,6 +29,8 @@ func Lines(r Report, view string, ascii bool) []string {
 		out = append(out, "resync: observed canonical data only")
 	}
 	switch strings.ToLower(view) {
+	case "layers":
+		out = append(out, treeLines(r.Tree)...)
 	case "overview":
 		out = append(out, cacheLines(r)...)
 		out = append(out, TelemetryLines(r, "host_start")...)

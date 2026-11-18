@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
@@ -102,5 +104,50 @@ func TestSubagentShowWaitAndHistoryOnArchivedHandle(t *testing.T) {
 		if err != nil || len(view.History.Items) == 0 || view.Session.Session.ID != children[0] {
 			t.Fatal("archived history/cache lookup failed", view, err)
 		}
+	}
+	for _, args := range [][]string{{"review", "spawn-0000", "reject", "--reason", "needs a focused fix"}, {"review", "spawn-0000", "accept"}} {
+		var out bytes.Buffer
+		if err := runSubagentCLI(ctx, args, strings.NewReader(""), &out); err != nil || !strings.Contains(out.String(), "Recorded") {
+			t.Fatal(args, out.String(), err)
+		}
+	}
+	owner, err := h.Attach("main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := owner.Inspect(0, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reviews []sessionstore.ChildReview
+	for _, item := range v.History.Items {
+		if r, ok := item.Data.(sessionstore.HostRecord); ok && r.ChildReview != nil {
+			reviews = append(reviews, *r.ChildReview)
+		}
+	}
+	if len(reviews) != 2 || reviews[0].Decision != "reject" || reviews[0].Reason != "needs a focused fix" || reviews[1].Decision != "accept" || reviews[1].Reason != "" {
+		t.Fatal("missing optional parent review", reviews)
+	}
+	first, err := owner.RecordChildReview(ctx, owner.Generation, reviews[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := owner.RecordChildReview(ctx, owner.Generation, reviews[1])
+	if err != nil || first != again {
+		t.Fatal("retry was not idempotent", first, again, err)
+	}
+	changed := reviews[1]
+	changed.Decision = "reject"
+	if _, err := owner.RecordChildReview(ctx, owner.Generation, changed); !errors.Is(err, host.ErrConflict) {
+		t.Fatal("changed retry accepted", err)
+	}
+	if _, err := owner.RecordChildReview(ctx, "stale", reviews[1]); !errors.Is(err, host.ErrStaleGeneration) {
+		t.Fatal("stale parent accepted", err)
+	}
+	changed = reviews[1]
+	changed.InputID = "not-owned"
+	changed.ChildID = "unrelated"
+	if _, err := owner.RecordChildReview(ctx, owner.Generation, changed); err == nil {
+		t.Fatal("review crossed parent boundary")
 	}
 }

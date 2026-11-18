@@ -9,6 +9,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 )
 
 type ControlRequest struct {
@@ -21,6 +22,14 @@ type ControlRequest struct {
 	// Request and Allow answer a child's approval request (ApproveChild).
 	Request string `json:",omitzero"`
 	Allow   bool   `json:",omitzero"`
+	Review  string `json:",omitzero"`
+}
+
+func ReviewChild(ctx context.Context, owner *host.Session, r ControlRequest) (host.Receipt, error) {
+	if _, err := validateControl(owner, r); err != nil {
+		return host.Receipt{}, err
+	}
+	return owner.RecordChildReview(ctx, r.ParentGeneration, sessionstore.ChildReview{InputID: r.InputID, Handle: string(r.OperationID), ChildID: string(r.ChildID), Decision: r.Review, Reason: r.Text})
 }
 
 func validateControl(owner *host.Session, r ControlRequest) (operation.Operation, error) {

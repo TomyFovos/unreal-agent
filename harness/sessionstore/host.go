@@ -23,6 +23,19 @@ type HostRecord struct {
 	Selection           *RuntimeSelection             `json:",omitzero"`
 	Activity            *llm.ActivityRecord           `json:",omitzero"`
 	End                 *EndRecord                    `json:",omitzero"`
+	ChildReview         *ChildReview                  `json:",omitzero"`
+}
+
+const HostChildReview = "child_review"
+
+// ChildReview is a parent's optional assessment. It never changes the child's
+// outcome, permissions or scheduling. InputID makes transport retries idempotent.
+type ChildReview struct {
+	InputID  inbox.ID
+	Handle   string
+	ChildID  string
+	Decision string
+	Reason   string `json:",omitzero"`
 }
 
 const HostEnded = "ended"
@@ -42,6 +55,9 @@ func (r HostRecord) Validate() error {
 	if r.Version != 1 {
 		return fmt.Errorf("unsupported host record version %d", r.Version)
 	}
+	if r.ChildReview != nil && r.Kind != HostChildReview {
+		return fmt.Errorf("unexpected child review")
+	}
 	if r.Kind != HostProjectInstructions && r.ProjectInstructions != nil {
 		return fmt.Errorf("host record %q carries project instructions", r.Kind)
 	}
@@ -49,6 +65,12 @@ func (r HostRecord) Validate() error {
 		return fmt.Errorf("unexpected runtime selection")
 	}
 	switch r.Kind {
+	case HostChildReview:
+		v := r.ChildReview
+		if v == nil || v.InputID == "" || v.Handle == "" || v.ChildID == "" || (v.Decision != "accept" && v.Decision != "reject") {
+			return fmt.Errorf("invalid child review")
+		}
+		return nil
 	case HostEnded:
 		if r.End == nil || r.End.EndedBy != "host_restart" || r.End.EndedAt.IsZero() {
 			return fmt.Errorf("invalid executor end record")

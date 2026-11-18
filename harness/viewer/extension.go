@@ -105,6 +105,13 @@ func (h ExtensionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		out.Error = "invalid_request"
 	} else {
 		switch q.Action {
+		case "inspect_tree":
+			v, e := (ParentReader{Host: h.Host, ParentID: q.ParentID, Directory: h.Directory, cache: h.cache}).InspectTree(r.Context(), q.ID, q.After, q.Limit)
+			if e != nil {
+				err = e
+			} else {
+				out.View = &v
+			}
 		case "observe":
 			v, e := (ParentReader{Host: h.Host, ParentID: q.ParentID, Directory: h.Directory, cache: h.cache}).Observe(r.Context(), q.ID, q.Limit)
 			if e != nil {
@@ -127,10 +134,12 @@ func (h ExtensionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		case "view.set":
 			err = writeViewPreference(h.Directory, q.ParentID, q.Display)
-		case "steer", "cancel", "resume", "approve":
+		case "steer", "cancel", "resume", "approve", "review":
 			controls := HostControls{Host: h.Host}
 			var receipt host.Receipt
 			switch q.Action {
+			case "review":
+				receipt, err = controls.ReviewChild(r.Context(), q.Control)
 			case "steer":
 				receipt, err = controls.SteerChild(r.Context(), q.Control)
 			case "approve":
@@ -275,6 +284,9 @@ func (r Remote) CancelChild(ctx context.Context, q ControlRequest) (host.Receipt
 }
 func (r Remote) ApproveChild(ctx context.Context, q ControlRequest) (host.Receipt, error) {
 	return r.receipt(ctx, "approve", q)
+}
+func (r Remote) ReviewChild(ctx context.Context, q ControlRequest) (host.Receipt, error) {
+	return r.receipt(ctx, "review", q)
 }
 func (r Remote) ResumeChild(ctx context.Context, q ControlRequest) error {
 	if q.ParentID != r.ParentID {

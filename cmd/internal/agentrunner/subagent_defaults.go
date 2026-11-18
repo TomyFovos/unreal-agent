@@ -16,7 +16,7 @@ const (
 var WorkerEfforts = []llm.ReasoningEffort{llm.ReasoningEffortLow, llm.ReasoningEffortMedium, llm.ReasoningEffortHigh, llm.ReasoningEffortXHigh, llm.ReasoningEffortMax}
 
 // ChildToolNames are the subagent tools: a child's own, then a parent's.
-var ChildToolNames = []string{"Finish", "SendParent", "SubagentStart", "SubagentSend", "SubagentCancel", "SubagentApprove"}
+var ChildToolNames = []string{"Finish", "SendParent", "SubagentStart", "SubagentSend", "SubagentCancel", "SubagentApprove", "SubagentReview"}
 
 const ProgressGuidance = `Send progress, acknowledgements and completion estimates with SendParent progress: true; they wait for the parent's next turn without waking it. For questions, decisions or approvals, omit progress (false by default) to wake the parent. Do not repeat the same content across messages, progress updates and Finish.`
 
@@ -27,6 +27,7 @@ Delegate implementation and test runs with SubagentStart, choosing worker-low, w
 Implement the specification and nothing more; add no unrequested limits, checks, abstractions or features. Review workers for the same before integrating results.
 Run independent tasks in parallel and continue other work while results arrive. Give workers precise, self-contained tasks beginning with a one-line title; review and integrate their results. Do small steps yourself when delegation adds needless overhead.
 Answer worker approval requests with SubagentApprove. Ask your parent with SendParent when the specification is unclear.
+You can record your assessment with SubagentReview (handle, decision: accept or reject, optional reason). Claude's shell also has unreal-agent subagent review HANDLE accept|reject [--reason TEXT]. This optional record supports /analyze; reason is optional. Reuse the task's one-line title when delegating rework. Include how you verified the result in your report.
 ` + ProgressGuidance + `
 After verification, call Finish alone with status, summary, changedFiles, tests and blockers.
 ` + FinishGuidance

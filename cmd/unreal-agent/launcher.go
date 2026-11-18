@@ -31,13 +31,13 @@ type launchOptions struct {
 	bootstrapAuto                                                  bool
 	bootstrapClaude                                                string
 	bootstrapCodexDisabled, bootstrapClaudeDisabled                bool
-	// defaultCredentials is STATE/credentials, where /login tells users to save
-	// the OpenCode Go key. It is not part of the Host binding: the Host looks
-	// for the key on each discovery, so saving it needs no restart.
+	// defaultCredentials is <sharedState or state>/credentials. Common and
+	// folders launchers share the store /login names. It is not part of the
+	// Host binding: discovery rereads it, so saving a key needs no restart.
 	defaultCredentials string
-	// subagentModel is STATE/subagent-model.json, subagent model's choice for
-	// every conversation. Like defaultCredentials it is not part of the
-	// Host binding.
+	// subagentModel is <sharedState or state>/subagent-model.json, the model
+	// choice for every conversation. Like defaultCredentials it is not part
+	// of the Host binding.
 	subagentModel string
 	// sharedState overrides where defaultCredentials and subagentModel live so
 	// every folder reads one login and one subagent model choice; empty keeps STATE.
@@ -98,6 +98,11 @@ func (l launcher) run(ctx context.Context, args []string, output io.Writer) (err
 		appendLauncherDiagnostic(o, err.Error())
 		err = launcherStartupError(o, message, err)
 	}()
+	if o.sharedState != "" {
+		if err = migrateSubagentModel(filepath.Join(o.state, "subagent-model.json"), o.subagentModel); err != nil {
+			return err
+		}
+	}
 	client := gateway.NewClient(o.socket)
 	defer client.Close()
 	if l.choose == nil {

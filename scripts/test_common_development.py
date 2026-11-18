@@ -118,6 +118,33 @@ class CommonDevelopmentTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
         self.assertNotIn("synthetic-go-key", json.dumps(settings) + self.install_output.getvalue())
 
+    def test_installer_and_all_launches_share_credentials_and_role_models(self):
+        for xdg in (None, "", str(self.home / "custom state")):
+            with self.subTest(xdg=xdg):
+                if xdg is None:
+                    self.env.pop("XDG_STATE_HOME", None)
+                else:
+                    self.env["XDG_STATE_HOME"] = xdg
+                self.args.opencode_go_api_key_env = "TEST_GO_KEY"
+                self.env["TEST_GO_KEY"] = "synthetic-go-key"
+                with patch.object(common.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as register:
+                    settings = self.install()
+                shared = Path(xdg or self.home / ".local/state") / "unreal-agent"
+                registration = register.call_args.args[0]
+                self.assertEqual(registration[registration.index("--store") + 1], str(shared / "credentials"))
+                states = set()
+                with patch.dict(os.environ, self.env, clear=True):
+                    for workspace, instance in (("first", "default"), ("second", "default"), ("first", "other")):
+                        root = self.home / workspace
+                        paths = common.prepare_repo(settings, root, instance)
+                        command = common.command_for(settings, root, paths, "dev")
+                        self.assertIn("--shared-state-directory", command)
+                        self.assertEqual(command[command.index("--shared-state-directory") + 1], str(shared))
+                        self.assertEqual(command[command.index("--state-directory") + 1], str(paths["state"]))
+                        states.add(paths["state"])
+                        self.assertNotIn("synthetic-go-key", str(command))
+                self.assertEqual(len(states), 3)
+
     def test_api_keys_require_explicit_sources_and_persist_references_only(self):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "ambient-fake-key", "ANTHROPIC_API_KEY": "ambient-fake-key"}):
             self.assertEqual(common.api_key_sources(self.args, None), {})

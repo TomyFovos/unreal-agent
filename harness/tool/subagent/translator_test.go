@@ -133,13 +133,46 @@ func TestChildWithWorkersGetsParentTools(t *testing.T) {
 		return out
 	}
 	worker := map[string]runtime.Template{"worker": {}}
-	if got := enabled(nil, true); got["SubagentStart"] || got["SubagentApprove"] || !got["Finish"] || !got["SendParent"] {
+	if got := enabled(nil, true); got["SubagentStart"] || got["SubagentApprove"] || got["SubagentReview"] || !got["Finish"] || !got["SendParent"] {
 		t.Fatal("plain child", got)
 	}
-	if got := enabled(worker, true); !got["SubagentStart"] || !got["SubagentApprove"] || !got["Finish"] {
+	if got := enabled(worker, true); !got["SubagentStart"] || !got["SubagentApprove"] || !got["SubagentReview"] || !got["Finish"] {
 		t.Fatal("lead child", got)
 	}
-	if got := enabled(worker, false); !got["SubagentStart"] || !got["SubagentApprove"] || got["Finish"] {
+	if got := enabled(worker, false); !got["SubagentStart"] || !got["SubagentApprove"] || !got["SubagentReview"] || got["Finish"] {
 		t.Fatal("parent", got)
 	}
+}
+
+func TestReviewIsOptionalMetadataWithOptionalReason(t *testing.T) {
+	extensions, err := Extensions("lead", map[string]runtime.Template{"worker": {}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range extensions {
+		if e.Definition.Tool.Name != "SubagentReview" {
+			continue
+		}
+		if slices.Contains(e.Definition.Tool.Parameters["required"].([]string), "reason") {
+			t.Fatal("reason is required")
+		}
+		for _, args := range []string{`{"handle":"child","decision":"accept"}`, `{"handle":"child","decision":"reject","reason":"test failed"}`} {
+			c := &ctx{}
+			status := e.Translator.Translate(c, llm.ToolCall{Name: "SubagentReview", Arguments: args})
+			if status.Error != "" || len(c.specs) != 1 {
+				t.Fatal(status)
+			}
+			spec := c.specs[0]
+			plan, err := runtime.DecodePlan(operation.Operation{ID: "review", Type: spec.Type, Version: spec.Version, State: spec.State, MaxOutputLength: spec.MaxOutputLength})
+			if err != nil || plan.Action != "review" || plan.ParentID != "lead" || plan.Handle != "child" || plan.Review == "" {
+				t.Fatal(plan, err)
+			}
+		}
+		c := &ctx{}
+		if status := e.Translator.Translate(c, llm.ToolCall{Name: "SubagentReview", Arguments: `{"handle":"child","decision":"maybe"}`}); status.Error == "" || len(c.specs) != 0 {
+			t.Fatal("invalid decision submitted", status)
+		}
+		return
+	}
+	t.Fatal("SubagentReview missing")
 }

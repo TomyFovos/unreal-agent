@@ -32,6 +32,10 @@ def settings_path(home):
     return home / ".config" / NAMESPACE / "launcher.json"
 
 
+def shared_state_directory(home):
+    return Path(os.environ.get("XDG_STATE_HOME") or home / ".local/state") / "unreal-agent"
+
+
 def package(directory):
     return pilot.decode((directory / "KIT.json").read_bytes())
 
@@ -336,9 +340,8 @@ def install(args, directory, meta):
             pilot.fail("common_shell_path_unavailable", "Keep installed files. Open a fresh Bash; current aliases/functions cannot be removed by this installer. Use $HOME/.local/bin/unreal explicitly.")
         prune_versions(home, installed, prior_version)
     if go_key is not None:
-        state = Path(os.environ.get("XDG_STATE_HOME") or str(home / ".local/state"))
         result = subprocess.run([str(installed / "unreal-agent-auth"), "login", "--store",
-                                 str(state / "unreal-agent/credentials"), "--provider", "opencode-go",
+                                 str(shared_state_directory(home) / "credentials"), "--provider", "opencode-go",
                                  "--id", "primary", "--key-stdin"], input=go_key,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         if result.returncode:
@@ -432,7 +435,8 @@ def repo_paths(home, workspace, instance="default"):
 
 def command_for(settings, workspace, paths, session):
     command = [str(Path(settings["BinaryDirectory"]) / "unreal"),
-               "--state-directory", str(paths["state"]), "--socket", str(paths["socket"])]
+               "--state-directory", str(paths["state"]), "--socket", str(paths["socket"]),
+               "--shared-state-directory", str(shared_state_directory(Path(settings["Home"])))]
     if paths.get("explicit_config"): command += ["--config", str(paths["config"])]
     if settings["DockerOAuth"]: command.append("--bootstrap-codex-docker-oauth")
     if settings.get("CodexRoute") == "auto": command.append("--bootstrap-codex-auto")

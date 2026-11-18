@@ -81,30 +81,15 @@ func (c *parentReadCache) inspect(ctx context.Context, owner *host.Session, pare
 	}
 	// id comes from the validated canonical Child plan above, not from an
 	// arbitrary path supplied by the gateway caller.
-	store, err := localfile.New(directory)
+	child, err := c.loadChild(ctx, directory, id)
 	if err != nil {
 		return host.View{}, err
 	}
-	info, err := store.StatSession(id)
-	if err != nil {
-		delete(c.children, id)
-		return host.View{}, err
-	}
-	observed, ok := c.children[id]
-	if !ok || !os.SameFile(info, observed.info) || info.Size() != observed.info.Size() || !info.ModTime().Equal(observed.info.ModTime()) {
-		child, err := subagent.ReadChildSnapshot(ctx, directory, id)
-		if err != nil {
-			delete(c.children, id)
-			return host.View{}, err
-		}
-		observed = childObservation{info: info, child: child}
-		c.children[id] = observed
-	}
-	config := observed.child.Configuration
+	config := child.Configuration
 	if config == nil || config.ParentID != parent || config.ChildID != id || config.OperationID != identity {
 		return host.View{}, fmt.Errorf("child canonical configuration does not match parent")
 	}
-	view := observed.child.View
+	view := child.View
 	items := view.History.Items
 	start := min(uint64(after), uint64(len(items)))
 	end := min(start+uint64(limit), uint64(len(items)))
@@ -115,4 +100,35 @@ func (c *parentReadCache) inspect(ctx context.Context, owner *host.Session, pare
 	view.History = host.HistoryPage{Items: items[start:end], NextAfter: next, More: end < uint64(len(items))}
 	// Protect the cached observation from callers mutating public snapshots.
 	return copyValue(view)
+}
+
+// Caller holds c.mu. Archive moves preserve the inode and do not invalidate
+// immutable snapshots; a resumed writer's append does invalidate them.
+func (c *parentReadCache) loadChild(ctx context.Context, directory string, id session.ID) (subagent.ChildView, error) {
+	store, err := localfile.New(directory)
+	if err != nil {
+		return subagent.ChildView{}, err
+	}
+	info, err := store.StatSession(id)
+	if err != nil {
+		delete(c.children, id)
+		return subagent.ChildView{}, err
+	}
+	observed, ok := c.children[id]
+	if !ok || !os.SameFile(info, observed.info) || info.Size() != observed.info.Size() || !info.ModTime().Equal(observed.info.ModTime()) {
+		child, err := subagent.ReadChildSnapshot(ctx, directory, id)
+		if err != nil {
+			delete(c.children, id)
+			return subagent.ChildView{}, err
+		}
+		observed = childObservation{info: info, child: child}
+		c.children[id] = observed
+	}
+	return observed.child, nil
+}
+
+func (c *parentReadCache) treeChild(ctx context.Context, directory string, id session.ID) (subagent.ChildView, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.loadChild(ctx, directory, id)
 }

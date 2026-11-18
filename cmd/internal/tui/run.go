@@ -63,6 +63,7 @@ type Config struct {
 	RuntimeCapabilities func(context.Context) (map[string]modelcatalog.Capabilities, error)
 	ExportAnalysis      func(context.Context, analysis.Report, string) (string, error)
 	PrepareAnalysis     func(context.Context) error
+	AnalysisInspect     analysis.InspectFunc
 	// Empty uses the standard private state export directory. No subprocess
 	// backend is used for public conversation exports.
 	ExportDirectory string
@@ -1163,6 +1164,9 @@ func Run(ctx context.Context, c Config) error {
 					err := m.EnsureAnalysis(ctx, c.Client)
 					if err == nil && c.PrepareAnalysis != nil {
 						err = c.PrepareAnalysis(ctx)
+					}
+					if err == nil && c.AnalysisInspect != nil {
+						err = m.LoadAnalysisTree(ctx, c.AnalysisInspect)
 					}
 					return commandResult{picker: analyzePicker(""), err: err}
 				})

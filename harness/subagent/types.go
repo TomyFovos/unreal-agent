@@ -58,6 +58,7 @@ type Plan struct {
 	// Request and Allow answer a child's approval request.
 	Request string `json:",omitzero"`
 	Allow   bool   `json:",omitzero"`
+	Review  string `json:",omitzero"`
 	// Notify tells the parent when the child ends, as a message that wakes
 	// it. A child started without a tool call (the subagent command) has no
 	// tool result to do that.
@@ -131,6 +132,10 @@ func (p Plan) Validate() error {
 	case "approve":
 		if p.Handle == "" || p.Request == "" || len(p.Request) > 256 {
 			return fmt.Errorf("child operation handle and request are required")
+		}
+	case "review":
+		if p.Handle == "" || p.Review != "accept" && p.Review != "reject" {
+			return fmt.Errorf("child handle and accept/reject assessment are required")
 		}
 	case "parent":
 		if p.Text == "" {

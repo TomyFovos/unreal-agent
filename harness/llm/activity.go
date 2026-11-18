@@ -17,6 +17,7 @@ type ActivityRecord struct {
 	Model     string            `json:",omitzero"`
 	Effort    string            `json:",omitzero"`
 	Template  string            `json:",omitzero"`
+	Layer     string            `json:",omitzero"` // child_start: role group at start, independent of provider
 	Tool      string            `json:",omitzero"`
 	Reason    string            `json:",omitzero"`
 	Usage     *Usage            `json:",omitzero"`

@@ -67,6 +67,7 @@ type Errors struct {
 	Recent                             []Event
 }
 type Report struct {
+	Tree                *TreeReport              `json:",omitzero"`
 	Activities          []llm.ActivityRecord     `json:",omitzero"`
 	Redactions          []RedactionTotals        `json:",omitzero"`
 	Compactions         []llm.ConversationRecord `json:",omitzero"`
@@ -124,6 +125,7 @@ type call struct {
 	status     *sessionstore.ToolCallStatus
 }
 type Accumulator struct {
+	metrics             *sessionMetrics
 	activities          []llm.ActivityRecord
 	compactions         []llm.ConversationRecord
 	inputTokens         int64
@@ -148,7 +150,7 @@ type Accumulator struct {
 }
 
 func New(id session.ID) *Accumulator {
-	return &Accumulator{id: id, turnIndex: map[session.TurnID]int{}, calls: map[string]*call{}, operations: map[operation.ID]operation.Operation{}}
+	return &Accumulator{metrics: newSessionMetrics(id), id: id, turnIndex: map[session.TurnID]int{}, calls: map[string]*call{}, operations: map[operation.ID]operation.Operation{}}
 }
 func summarize(s *sessionstore.RuntimeSelection) *Selection {
 	if s == nil {
@@ -156,7 +158,7 @@ func summarize(s *sessionstore.RuntimeSelection) *Selection {
 	}
 	return &Selection{Provider: viewer.SafeText(s.Provider), Model: viewer.SafeText(s.Model), Name: viewer.SafeText(s.Name), Effort: string(s.Effort), Revision: s.Revision, ContextWindow: s.ContextWindow}
 }
-func (a *Accumulator) Created(at time.Time) { a.created = at }
+func (a *Accumulator) Created(at time.Time) { a.created = at; a.metrics.created = at }
 func (a *Accumulator) Apply(item host.HistoryItem) {
 	e := Event{At: item.RecordedAt}
 	switch v := item.Data.(type) {
@@ -311,6 +313,7 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 	if e.Kind != "" {
 		a.addEvent(e)
 	}
+	a.metrics.apply(item, a.active)
 }
 
 func (a *Accumulator) observeInputTokens(usage llm.Usage) {

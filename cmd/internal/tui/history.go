@@ -238,6 +238,21 @@ func (m *Model) EnsureAnalysis(ctx context.Context, r Reader) error {
 	}
 }
 
+func (m *Model) LoadAnalysisTree(ctx context.Context, inspect analysis.InspectFunc) error {
+	m.mu.Lock()
+	id := m.state.ID
+	m.mu.Unlock()
+	tree, err := analysis.ReadTree(ctx, id, inspect)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.analysisTree = tree
+	m.state.Version++
+	m.mu.Unlock()
+	return nil
+}
+
 func applyHistoryReceipts(entries []Entry, receipts []host.HistoryReceipt) {
 	for _, receipt := range receipts {
 		updateReceipts(entries, receipt.Status, receipt.At)

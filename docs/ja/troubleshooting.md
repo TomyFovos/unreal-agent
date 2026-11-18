@@ -70,9 +70,15 @@
 プロジェクト内で `unreal --workspace-info` を実行すると、Workspace / Config / State / Socket の4項目が表示されます。log のパスは出力されず、表示された State 内に `host.log` があります。
 
 共通キットの既定の保存先は以下の通りです。
+
 - **ワークスペース別設定:** `~/.config/unreal-agent-common/repos/`
 - **ワークスペース別状態・ログ:** `~/.local/state/unreal-agent-common/r-…/`（ワークスペース固有。この中に `host.log` と `sessions/` があります）
+- **共有認証ストア:** `~/.local/state/unreal-agent/credentials`（インストーラーと `/login` の保存先。全ワークスペース・instance の Host が参照します）
+- **共有の役割別モデル選択:** `~/.local/state/unreal-agent/subagent-model.json`
 - **ランチャー設定:** `~/.config/unreal-agent-common/launcher.json`
+
+共有ディレクトリは `XDG_STATE_HOME` 設定時には `$XDG_STATE_HOME/unreal-agent/` です。Mac も同じです。
+旧リポジトリ別の `subagent-model.json` は共有設定がなければ起動時に移行し、元ファイルを残します。
 
 問題が起きた時刻の前後の `host.log` を確認してください。
 

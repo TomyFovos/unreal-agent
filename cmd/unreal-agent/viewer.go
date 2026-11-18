@@ -28,7 +28,7 @@ func attachViewer(ctx context.Context, client *gateway.Client, id session.ID) er
 	initial := tui.ViewMode(remote.SavedView(readCtx))
 	cancelRead()
 	return tui.Terminal(ctx, tui.Config{Client: client, ID: id, Viewer: panel.Snapshot, Command: childStartCommand(client, id, panel.Command), Updates: panel.Updates(),
-		InitialView: initial, PrepareAnalysis: panel.PrepareAnalysis,
+		InitialView: initial, PrepareAnalysis: panel.PrepareAnalysis, AnalysisInspect: remote.InspectTree,
 		ViewSelected: func(mode tui.ViewMode) {
 			// Remember the choice without holding up the terminal.
 			go func() {
