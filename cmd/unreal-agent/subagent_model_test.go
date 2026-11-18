@@ -465,12 +465,12 @@ func TestSubagentTemplateValidatorAcceptsReboundWorkers(t *testing.T) {
 	}
 	flash := modelcatalog.Model{ID: "deepseek-v4.1-flash", Efforts: []llm.ReasoningEffort{"low", "high", "max"}, DefaultEffort: "high"}
 	chosen := base
-	if chosen.Runtime, err = boundChildRuntime(c, base.Runtime, backend, flash.ID, subagentEffort("lead", flash), true, subagentEffort("collector", flash)); err != nil {
+	if chosen.Runtime, err = boundChildRuntime(c, base.Runtime, backend, sessionstore.RuntimeSelection{Model: flash.ID, Effort: subagentEffort("lead", flash)}, true, subagentEffort("collector", flash)); err != nil {
 		t.Fatal(err)
 	}
 	chosen.Subagents = maps.Clone(base.Subagents)
 	for name, worker := range base.Subagents {
-		if worker.Runtime, err = boundChildRuntime(c, worker.Runtime, backend, flash.ID, subagentEffort(name, flash), true, subagentEffort("collector", flash)); err != nil {
+		if worker.Runtime, err = boundChildRuntime(c, worker.Runtime, backend, sessionstore.RuntimeSelection{Model: flash.ID, Effort: subagentEffort(name, flash)}, true, subagentEffort("collector", flash)); err != nil {
 			t.Fatal(err)
 		}
 		chosen.Subagents[name] = worker
@@ -486,7 +486,7 @@ func TestSubagentTemplateValidatorAcceptsReboundWorkers(t *testing.T) {
 	}
 	// The Codex start is accepted as before.
 	unchanged := base
-	if unchanged.Runtime, err = boundChildRuntime(c, base.Runtime, mustProvider(t, c, "openai-codex"), leadModel, leadEffort, false, ""); err != nil {
+	if unchanged.Runtime, err = boundChildRuntime(c, base.Runtime, mustProvider(t, c, "openai-codex"), sessionstore.RuntimeSelection{Model: leadModel, Effort: leadEffort}, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err = validate(base, unchanged); err != nil {
@@ -499,7 +499,7 @@ func TestSubagentTemplateValidatorAcceptsReboundWorkers(t *testing.T) {
 		if subagentRole(name) != "worker" {
 			continue
 		}
-		worker.Runtime, err = boundChildRuntime(c, worker.Runtime, backend, flash.ID, "max", false, "")
+		worker.Runtime, err = boundChildRuntime(c, worker.Runtime, backend, sessionstore.RuntimeSelection{Model: flash.ID, Effort: "max"}, false, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -596,12 +596,12 @@ func TestSubagentTemplatesBindAModelWithoutEfforts(t *testing.T) {
 	}
 	base := templates["lead"]
 	chosen := base
-	if chosen.Runtime, err = boundChildRuntime(c, base.Runtime, backend, model.ID, subagentEffort("lead", model), true, subagentEffort("collector", model)); err != nil {
+	if chosen.Runtime, err = boundChildRuntime(c, base.Runtime, backend, sessionstore.RuntimeSelection{Model: model.ID, Effort: subagentEffort("lead", model)}, true, subagentEffort("collector", model)); err != nil {
 		t.Fatal(err)
 	}
 	chosen.Subagents = maps.Clone(base.Subagents)
 	for name, worker := range base.Subagents {
-		if worker.Runtime, err = boundChildRuntime(c, worker.Runtime, backend, model.ID, subagentEffort(name, model), true, subagentEffort("collector", model)); err != nil {
+		if worker.Runtime, err = boundChildRuntime(c, worker.Runtime, backend, sessionstore.RuntimeSelection{Model: model.ID, Effort: subagentEffort(name, model)}, true, subagentEffort("collector", model)); err != nil {
 			t.Fatal(err)
 		}
 		chosen.Subagents[name] = worker

@@ -2,10 +2,12 @@ package analysis
 
 import (
 	"encoding/json/v2"
+	"slices"
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/opencodego"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
@@ -57,12 +59,14 @@ func modelKey(s *sessionstore.RuntimeSelection) ModelKey {
 
 type RequestMetric struct {
 	ModelKey
-	Kind         string // response or compaction
-	At           time.Time
-	Usage        viewer.Usage
-	Duration     Metric
-	OutputTPS    Metric
-	ListPriceUSD Metric
+	SelectionSource string
+	Fast            string `json:",omitzero"`
+	Kind            string // response or compaction
+	At              time.Time
+	Usage           viewer.Usage
+	Duration        Metric
+	OutputTPS       Metric
+	ListPriceUSD    Metric
 	// TimedOutput is only the tokens paired with Duration, never all output
 	// divided by the subset of responses that happened to have timing.
 	TimedOutput int64
@@ -78,21 +82,23 @@ type reviewEvidence struct {
 }
 type operationTiming struct{ start, end time.Time }
 type sessionMetrics struct {
-	id         session.ID
-	created    time.Time
-	parent     session.ID
-	template   string
-	selection  *sessionstore.RuntimeSelection
-	requests   []RequestMetric
-	starts     map[string]childStart
-	reviews    map[string]reviewEvidence
-	times      map[operation.ID]operationTiming
-	finish     string
-	ended      time.Time
-	endSource  string
-	wait       Metric
-	waitStart  time.Time
-	waitSource string
+	id              session.ID
+	created         time.Time
+	parent          session.ID
+	template        string
+	layer           string
+	selection       *sessionstore.RuntimeSelection
+	requests        []RequestMetric
+	starts          map[string]childStart
+	reviews         map[string]reviewEvidence
+	times           map[operation.ID]operationTiming
+	finish          string
+	ended           time.Time
+	endSource       string
+	wait            Metric
+	waitStart       time.Time
+	waitSource      string
+	responseRuntime llm.ActivityRecord
 }
 
 func newSessionMetrics(id session.ID) *sessionMetrics {
@@ -126,9 +132,11 @@ func (m *sessionMetrics) apply(item host.HistoryItem, active *sessionstore.Runti
 			var config struct {
 				ParentID session.ID
 				Template string
+				Layer    string
 			}
 			if json.Unmarshal(v.Configuration, &config) == nil {
 				m.parent, m.template = config.ParentID, config.Template
+				m.layer = config.Layer
 			}
 			if m.selection == nil {
 				m.selection = sessionstore.SelectionFromConfiguration(v.Configuration)
@@ -151,6 +159,11 @@ func (m *sessionMetrics) apply(item host.HistoryItem, active *sessionstore.Runti
 			m.reviews[v.ChildReview.Handle] = r
 		}
 		if a := v.Activity; a != nil {
+			// A child's own request activity can identify its transport. Starts
+			// of its descendants describe those children, never this Session.
+			if a.Kind != "child_start" && a.Provider != "" {
+				m.responseRuntime = *a
+			}
 			if a.Kind == "host_start" && m.finish == "" {
 				m.ended = time.Time{}
 				m.endSource = ""
@@ -183,11 +196,9 @@ func (m *sessionMetrics) apply(item host.HistoryItem, active *sessionstore.Runti
 			}
 		}
 	case sessionstore.ModelResponse:
-		key := modelKey(active)
-		if v.Response.Model != "" {
-			key.Model = viewer.SafeText(v.Response.Model)
-		}
+		key, source := m.responseModel(v.Response, active)
 		m.addRequest(v.Response.Usage, v.Response.Generation, key, item.RecordedAt, "response")
+		m.requests[len(m.requests)-1].SelectionSource = source
 	case sessionstore.ToolCallStatus:
 		for _, op := range v.Operations {
 			t := m.times[op.ID]
@@ -201,13 +212,53 @@ func (m *sessionMetrics) apply(item host.HistoryItem, active *sessionstore.Runti
 		}
 	case sessionstore.Fork:
 		m.parent, m.template, m.finish, m.endSource = "", "", "", ""
+		m.layer = ""
 		m.selection = nil
+		m.responseRuntime = llm.ActivityRecord{}
 		m.ended = time.Time{}
 	}
 }
 
+func (m *sessionMetrics) responseModel(response llm.Response, active *sessionstore.RuntimeSelection) (ModelKey, string) {
+	key := modelKey(active)
+	if response.Model == "" {
+		return key, "derived"
+	}
+	key.Model = viewer.SafeText(response.Model)
+	key.Provider = viewer.SafeText(response.Provider)
+	if key.Provider == "" {
+		key.Provider = viewer.SafeText(response.Usage.Provider)
+	}
+	a := m.responseRuntime
+	activityMatches := a.Model == response.Model || a.ID != "" && a.ID == response.ID
+	if key.Provider == "" && activityMatches {
+		key.Provider = viewer.SafeText(a.Provider)
+	}
+	if key.Provider == "" && active != nil && response.Model == active.Model {
+		key.Provider = viewer.SafeText(active.Provider)
+	}
+	// AuthMethod identifies how a request authenticated, not its provider.
+	// Use exact identities from the selectable catalog, never model prefixes.
+	if key.Provider == "" && slices.Contains(opencodego.OfferedModels(), response.Model) {
+		key.Provider = opencodego.ProviderID
+	}
+	key.Effort = ""
+	if activityMatches && a.Provider == key.Provider {
+		key.Effort = viewer.SafeText(a.Effort)
+	} else if active != nil && response.Model == active.Model && key.Provider == active.Provider {
+		key.Effort = viewer.SafeText(string(active.Effort))
+	}
+	return key, "derived-from-responses"
+}
+
 func (m *sessionMetrics) addRequest(usage llm.Usage, g *llm.GenerationStatistics, model ModelKey, at time.Time, kind string) {
 	r := RequestMetric{ModelKey: model, At: at, Kind: kind}
+	if usage.Fast != nil {
+		r.Fast = "off"
+		if *usage.Fast {
+			r.Fast = "on"
+		}
+	}
 	viewer.AddUsage(&r.Usage, usage)
 	if g != nil && g.Valid() {
 		source := "measured"

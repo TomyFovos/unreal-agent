@@ -37,7 +37,9 @@ When pruning old tool results is not enough to fit within the model's context bu
 3. **Overflow recovery:** If a provider returns a context-overflow error, Unreal forces compaction and retries the request once. If the required recent context still exceeds the budget, it fails with `required_context_exceeds_budget`.
 
 > **Notes on Token Budgeting & Metrics:**
-> - **Token estimation:** Token counts used for budgeting are estimates, calibrated against the latest measured request when available.
+> - **Token accounting:** Pre-send admission and compaction thresholds use tokens for every provider. When the same prefix has reported input usage, the builder adds the provider-specific token estimate of the new response/input/results to that measured prefix. Changed provider/model, headers or historical projections use a fresh estimate. Claude uses the last call's input, including cache reads/writes, rather than the sum of its internal steps.
+> - **Estimates:** Compatible Responses API clients share a model-content estimator; Claude Code shares its actual prompt projection with the estimator. The text heuristic is four ASCII characters per token plus one token per non-ASCII rune. JSON envelopes, IDs and encrypted ciphertext bytes do not count as text tokens; schemas count once. These are approximate counts, with no admission margin. Image content still uses a size heuristic when input usage is unavailable.
+> - **Recorded evidence:** Each model Turn stores `ContextAdmission`: estimated total, measured prefix, estimated delta, adopted input count, budget/window, estimator, measurement label, header fingerprint and canonical request JSON bytes. Bytes are diagnostic only. They can be compared with the same Turn's response usage; old records without these fields remain readable.
 > - **Unknown window / output fallbacks:** An unknown context window uses `FallbackWindow`; an unknown maximum output uses `ResponseReserve` in the threshold calculation.
 > - **Prune metrics in `/analyze`:** Prune counts and savings in `/analyze` describe request-time omission, not recording-time truncation.
 

@@ -17,9 +17,10 @@ import (
 func TestObservationRetainsMetadataRecentHistoryAndCanonicalBodies(t *testing.T) {
 	s := &Session{ID: "s", snapshot: sessionstore.Snapshot{Session: session.Session{ID: "s"}}}
 	body := strings.Repeat("a", 159) + "👨‍👩‍👧‍👦" + strings.Repeat("private old body ", 2000)
+	usage := llm.Usage{InputTokens: 12, OutputTokens: 3, Unknown: []llm.UsageField{llm.UsageCachedInput}, Raw: []byte(`{"attribution":{"items":{"old-raw-usage":12}}}`)}
 	items := []sessionstore.Item{
 		{Kind: sessionstore.ItemInput, Data: input("old", body)},
-		{Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{ID: "response", Model: "model", Usage: llm.Usage{InputTokens: 12, OutputTokens: 3}, Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: body}}, {Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "call", Name: "Read", Arguments: `{"path":"file.go"}`}}}}}},
+		{Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{ID: "response", Model: "model", Usage: usage, Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: body}}, {Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "call", Name: "Read", Arguments: `{"path":"file.go"}`}}}}}},
 		{Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostContext, Context: &sessionstore.ContextRecord{Text: body, Usage: &llm.Usage{InputTokens: 5}, Conversation: &llm.ConversationRecord{Usage: &llm.Usage{OutputTokens: 2}}}}},
 		{Kind: sessionstore.ItemToolCallStatus, Data: sessionstore.ToolCallStatus{CallID: "call", Operations: []operation.Operation{{ID: "read", Type: "read", ToolName: "Read", Status: operation.StatusCompleted, State: []byte(`{"old":"opaque"}`)}}}},
 	}
@@ -42,7 +43,7 @@ func TestObservationRetainsMetadataRecentHistoryAndCanonicalBodies(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(encoded, []byte("private old body")) || bytes.Contains(encoded, []byte("opaque")) {
+	if bytes.Contains(encoded, []byte("private old body")) || bytes.Contains(encoded, []byte("opaque")) || bytes.Contains(encoded, []byte("old-raw-usage")) {
 		t.Fatal("observation retained old bodies")
 	}
 	var public View
@@ -64,6 +65,11 @@ func TestObservationRetainsMetadataRecentHistoryAndCanonicalBodies(t *testing.T)
 	if response.Response.Output[0].Data.(llm.Message).Text != strings.Repeat("a", 159)+"👨‍👩‍👧‍👦" {
 		t.Fatal("grapheme crossing the display boundary was cut")
 	}
+	if string(response.Response.Usage.Raw) != "{}" || !reflect.DeepEqual(response.Response.Usage.Unknown, usage.Unknown) {
+		t.Fatal("observation lost reported-usage metadata")
+	}
+	projection := v.History.Items[1].Data.(sessionstore.ModelResponse)
+	projection.Response.Usage.Unknown[0] = llm.UsageOutput
 	after, _ := json.Marshal(s.items)
 	if !bytes.Equal(before, after) {
 		t.Fatal("observation changed canonical in-memory values")
@@ -74,5 +80,8 @@ func TestObservationRetainsMetadataRecentHistoryAndCanonicalBodies(t *testing.T)
 	}
 	if got := full.History.Items[1].Data.(sessionstore.ModelResponse).Response.Output[0].Data.(llm.Message).Text; got != body {
 		t.Fatal("explicit history lost original text")
+	}
+	if got := full.History.Items[1].Data.(sessionstore.ModelResponse).Response.Usage; !reflect.DeepEqual(got, usage) {
+		t.Fatal("explicit history lost original usage")
 	}
 }

@@ -66,6 +66,12 @@ func (s *Session) awaitingParentReply() bool {
 			Progress bool
 		}
 		if err == nil && state.Plan.Type == "subagent" && json.Unmarshal(state.Plan.Data, &plan) == nil && plan.Action == "parent" && !plan.Progress {
+			var receipt struct {
+				Answer string `json:"answer"`
+			}
+			if json.Unmarshal(state.Handle, &receipt) == nil && receipt.Answer != "" {
+				return // The SendParent receipt already answered this question.
+			}
 			waiting = true
 		}
 	}
@@ -118,7 +124,7 @@ func (s *Session) commitTextFinish(ctx context.Context, turn session.TurnID) err
 		}
 		var text []string
 		for _, out := range r.Response.Output {
-			if out.Type == llm.ItemToolCall {
+			if call, ok := out.Data.(llm.ToolCall); ok && !call.Incomplete {
 				return fmt.Errorf("text child tools unsupported")
 			}
 			if m, ok := out.Data.(llm.Message); ok && m.Role == llm.RoleAssistant {
@@ -158,7 +164,10 @@ func (s *Session) WithExecutionPolicy(ctx context.Context) context.Context {
 // operator maximum when permission modes are on, else its fixed policy.
 func (s *Session) WithCapabilityPolicy(ctx context.Context) context.Context {
 	if c := permission.ControllerFromContext(s.ctx); c != nil {
-		return permission.WithPolicy(ctx, permission.FromContext(c.MaximumContext(s.ctx)))
+		// Bind every occurrence of this owner's controller, including one
+		// already present in ctx. Leaving that leaf in its current mode would
+		// incorrectly narrow preflight to the Ask/Read Only baseline.
+		return c.MaximumContext(permission.WithPolicy(ctx, permission.FromContext(s.ctx)))
 	}
 	return s.WithExecutionPolicy(ctx)
 }
@@ -226,7 +235,15 @@ func terminal(s operation.Status) bool {
 // CancelOperation acknowledges durable intent. Executor cancellation follows
 // only after the Coordinator persists the canceling operation checkpoint.
 func (s *Session) CancelOperation(ctx context.Context, generation string, inputID inbox.ID, id operation.ID) (Receipt, error) {
-	data, err := json.Marshal(inbox.ControlMessage{Mode: inbox.CancelOperation, Parameters: inbox.CancelRequest{OperationID: string(id)}})
+	return s.cancelOperation(ctx, generation, inputID, id, "user")
+}
+
+func (s *Session) CancelChildOperation(ctx context.Context, generation string, inputID inbox.ID, id operation.ID) (Receipt, error) {
+	return s.cancelOperation(ctx, generation, inputID, id, "coordinator")
+}
+
+func (s *Session) cancelOperation(ctx context.Context, generation string, inputID inbox.ID, id operation.ID, by string) (Receipt, error) {
+	data, err := json.Marshal(inbox.ControlMessage{Mode: inbox.CancelOperation, Parameters: inbox.CancelRequest{OperationID: string(id), By: by}})
 	if err != nil {
 		return Receipt{}, err
 	}

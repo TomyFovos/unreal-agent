@@ -116,6 +116,9 @@ func TestChildServerHelper(t *testing.T) {
 		var calls atomic.Int32
 		model := adapter(func(ctx context.Context, r llm.Request, _ llm.RequestOptions) (llm.Response, error) {
 			n := calls.Add(1)
+			if c.Task == "brief routing fixture" {
+				return runBriefRoutingFixture(ctx, c, r, int(n)-1)
+			}
 			if held.forgedMode != "" {
 				<-ctx.Done()
 				return llm.Response{}, ctx.Err()
@@ -129,6 +132,24 @@ func TestChildServerHelper(t *testing.T) {
 			if c.Task == "wait" {
 				<-ctx.Done()
 				return llm.Response{}, ctx.Err()
+			}
+			if c.Task == "finish-after-release" {
+				if err := os.WriteFile(filepath.Join(c.Workspace, "child-running"), nil, 0600); err != nil {
+					return llm.Response{}, err
+				}
+				for {
+					if _, err := os.Stat(filepath.Join(c.Workspace, "release-child")); !errors.Is(err, os.ErrNotExist) {
+						if err != nil {
+							return llm.Response{}, err
+						}
+						break
+					}
+					select {
+					case <-ctx.Done():
+						return llm.Response{}, ctx.Err()
+					case <-time.After(5 * time.Millisecond):
+					}
+				}
 			}
 			if c.Task == "boundary-messages" {
 				for _, item := range r.Input {

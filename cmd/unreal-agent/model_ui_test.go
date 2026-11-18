@@ -20,8 +20,9 @@ import (
 
 func TestModelSelectionGatewayExternalCredentialsAndResume(t *testing.T) {
 	type wireRequest struct {
-		Model     string `json:"model"`
-		Reasoning struct {
+		Model       string `json:"model"`
+		ServiceTier string `json:"service_tier"`
+		Reasoning   struct {
 			Effort string `json:"effort"`
 		} `json:"reasoning"`
 	}
@@ -46,7 +47,7 @@ func TestModelSelectionGatewayExternalCredentialsAndResume(t *testing.T) {
 	cache := filepath.Join(dir, "models_cache.json")
 	// This fixture tests selection/resume, so leave room for the real tool
 	// schemas, required instructions and the 64k compaction safety margin.
-	cacheData := []byte(`{"identity":{"account_id":"cache-account-sensitive"},"models":[{"slug":"model-b","display_name":"Model B","visibility":"list","supported_reasoning_levels":[{"effort":"high"}],"default_reasoning_level":"high","context_window":272000}]}`)
+	cacheData := []byte(`{"identity":{"account_id":"cache-account-sensitive"},"models":[{"slug":"model-b","display_name":"Model B","visibility":"list","supported_reasoning_levels":[{"effort":"high"}],"default_reasoning_level":"high","context_window":272000,"service_tiers":[{"id":"priority","name":"Fast"}]}]}`)
 	if err := os.WriteFile(cache, cacheData, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -87,6 +88,7 @@ func TestModelSelectionGatewayExternalCredentialsAndResume(t *testing.T) {
 	if err = os.WriteFile(cache, cacheData, 0600); err != nil {
 		t.Fatal(err)
 	}
+	choice.Fast = true
 	_, err = modelExchange(t.Context(), c.Extension, modelRequest{Action: "model.select", ID: "model-test", Generation: v.Generation, Selection: choice})
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +109,7 @@ func TestModelSelectionGatewayExternalCredentialsAndResume(t *testing.T) {
 		}
 		select {
 		case req := <-requests:
-			if req.Model != "model-b" || req.Reasoning.Effort != "high" {
+			if req.Model != "model-b" || req.Reasoning.Effort != "high" || req.ServiceTier != "priority" {
 				t.Fatal(req)
 			}
 		case <-time.After(5 * time.Second):
@@ -131,13 +133,18 @@ func TestModelSelectionGatewayExternalCredentialsAndResume(t *testing.T) {
 	}
 	select {
 	case req := <-requests:
-		if req.Model != "model-b" || req.Reasoning.Effort != "high" {
+		if req.Model != "model-b" || req.Reasoning.Effort != "high" || req.ServiceTier != "priority" {
 			t.Fatal("factory restart lost selection", req)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("restart did not send fake request")
 	}
-	inspectInteractive(t, c2, "model-test", func(v host.View) bool { return responseCount(v) == 3 })
+	replayed := inspectInteractive(t, c2, "model-test", func(v host.View) bool { return responseCount(v) == 3 })
+	for _, item := range replayed.History.Items {
+		if response, ok := item.Data.(sessionstore.ModelResponse); ok && (response.Response.Usage.Fast == nil || !*response.Response.Usage.Fast) {
+			t.Fatal("canonical response lost Fast mode on replay")
+		}
+	}
 	if _, err = c2.Stop(t.Context(), "model-test", v.Generation, inbox.StopWhenIdle, "test"); err != nil {
 		t.Fatal(err)
 	}

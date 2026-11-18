@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -12,12 +13,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/analysis"
 	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
+	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
@@ -149,5 +153,61 @@ func TestSubagentShowWaitAndHistoryOnArchivedHandle(t *testing.T) {
 	changed.ChildID = "unrelated"
 	if _, err := owner.RecordChildReview(ctx, owner.Generation, changed); err == nil {
 		t.Fatal("review crossed parent boundary")
+	}
+	for _, action := range []string{"reject", "accept"} {
+		var out bytes.Buffer
+		if err := runContextCLI(ctx, []string{"state", action, "spawn-0000"}, strings.NewReader(""), &out); err != nil {
+			t.Fatal(action, err)
+		}
+		var review contextstate.Result
+		if err := json.Unmarshal(out.Bytes(), &review); err != nil {
+			t.Fatal(err)
+		}
+		v, err := owner.Inspect(0, 256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var count int
+		var reviewLocator record.Locator
+		for _, item := range v.History.Items {
+			if r, ok := item.Data.(sessionstore.HostRecord); ok && r.ChildReview != nil {
+				count++
+				if r.ChildReview.Decision == action && r.ChildReview.Reason == "" {
+					reviewLocator = record.Item(string(owner.ID), uint64(item.Sequence))
+				}
+			}
+		}
+		wantCount := 3
+		if action == "accept" {
+			wantCount = 4
+		}
+		if count != wantCount || review.Locator != reviewLocator || reviewLocator == "" {
+			t.Fatal("state review wrote a different record", action, count, review.Locator, reviewLocator)
+		}
+		state, err := owner.ContextState(ctx)
+		if err != nil || state.Children.Processed.Count != 1 || len(state.Children.Current) != 2 {
+			t.Fatal("review counted as another child", state.Children, err)
+		}
+		if _, ok := state.Children.Processed.Sources[reviewLocator]; !ok {
+			t.Fatal("L2 did not reference the canonical review", reviewLocator)
+		}
+		tree, err := analysis.ReadTree(ctx, owner.ID, remote.InspectTree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		report := tree.Snapshot(nil)
+		for _, worker := range report.Workers {
+			wantRejected := 0
+			if action == "reject" {
+				wantRejected = 1
+			}
+			if worker.Rework.Reviewed != 1 || worker.Rework.Rejected != wantRejected ||
+				!worker.Rework.RejectRate.Known || worker.Rework.RejectRate.Value != float64(wantRejected) {
+				t.Fatalf("/analyze reviewed-child denominator changed: %+v", worker.Rework)
+			}
+		}
+		if len(report.Workers) != 1 {
+			t.Fatal("analysis skipped reviewed worker", report.Workers)
+		}
 	}
 }

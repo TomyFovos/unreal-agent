@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/unreallabsai/unreal-agent/harness/authflow"
+	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
@@ -42,6 +43,8 @@ type Config struct {
 }
 type request struct {
 	Permission      *permission.ControlRequest `json:",omitzero"`
+	Context         *contextstate.Command      `json:",omitzero"`
+	ContextInputID  string                     `json:",omitzero"`
 	ID              session.ID
 	Mode            host.Mode
 	Generation      string
@@ -54,6 +57,7 @@ type request struct {
 }
 type frame struct {
 	Version    *host.ObservationVersion `json:",omitzero"`
+	Context    *contextstate.Result     `json:",omitzero"`
 	Permission *permission.ControlReply `json:",omitzero"`
 	View       *host.View               `json:",omitzero"`
 	Event      *host.Event              `json:",omitzero"`
@@ -250,6 +254,12 @@ func dispatch(ctx context.Context, c Config, path string, q request) (frame, *ho
 		return frame{}, nil, err
 	}
 	switch path {
+	case "/v1/context":
+		if q.Context == nil {
+			return frame{}, nil, &Error{Code: "invalid_request"}
+		}
+		result, err := s.ContextCommand(ctx, q.Generation, q.ContextInputID, *q.Context)
+		return frame{Context: &result}, nil, err
 	case "/v1/open", "/v1/inspect":
 		v, e := s.Inspect(q.After, q.Limit)
 		return frame{View: &v}, nil, e

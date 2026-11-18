@@ -1,11 +1,11 @@
 package localfile
 
 import (
+	"bytes"
 	"context"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -95,8 +95,14 @@ func (s *Store) readRecord(id session.ID) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(f)
-	return data, errors.Join(err, f.Close())
+	// Keep reading past the initial stat if a writer appends concurrently.
+	// A size hint avoids reallocating and copying the growing JSONL buffer.
+	var data bytes.Buffer
+	if info, err := f.Stat(); err == nil && info.Size() <= int64(int(^uint(0)>>1))-bytes.MinRead {
+		data.Grow(int(info.Size()) + bytes.MinRead)
+	}
+	_, err = data.ReadFrom(f)
+	return data.Bytes(), errors.Join(err, f.Close())
 }
 
 // StatSession gives read caches the resolved inode identity, including during

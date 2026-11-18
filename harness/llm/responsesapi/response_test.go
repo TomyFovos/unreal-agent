@@ -102,6 +102,17 @@ func TestResponseIgnoresUnfinishedToolCall(t *testing.T) {
 	}
 }
 
+func TestResponseNormalizesOutputLimitAliases(t *testing.T) {
+	for _, reason := range []string{"max_tokens", "length"} {
+		t.Run(reason, func(t *testing.T) {
+			response, err := decodeResponse([]byte(`{"id":"r","status":"incomplete","incomplete_details":{"reason":"` + reason + `"},"output":[]}`))
+			if err != nil || response.Stop != llm.StopMaxOutputTokens {
+				t.Fatalf("response stop = %q, error = %v", response.Stop, err)
+			}
+		})
+	}
+}
+
 func TestResponsePreservesRawUsage(t *testing.T) {
 	raw := `{"input_tokens":7,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":2},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":4},"total_tokens":12,"cost":0.0042,"provider_usage":{"prompt_tokens":7}}`
 	response, err := decodeResponse([]byte(`{"id":"response-1","status":"completed","output":[],"usage":` + raw + `}`))

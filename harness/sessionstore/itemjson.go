@@ -5,8 +5,10 @@ import (
 	"encoding/json/v2"
 	"fmt"
 
+	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/session"
+	"github.com/unreallabsai/unreal-agent/internal/jsonspan"
 )
 
 type itemJSON Item
@@ -21,13 +23,13 @@ func (item Item) MarshalJSON() ([]byte, error) {
 func (item *Item) UnmarshalJSON(encoded []byte) error {
 	var decoded struct {
 		itemJSON
-		Data jsontext.Value
+		Data jsonspan.Span
 	}
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		return err
 	}
 
-	data, err := decodeItemData(decoded.Kind, decoded.Data)
+	data, err := decodeItemData(decoded.Kind, decoded.Data.Value(encoded))
 	if err != nil {
 		return err
 	}
@@ -38,6 +40,12 @@ func (item *Item) UnmarshalJSON(encoded []byte) error {
 
 func (item Item) validateData() error {
 	switch item.Kind {
+	case ItemContextEvent:
+		e, ok := item.Data.(contextstate.Event)
+		if !ok {
+			return fmt.Errorf("context state event has wrong data type")
+		}
+		return e.Validate()
 	case ItemHostRecord:
 		r, ok := item.Data.(HostRecord)
 		if !ok {
@@ -81,6 +89,12 @@ func decodeItemData(kind ItemKind, encoded jsontext.Value) (any, error) {
 		return nil, fmt.Errorf("%s data must not be null", kind)
 	}
 	switch kind {
+	case ItemContextEvent:
+		var e contextstate.Event
+		if err := json.Unmarshal(encoded, &e); err != nil {
+			return nil, err
+		}
+		return e, e.Validate()
 	case ItemHostRecord:
 		var r HostRecord
 		if err := json.Unmarshal(encoded, &r); err != nil {

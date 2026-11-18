@@ -42,7 +42,7 @@ func TestContextOverflowCompactsAndRetriesExactlyOnce(t *testing.T) {
 		previous := session.TurnID("")
 		for i := range 10 {
 			id := session.TurnID(fmt.Sprintf("old-%d", i))
-			if err := store.AppendInput(t.Context(), "session-1", externalEvent(t, i, "input-"+inbox.ID(id), strings.Repeat("older conversation ", 1000))); err != nil {
+			if err := store.AppendInput(t.Context(), "session-1", externalEvent(t, i, "input-"+inbox.ID(id), strings.Repeat("older conversation ", 4000))); err != nil {
 				t.Fatal(err)
 			}
 			if err := store.AppendTurn(t.Context(), "session-1", session.Turn{ID: id, PreviousTurnID: previous, Type: session.TurnRegular}); err != nil {
@@ -190,6 +190,48 @@ func TestInterruptedCodexCallRecordsFixedReceiptWithoutDispatch(t *testing.T) {
 			t.Fatal("fixed interruption receipt was not canonical")
 		}
 		run.respond(t, 0, textResponse("Ready to continue safely."))
+		run.input(t, stopInput(t, "stop", inbox.StopWhenIdle))
+		run.assertStopped(t)
+	})
+}
+
+func TestContextAdmissionMeasurementPersistsOnItsTurn(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		run := newStopTestRun(t, 0)
+		store, err := localfile.New(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Create(t.Context(), "session-1"); err != nil {
+			t.Fatal(err)
+		}
+		run.current.dependencies.ContextBuilder = appendOnlyTestBuilder(t)
+		restoreTestRun(t, run, store)
+		run.start(t)
+		run.input(t, externalEvent(t, 1, "task", "Continue"))
+		run.respond(t, 0, llm.Response{Usage: llm.Usage{InputTokens: 1234}, Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "answer"}}}})
+		run.input(t, externalEvent(t, 2, "next", "Next"))
+		page, err := store.Items(t.Context(), "session-1", 0, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var admissions []*session.ContextAdmission
+		for _, item := range page.Items {
+			if turn, ok := item.Data.(session.Turn); ok && turn.ContextAdmission != nil {
+				admissions = append(admissions, turn.ContextAdmission)
+			}
+		}
+		if len(admissions) != 2 {
+			t.Fatal("admission not stored on each model Turn", len(admissions))
+		}
+		first, next := admissions[0], admissions[1]
+		if first.Measurement != "estimated" || first.Estimator == "" || len(first.HeaderFingerprint) != 64 || first.InputTokens != first.EstimatedInputTokens || first.RequestBytes <= first.InputTokens {
+			t.Fatal("initial estimate unlabelled or mixed with bytes", first)
+		}
+		if next.Measurement != "measured-prefix+estimated-delta" || next.MeasuredPrefixTokens != 1234 || next.InputTokens != 1234+next.EstimatedDeltaTokens {
+			t.Fatal("measured prefix/delta record lost", next)
+		}
+		run.respond(t, 1, textResponse("Complete"))
 		run.input(t, stopInput(t, "stop", inbox.StopWhenIdle))
 		run.assertStopped(t)
 	})

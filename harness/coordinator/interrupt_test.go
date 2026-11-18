@@ -137,7 +137,7 @@ func TestSteeredInputDoesNotInterruptALaterChildWaitOrStartAnotherTurn(t *testin
 		}
 		run.input(t, externalEvent(t, 1, "queued", "answer now"))
 		inputs, err := opt.Steering(run.calls[0].ctx)
-		if err != nil || !slices.Equal(inputs, []string{"answer now"}) {
+		if err != nil || !slices.Equal(inputs, []llm.BatchInput{{Text: "answer now"}}) {
 			t.Fatal("steering", inputs, err)
 		}
 		if err := opt.BeginTools(run.calls[0].ctx, true); err != nil || run.calls[0].ctx.Err() != nil {

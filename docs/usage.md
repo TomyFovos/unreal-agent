@@ -128,9 +128,26 @@ Running `/stop` opens a menu with four scopes (**Main agent** is focused by defa
 
 ## Delegated Background Work (Child Agents)
 
-When using Claude, the main agent can delegate implementation or research tasks to background GPT sub-agents (such as `lead`, `worker-*`, and `collector`).
+The main agent can delegate implementation or research to configured child templates such as `lead`, `worker-*`, and `collector`. Tool-capable agents use `SubagentStart`. Claude Code can start Unreal children in Bash with `unreal-agent subagent start`.
 
-- **Automatic wake-up:** When a child finishes or reports back, it wakes the parent agent automatically without requiring user input.
+- **Automatic wake-up.** User input, a child completion notice, or a forwarded question or approval wakes an idle parent, including after a failed parent model turn. During a usage-limit wait, the parent picks up queued reports when the wait ends. Ready and progress notifications stay quiet.
 - **Compact chat display:** Routine parent-child coordination is folded into a single summary line (`┄ 裏の作業 ...`).
 - **Important notices stay visible:** Agent messages starting with `【報告】` (Report) or `【要確認】` (Needs Confirmation) are always shown in full, and `【要確認】` highlights a banner above the input bar until you reply.
 - **Approvals:** Child tool requests follow the parent Session's permission mode and are mediated by the parent agent. See [Providers — Delegated GPT work](providers.md#delegated-gpt-work) and [Permissions](permissions.md).
+
+### Delegation brief
+
+`SubagentStart` accepts an optional `brief` with `title`, `purpose`, `inputs`, `outputs`, `verification`, and `acceptance_criteria`. The Bash command accepts the same fields.
+
+```bash
+unreal-agent subagent start --template lead --title 'Check report totals' \
+  --purpose 'Decide whether to accept the report' --inputs 'report.json' \
+  --outputs 'A list of discrepancies' --verification 'Recompute the totals' \
+  --acceptance-criteria 'Cite each discrepancy and its source' --task 'Use the current fixture.'
+```
+
+Free-text `task`, `--task`, and a quoted heredoc still work. Omitted fields appear as `未指定/unspecified`. The harness adds the absolute work root and any differing process working directory, the selected permission mode and configured write scope, `TMPDIR`, restrictions from the settings and explicit instructions, the report format, certainty labels with sources, and a next-action placeholder. An explicitly labelled `Prohibitions: …` line from the task or acceptance criteria is reproduced in the brief. The child receives the same text shown in the start preview and in `subagent show HANDLE --task`.
+
+A child can ask `SendParent` for the exact value of one field using `brief <field>`, such as `brief root` or `brief verification`. The tool returns the stored value when present. Other questions go to the parent unchanged. The ended notice includes the full recorded completion report. The parent reviews the evidence and decides whether to accept.
+
+`/analyze` → **Overview** shows measured handled and forwarded counts per routing rule. It labels the estimated parent wakeups saved as an upper bound from brief replies, since multiple messages can share a parent turn.

@@ -17,6 +17,17 @@ func modelLabel(m ModelKey) string {
 	return known(m.Provider) + " / " + known(m.Model) + " / " + known(m.Effort)
 }
 
+func requestModelLabel(m ModelKey, fast string) string {
+	label := modelLabel(m)
+	if fast != "" {
+		return label + " / fast " + fast
+	}
+	if m.Provider == "openai-codex" {
+		return label + " / fast unknown"
+	}
+	return label
+}
+
 func layerOrder(layer string) string {
 	switch layer {
 	case "main":
@@ -73,7 +84,7 @@ func treeLines(r *TreeReport) []string {
 		if g.Unobserved > 0 {
 			requests += fmt.Sprintf(" observed; %d sessions unknown", g.Unobserved)
 		}
-		out = append(out, "", g.Layer+" / "+modelLabel(g.ModelKey), fmt.Sprintf("  layer: %d recorded / %d derived; sessions %d", g.RecordedLayers, g.DerivedLayers, g.Sessions), "  requests "+requests+"; input "+value(g.Usage.Input, g.Usage, llm.UsageInput)+"; output "+value(g.Usage.Output, g.Usage, llm.UsageOutput)+"; cached reads "+value(g.Usage.CachedInput, g.Usage, llm.UsageCachedInput), "  output TPS "+metricText(g.OutputTPS, " tok/s")+"; request mean "+metricText(g.RequestDuration, "s"), "  child wall total "+metricText(g.ChildWallTime, "s")+"; first response total "+metricText(g.FirstResponse, "s"), "  usage-limit wait "+metricText(g.UsageLimitWait, "s")+"; list price "+metricText(g.ListPriceUSD, " USD"))
+		out = append(out, "", g.Layer+" / "+requestModelLabel(g.ModelKey, g.Fast), fmt.Sprintf("  layer: %d recorded / %d derived; sessions %d", g.RecordedLayers, g.DerivedLayers, g.Sessions), "  requests "+requests+"; input "+value(g.Usage.Input, g.Usage, llm.UsageInput)+"; output "+value(g.Usage.Output, g.Usage, llm.UsageOutput)+"; cached reads "+value(g.Usage.CachedInput, g.Usage, llm.UsageCachedInput), "  output TPS "+metricText(g.OutputTPS, " tok/s")+"; request mean "+metricText(g.RequestDuration, "s"), "  child wall total "+metricText(g.ChildWallTime, "s")+"; first response total "+metricText(g.FirstResponse, "s"), "  usage-limit wait "+metricText(g.UsageLimitWait, "s")+"; list price "+metricText(g.ListPriceUSD, " USD"))
 	}
 	out = append(out, "", "Worker rework: denominator = normally ended workers explicitly accepted/rejected.", "Repeated same-parent titles after an end infer redelegation; this does not create a review.", "Task totals are derived chains, attributed to the initial worker model, including every retry's worker time/tokens.", "Task elapsed includes parent gaps; parent tokens cannot be assigned to tasks and remain in layer totals.")
 	for _, w := range r.Workers {
@@ -84,11 +95,11 @@ func treeLines(r *TreeReport) []string {
 	for _, task := range r.Tasks {
 		out = append(out, fmt.Sprintf("  %s / %s: attempts %d; worker time %s; elapsed incl. parent gaps %s; tokens %s (task grouping derived)", task.ID, modelLabel(task.ModelKey), task.Attempts, metricText(task.WallTime, "s"), metricText(task.Elapsed, "s"), metricText(task.TotalTokens, "")))
 	}
-	out = append(out, "", "Per-session observations (start selection, measured or derived)")
+	out = append(out, "", "Per-session observations (recorded start or first response; measured, derived or unknown)")
 	for _, s := range r.Sessions {
 		out = append(out, fmt.Sprintf("%s [%s; layer %s; selection %s] %s", s.ID, s.Layer, s.LayerSource, s.SelectionSource, modelLabel(s.ModelKey)), "  wall "+metricText(s.WallTime, "s")+"; first response "+metricText(s.FirstResponse, "s")+"; wait "+metricText(s.UsageLimitWait, "s"))
 		for i, req := range s.Requests {
-			out = append(out, fmt.Sprintf("  request %d (%s) %s: duration %s; output TPS %s", i+1, req.Kind, modelLabel(req.ModelKey), metricText(req.Duration, "s"), metricText(req.OutputTPS, " tok/s")))
+			out = append(out, fmt.Sprintf("  request %d (%s) %s: duration %s; output TPS %s", i+1, req.Kind, requestModelLabel(req.ModelKey, req.Fast), metricText(req.Duration, "s"), metricText(req.OutputTPS, " tok/s")))
 		}
 	}
 	for i := range out {

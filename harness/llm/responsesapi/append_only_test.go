@@ -129,7 +129,7 @@ func TestResponsesToolEpochBreaksPrefixOnceThenAppendsAgain(t *testing.T) {
 		call := repairCall(id)
 		call.Data = llm.ToolCall{CallID: id, Name: "Bash", Arguments: `{"command":"printf unknown"}`}
 		h.response(turn, repairReasoning(fmt.Sprintf("reason-%d", i), 128), call)
-		h.receipt(turn, id, strings.Repeat("X", 2200), operation.StatusCompleted)
+		h.receipt(turn, id, strings.Repeat("X", 8800), operation.StatusCompleted)
 		ack := fmt.Sprintf("ack-%d", i)
 		var records []sessionstore.ContextRecord
 		if err := prepareAppendHistory(h, nil, false, &records); err != nil {
@@ -215,14 +215,14 @@ func TestResponsesCompactionPrunesThenSummarizesAndResumesPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.response("t1", repairCall("read"))
-	h.receipt("t1", "read", strings.Repeat("old tool result ", 1000), operation.StatusCompleted)
+	h.receipt("t1", "read", strings.Repeat("old tool result ", 4000), operation.StatusCompleted)
 	if _, _, err := h.request("ack"); err != nil {
 		t.Fatal(err)
 	}
 	h.response("ack", llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "Received."}})
 	for i := range 8 {
 		id := fmt.Sprintf("old-%d", i)
-		h.user(id, strings.Repeat("old conversation ", 1600))
+		h.user(id, strings.Repeat("old conversation ", 6400))
 		h.item(sessionstore.ItemTurn, session.Turn{ID: session.TurnID(id), Type: session.TurnRegular}, h.b.Commit)
 		h.response(id, llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "Historical answer."}})
 	}
@@ -263,7 +263,7 @@ func TestResponsesCompactionPrunesThenSummarizesAndResumesPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := appendWire(t, compacted.Request)
-	if bytes.Contains(first["input"], []byte(strings.Repeat("old conversation ", 1600))) && len(compacted.Request.Input) > 20 {
+	if bytes.Contains(first["input"], []byte(strings.Repeat("old conversation ", 6400))) && len(compacted.Request.Input) > 20 {
 		t.Fatal("view did not advance")
 	}
 	h.response("after-compaction", llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "Continuing."}})
@@ -279,7 +279,7 @@ func TestResponsesCompactionPrunesThenSummarizesAndResumesPrefix(t *testing.T) {
 	// Old canonical units are still indexed with the full receipt, not its pruned view.
 	found := false
 	for i := 1; i < 100; i++ {
-		if u, ok := h.engine.ResolveUnit(fmt.Sprintf("unit-%020d", i)); ok && strings.Contains(contextengine.Text(u.Item), strings.Repeat("old tool result ", 1000)) {
+		if u, ok := h.engine.ResolveUnit(fmt.Sprintf("unit-%020d", i)); ok && strings.Contains(contextengine.Text(u.Item), strings.Repeat("old tool result ", 4000)) {
 			found = true
 		}
 	}
@@ -421,14 +421,14 @@ func TestResponsesUnsubmittedPendingStatusKeepsOneNativeReceipt(t *testing.T) {
 
 func TestResponsesSummaryRetainsInterleavedCallResultPair(t *testing.T) {
 	h := newRepairHistory(t, contextengine.Config{LargeToolTokens: 100000})
-	h.user("old-task", strings.Repeat("a", 180000))
+	h.user("old-task", strings.Repeat("a", 720000))
 	h.item(sessionstore.ItemTurn, session.Turn{ID: "t1", Type: session.TurnRegular}, h.b.Commit)
 	h.response("t1", repairCall("read"))
-	h.user("interleaved", strings.Repeat("b", 30000))
+	h.user("interleaved", strings.Repeat("b", 120000))
 	h.receipt("t1", "read", "exact receipt", operation.StatusCompleted)
 	h.item(sessionstore.ItemTurn, session.Turn{ID: "ack", Type: session.TurnRegular}, h.b.Commit)
 	h.response("ack", llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "Received."}})
-	h.user("latest", strings.Repeat("c", 25000))
+	h.user("latest", strings.Repeat("c", 100000))
 	adapter := &appendSummaryAdapter{}
 	if err := prepareAppendHistory(h, adapter, false, nil); err != nil {
 		t.Fatal(err)

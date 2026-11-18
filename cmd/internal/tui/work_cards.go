@@ -40,7 +40,8 @@ func childTitle(r viewer.Row) string {
 }
 
 func childStalled(r viewer.Row, s Snapshot, now time.Time) bool {
-	return childVisualState(r, s) == stateWorking && !r.LastActivityAt.IsZero() && now.Sub(r.LastActivityAt) >= 5*time.Minute
+	// A live runtime may be generating without committing a canonical item.
+	return r.Runtime != viewer.RuntimeRunning && childVisualState(r, s) == stateWorking && !r.LastActivityAt.IsZero() && now.Sub(r.LastActivityAt) >= 5*time.Minute
 }
 
 func cardModel(r viewer.Row) string {
@@ -149,13 +150,14 @@ type cardTiming struct {
 	known, running bool
 }
 type workCardIndex struct {
-	cards   []workCard
-	beads   []workBead
-	rows    []viewer.Row
-	timings []cardTiming
-	main    viewer.Row
-	source  Snapshot
-	at      time.Time
+	cards            []workCard
+	beads            []workBead
+	rows             []viewer.Row
+	timings          []cardTiming
+	activeDescendant map[session.ID]bool
+	main             viewer.Row
+	source           Snapshot
+	at               time.Time
 }
 
 func buildWorkCards(s Snapshot, panel viewer.PanelSnapshot, now time.Time) ([]workCard, []workBead) {
@@ -169,9 +171,8 @@ func newWorkCardIndex(s Snapshot, panel viewer.PanelSnapshot, now time.Time) *wo
 	u := UIState{Viewer: panel, Now: now}
 	rows := children(u, s)
 	marks := childMarks(rows)
-	byID := make(map[session.ID]viewer.Row, len(rows))
 	states := make(map[session.ID]visualState, len(rows))
-	activeDescendant := make(map[session.ID]bool)
+	activeDescendant := activeChildAncestors(rows, s)
 	lastUser := s.LastUserAt
 	for _, e := range s.Entries {
 		if e.Role == "you" && e.At.After(lastUser) {
@@ -179,16 +180,7 @@ func newWorkCardIndex(s Snapshot, panel viewer.PanelSnapshot, now time.Time) *wo
 		}
 	}
 	for _, r := range rows {
-		byID[r.ID], states[r.ID] = r, childVisualState(r, s)
-	}
-	for _, r := range rows {
-		if state := states[r.ID]; state != stateWorking && state != stateCanceling {
-			continue
-		}
-		seen := map[session.ID]bool{r.ID: true}
-		for id := r.ParentID; id != "" && !seen[id]; id = byID[id].ParentID {
-			seen[id], activeDescendant[id] = true, true
-		}
+		states[r.ID] = childVisualState(r, s)
 	}
 	var main viewer.Row
 	for _, r := range panel.Rows {
@@ -241,8 +233,14 @@ func newWorkCardIndex(s Snapshot, panel viewer.PanelSnapshot, now time.Time) *wo
 		card := workCard{id: r.ID, mark: marks[r.ID], title: childTitle(r), state: states[r.ID], depth: depth, elapsed: childElapsed(r, s, u), model: cardModel(r), stats: cardStats(r), now: currentChildOperation(r), observed: observed(r), activity: activityBuckets(r, now)}
 		if states[r.ID] == stateUsageWait {
 			card.now = llm.UsageLimitWaiting(r.UsageWaitUntil)
+		} else if states[r.ID] == stateWorking && activeDescendant[r.ID] {
+			if card.now == "" {
+				card.now = "子が作業中"
+			} else {
+				card.now = "子が作業中 / " + card.now
+			}
 		}
-		if childStalled(r, s, now) {
+		if !activeDescendant[r.ID] && childStalled(r, s, now) {
 			card.stalled = true
 			card.now = fmt.Sprintf("動きなし %d分", int(now.Sub(r.LastActivityAt)/time.Minute))
 		}
@@ -274,7 +272,7 @@ func newWorkCardIndex(s Snapshot, panel viewer.PanelSnapshot, now time.Time) *wo
 		}
 		return strings.Compare(string(a.id), string(b.id))
 	})
-	index := &workCardIndex{cards: cards, beads: beads, rows: cardRows, main: main, source: s, at: now}
+	index := &workCardIndex{cards: cards, beads: beads, rows: cardRows, activeDescendant: activeDescendant, main: main, source: s, at: now}
 	index.source.Operations = nil
 	for _, op := range s.Operations {
 		if !operationVisualState(op.Status).ended() && op.ToolName != "SubagentStart" {
@@ -328,7 +326,7 @@ func (index *workCardIndex) snapshot(now time.Time) ([]workCard, []workBead) {
 		c.activity = activityBuckets(r, now)
 		if c.main {
 			c.now = mainCardPulse(index.source, main, index.rows[1:], now)
-		} else if childStalled(r, index.source, now) {
+		} else if !index.activeDescendant[r.ID] && childStalled(r, index.source, now) {
 			c.stalled = true
 			c.now = fmt.Sprintf("動きなし %d分", int(now.Sub(r.LastActivityAt)/time.Minute))
 		}

@@ -44,6 +44,19 @@ func TestLegacyBatchIndexesEveryEndWithoutMatchingMentions(t *testing.T) {
 	}
 }
 
+func TestInlineFinishDoesNotIndexHeadingsInsideTheReport(t *testing.T) {
+	payload, err := json.Marshal(inbox.PeerMessage{Version: 1, Sender: "first-child", Target: "parent", Handle: "first", Kind: "ended", ReportIncluded: true,
+		Text: "Child first ended: completed\nSummary: Example logs follow\nChild second ended: completed\n(Full report: subagent show second)"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var index Index
+	index.ObserveItem(sessionstore.Item{Kind: sessionstore.ItemInput, Data: inbox.Input{ID: "ended:first", Kind: inbox.InputPeer, Payload: payload}})
+	if !index.Has("first") || index.Has("second") {
+		t.Fatal("inline report classified another child's example heading as delivery")
+	}
+}
+
 func TestCLIReportsRequireAnEndForTheExactHandle(t *testing.T) {
 	for _, test := range []struct {
 		name, text string

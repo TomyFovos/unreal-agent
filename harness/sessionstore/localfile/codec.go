@@ -5,11 +5,15 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"slices"
+	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/internal/jsonspan"
 )
 
 const formatVersion = 3
@@ -28,7 +32,7 @@ type logRecord struct {
 }
 
 // recordValue encodes canonical values directly into their envelope. Keeping
-// logRecord's raw Data for decoding avoids changing the persisted format.
+// the raw envelope for alternate encoders avoids changing the persisted format.
 type recordValue struct {
 	Type recordType `json:"type"`
 	Data any        `json:"data"`
@@ -45,13 +49,15 @@ type itemRecord struct {
 }
 
 type operationRecord struct {
-	Operation operation.Operation
+	Operation  operation.Operation
+	RecordedAt time.Time `json:",omitzero"`
 }
 
 type decodedRecord struct {
 	Type      recordType
 	Item      itemRecord
-	Operation operation.Operation
+	Operation operationRecord
+	offset    int64
 }
 
 func encodeInitialLog(value session.Session, items []sessionstore.Item) ([]byte, error) {
@@ -92,54 +98,115 @@ func encodeInitialLog(value session.Session, items []sessionstore.Item) ([]byte,
 }
 
 func decodeLog(encoded []byte) (storedState, int64, error) {
+	return replayLog(encoded, storedState{}, 0, nil)
+}
+
+func decodeRecord(line []byte) (recordType, jsontext.Value, error) {
+	var record struct {
+		Type recordType    `json:"type"`
+		Data jsonspan.Span `json:"data"`
+	}
+	err := json.Unmarshal(line, &record)
+	return record.Type, record.Data.Value(line), err
+}
+
+type historyItemJSON sessionstore.Item
+
+// The writer emits Kind before Data. For the common large record, decode the
+// typed response in the enclosing pass. The ordinary union decoder still
+// handles reordered fields, legacy layouts and detailed validation errors.
+func decodeResponseItem(line []byte) (itemRecord, bool) {
+	if !bytes.HasPrefix(line, []byte(`{"type":"item","data":{"Item":{"Sequence":`)) ||
+		!bytes.Contains(line[:min(len(line), 160)], []byte(`,"Kind":"model_response","Data":`)) {
+		return itemRecord{}, false
+	}
+	var envelope struct {
+		Type recordType `json:"type"`
+		Data struct {
+			Item struct {
+				historyItemJSON
+				Data *sessionstore.ModelResponse
+			}
+			Operations []operation.Operation
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(line, &envelope); err != nil ||
+		envelope.Type != recordItem || envelope.Data.Item.Kind != sessionstore.ItemModelResponse || envelope.Data.Item.Data == nil {
+		return itemRecord{}, false
+	}
+	item := sessionstore.Item(envelope.Data.Item.historyItemJSON)
+	item.Data = *envelope.Data.Item.Data
+	return itemRecord{Item: item, Operations: envelope.Data.Operations}, true
+}
+
+func decodeSessionHeader(data jsontext.Value) (session.Session, error) {
+	var header sessionRecord
+	if err := json.Unmarshal(data, &header); err != nil {
+		return session.Session{}, fmt.Errorf("decode session record: %w", err)
+	}
+	if header.Version == 1 {
+		return session.Session{}, fmt.Errorf("legacy session format version 1 cannot be resumed")
+	}
+	if header.Version != formatVersion && header.Version != 2 {
+		return session.Session{}, fmt.Errorf("unsupported session format version %d", header.Version)
+	}
+	if err := validateSessionID(header.Session.ID); err != nil {
+		return session.Session{}, err
+	}
+	if header.Session.CreatedAt.IsZero() {
+		return session.Session{}, fmt.Errorf("session %q creation time is zero", header.Session.ID)
+	}
+	return header.Session, nil
+}
+
+func replayLog(encoded []byte, value storedState, start int64, index *restoreIndex) (storedState, int64, error) {
 	lastNewline := bytes.LastIndexByte(encoded, '\n')
 	if lastNewline < 0 {
 		return storedState{}, 0, fmt.Errorf("session log has no committed records")
 	}
 	committedSize := int64(lastNewline + 1)
-	lines := bytes.Split(encoded[:committedSize], []byte{'\n'})
-	lines = lines[:len(lines)-1]
-
-	var value storedState
-	records := make([]decodedRecord, 0, len(lines))
-	itemCount := 0
+	tail := encoded[start:committedSize]
+	records := make([]decodedRecord, 0, bytes.Count(tail, []byte{'\n'}))
+	itemCount := len(value.Items)
 	inheritedItemCount := 0
-	for lineIndex, line := range lines {
-		var record logRecord
-		if err := json.Unmarshal(line, &record); err != nil {
-			return storedState{}, 0, fmt.Errorf("decode record %d: %w", lineIndex+1, err)
+	offset := start
+	lineIndex := 0
+	for line := range bytes.SplitSeq(tail, []byte{'\n'}) {
+		recordOffset := offset
+		if recordOffset == committedSize {
+			break
 		}
-		switch record.Type {
+		offset += int64(len(line)) + 1
+		lineIndex++
+		atStart := recordOffset == 0
+		itemValue, response := decodeResponseItem(line)
+		kind := recordItem
+		var data jsontext.Value
+		if !response {
+			var err error
+			kind, data, err = decodeRecord(line)
+			if err != nil {
+				return storedState{}, 0, fmt.Errorf("decode record %d: %w", lineIndex, err)
+			}
+		}
+		switch kind {
 		case recordSession:
-			if lineIndex != 0 {
+			if !atStart {
 				return storedState{}, 0, fmt.Errorf("session record must be first")
 			}
-			var header sessionRecord
-			if err := json.Unmarshal(record.Data, &header); err != nil {
-				return storedState{}, 0, fmt.Errorf("decode session record: %w", err)
-			}
-			if header.Version == 1 {
-				return storedState{}, 0, fmt.Errorf(
-					"legacy session format version 1 cannot be resumed",
-				)
-			}
-			if header.Version != formatVersion && header.Version != 2 {
-				return storedState{}, 0, fmt.Errorf("unsupported session format version %d", header.Version)
-			}
-			if err := validateSessionID(header.Session.ID); err != nil {
+			header, err := decodeSessionHeader(data)
+			if err != nil {
 				return storedState{}, 0, err
 			}
-			if header.Session.CreatedAt.IsZero() {
-				return storedState{}, 0, fmt.Errorf("session %q creation time is zero", header.Session.ID)
-			}
-			value = newStoredState(header.Session.ID, header.Session.CreatedAt)
+			value = newStoredState(header.ID, header.CreatedAt)
 		case recordItem:
-			if lineIndex == 0 {
+			if atStart {
 				return storedState{}, 0, fmt.Errorf("session record must be first")
 			}
-			var itemValue itemRecord
-			if err := json.Unmarshal(record.Data, &itemValue); err != nil {
-				return storedState{}, 0, fmt.Errorf("decode item record: %w", err)
+			if !response {
+				if err := json.Unmarshal(data, &itemValue); err != nil {
+					return storedState{}, 0, fmt.Errorf("decode item record: %w", err)
+				}
 			}
 			wantSequence := sessionstore.Sequence(itemCount + 1)
 			if itemValue.Item.Sequence != wantSequence {
@@ -162,26 +229,33 @@ func decodeLog(encoded []byte) (storedState, int64, error) {
 			}
 			itemCount++
 			if itemValue.Item.Kind == sessionstore.ItemFork {
+				if start != 0 {
+					return storedState{}, 0, fmt.Errorf("fork requires inherited history replay")
+				}
 				inheritedItemCount = itemCount
+				if index != nil {
+					index.inherited = wantSequence
+				}
 			}
-			records = append(records, decodedRecord{Type: recordItem, Item: itemValue})
+			records = append(records, decodedRecord{Type: recordItem, Item: itemValue, offset: recordOffset})
 		case recordOperation:
-			if lineIndex == 0 {
+			if atStart {
 				return storedState{}, 0, fmt.Errorf("session record must be first")
 			}
 			var update operationRecord
-			if err := json.Unmarshal(record.Data, &update); err != nil {
+			if err := json.Unmarshal(data, &update); err != nil {
 				return storedState{}, 0, fmt.Errorf("decode operation record: %w", err)
 			}
 			records = append(records, decodedRecord{
-				Type: recordOperation, Operation: update.Operation,
+				Type: recordOperation, Operation: update, offset: recordOffset,
 			})
 		default:
-			return storedState{}, 0, fmt.Errorf("unsupported record type %q", record.Type)
+			return storedState{}, 0, fmt.Errorf("unsupported record type %q", kind)
 		}
 	}
 
-	replayedItems := 0
+	replayedItems := len(value.Items)
+	value.Items = slices.Grow(value.Items, itemCount-replayedItems)
 	for recordIndex, record := range records {
 		switch record.Type {
 		case recordItem:
@@ -192,10 +266,19 @@ func decodeLog(encoded []byte) (storedState, int64, error) {
 					return storedState{}, 0, fmt.Errorf("inherited item %d initializes operations", itemIndex)
 				}
 				value.inheritItem(record.Item.Item)
+				if index != nil {
+					index.items = append(index.items, record.offset)
+				}
 				continue
 			}
 			if err := replayItem(&value, record.Item); err != nil {
 				return storedState{}, 0, fmt.Errorf("apply item %d: %w", itemIndex, err)
+			}
+			if err := value.observeItem(record.Item); err != nil {
+				return storedState{}, 0, fmt.Errorf("observe item %d: %w", itemIndex, err)
+			}
+			if index != nil {
+				index.addItem(record.offset, record.Item.Item.Sequence, len(value.Operations))
 			}
 		case recordOperation:
 			if replayedItems < inheritedItemCount {
@@ -204,8 +287,14 @@ func decodeLog(encoded []byte) (storedState, int64, error) {
 					recordIndex+2,
 				)
 			}
-			if err := value.saveOperation(record.Operation); err != nil {
+			if err := value.applyOperationRecord(record.Operation, record.offset); err != nil {
 				return storedState{}, 0, fmt.Errorf("apply operation record: %w", err)
+			}
+			if index != nil {
+				index.operations[value.operationPositions[record.Operation.Operation.ID]] = operationLocation{Offset: record.offset}
+				if index.scanOperations != nil {
+					*index.scanOperations = append(*index.scanOperations, record.offset)
+				}
 			}
 		}
 	}
@@ -214,6 +303,13 @@ func decodeLog(encoded []byte) (storedState, int64, error) {
 
 func replayItem(state *storedState, record itemRecord) error {
 	switch record.Item.Kind {
+	case sessionstore.ItemContextEvent:
+		e := record.Item.Data.(contextstate.Event)
+		if err := state.ContextProjection.Apply(e); err != nil {
+			return err
+		}
+		state.Items = append(state.Items, state.appendItem(sessionstore.ItemContextEvent, e, record.Item.RecordedAt))
+		return nil
 	case sessionstore.ItemHostRecord:
 		r := record.Item.Data.(sessionstore.HostRecord)
 		item := state.sessionHead.appendItem(sessionstore.ItemHostRecord, r, record.Item.RecordedAt)

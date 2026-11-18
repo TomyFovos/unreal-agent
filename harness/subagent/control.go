@@ -84,7 +84,7 @@ func CancelChild(ctx context.Context, owner *host.Session, r ControlRequest) (ho
 	if _, err := validateControl(owner, r); err != nil {
 		return host.Receipt{}, err
 	}
-	return owner.CancelOperation(ctx, r.ParentGeneration, r.InputID, r.OperationID)
+	return owner.CancelChildOperation(ctx, r.ParentGeneration, r.InputID, r.OperationID)
 }
 
 // ResumeChild validates the ownership boundary. A live parent automatically

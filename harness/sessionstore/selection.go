@@ -15,7 +15,7 @@ func SelectionFromConfiguration(raw jsontext.Value) *RuntimeSelection {
 	if v == nil {
 		return nil
 	}
-	s := &RuntimeSelection{Version: 1, Provider: v.Provider.Provider, Model: v.Provider.Model.ID, Name: v.Provider.Model.ID, Effort: v.ReasoningEffort.Normalize()}
+	s := &RuntimeSelection{Version: 1, Provider: v.Provider.Provider, Model: v.Provider.Model.ID, Name: v.Provider.Model.ID, Effort: v.ReasoningEffort.Normalize(), Fast: v.Fast}
 	if s.Validate() != nil {
 		return nil
 	}
@@ -94,6 +94,7 @@ type configurationMetadata struct {
 		} `json:"model"`
 	}
 	ReasoningEffort llm.ReasoningEffort
+	Fast            bool
 	ClaudeCode      jsontext.Value
 }
 
@@ -118,7 +119,7 @@ func metadataFromConfiguration(raw jsontext.Value) *configurationMetadata {
 	return nil
 }
 
-// RuntimeSelection is a versioned, nonsecret provider/model/effort choice.
+// RuntimeSelection is a versioned, nonsecret provider/model/effort/speed choice.
 // Credential material and permissions remain outside this selection; Binding
 // records an operator backend reference/configuration without rewriting creation.
 type RuntimeSelection struct {
@@ -129,6 +130,7 @@ type RuntimeSelection struct {
 	Model         string
 	Name          string
 	Effort        llm.ReasoningEffort
+	Fast          bool  `json:",omitzero"`
 	ContextWindow int64 `json:",omitzero"`
 	// Binding is a nonsecret operator backend snapshot. It binds a newly
 	// selected provider without changing the immutable creation configuration.
@@ -158,6 +160,9 @@ func (s RuntimeSelection) Validate() error {
 		if len(value) > 256 || strings.ContainsAny(value, "\x00\x1b\r\n") {
 			return errors.New("invalid runtime selection")
 		}
+	}
+	if s.Fast && s.Provider != "openai-codex" {
+		return errors.New("fast unsupported for " + s.Model)
 	}
 	return nil
 }

@@ -9,7 +9,7 @@ Unreal Agent supports Claude and ChatGPT subscription logins, optional OpenAI an
 ## Switching Models (`/model`)
 
 1. Run `/model` in the TUI and choose a connection: `ChatGPT（サブスク）`, `Claude（サブスク）`, `OpenAI API（API キー・別課金）`, or `Claude（API キー・別課金）`. `OpenCode Go` appears after its key is saved. API connections require explicit registration.
-2. Select a model from that connection's catalog, then choose a reasoning effort level when available.
+2. Select a model from that connection's catalog, then choose any available reasoning effort and Fast mode options.
 3. After signing in later or updating an external CLI, run `/model refresh` to re-check authentication and reload models, then select the provider in `/model`. Reinstallation is unnecessary. An existing Session keeps its selected provider until you change it.
 
 > **Notes:**
@@ -61,6 +61,14 @@ Unreal Agent supports Claude and ChatGPT subscription logins, optional OpenAI an
   *(The auth file must be a regular private file, and `models_cache.json` is read from the same directory.)*
 
 - **Model catalog discovery:** Standard Codex catalog discovery reads only `models_cache.json` beside the selected auth file; it never runs the CLI to enumerate models, even on `/model refresh`. Catalog availability and authentication/entitlement validation are checked independently.
+
+### Fast mode
+
+In `/model`, choose **Fast mode** after effort when the ChatGPT subscription catalog advertises it. The selection applies from the next turn and survives Session resume. Fast is off by default. Codex CLI 0.169.1 sends `"service_tier": "priority"` in the Responses request for the selected model. Unreal uses the same field when on and omits it when off. Support comes from `service_tiers[].id` in the official cache or `serviceTiers[].id` in `model/list`. [Codex CLI picker](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/tui/src/chatwidget/service_tiers.rs#L75-L95), [request builder](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/core/src/client.rs#L1278-L1306), [Luna catalog entry](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/models-manager/models.json#L1197-L1207)
+
+On ChatGPT sign-in, GPT-6 Luna Fast uses **2.5×** the included subscription allowance and **2×** the purchased-credit or eligible enterprise pay-as-you-go rate for the same model at standard speed. Rates vary by model. [OpenAI speed guide](https://learn.chatgpt.com/docs/agent-configuration/speed#fast-mode), [OpenAI pricing](https://learn.chatgpt.com/docs/pricing?codex-pricing-speed=fast#speed-multipliers)
+
+Unreal reports `fast unsupported for <model>` if Fast cannot be enabled. If a saved selection loses catalog support, requests continue on that model at standard speed and display the same notice. `/analyze` → **Layers** groups token usage and output tok/s by the mode sent with each request. Older Codex records without mode metadata appear as `fast unknown`.
 
 ---
 
@@ -163,8 +171,8 @@ Claude guidance and provider availability follow each selected role. An unavaila
 ### How Delegation Works
 
 1. Ask Claude to delegate a task (or hand implementation to `lead`).
-2. Claude invokes `~/.local/bin/unreal-agent subagent` via Bash, hands off the task, and ends its turn immediately.
-3. When the child agent finishes or needs input, Unreal wakes the parent Session automatically.
+2. Claude invokes `~/.local/bin/unreal-agent subagent` via Bash, hands off the task, and can continue independent work in parallel.
+3. Unreal answers exact requests for stored brief fields locally and delivers forwarded questions, approval requests and full completion reports to the parent. Claude Code receives them through its post-tool-batch hook. Responses providers include them in the request that follows tool results. Messages that need a decision wake an idle parent. [Delegation brief](usage.md#delegation-brief)
 4. Child agents inherit the parent Session's permission mode (bounded by the Host's maximum policy), and the parent agent mediates child approval requests. See [Permissions](permissions.md).
 
 > **Environment Inheritance:** Children inherit the Host environment (including `PATH`, `HOME`, and tool configuration), excluding `OPENAI_CODEX_ACCESS_TOKEN` and `OPENAI_CODEX_ACCOUNT_ID`. This is process inheritance, not environment isolation.
@@ -176,11 +184,13 @@ On the user's instruction, the main agent reads and changes settings from its Se
 ```sh
 unreal-agent subagent model show
 unreal-agent subagent model set --role lead --provider openai-codex --model gpt-6.2-sol --effort max
-unreal-agent subagent model set --role worker --provider opencode-go --model deepseek-v4.1-flash --effort max
+unreal-agent subagent model set --role worker --provider openai-codex --model gpt-6-luna --effort max --fast on
 unreal-agent subagent model show --role worker
 ```
 
 Roles are `lead`, `worker` (all `worker-*` templates), `collector`, and `all` (replace every role). Any registered, available provider may be chosen; its model must exist in its catalog, and an explicit `--effort` must be offered by that model. Omitting effort keeps template-derived defaults. An explicit worker effort applies to every worker. The collector remains independent, defaulting to `gpt-6-luna` / medium. Roles are not tied to providers. API-key connections require an explicit user choice; unavailable connections never cause fallback.
+
+Use `--fast on` on any role with a supported ChatGPT subscription model. A full model selection with `--fast off` or without `--fast` uses standard speed. Once a role has a saved model, `model set --role worker --fast off` changes speed and keeps its provider, model, and effort. `model show` displays the saved mode.
 
 The Host handles and records reads and changes in the owning Session. Settings remain in shared `STATE/subagent-model.json`, across Sessions, folders and Host restarts. Old Version 1 files apply their single choice to all roles; role settings use Version 2. Unchanged roles inherit the previous global choice. Settings apply to the next child start; running children and their recorded worker selections stay fixed. Explicit `Subagents`, `SubagentDefaults`, and `/children start` commands with an explicit runtime remain independent.
 

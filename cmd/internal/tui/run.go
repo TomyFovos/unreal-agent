@@ -601,7 +601,9 @@ func Run(ctx context.Context, c Config) error {
 					if p.Kind == "permission-once" {
 						u.PermissionDismissed = p.PermissionOperation
 					}
-					if p.Kind == "effort" {
+					if p.Kind == "fast" {
+						u.Picker = p.back
+					} else if p.Kind == "effort" {
 						var current *sessionstore.RuntimeSelection
 						if s.Selection != nil && s.Selection.Provider == p.Provider {
 							current = s.Selection
@@ -638,14 +640,12 @@ func Run(ctx context.Context, c Config) error {
 					if len(p.Options) == 0 {
 						continue
 					}
-					// A model choice commits the selection with the effort it
-					// carries; models with no effort step pass "" directly.
-					commit := func(m modelcatalog.Model, effort llm.ReasoningEffort) {
+					commit := func(m modelcatalog.Model, effort llm.ReasoningEffort, fast bool) {
 						if c.SelectModel == nil || s.Selection == nil {
 							notice("model switching unavailable", "warning")
 							return
 						}
-						selected := sessionstore.RuntimeSelection{Version: 1, RequestID: uuid.New().String(), Provider: p.Provider, Model: m.ID, Name: m.Name, Effort: effort, ContextWindow: m.ContextWindow}
+						selected := sessionstore.RuntimeSelection{Version: 1, RequestID: uuid.New().String(), Provider: p.Provider, Model: m.ID, Name: m.Name, Effort: effort, ContextWindow: m.ContextWindow, Fast: fast}
 						generation, revision := s.Generation, p.Revision
 						u.Picker = nil
 						start("changing model for the next turn", func(ctx context.Context) commandResult {
@@ -744,11 +744,18 @@ func Run(ctx context.Context, c Config) error {
 						})
 						continue
 					}
+					chooseFast := func(m modelcatalog.Model, effort llm.ReasoningEffort) {
+						if m.AllowsFast(p.Provider) {
+							u.Picker = p.fast(m, effort, s.Selection)
+						} else {
+							commit(m, effort, false)
+						}
+					}
 					if p.Kind == "model" {
 						if chosen := p.Catalog.Models[p.Selection]; chosen.EffortUnknown {
 							// The catalog names no Unreal effort: the request
 							// carries no reasoning effort, so no effort step.
-							commit(chosen, "")
+							chooseFast(chosen, "")
 							continue
 						}
 						u.Picker = p.effort(s.Selection)
@@ -788,7 +795,11 @@ func Run(ctx context.Context, c Config) error {
 						continue
 					}
 					if p.Kind == "effort" {
-						commit(p.Model, p.selectedEffort())
+						chooseFast(p.Model, p.selectedEffort())
+						continue
+					}
+					if p.Kind == "fast" {
+						commit(p.Model, p.Effort, p.Selection == 1)
 						continue
 					}
 				}

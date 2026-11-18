@@ -2,11 +2,14 @@ package localfile
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sync"
 
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
@@ -26,6 +29,7 @@ type RestoreView struct {
 	id               session.ID
 	ctx              context.Context
 	state            *storedState
+	index            *restoreIndex
 	committedSize    int64
 	reason, closeErr error
 	stop             func() bool
@@ -33,27 +37,56 @@ type RestoreView struct {
 
 // OpenRestoreView reads one canonical snapshot under the owning Host writer lease.
 func (s *Store) OpenRestoreView(ctx context.Context, id session.ID) (view *RestoreView, err error) {
-	if err = validateSessionID(id); err != nil {
+	return s.openRestoreView(ctx, id, false)
+}
+
+// OpenCheckpointedRestoreView uses a derived write head for an interactive
+// Session. A cache miss starts from the canonical header and builds a new index.
+func (s *Store) OpenCheckpointedRestoreView(ctx context.Context, id session.ID) (*RestoreView, error) {
+	return s.openRestoreView(ctx, id, true)
+}
+
+func (s *Store) openRestoreView(ctx context.Context, id session.ID, checkpoint bool) (*RestoreView, error) {
+	if err := validateSessionID(id); err != nil {
 		return nil, err
 	}
-	if err = context.Cause(ctx); err != nil {
+	if err := context.Cause(ctx); err != nil {
 		return nil, err
 	}
 	encoded, err := s.readRecord(id)
 	if err != nil {
 		return nil, fmt.Errorf("read session %q: %w", id, err)
 	}
-	if err = context.Cause(ctx); err != nil {
+	if err := context.Cause(ctx); err != nil {
 		return nil, err
 	}
-	state, committedSize, err := decodeLog(encoded)
+	var state storedState
+	var committedSize, start int64
+	var index *restoreIndex
+	var hit bool
+	if checkpoint {
+		state, start, index, hit = s.readRestoreCheckpoint(id, encoded)
+		if hit {
+			state, committedSize, err = replayLog(encoded, state, start, index)
+		}
+	}
+	if !hit || err != nil {
+		start, state = 0, storedState{}
+		if checkpoint {
+			index = &restoreIndex{prefix: sha256.New()}
+		}
+		state, committedSize, err = replayLog(encoded, state, start, index)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read session %q: %w", id, err)
 	}
 	if state.Snapshot.Session.ID != id {
 		return nil, fmt.Errorf("restore session identity mismatch")
 	}
-	v := &RestoreView{store: s, id: id, ctx: ctx, state: &state, committedSize: committedSize}
+	if index != nil {
+		index.prefix.Write(encoded[start:committedSize])
+	}
+	v := &RestoreView{store: s, id: id, ctx: ctx, state: &state, index: index, committedSize: committedSize}
 	return s.installRestoreView(v)
 }
 
@@ -102,7 +135,7 @@ func (v *RestoreView) Take(ctx context.Context, id session.ID) ([]sessionstore.I
 	if err != nil {
 		return nil, nil, err
 	}
-	v.store.putCachedWriteState(id, head, v.committedSize)
+	v.store.setCachedWriteState(id, cachedWriteState{head: head, committedSize: v.committedSize, restoreIndex: v.index})
 	items, ops := v.state.Items, v.state.Operations
 	return items, ops, v.finishLocked(ErrRestoreViewClosed)
 }
@@ -207,17 +240,55 @@ func (v *RestoreView) Items(ctx context.Context, id session.ID, after sessionsto
 		if err := context.Cause(ctx); err != nil {
 			return sessionstore.Page{}, err
 		}
-		copy, err := cloneRestoreValue(item)
-		if err != nil {
-			return sessionstore.Page{}, err
-		}
-		items = append(items, copy)
+		items = append(items, cloneHistoryItem(item))
 	}
 	next := after
 	if len(items) > 0 {
 		next = items[len(items)-1].Sequence
 	}
 	return sessionstore.Page{Items: items, NextAfter: next, More: end < uint64(len(v.state.Items))}, nil
+}
+
+// Responses and turns comprise most of a long history. Their common immutable
+// fields can be copied by value; opaque provider bytes and slices stay detached.
+func cloneHistoryItem(item sessionstore.Item) sessionstore.Item {
+	switch value := item.Data.(type) {
+	case session.Turn:
+		value.BatchRecords = slices.Clone(value.BatchRecords)
+		if value.ContextAdmission != nil {
+			admission := *value.ContextAdmission
+			value.ContextAdmission = &admission
+		}
+		item.Data = value
+		return item
+	case sessionstore.ModelResponse:
+		r := &value.Response
+		r.Usage.Raw = r.Usage.Raw.Clone()
+		r.Usage.Unknown = slices.Clone(r.Usage.Unknown)
+		if r.Failure != nil {
+			failure := *r.Failure
+			r.Failure = &failure
+		}
+		if r.Generation != nil {
+			generation := *r.Generation
+			r.Generation = &generation
+		}
+		r.Output = slices.Clone(r.Output)
+		for i, output := range r.Output {
+			switch output.Data.(type) {
+			case llm.Message, llm.ToolCall:
+				if output.Responses == nil {
+					continue
+				}
+			}
+			r.Output[i], _ = cloneRestoreValue(output)
+		}
+		item.Data = value
+		return item
+	default:
+		copy, _ := cloneRestoreValue(item)
+		return copy
+	}
 }
 func (v *RestoreView) Resume(ctx context.Context, id session.ID) (sessionstore.ResumeState, error) {
 	v.mu.Lock()
@@ -255,6 +326,7 @@ func (v *RestoreView) finishLocked(reason error) error {
 	}
 	v.reason = reason
 	v.state = nil
+	v.index = nil
 	v.store.restoreView.CompareAndSwap(v, nil)
 	if v.stop != nil {
 		v.stop()

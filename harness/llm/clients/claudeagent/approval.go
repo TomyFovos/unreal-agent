@@ -26,15 +26,20 @@ const gateMatcher = "Bash|PowerShell|Edit|MultiEdit|Write|NotebookEdit|Agent"
 type approver struct {
 	mu          sync.Mutex
 	cli         string
+	contextCLI  string
 	agentModel  string
 	agentEffort llm.ReasoningEffort
+}
+
+func (a *approver) hostCommand(command string) bool {
+	return subagentCommand(command, a.cli) || literalSessionCommand(command, a.contextCLI, "state", "record")
 }
 
 func (a *approver) decide(ctx context.Context, toolName string, input jsontext.Value, toolUseID string) (bool, string) {
 	if toolName == "AskUserQuestion" {
 		return false, "Unreal Agent cannot show question dialogs. Ask the user in your reply instead."
 	}
-	if toolName == "Bash" && subagentCommand(inputFields(input).Command, a.cli) {
+	if toolName == "Bash" && a.hostCommand(inputFields(input).Command) {
 		return true, ""
 	}
 	controller := permission.ControllerFromContext(ctx)
@@ -69,8 +74,8 @@ func (a *approver) gate(ctx context.Context, in hookInput) map[string]any {
 	refuse := func(reason string) map[string]any {
 		return map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}
 	}
-	if in.ToolName == "Bash" && subagentCommand(inputFields(in.ToolInput).Command, a.cli) {
-		return map[string]any{} // children follow the mode themselves
+	if in.ToolName == "Bash" && a.hostCommand(inputFields(in.ToolInput).Command) {
+		return map[string]any{} // the Host applies the Session's permissions
 	}
 	if in.ToolName == "Agent" {
 		// Each turn's process ends with the turn, which would cut off a
@@ -95,11 +100,16 @@ func (a *approver) gate(ctx context.Context, in hookInput) map[string]any {
 		return map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "Unreal Agent keeps Agent work inside the turn and applies operator-selected Agent settings.", "updatedInput": input}}
 	}
 	if in.ToolName == "Bash" {
-		if command, ok := currentSubagentCommand(inputFields(in.ToolInput).Command, a.cli); ok {
+		original := inputFields(in.ToolInput).Command
+		command, ok := currentSubagentCommand(original, a.cli)
+		if !ok {
+			command, ok = currentSessionCommand(original, a.contextCLI, "state", "record")
+		}
+		if ok {
 			var input map[string]any
 			if json.Unmarshal(in.ToolInput, &input) == nil {
 				input["command"] = command
-				return map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "Unreal Agent ran its current subagent command.", "updatedInput": input}}
+				return map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "Unreal Agent ran its current Session command.", "updatedInput": input}}
 			}
 		}
 	}

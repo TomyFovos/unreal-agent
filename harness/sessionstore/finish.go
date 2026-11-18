@@ -15,6 +15,7 @@ type FinishResult struct {
 	ChangedFiles []string
 	Tests        []string
 	Blockers     []string
+	Next         string `json:",omitzero"`
 }
 type FinishRecord struct {
 	Version     uint32

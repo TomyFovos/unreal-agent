@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"time"
 )
@@ -24,9 +25,12 @@ type HostRecord struct {
 	Activity            *llm.ActivityRecord           `json:",omitzero"`
 	End                 *EndRecord                    `json:",omitzero"`
 	ChildReview         *ChildReview                  `json:",omitzero"`
+	Artifact            *ArtifactRecord               `json:",omitzero"`
+	Approval            *permission.Approval          `json:",omitzero"`
 }
 
 const HostChildReview = "child_review"
+const HostApproval = "approval"
 
 // ChildReview is a parent's optional assessment. It never changes the child's
 // outcome, permissions or scheduling. InputID makes transport retries idempotent.
@@ -58,6 +62,9 @@ func (r HostRecord) Validate() error {
 	if r.ChildReview != nil && r.Kind != HostChildReview {
 		return fmt.Errorf("unexpected child review")
 	}
+	if r.Artifact != nil && r.Kind != HostArtifact {
+		return fmt.Errorf("unexpected artifact record")
+	}
 	if r.Kind != HostProjectInstructions && r.ProjectInstructions != nil {
 		return fmt.Errorf("host record %q carries project instructions", r.Kind)
 	}
@@ -65,6 +72,16 @@ func (r HostRecord) Validate() error {
 		return fmt.Errorf("unexpected runtime selection")
 	}
 	switch r.Kind {
+	case HostApproval:
+		if r.Approval == nil || r.Approval.Request.ID == "" || r.Approval.Request.Tool == "" {
+			return fmt.Errorf("invalid approval record")
+		}
+		return nil
+	case HostArtifact:
+		if r.Artifact == nil {
+			return fmt.Errorf("missing artifact record")
+		}
+		return r.Artifact.Validate()
 	case HostChildReview:
 		v := r.ChildReview
 		if v == nil || v.InputID == "" || v.Handle == "" || v.ChildID == "" || (v.Decision != "accept" && v.Decision != "reject") {

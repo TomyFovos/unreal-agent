@@ -36,6 +36,9 @@ func requestBody(request llm.Request, promptCacheKey string, extensions map[stri
 		Include: &include,
 		Input:   &input,
 	}
+	if request.Model.Fast {
+		params.ServiceTier = new(openaiapi.ServiceTier("priority"))
+	}
 	if promptCacheKey != "" {
 		params.PromptCacheKey = &promptCacheKey
 	}

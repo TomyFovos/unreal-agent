@@ -40,6 +40,7 @@ type SessionMetric struct {
 type LayerModel struct {
 	ModelKey
 	Layer                                                                                  string
+	Fast                                                                                   string `json:",omitzero"`
 	Sessions, Unobserved, RecordedLayers, DerivedLayers                                    int
 	Requests                                                                               int
 	Usage                                                                                  viewer.Usage
@@ -86,6 +87,7 @@ type TreeReport struct {
 	Workers    []WorkerSummary
 	Sessions   []SessionMetric
 	Tasks      []TaskMetric
+	Routing    []RoutingCount `json:",omitzero"`
 }
 
 type treeNode struct {
@@ -93,6 +95,7 @@ type treeNode struct {
 	parent          session.ID
 	handle          operation.ID
 	template, title string
+	layer           string
 	selection       *sessionstore.RuntimeSelection
 	status          operation.Status
 	observed        bool
@@ -159,6 +162,7 @@ func ReadTree(ctx context.Context, root session.ID, inspect InspectFunc) (*Tree,
 		tree.nodes = append(tree.nodes, n)
 		sort.Slice(latest.Operations, func(i, j int) bool { return latest.Operations[i].ID < latest.Operations[j].ID })
 		for _, op := range latest.Operations {
+			n.acc.operations[op.ID] = op
 			p, err := subagent.DecodePlan(op)
 			if err != nil {
 				if state, e := operation.DecodeRemoteJobState(op); e == nil && state.Plan.Type == subagent.PlanType {
@@ -174,7 +178,7 @@ func ReadTree(ctx context.Context, root session.ID, inspect InspectFunc) (*Tree,
 				continue
 			}
 			seen[p.ChildID] = true
-			queue = append(queue, &treeNode{acc: New(p.ChildID), parent: n.acc.id, handle: op.ID, template: p.Template, title: taskTitle(p.Text), selection: sessionstore.SelectionFromConfiguration(p.Configuration.Runtime), status: op.Status})
+			queue = append(queue, &treeNode{acc: New(p.ChildID), parent: n.acc.id, handle: op.ID, template: p.Template, layer: p.Configuration.Layer, title: taskTitle(p.Title()), selection: sessionstore.SelectionFromConfiguration(p.Configuration.Runtime), status: op.Status})
 		}
 	}
 	tree.observedAt = time.Now().UTC()
@@ -203,8 +207,14 @@ func interval(start, end time.Time, source string) Metric {
 func (t *Tree) Snapshot(root *Accumulator) *TreeReport {
 	r := &TreeReport{Version: 1, ObservedAt: t.observedAt, Partial: t.partial, PriceTable: PriceTableSource}
 	metrics := map[session.ID]*sessionMetrics{}
+	routing := routingCounts{}
 	for _, n := range t.nodes {
 		metrics[n.acc.id] = n.acc.metrics
+		if root != nil && root.id == n.acc.id {
+			routing.merge(root.routing())
+		} else {
+			routing.merge(n.acc.routing())
+		}
 	}
 	if root != nil {
 		metrics[root.id] = root.metrics
@@ -219,6 +229,11 @@ func (t *Tree) Snapshot(root *Accumulator) *TreeReport {
 				s.Layer, s.LayerSource = "main", "measured"
 			}
 			s.ModelKey = modelKey(m.selection)
+		}
+		if n.layer != "" {
+			s.Layer, s.LayerSource = viewer.SafeText(n.layer), "measured"
+		} else if m.layer != "" {
+			s.Layer, s.LayerSource = viewer.SafeText(m.layer), "measured"
 		}
 		s.StartedAt = m.created
 		source := "derived"
@@ -255,6 +270,17 @@ func (t *Tree) Snapshot(root *Accumulator) *TreeReport {
 		} else if s.Finish == "" && n.status == operation.StatusCompleted {
 			s.Finish = "completed"
 		}
+		if s.SelectionSource != "measured" {
+			for _, req := range s.Requests {
+				if req.Kind == "response" && req.SelectionSource == "derived-from-responses" {
+					s.ModelKey, s.SelectionSource = req.ModelKey, req.SelectionSource
+					break
+				}
+			}
+			if s.ModelKey == (ModelKey{}) {
+				s.SelectionSource = "unknown"
+			}
+		}
 		if s.Finish == "success" {
 			s.Finish = "completed"
 		}
@@ -278,6 +304,7 @@ func (t *Tree) Snapshot(root *Accumulator) *TreeReport {
 	}
 	r.buildTasks()
 	r.aggregate()
+	r.Routing = routing.sorted()
 	return r
 }
 
@@ -367,14 +394,18 @@ func mergeUsage(dst *viewer.Usage, src viewer.Usage) {
 }
 
 func (r *TreeReport) aggregate() {
-	groups := map[string]int{}
-	group := func(layer string, model ModelKey) *LayerModel {
-		key := layer + "\x00" + model.Provider + "\x00" + model.Model + "\x00" + model.Effort
+	type layerKey struct {
+		ModelKey
+		layer, fast string
+	}
+	groups := map[layerKey]int{}
+	group := func(layer string, model ModelKey, fast string) *LayerModel {
+		key := layerKey{model, layer, fast}
 		if i, ok := groups[key]; ok {
 			return &r.Layers[i]
 		}
 		groups[key] = len(r.Layers)
-		r.Layers = append(r.Layers, LayerModel{Layer: layer, ModelKey: model})
+		r.Layers = append(r.Layers, LayerModel{Layer: layer, ModelKey: model, Fast: fast})
 		return &r.Layers[len(r.Layers)-1]
 	}
 	workers := map[ModelKey]int{}
@@ -387,7 +418,16 @@ func (r *TreeReport) aggregate() {
 		return &r.Workers[len(r.Workers)-1]
 	}
 	for _, s := range r.Sessions {
-		g := group(s.Layer, s.ModelKey)
+		// Session timing belongs to the first response on its attributed model.
+		// Each request below uses its own recorded mode, even after a switch.
+		fast := ""
+		for _, req := range s.Requests {
+			if req.Kind == "response" && req.ModelKey == s.ModelKey {
+				fast = req.Fast
+				break
+			}
+		}
+		g := group(s.Layer, s.ModelKey, fast)
 		g.Sessions++
 		if s.LayerSource == "measured" {
 			g.RecordedLayers++
@@ -411,7 +451,7 @@ func (r *TreeReport) aggregate() {
 		}
 		g.UsageLimitWait.merge(s.UsageLimitWait)
 		for _, req := range s.Requests {
-			g = group(s.Layer, req.ModelKey)
+			g = group(s.Layer, req.ModelKey, req.Fast)
 			g.Requests++
 			mergeUsage(&g.Usage, req.Usage)
 			g.ListPriceUSD.merge(req.ListPriceUSD)
@@ -501,7 +541,7 @@ func (r *TreeReport) aggregate() {
 	}
 	sort.Slice(r.Layers, func(i, j int) bool {
 		a, b := r.Layers[i], r.Layers[j]
-		return layerOrder(a.Layer)+modelLabel(a.ModelKey) < layerOrder(b.Layer)+modelLabel(b.ModelKey)
+		return layerOrder(a.Layer)+requestModelLabel(a.ModelKey, a.Fast) < layerOrder(b.Layer)+requestModelLabel(b.ModelKey, b.Fast)
 	})
 	sort.Slice(r.Workers, func(i, j int) bool { return modelLabel(r.Workers[i].ModelKey) < modelLabel(r.Workers[j].ModelKey) })
 }

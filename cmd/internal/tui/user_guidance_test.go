@@ -8,8 +8,11 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/analysis"
 	"github.com/unreallabsai/unreal-agent/harness/host"
+	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
@@ -143,6 +146,31 @@ func TestSessionDiagnosticSurvivesResume(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("resume discarded diagnostic cause")
+	}
+}
+
+func TestFailedTurnIsVisibleWhileSessionKeepsRunning(t *testing.T) {
+	m := NewModel("s")
+	const reason = `call model for turn "turn-1": Claude Code: turn_failed: You've hit your limit`
+	items := []host.HistoryItem{
+		{Sequence: 1, Kind: sessionstore.ItemInput, Data: inbox.Input{ID: "user", Kind: inbox.InputExternal, Payload: []byte(`"continue"`)}},
+		{Sequence: 2, Kind: sessionstore.ItemTurn, Data: session.Turn{ID: "turn-1", Type: session.TurnRegular}},
+		{Sequence: 3, Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{Kind: sessionstore.HostActivity, Activity: &llm.ActivityRecord{Kind: llm.ActivityModelFailure, ID: "turn-1", Reason: reason}}},
+	}
+	v := host.View{Generation: "g", Running: true, History: host.HistoryPage{Items: items}}
+	if err := m.apply(v); err != nil {
+		t.Fatal(err)
+	}
+	s := m.Snapshot()
+	if !s.Running || s.WaitingForModel || len(s.Entries) != 2 || s.Entries[1].Role != "error" || s.Entries[1].TurnID != "turn-1" {
+		t.Fatal("failed turn projection", s)
+	}
+	if text := chatText(s, plainUI(), 160); !strings.Contains(text, "利用上限に達しました") || !strings.Contains(text, "入力を送り直す") || strings.Contains(text, "/resume") {
+		t.Fatal(text)
+	}
+	diagnostic := m.Analysis(time.Now(), nil).Errors.Recent
+	if len(diagnostic) != 1 || diagnostic[0].Name != reason {
+		t.Fatal("failed turn cause was lost", diagnostic)
 	}
 }
 

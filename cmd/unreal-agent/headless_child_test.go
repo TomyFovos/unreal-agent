@@ -210,8 +210,26 @@ func TestHeadlessUnreportedChildCompletion(t *testing.T) {
 					}
 					if fixture != nil {
 						turns := fixture.Calls(t)
-						if len(turns) != 2 || !strings.Contains(turns[1].Input, "stop="+string(stop)) {
-							t.Fatalf("Claude did not review child's failure: %+v", turns)
+						batches := fixture.BatchContexts(t)
+						if len(turns) == 0 || len(batches) != 1 {
+							t.Fatalf("Claude ran %d turns and %d tool batches, want at least one turn and one batch", len(turns), len(batches))
+						}
+						// The child can finish before the start batch completes or
+						// after it. Each case gives the parent exactly one report.
+						reason := "stop=" + string(stop)
+						countReports := func(text string) int {
+							if strings.Contains(text, reason) {
+								return strings.Count(text, "(ended), not human input")
+							}
+							return 0
+						}
+						inBatch := countReports(batches[0])
+						inResume := 0
+						for _, turn := range turns[1:] {
+							inResume += countReports(turn.Input)
+						}
+						if inBatch+inResume != 1 || len(turns) != 1+inResume {
+							t.Fatalf("Claude reviews of child's failure = %d in batch and %d in resume across %d turns", inBatch, inResume, len(turns))
 						}
 					}
 					assertNoStoredCredentials(t, sessions, "fake-selected-key", "fake-anthropic-headless")

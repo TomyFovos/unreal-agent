@@ -9,6 +9,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
@@ -20,6 +21,7 @@ type Engine struct {
 	units      map[string]Unit
 	order      []string
 	sources    map[string][]string
+	deferred   map[string]HistoryRef
 	state      State
 	ops        map[string]OperationState
 	through    sessionstore.Sequence
@@ -86,18 +88,45 @@ func (e *Engine) add(u Unit, source string, omitGroup bool) (string, bool, *llm.
 	} else {
 		u.Item = public
 	}
+	if ref, ok := e.deferred[source]; ok {
+		u.Source.Sequence, u.Source.RecordedAt = ref.Sequence, ref.RecordedAt
+		delete(e.deferred, source)
+	} else {
+		e.sources[source] = append(e.sources[source], u.ID)
+	}
 	e.units[u.ID] = u
 	if u.Kind == UserMessage && u.Required {
 		e.latestUser = u.ID
 	}
 	e.order = append(e.order, u.ID)
-	e.sources[source] = append(e.sources[source], u.ID)
 	return u.ID, eligible, redaction
+}
+
+// Omit removes an output from the projection while preserving its position.
+// Historical compaction and receipt records refer to these unit IDs.
+func (e *Engine) Omit(id string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if u, ok := e.units[id]; ok {
+		u.Class, u.Item, u.Group = Omit, llm.Item{}, ""
+		e.units[id] = u
+	}
 }
 
 func (e *Engine) Observe(item sessionstore.Item, source string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	// A bridge input can commit before the Context Builder has a unit for it.
+	// Keep only its source coordinates until the projection boundary.
+	if input, ok := item.Data.(inbox.Input); ok && input.Deferred && len(e.sources[source]) == 0 {
+		peer, _ := input.DecodePeerMessage()
+		if peer.Kind != "ready" {
+			if e.deferred == nil {
+				e.deferred = map[string]HistoryRef{}
+			}
+			e.deferred[source] = HistoryRef{Sequence: item.Sequence, RecordedAt: item.RecordedAt}
+		}
+	}
 	for _, id := range e.sources[source] {
 		u := e.units[id]
 		u.Source.Sequence, u.Source.RecordedAt = item.Sequence, item.RecordedAt

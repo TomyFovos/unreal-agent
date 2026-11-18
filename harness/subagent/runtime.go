@@ -41,6 +41,11 @@ type RuntimeResolver func(context.Context, *host.Session, string, Template, *Run
 // StartChild uses the same canonical SubagentStart Operation as model calls.
 // The stable input ID also gives operator starts their existing retry semantics.
 func StartChild(ctx context.Context, owner *host.Session, generation string, input inbox.ID, name, task string, templates map[string]Template, requested *RuntimeRequest, resolve RuntimeResolver, bindOverrides ...bool) (host.Receipt, error) {
+	return StartChildWithBrief(ctx, owner, generation, input, name, task, BriefFields{}, templates, requested, resolve, bindOverrides...)
+}
+
+// StartChildWithBrief commits an operator start with optional structured task fields.
+func StartChildWithBrief(ctx context.Context, owner *host.Session, generation string, input inbox.ID, name, task string, brief BriefFields, templates map[string]Template, requested *RuntimeRequest, resolve RuntimeResolver, bindOverrides ...bool) (host.Receipt, error) {
 	if owner == nil || generation != owner.Generation {
 		return host.Receipt{}, host.ErrStaleGeneration
 	}
@@ -64,7 +69,7 @@ func StartChild(ctx context.Context, owner *host.Session, generation string, inp
 		}
 		var state operation.RemoteJobState
 		var plan Plan
-		if spec.Type != operation.TypeRemoteJob || spec.Version != operation.VersionRemoteJob || json.Unmarshal(spec.State, &state) != nil || state.Plan.Type != PlanType || state.Plan.Version != PlanVersion || json.Unmarshal(state.Plan.Data, &plan) != nil || plan.Validate() != nil || plan.Action != "start" || plan.Template != name || plan.Text != task {
+		if spec.Type != operation.TypeRemoteJob || spec.Version != operation.VersionRemoteJob || json.Unmarshal(spec.State, &state) != nil || state.Plan.Type != PlanType || state.Plan.Version != PlanVersion || json.Unmarshal(state.Plan.Data, &plan) != nil || plan.Validate() != nil || plan.Action != "start" || plan.Template != name || plan.Text != task || plan.Brief != brief {
 			return host.Receipt{}, host.ErrConflict
 		}
 
@@ -106,7 +111,7 @@ func StartChild(ctx context.Context, owner *host.Session, generation string, inp
 	} else if requested != nil {
 		return host.Receipt{}, &RuntimeError{Code: "selection_unsupported"}
 	}
-	spec, e := NewSpec(Plan{Version: 1, Action: "start", ParentID: owner.ID, Template: name, Text: task, Configuration: &configured, RuntimeBound: bound, RuntimeOverride: override, Notify: true})
+	spec, e := NewSpec(Plan{Version: 1, Action: "start", ParentID: owner.ID, Template: name, Text: task, Brief: brief, Configuration: &configured, RuntimeBound: bound, RuntimeOverride: override, Notify: true})
 	if e != nil {
 		return host.Receipt{}, e
 	}

@@ -82,6 +82,7 @@ type State struct {
 	ActiveOperations         int
 }
 
+// Budget and all Config window/reserve/size fields are in input tokens.
 type Budget struct {
 	Window, ResponseReserve, SchemaReserve, ProtocolReserve, Input int64
 	WindowSource                                                   string // catalog or conservative-fallback
@@ -89,15 +90,18 @@ type Budget struct {
 
 // Diagnostics contains no unit bodies, arguments, search terms or private IDs.
 type Diagnostics struct {
-	Version                                   int
-	Provider, Model, Effort                   string
-	RuntimeRevision                           uint64
-	ThroughSequence                           sessionstore.Sequence
-	CanonicalUnits, Recent, Omitted, Excluded int
-	EstimatedInputTokens                      int64
-	Budget                                    Budget
-	Utilization                               float64
-	Measurement, Cache                        string
+	Version                                                int
+	Provider, Model, Effort                                string
+	RuntimeRevision                                        uint64
+	ThroughSequence                                        sessionstore.Sequence
+	CanonicalUnits, Recent, Omitted, Excluded              int
+	EstimatedInputTokens                                   int64
+	RequestBytes                                           int64
+	InputTokens, MeasuredInputTokens, EstimatedDeltaTokens int64
+	Estimator, HeaderFingerprint                           string
+	Budget                                                 Budget
+	Utilization                                            float64
+	Measurement, Cache                                     string
 }
 
 type Selected struct {
@@ -154,10 +158,10 @@ func (c Config) Resolve() (Config, error) {
 	// Like Codex, a request may fill the model's context window: the input
 	// budget is the window less the reserves unless configured lower. An
 	// unknown window (Codex through Docker Sandboxes lists none) falls back to
-	// 768 KiB of estimated bytes: bytes overstate tokens about threefold, so
-	// it stays within the smallest current window, 272k tokens.
+	// the smallest current window, 272k tokens. Estimates never reinterpret a
+	// catalog token window as bytes.
 	if c.FallbackWindow == 0 {
-		c.FallbackWindow = 768 << 10
+		c.FallbackWindow = 272000
 	}
 	if c.InputBudget == 0 {
 		c.InputBudget = 16 << 20

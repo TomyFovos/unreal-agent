@@ -52,6 +52,7 @@ type BuildConfig struct {
 	// RequestEffort resolves a selected effort, including legacy ultra, to the
 	// one the backend accepts. It is set for CatalogModels providers.
 	RequestEffort func(ctx context.Context, model string, selected llm.ReasoningEffort) llm.ReasoningEffort
+	SupportsFast  func(ctx context.Context, model string) bool
 }
 type Factory func(BuildConfig, credential.Material) (Client, error)
 type Descriptor struct {

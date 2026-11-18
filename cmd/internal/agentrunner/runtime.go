@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
 	"github.com/unreallabsai/unreal-agent/harness/contextengine"
+	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/dap"
 	"github.com/unreallabsai/unreal-agent/harness/host"
@@ -23,6 +24,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 	"github.com/unreallabsai/unreal-agent/harness/tool/bash"
+	"github.com/unreallabsai/unreal-agent/harness/tool/contexttools"
 	"github.com/unreallabsai/unreal-agent/harness/tool/observed"
 	"github.com/unreallabsai/unreal-agent/harness/tool/viewimage"
 	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
@@ -40,6 +42,7 @@ type RuntimeIdentity struct {
 	Profile                 profile.Selection
 	Workspace, SystemPrompt string
 	ReasoningEffort         llm.ReasoningEffort
+	Fast                    bool `json:",omitzero"`
 	DisallowedTools         []string
 	LanguageServers         string              `json:",omitempty"`
 	DebugAdapters           string              `json:",omitempty"`
@@ -48,9 +51,10 @@ type RuntimeIdentity struct {
 type RuntimeConfig struct {
 	CredentialSources map[string]credential.Source // nonsecret Host-owned locations, never Session identity
 	BuiltinSubagents  bool                         // defaults follow subagent model or the owning Session's explicit GPT connection
-	// ResolveChildRuntime validates a lead's already bound worker templates.
-	// Their recorded selections remain fixed for the lifetime of the lead.
-	ResolveChildRuntime subagent.RuntimeResolver
+	// Child starts resolve current operator choices; recovery validates the
+	// already recorded runtime without selecting a different model.
+	ResolveChildRuntime   subagent.RuntimeResolver
+	ValidateChildTemplate func(subagent.Template, subagent.Template) error
 	// Context is a versioned, disposable projection strategy. It is deliberately
 	// outside immutable runtime/auth identity, so old histories need no migration.
 	Context contextengine.Config
@@ -206,7 +210,7 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 	}
 	factory := func(ctx context.Context, id session.ID) (host.Runtime, error) {
 		// Keep immutable creation bytes intact; normalize only the active choice.
-		base := sessionstore.RuntimeSelection{Version: 1, Provider: c.Identity.Provider.Provider, Model: c.Identity.Provider.Model.ID, Name: c.Identity.Provider.Model.ID, Effort: c.Identity.ReasoningEffort.Normalize()}
+		base := sessionstore.RuntimeSelection{Version: 1, Provider: c.Identity.Provider.Provider, Model: c.Identity.Provider.Model.ID, Name: c.Identity.Provider.Model.ID, Effort: c.Identity.ReasoningEffort.Normalize(), Fast: c.Identity.Fast}
 		active := base
 		if prior := host.ActiveRuntimeSelection(ctx); prior != nil {
 			active = *prior
@@ -270,6 +274,26 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 				e = configured.Close()
 			}
 			return errors.Join(e, client.Close())
+		}
+		owner, owned := host.SessionFromContext(ctx)
+		if owned || tools.CatalogOnly {
+			configured.Registry, err = tool.WithExtensions(configured.Registry, contexttools.Extensions(c.Identity.DisallowedTools))
+			if err != nil {
+				closeRuntime()
+				return host.Runtime{}, err
+			}
+			if owned {
+				handler := contexttools.NewHandler(ctx, owner)
+				configured.RemoteJobs = append(configured.RemoteJobs, handler)
+				closeBase := configured.Close
+				configured.Close = func() error {
+					err := handler.Close()
+					if closeBase != nil {
+						err = errors.Join(err, closeBase())
+					}
+					return err
+				}
+			}
 		}
 		if _, enabled := configured.Registry.Resolve(tool.SkillUseName); enabled {
 			for _, skill := range skills {
@@ -364,11 +388,14 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 				}
 			}
 			prompt, definitions := composed.Compose(c.Identity.SystemPrompt, definitions)
+			if slices.ContainsFunc(definitions, func(d llm.Tool) bool { return d.Name == string(contextstate.Show) }) {
+				prompt += "\n" + contexttools.Guidance
+			}
 			builder.(interface{ SetRuntimeProvider(string) }).SetRuntimeProvider(choice.Provider)
 			b := builder.(interface {
 				ConfigureRuntime(llm.Model, string, []llm.Tool, []tool.Skill, bool, bool)
 			})
-			b.ConfigureRuntime(llm.Model{ID: choice.Model, ReasoningEffort: choice.Effort}, prompt, definitions, registry.Skills(), !enabled, len(c.Backends) > 0 || c.Discovered != nil || !enabled)
+			b.ConfigureRuntime(llm.Model{ID: choice.Model, ReasoningEffort: choice.Effort, Fast: choice.Fast}, prompt, definitions, registry.Skills(), !enabled, len(c.Backends) > 0 || c.Discovered != nil || !enabled)
 			builder.(interface {
 				SetContextRuntime(sessionstore.RuntimeSelection, bool)
 			}).SetContextRuntime(choice, enabled)
@@ -426,7 +453,7 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 					return e
 				}
 			}
-			builder.SetModel(llm.Model{ID: choice.Model, ReasoningEffort: choice.Effort})
+			builder.SetModel(llm.Model{ID: choice.Model, ReasoningEffort: choice.Effort, Fast: choice.Fast})
 			return nil
 		}
 		return host.Runtime{RetainOperation: configured.RetainOperation, InterruptedInput: configured.InterruptedInput, CompletedInput: configured.CompletedInput, ContextEngine: engine, Selection: &base, ValidateSelection: validate, ApplySelection: apply, BeforeGeneration: refreshPermission, Builder: builder, LLM: client, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, configured.RemoteJobs...), Close: closeRuntime}, nil

@@ -113,6 +113,15 @@ func FuzzRunLogMatchesExecution(f *testing.F) {
 						return llm.Response{}, errors.New("settled execution requested another model response")
 					}
 					response := responses[len(returned)]
+					// This codec oracle deliberately persists counters up to MaxInt64.
+					// Supply the synthetic last-call context independently of those
+					// aggregate counters, preserving every precision/log assertion.
+					response.Generation = &llm.GenerationStatistics{
+						Model:  request.Model.ID,
+						Tokens: llm.ReportedTokens(response.Usage), ContextKnown: true,
+						ContextTokens:  (contextengine.TokenEstimator{Provider: "openai"}).Request(request),
+						DurationMicros: 1, Source: "client_clock",
+					}
 					returned = append(returned, response)
 					return copyLogResponse(response), nil
 				}}
@@ -129,7 +138,7 @@ func FuzzRunLogMatchesExecution(f *testing.F) {
 				// KiB fixture could not hold its 70 KiB failure/resume seed intact.
 				// Real defaults and dedicated true-overflow tests remain unchanged.
 				configured := testConfig(client)
-				budget := int64(65536) + 4*contextengine.Estimate(text)*int64(len(actions)+2)
+				budget := int64(65536) + 4*contextengine.JSONBytes(text)*int64(len(actions)+2)
 				configured.Context = contextengine.Config{FallbackWindow: budget + 8192, InputBudget: budget}
 				err := Run(ctx, []string{"-workspace", workspace, "-session-directory", sessions, "-log-directory", logDirectory, "-tool-heartbeat-interval", "0"},
 					func(name string) string {

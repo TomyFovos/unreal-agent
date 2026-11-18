@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/host"
+	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
@@ -90,9 +91,16 @@ func TestSubagentCommandRuntimeOverrides(t *testing.T) {
 		{"effort", []string{"-effort", "low"}, selection{"template-model", "low"}},
 		{"both", []string{"-model", "gpt-6-astra", "--effort", "max"}, selection{"gpt-6-astra", "max"}},
 		{"legacy effort", []string{"--effort", "ultra"}, selection{"template-model", "max"}},
+		{"structured only", []string{"--title", "Review", "--purpose", "Acceptance decision",
+			"--inputs", "diff.txt", "--outputs", "review.md", "--verification", "Read the changed tests",
+			"--acceptance-criteria", "Explain findings with evidence"}, selection{"template-model", "high"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			args := append([]string{"start", "--template", "review", "--task", "Review the change."}, tc.flags...)
+			args := []string{"start", "--template", "review"}
+			if tc.name != "structured only" {
+				args = append(args, "--task", "Review the change.")
+			}
+			args = append(args, tc.flags...)
 			started, err := cli(args...)
 			if err != nil {
 				t.Fatal(started, err)
@@ -143,6 +151,33 @@ func TestSubagentCommandRuntimeOverrides(t *testing.T) {
 			}
 			if s := sessionstore.SelectionFromConfiguration(child.Configuration.Runtime); s == nil || s.Provider != "openai-codex" || s.Model != tc.want.model || string(s.Effort) != tc.want.effort {
 				t.Fatal("recorded runtime selection", s)
+			}
+			if tc.name == "structured only" {
+				want := subagent.BriefFields{Title: "Review", Purpose: "Acceptance decision", Inputs: "diff.txt", Outputs: "review.md",
+					Verification: "Read the changed tests", AcceptanceCriteria: "Explain findings with evidence"}
+				if plan.Text != "" || plan.Brief != want {
+					t.Fatalf("structured CLI task = %+v and %q", plan.Brief, plan.Text)
+				}
+			}
+			_, preview, ok := strings.Cut(started, "Delegation brief v1\n")
+			if !ok {
+				t.Fatal("CLI start missing preview", started)
+			}
+			preview = "Delegation brief v1\n" + strings.TrimSuffix(preview, "\n")
+			found := false
+			for _, item := range child.View.History.Items {
+				in, ok := item.Data.(inbox.Input)
+				if !ok || string(in.ID) != "task:"+handle[1] {
+					continue
+				}
+				peer, err := in.DecodePeerMessage()
+				if err != nil || peer.Text != preview {
+					t.Fatalf("CLI preview differs from child input.\nPreview %q\nChild %q\nError %v", preview, peer.Text, err)
+				}
+				found = true
+			}
+			if !found {
+				t.Fatal("missing child task input")
 			}
 		})
 	}

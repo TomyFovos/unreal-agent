@@ -135,7 +135,7 @@ func TestToolEpochWaitsThenPrunesAllOldResultsAtOnce(t *testing.T) {
 	f.user(t, "task", "Keep the task")
 	for i := range 3 {
 		id := fmt.Sprint(i)
-		epochExchange(t, f, id, "Bash", `{"command":"printf unknown"}`, strings.Repeat("x", 2200))
+		epochExchange(t, f, id, "Bash", `{"command":"printf unknown"}`, strings.Repeat("x", 8800))
 		prunes := epochPrunes(epochPrepare(t, f))
 		if i < 2 {
 			if len(prunes) != 0 || len(f.b.pruned) != 0 {
@@ -174,9 +174,9 @@ func TestToolEpochMinimumIsInclusiveAndUsesNetSavings(t *testing.T) {
 	var saved int64
 	for _, u := range f.b.engine.Units() {
 		if r, ok := u.Item.Data.(llm.ToolResult); ok && r.CallID == "old" {
-			before := contextengine.Estimate(r)
+			before := f.b.tokenEstimator().ToolResult(r)
 			r.Output = []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: f.b.omittedOutput(u, r, f.b.toolCalls()[r.CallID])}}
-			saved = before - contextengine.Estimate(r)
+			saved = before - f.b.tokenEstimator().ToolResult(r)
 		}
 	}
 	if saved <= 0 {
@@ -210,7 +210,7 @@ func TestToolEpochObsoleteReadsInsideRecentWindow(t *testing.T) {
 			t.Run(old.name+"/"+later.name+later.args, func(t *testing.T) {
 				f := newContextFixture(t, "openai-codex", contextengine.Config{ToolResultKeepTokens: 100000, ToolResultMinPruneTokens: 1000})
 				f.user(t, "task", "Inspect")
-				epochExchange(t, f, "old", old.name, old.args, strings.Repeat("old\n", 1000))
+				epochExchange(t, f, "old", old.name, old.args, strings.Repeat("old\n", 4000))
 				epochExchange(t, f, "unknown", "Bash", `{"command":"cat src/foo.go other.go"}`, strings.Repeat("unclassified\n", 300))
 				f.item(t, sessionstore.ItemTurn, session.Turn{ID: "later", Type: session.TurnRegular})
 				f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "later", Response: llm.Response{Output: []llm.Item{epochCall("later", later.name, later.args)}}})
@@ -276,8 +276,8 @@ func TestToolEpochPersistFailureDoesNotChangeView(t *testing.T) {
 	t.Parallel()
 	f := newContextFixture(t, "openai-codex", contextengine.Config{ToolResultKeepTokens: 1, ToolResultMinPruneTokens: 1000})
 	f.user(t, "task", "Inspect")
-	epochExchange(t, f, "old", "read", `{"path":"old.go"}`, strings.Repeat("x", 3000))
-	epochExchange(t, f, "new", "read", `{"path":"new.go"}`, strings.Repeat("y", 3000))
+	epochExchange(t, f, "old", "read", `{"path":"old.go"}`, strings.Repeat("x", 12000))
+	epochExchange(t, f, "new", "read", `{"path":"new.go"}`, strings.Repeat("y", 12000))
 	before, _ := json.Marshal(f.b.deriveItems())
 	failure := errors.New("storage failed")
 	err := f.b.pruneToolEpoch(func(sessionstore.ContextRecord) error { return failure })
@@ -433,10 +433,10 @@ func TestToolEpochLongConversationReducesAverageInput(t *testing.T) {
 		for i := range calls {
 			id := fmt.Sprint(i)
 			epochExchange(t, f, id, "read", fmt.Sprintf(`{"path":"source%d.go"}`, i), body)
-			// Synthetic measured usage is a quarter of the conservative JSON
-			// estimate. This exercises the same calibration as real Responses.
+			// Synthetic reported usage is a quarter of the serialized payload
+			// bytes. This exercises measured calibration independently of admission.
 			request := llm.Request{Model: f.b.request.Model, Tools: f.b.request.Tools, Input: f.b.deriveItems()}
-			input := contextengine.Estimate(request) / 4
+			input := contextengine.JSONBytes(request) / 4
 			turn := session.TurnID(id + "-measured")
 			f.item(t, sessionstore.ItemTurn, session.Turn{ID: turn, Type: session.TurnRegular})
 			f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: turn, Response: llm.Response{Usage: llm.Usage{InputTokens: input}}})
@@ -448,7 +448,7 @@ func TestToolEpochLongConversationReducesAverageInput(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			totals[index] += contextengine.Estimate(built.Request) / 4
+			totals[index] += contextengine.JSONBytes(built.Request) / 4
 		}
 	}
 	generatedTokens := calls * len(body) / 4

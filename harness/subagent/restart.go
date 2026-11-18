@@ -92,6 +92,16 @@ func (m *Manager) watchRecovered(ctx context.Context, id operation.ID, p Plan, s
 	defer ticker.Stop()
 	var previous os.FileInfo
 	var view ChildView
+	finished := func(view ChildView) (operation.Status, error) {
+		handle := Handle{Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: id, Finish: view.Finish, FinishLocator: view.FinishLocator}
+		if view.Configuration != nil {
+			handle.Brief = view.Configuration.Brief
+		}
+		var err error
+		state.Handle, err = json.Marshal(handle)
+		state.TerminalResult = view.Finish.Result.Summary
+		return finishStatus(handle), err
+	}
 	for {
 		info, err := store.StatSession(p.ChildID)
 		if err != nil {
@@ -105,10 +115,7 @@ func (m *Manager) watchRecovered(ctx context.Context, id operation.ID, p Plan, s
 			previous = info
 		}
 		if view.Finish != nil {
-			handle := Handle{Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: id, Finish: view.Finish}
-			state.Handle, err = json.Marshal(handle)
-			state.TerminalResult = view.Finish.Result.Summary
-			return finishStatus(handle), err
+			return finished(view)
 		}
 		lock, err := store.AcquireWriter(p.ChildID)
 		if err == nil {
@@ -116,10 +123,7 @@ func (m *Manager) watchRecovered(ctx context.Context, id operation.ID, p Plan, s
 			err = recordErr
 			err = errors.Join(err, lock.Close())
 			if err == nil && view != nil && view.Finish != nil {
-				handle := Handle{Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: id, Finish: view.Finish}
-				state.Handle, err = json.Marshal(handle)
-				state.TerminalResult = view.Finish.Result.Summary
-				return finishStatus(handle), err
+				return finished(*view)
 			}
 			return operation.StatusCanceled, err
 		}

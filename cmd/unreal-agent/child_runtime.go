@@ -7,8 +7,10 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"maps"
+	"strings"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
+	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
@@ -74,6 +76,51 @@ func builtinGPTProvider(owner *host.Session) string {
 	return "openai-codex"
 }
 
+// A lead keeps its own immutable runtime, but each new worker uses the shared
+// role choice at that start. Provider registrations and catalog readers are
+// process configuration, outside the lead's recorded runtime identity.
+func configureWorkerModels(c *agentrunner.RuntimeConfig, modelFile string, sources map[string]credential.Source, parent subagent.ChildConfig) {
+	if _, err := c.ProviderRuntime(opencodego.ProviderID); err == nil {
+		models := &openCodeGoCatalog{url: openCodeGoModelsURL(serveConfiguration{Runtime: c.Identity, Providers: c.Backends})}
+		c.Catalogs[opencodego.ProviderID] = func(ctx context.Context) (modelcatalog.Catalog, error) { return models.read(ctx, false) }
+	}
+	c.Health = map[string]func(context.Context) error{}
+	backends := maps.Clone(c.Backends)
+	if backends == nil {
+		backends = map[string]agentrunner.ProviderRuntime{}
+	}
+	backends[c.Identity.Provider.Provider] = agentrunner.ProviderRuntime{Provider: c.Identity.Provider, ReasoningEffort: c.Identity.ReasoningEffort, Claude: c.Identity.Claude}
+	for id, p := range backends {
+		if b := apiBackend(p, sources[id]); b.Catalog != nil {
+			c.Health[id] = b.Check
+			c.Catalogs[id] = func(ctx context.Context) (modelcatalog.Catalog, error) { return b.Catalog(ctx, false) }
+		}
+	}
+	parentLayer := parent.Layer
+	if parentLayer == "" {
+		parentLayer = subagent.RoleGroup(parent.Template)
+	}
+	resolve := childRuntimeResolverForLayer(*c, modelFile, parentLayer, nil)
+	c.ResolveChildRuntime = func(ctx context.Context, owner *host.Session, name string, template subagent.Template, requested *subagent.RuntimeRequest) (subagent.Template, error) {
+		if requested != nil {
+			return boundWorkerRuntime(ctx, owner, name, template, requested)
+		}
+		// Older leads recorded already bound templates with no Default. Supply
+		// the built-in role default only while resolving, preserving their shape
+		// for canonical replay and template validation.
+		originalDefault := template.Default
+		choice := subagent.RuntimeRequest{Provider: "openai-codex", Model: leadModel, Effort: llm.ReasoningEffort(strings.TrimPrefix(name, "worker-"))}
+		if name == "collector" {
+			choice.Model, choice.Effort = collectorModel, collectorEffort
+		}
+		template.Default = &choice
+		chosen, err := resolve(ctx, owner, name, template, nil)
+		chosen.Default = originalDefault
+		return chosen, err
+	}
+	c.ValidateChildTemplate = childTemplateValidator(*c)
+}
+
 // claudeChildrenRefusal says what to do while subagent model chose Claude: Claude's
 // own Agent tool runs the sub-agents, so a built-in child start is refused.
 const claudeChildrenRefusal = "subagent model で Claude を選んでいる間は子を起動できません。子を使うには subagent model で OpenAI Codex か OpenCode Go を選んでください"
@@ -83,7 +130,25 @@ const claudeChildrenRefusal = "subagent model で Claude を選んでいる間�
 // sub-agents' model chosen with subagent model, and so do a lead's workers;
 // a choice that cannot run fails the start, nothing falls back to Codex.
 func childRuntimeResolver(c agentrunner.RuntimeConfig, modelFile string) subagent.RuntimeResolver {
+	return childRuntimeResolverForLayer(c, modelFile, "main", nil)
+}
+
+func childRuntimeResolverForLayer(c agentrunner.RuntimeConfig, modelFile, parentLayer string, leadDefault *subagent.RuntimeRequest) subagent.RuntimeResolver {
 	return func(ctx context.Context, owner *host.Session, name string, template subagent.Template, requested *subagent.RuntimeRequest) (subagent.Template, error) {
+		template.Layer = subagent.ResolveLayer(name, parentLayer)
+		roleName := name
+		roleDefault := template.Default
+		if template.Layer == "lead" && subagent.RoleGroup(name) != "lead" && (c.BuiltinSubagents || modelFile != "") {
+			roleName = "lead"
+			if roleDefault != nil {
+				choice := *roleDefault
+				choice.Model, choice.Effort = leadModel, leadEffort
+				if leadDefault != nil {
+					choice = *leadDefault
+				}
+				roleDefault = &choice
+			}
+		}
 		// The child follows the Session's mode; only its maximum bounds the start.
 		ctx = owner.WithCapabilityPolicy(ctx)
 		fail := func(code string) (subagent.Template, error) { return template, &subagent.RuntimeError{Code: code} }
@@ -96,7 +161,7 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig, modelFile string) subagen
 			if e != nil {
 				return fail("subagent_model_unreadable")
 			}
-			saved, roleChoice = m, m.choice(name)
+			saved, roleChoice = m, m.choice(roleName)
 			if buildfeatures.Disabled(roleChoice.Provider) {
 				return template, disabledChildError()
 			}
@@ -104,11 +169,11 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig, modelFile string) subagen
 			if roleChoice.Provider == claudeagent.ProviderID {
 				return template, &subagent.RuntimeError{Code: "provider_unavailable", Hint: claudeChildrenRefusal}
 			}
-			if roleChoice.Provider == opencodego.ProviderID || roleChoice.Model != "" || roleChoice.Effort != "" {
+			if roleChoice.Provider == opencodego.ProviderID || roleChoice.Model != "" || roleChoice.Effort != "" || roleChoice.Fast {
 				// The effort is the role's on this model, bound below.
-				requested, chosen = &subagent.RuntimeRequest{Provider: roleChoice.Provider, Model: roleChoice.Model, Effort: template.Default.Effort}, true
+				requested, chosen = &subagent.RuntimeRequest{Provider: roleChoice.Provider, Model: roleChoice.Model, Effort: roleDefault.Effort}, true
 				if requested.Model == "" {
-					requested.Model = template.Default.Model
+					requested.Model = roleDefault.Model
 				}
 			} else if template.Default.Provider != "openai-codex" && !c.BuiltinSubagents {
 				return fail("provider_unavailable")
@@ -142,7 +207,12 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig, modelFile string) subagen
 			}
 		}
 		if requested == nil {
-			requested = template.Default
+			requested = roleDefault
+			if requested != nil && c.BuiltinSubagents {
+				choice := *requested
+				choice.Provider = template.Default.Provider
+				requested = &choice
+			}
 		}
 		if e := permission.FromContext(ctx).CheckTool("SubagentStart"); e != nil {
 			return fail("permission_denied")
@@ -155,6 +225,7 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig, modelFile string) subagen
 		if requested != nil {
 			choice = sessionstore.RuntimeSelection{Version: 1, Provider: requested.Provider, Model: requested.Model, Effort: requested.Effort.Normalize()}
 		}
+		choice.Fast = roleChoice.Fast
 		if buildfeatures.Disabled(choice.Provider) {
 			return template, disabledChildError()
 		}
@@ -191,7 +262,7 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig, modelFile string) subagen
 		}
 		if chosen {
 			if choice.Provider == opencodego.ProviderID {
-				choice.Effort = subagentEffort(name, model)
+				choice.Effort = subagentEffort(roleName, model)
 			} else if roleChoice.Effort == "" && !model.AllowsEffort(choice.Effort) {
 				choice.Effort = model.DefaultEffort
 			}
@@ -203,7 +274,7 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig, modelFile string) subagen
 			return fail("unsupported_effort")
 		}
 		collector := subagentEffort("collector", model)
-		raw, e := boundChildRuntime(c, template.Runtime, backend, choice.Model, choice.Effort, chosen, collector)
+		raw, e := boundChildRuntime(c, template.Runtime, backend, choice, chosen, collector)
 		if e != nil {
 			return template, e
 		}
@@ -231,7 +302,7 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig, modelFile string) subagen
 				if workerChoice.Model != "" {
 					workerModel = workerChoice.Model
 				}
-				if id == opencodego.ProviderID || workerChoice.Model != "" || workerChoice.Effort != "" {
+				if id == opencodego.ProviderID || workerChoice.Model != "" || workerChoice.Effort != "" || workerChoice.Fast {
 					catalog, err := c.Catalog(ctx, id)
 					if err != nil {
 						return template, &subagent.RuntimeError{Code: "provider_unavailable", Hint: modelcatalog.CatalogUnavailable.ProviderHint(id)}
@@ -252,7 +323,8 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig, modelFile string) subagen
 						return fail("unsupported_effort")
 					}
 				}
-				if t.Runtime, e = boundChildRuntime(c, t.Runtime, workerBackend, workerModel, workerEffort, false, ""); e != nil {
+				choice := sessionstore.RuntimeSelection{Model: workerModel, Effort: workerEffort, Fast: workerChoice.Fast}
+				if t.Runtime, e = boundChildRuntime(c, t.Runtime, workerBackend, choice, false, ""); e != nil {
 					return template, e
 				}
 				workers[worker] = t
@@ -276,7 +348,7 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig, modelFile string) subagen
 // boundChildRuntime is a template's runtime on a registered backend, model
 // and effort; chosen gives a built-in prompt for that model, whose lead names
 // the collector's effort.
-func boundChildRuntime(c agentrunner.RuntimeConfig, runtime jsontext.Value, backend agentrunner.ProviderRuntime, model string, effort llm.ReasoningEffort, chosen bool, collector llm.ReasoningEffort) (jsontext.Value, error) {
+func boundChildRuntime(c agentrunner.RuntimeConfig, runtime jsontext.Value, backend agentrunner.ProviderRuntime, choice sessionstore.RuntimeSelection, chosen bool, collector llm.ReasoningEffort) (jsontext.Value, error) {
 	var identity agentrunner.RuntimeIdentity
 	if json.Unmarshal(runtime, &identity) != nil {
 		return nil, &subagent.RuntimeError{Code: "invalid_template"}
@@ -285,11 +357,12 @@ func boundChildRuntime(c agentrunner.RuntimeConfig, runtime jsontext.Value, back
 	// Keep the exact requested/applied selection. A catalog row may match a
 	// resolved version as well as its alias; inheritance must not silently
 	// replace a pinned version with the alias (or break stable-ID retries).
-	identity.Provider.Model.ID = model
-	identity.ReasoningEffort = effort
+	identity.Provider.Model.ID = choice.Model
+	identity.ReasoningEffort = choice.Effort
+	identity.Fast = choice.Fast
 	identity.Claude = backend.Claude
 	if chosen {
-		identity.SystemPrompt = subagentPromptFor(identity.SystemPrompt, backend.Provider.Provider, model, collector)
+		identity.SystemPrompt = subagentPromptFor(identity.SystemPrompt, backend.Provider.Provider, choice.Model, collector)
 	}
 	registry, e := c.Providers.WithModel(identity.Provider)
 	if e != nil {
@@ -337,6 +410,9 @@ func childTemplateValidator(c agentrunner.RuntimeConfig) func(subagent.Template,
 			return fail()
 		}
 		base.Runtime = chosen.Runtime
+		// Layer is start metadata. Replay preserves the recorded resolution,
+		// including legacy plans that predate explicit layer attribution.
+		base.Layer = chosen.Layer
 		// A start on the sub-agents' model binds the lead's workers too.
 		if len(base.Subagents) > 0 && len(chosen.Subagents) == len(base.Subagents) {
 			workers := maps.Clone(base.Subagents)
@@ -389,6 +465,7 @@ func validChildRuntime(c agentrunner.RuntimeConfig, base, recorded jsontext.Valu
 	a.Provider = registered
 	a.Claude = backend.Claude
 	a.ReasoningEffort = b.ReasoningEffort
+	a.Fast = b.Fast
 	want := recorded.Clone()
 	if want.Canonicalize() != nil {
 		return mismatch

@@ -47,6 +47,11 @@ func (w *serializedStore) AppendInput(ctx context.Context, id session.ID, in inb
 	defer w.mu.Unlock()
 	return w.store.AppendInput(ctx, id, in)
 }
+func (w *serializedStore) AppendInputRecorded(ctx context.Context, id session.ID, in inbox.Input) (sessionstore.Sequence, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.store.AppendInputRecorded(ctx, id, in)
+}
 func (w *serializedStore) AppendTurn(ctx context.Context, id session.ID, t session.Turn) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -73,12 +78,13 @@ func (w *serializedStore) AppendToolCallStatus(ctx context.Context, id session.I
 func (w *serializedStore) SaveOperation(ctx context.Context, id session.ID, op operation.Operation) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := w.store.SaveOperation(ctx, id, op); err != nil {
+	locator, err := w.store.SaveOperationRecorded(ctx, id, op)
+	if err != nil {
 		return err
 	}
 	op = cloneSavedOperationCheckpoint(op, w.operations[op.ID])
 	w.setOperation(op)
-	w.broadcast(Event{Kind: "operation", Operation: &op})
+	w.broadcast(w.operationEvent(op, locator))
 	return nil
 }
 func (w *serializedStore) Resume(ctx context.Context, id session.ID) (sessionstore.ResumeState, error) {

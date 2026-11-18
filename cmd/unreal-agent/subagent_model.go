@@ -37,6 +37,7 @@ type subagentModelChoice struct {
 	Provider string
 	Model    string              `json:",omitzero"`
 	Effort   llm.ReasoningEffort `json:",omitzero"`
+	Fast     bool                `json:",omitzero"`
 }
 
 type subagentRoleModels struct {
@@ -98,10 +99,10 @@ func (m subagentModel) valid() bool {
 	}
 	for _, role := range subagentRoleGroups {
 		c := m.choice(role)
-		if c.Provider == "" && c.Model == "" && c.Effort == "" {
+		if c.Provider == "" && c.Model == "" && c.Effort == "" && !c.Fast {
 			continue
 		}
-		if c.Provider == "" {
+		if c.Provider == "" || c.Fast && c.Provider != "openai-codex" {
 			return false
 		}
 		if c.Provider != "openai-codex" && c.Model == "" {

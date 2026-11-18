@@ -132,7 +132,7 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 	}
 	prior := o.Progress
 	if steering := o.Steering; steering != nil {
-		o.Steering = func(callCtx context.Context) ([]string, error) {
+		o.Steering = func(callCtx context.Context) ([]llm.BatchInput, error) {
 			inputs, err := steering(callCtx)
 			if err == nil && len(inputs) > 0 {
 				s.mu.Lock()

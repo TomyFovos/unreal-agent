@@ -12,7 +12,7 @@ import (
 // settings already allow, so the user's sandbox stays on.
 func launchSettings(directory string, env []string, subagents SubagentCLI) string {
 	upstream := ancestorInstructionSettings(directory, env)
-	if subagentCommandPath(subagents) == "" {
+	if !sessionCommandAvailable(subagents) {
 		return upstream
 	}
 	// Upstream's keys are its own: decode the object generically and add the

@@ -64,7 +64,7 @@ If `unreal` does not start or points to the wrong command:
 3. **Resend an uncertain message (`/retry`):** If a network or socket hiccup left a submission in an uncertain state, run `/retry`. It reuses the exact submission ID so your prompt is never duplicated.
 4. **Session locked by another process (`writer_owned`):** Close the other terminal/process that owns the Session and reconnect. Never delete lock files or live Session files manually.
 
-> **Note:** If a background Host restarts, any unfinished child agents are marked canceled and reported to the parent agent rather than respawned automatically.
+If a parent's model turn fails, running children keep working and can still report to the parent. Send a new message to continue the parent turn. On Host restart, the parent reconnects to children whose executors still hold their writer leases and receives one end notice for each abandoned child.
 
 ---
 

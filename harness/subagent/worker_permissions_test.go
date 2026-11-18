@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -205,6 +206,113 @@ func setParentMode(t *testing.T, c *permission.Controller, key string, mode perm
 	rev := c.Snapshot().Revision
 	if err := c.SetMode(key, rev, mode); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestParentModelFailureLeavesChildApprovalPending(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "approved-marker")
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := permission.Config{Tools: []string{"Bash", "Finish"}, FilesystemUnrestricted: true, NetworkUnrestricted: true, ProcessMode: permission.ProcessUnrestricted}
+	baseline := permission.Config{Tools: []string{"Finish"}, ReadRoots: []string{dir}}
+	templates := map[string]sub.Template{"worker": {Workspace: dir, Runtime: jsontext.Value(`{}`), Policy: policy, Baseline: &baseline}}
+	firstStarted, fail, answer := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	asked := make(chan string, 1)
+	var calls atomic.Int32
+	model := adapter(func(ctx context.Context, r llm.Request, _ llm.RequestOptions) (llm.Response, error) {
+		switch calls.Add(1) {
+		case 1:
+			close(firstStarted)
+			select {
+			case <-fail:
+				return llm.Response{}, fmt.Errorf("parent model unavailable")
+			case <-ctx.Done():
+				return llm.Response{}, ctx.Err()
+			}
+		case 2:
+			for _, item := range r.Input {
+				if msg, ok := item.Data.(llm.Message); ok {
+					peer, err := modelPeer(msg.Text)
+					match := approvalRequest.FindStringSubmatch(peer.Text)
+					if err != nil || match == nil {
+						continue
+					}
+					asked <- match[1]
+					select {
+					case <-answer:
+						args, _ := json.Marshal(map[string]any{"handle": peer.Handle, "request": match[1], "allow": true})
+						return response("SubagentApprove", string(args)), nil
+					case <-ctx.Done():
+						return llm.Response{}, ctx.Err()
+					}
+				}
+			}
+		}
+		return llm.Response{}, nil
+	})
+	cfg := sub.Config{Directory: dir, Binary: binary, Arguments: []string{"-test.run=^TestWorkerChildHelper$"}, Environment: append(os.Environ(), "UNREAL_WORKER_HELPER=1"), Templates: templates}
+	h, err := host.New(t.Context(), host.Config{Directory: dir, PermissionMaximum: permission.Unrestricted(), Build: factory(cfg, model)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	parent, err := h.Create(t.Context(), host.Options{ID: "parent", Policy: permission.Unrestricted(), PermissionMode: permission.Ask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	submitFailureTestInput(t, parent, "task", "start the parent turn")
+	ctx, cancel := context.WithTimeout(t.Context(), 12*time.Second)
+	defer cancel()
+	select {
+	case <-firstStarted:
+	case <-ctx.Done():
+		t.Fatal("the parent call did not start", ctx.Err())
+	}
+	if _, err = sub.StartChild(ctx, parent, parent.Generation, "start", "worker", "printf ok > "+marker, templates, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	child := waitReady(t, parent)
+	pending := func() string {
+		v, err := parent.Inspect(0, 256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, op := range v.Operations {
+			if op.ID == child.ID && op.Status == operation.StatusAwaiting {
+				handle, _ := sub.DecodeHandle(op)
+				if len(handle.Approvals) == 1 {
+					return handle.Approvals[0].ID
+				}
+			}
+		}
+		return ""
+	}
+	awaitBoundary(t, func() bool { return pending() != "" })
+	want := pending()
+	close(fail)
+	if v := awaitParentModelFailure(t, parent); !v.Running {
+		t.Fatal("the failed turn ended the parent", v.Failure)
+	}
+	select {
+	case id := <-asked:
+		if id != want || pending() != want {
+			t.Fatal("approval was removed or replaced after failure", id, pending(), want)
+		}
+	case <-ctx.Done():
+		t.Fatal("pending approval did not wake parent", ctx.Err())
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the command ran before the parent answered", err)
+	}
+	close(answer)
+	if result := awaitChild(t, parent, true); result.Status != operation.StatusCompleted {
+		t.Fatal("worker did not finish after approval", result)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "ok" {
+		t.Fatal("the approved command did not run", string(data), err)
 	}
 }
 

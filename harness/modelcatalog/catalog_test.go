@@ -59,6 +59,23 @@ func TestCodexCacheOmitsUltraEffort(t *testing.T) {
 	}
 }
 
+func TestCodexCacheFastModeUsesAdvertisedPriority(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "models_cache.json")
+	data := []byte(`{"models":[
+		{"slug":"gpt-6-luna","visibility":"list","supported_reasoning_levels":[{"effort":"max"}],"service_tiers":[{"id":"priority","name":"Fast"}]},
+		{"slug":"standard","visibility":"list","supported_reasoning_levels":[{"effort":"high"}],"service_tiers":[{"id":"ultrafast"}]},
+		{"slug":"old","visibility":"list","supported_reasoning_levels":[{"effort":"high"}]}
+	]}`)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := ReadCodexCache(path)
+	if !c.Available || len(c.Models) != 3 || !c.Models[0].AllowsFast("openai-codex") ||
+		c.Models[0].AllowsFast("opencode-go") || c.Models[1].AllowsFast("openai-codex") || c.Models[2].AllowsFast("openai-codex") {
+		t.Fatalf("incorrect Fast capabilities: %+v", c)
+	}
+}
+
 // Legacy ultra uses max, ignoring Codex's multi-agent delegation metadata.
 func TestRequestEffortResolvesUltraToHighestSupported(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "models_cache.json")

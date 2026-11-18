@@ -104,6 +104,10 @@ func (s *Session) indexHistory() {
 			h.TurnID = d.ID
 		case sessionstore.HostRecord:
 			switch d.Kind {
+			case sessionstore.HostActivity:
+				if d.Activity != nil && d.Activity.Kind == llm.ActivityModelFailure {
+					h.WaitingForModel = false
+				}
 			case "configuration":
 				h.Configuration = projectConfiguration(d.Configuration)
 				if h.Selection == nil {
@@ -151,9 +155,11 @@ func (s *Session) indexHistory() {
 				stats = &llm.GenerationStatistics{Model: d.Response.Model, Tokens: llm.ReportedTokens(d.Response.Usage)}
 			}
 			if stats != nil {
-				h.Generations = append(h.Generations, *stats)
-				if len(h.Generations) > 8 {
-					h.Generations = append([]llm.GenerationStatistics(nil), h.Generations[len(h.Generations)-8:]...)
+				if len(h.Generations) < 8 {
+					h.Generations = append(h.Generations, *stats)
+				} else {
+					copy(h.Generations, h.Generations[1:])
+					h.Generations[len(h.Generations)-1] = *stats
 				}
 			}
 		case sessionstore.ToolCallStatus:

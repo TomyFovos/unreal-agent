@@ -33,15 +33,18 @@ type RequestOptions struct {
 	// The adapter never executes work or treats progress as a receipt.
 	Tools func(context.Context, Response) ([]ToolOutcome, error)
 	// BeginTools pins a live host-rendezvous request before its first tool call.
-	// Queued inputs wait for the final response while its private continuation
-	// is active, except when waitingForChildren lets user input interrupt it
-	// or the provider delivers them through Steering at a batch boundary.
+	// Queued inputs reach the private continuation through Steering at a batch
+	// boundary. waitingForChildren lets user input interrupt a child wait.
 	// The adapter updates that flag at the beginning and end of such a wait.
 	BeginTools func(ctx context.Context, waitingForChildren bool) error
-	// Steering delivers queued user input at a provider's tool-batch boundary.
-	// The Coordinator records delivery in the live turn's input watermark.
-	// Only providers that consume it opt in; other routes are unchanged.
-	Steering func(context.Context) ([]string, error)
+	// Steering supplies queued user and peer inputs in inbox order at a
+	// provider's tool-batch boundary. The response confirms their delivery.
+	Steering func(context.Context) ([]BatchInput, error)
+}
+
+type BatchInput struct {
+	Text string
+	Peer bool
 }
 
 type RequestIdentity struct {

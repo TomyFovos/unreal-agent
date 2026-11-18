@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
+	"github.com/unreallabsai/unreal-agent/harness/analysis"
 	"github.com/unreallabsai/unreal-agent/harness/authflow"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/host"
@@ -30,6 +31,8 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/opencodego"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/internal/testclaude"
@@ -187,7 +190,10 @@ func fakeCodexSource(t *testing.T, cfg *serveConfiguration, codex bool, responde
 		t.Fatal(err)
 	}
 	writeCodexAuth(t, filepath.Join(auth, "auth.json"), "gpt-token-sensitive", "gpt-account-sensitive")
-	cache := `{"models":[{"slug":"gpt-6.2-sol","display_name":"GPT-6.2 Sol","visibility":"list","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"}]}]}`
+	cache := `{"models":[
+		{"slug":"gpt-6.2-sol","display_name":"GPT-6.2 Sol","visibility":"list","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"}]},
+		{"slug":"gpt-6-luna","display_name":"GPT-6 Luna","visibility":"list","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"medium"},{"effort":"max"}],"service_tiers":[{"id":"priority","name":"Fast"}]}
+	]}`
 	if err := os.WriteFile(filepath.Join(auth, "models_cache.json"), []byte(cache), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +227,7 @@ func TestSubagentRoleSelectionRoutingAndRestart(t *testing.T) {
 		role, provider, model string
 		effort                llm.ReasoningEffort
 	}{
-		{"lead", "openai-codex", leadModel, ""},
+		{"lead", "openai-codex", leadModel, "max"},
 		{"worker", opencodego.ProviderID, "deepseek-v4.1-flash", "max"},
 		{"collector", opencodego.ProviderID, "kimi-k2.7-code", ""},
 	} {
@@ -242,7 +248,24 @@ func TestSubagentRoleSelectionRoutingAndRestart(t *testing.T) {
 			summary = "collector done"
 		}
 		h.waitReport(t, handle[1], summary)
+		child, err := subagent.ReadChildSnapshot(t.Context(), filepath.Join(h.directory, "sessions"), subagent.ChildID("designer", operation.ID(handle[1])))
+		if err != nil || child.Configuration == nil {
+			t.Fatal("missing direct child configuration", err)
+		}
+		selection := sessionstore.SelectionFromConfiguration(child.Configuration.Runtime)
+		if child.Configuration.Layer != "lead" || selection == nil || selection.Provider != "openai-codex" || selection.Model != leadModel || selection.Effort != "max" {
+			t.Fatalf("main -> %s must use the lead selection: layer=%q runtime=%+v", name, child.Configuration.Layer, selection)
+		}
 	}
+	// A collector's own selection is used when a lead starts it.
+	h.gpt.mu.Lock()
+	h.gpt.leadChildTemplate = "collector"
+	h.gpt.mu.Unlock()
+	collectorLead := h.mustCLI(t, "Collect through the lead.", "start", "--template", "lead")
+	h.waitReport(t, childHandle.FindStringSubmatch(collectorLead)[1], "lead done")
+	h.gpt.mu.Lock()
+	h.gpt.leadChildTemplate = ""
+	h.gpt.mu.Unlock()
 	// Overriding a Codex lead must also keep its Go worker bindings.
 	override := h.mustCLI(t, "Keep the workers' separate provider.", "start", "--template", "lead", "--effort", "max")
 	h.waitReport(t, childHandle.FindStringSubmatch(override)[1], "lead done")
@@ -266,14 +289,97 @@ func TestSubagentRoleSelectionRoutingAndRestart(t *testing.T) {
 		t.Fatalf("Go wire models: %v", models)
 	}
 	before := h.mustCLI(t, "", "model", "show")
-	h.start(t)
-	h.designer(t)
+	h.stop()
+	h.client, h.stop = startMultiChildCLIEnvironment(t, h.binary, h.cfg, h.directory, 4*time.Minute, h.environment, "--credential-directory", h.store, "--subagent-model-file", h.modelFile, "--codex-auth-file", h.codexAuth)
+	view, err := h.client.Open(t.Context(), host.Resume, "designer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := h.client.WatchPermissions(t.Context(), "designer", view.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(control.Cancel)
+	setGatewayHumanMode(t, control, permission.Ask)
 	after := h.mustCLI(t, "", "model", "show")
 	if before != after {
 		t.Fatalf("restart changed choices: %s -> %s", before, after)
 	}
-	started := h.mustCLI(t, "Use restored worker.", "start", "--template", "worker-low")
-	h.waitReport(t, childHandle.FindStringSubmatch(started)[1], "worker done")
+	for _, name := range []string{"worker-max", "collector"} {
+		started := h.mustCLI(t, "Use restored lead selection.", "start", "--template", name)
+		summary := "worker done"
+		if name == "collector" {
+			summary = "collector done"
+		}
+		h.waitReport(t, childHandle.FindStringSubmatch(started)[1], summary)
+	}
+	tree, err := analysis.ReadTree(t.Context(), "designer", func(ctx context.Context, id session.ID, after sessionstore.Sequence, limit int) (host.View, error) {
+		child, err := subagent.ReadChild(ctx, filepath.Join(h.directory, "sessions"), id, after, limit)
+		return child.View, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := tree.Snapshot(nil)
+	if report.Partial {
+		t.Fatal("partial analysis tree")
+	}
+	var direct, workersBelowLead, collectorsBelowLead int
+	for _, metric := range report.Sessions {
+		if metric.ParentID == "designer" {
+			direct++
+			if metric.Layer != "lead" || metric.LayerSource != "measured" || metric.Provider != "openai-codex" || metric.Model != leadModel || metric.Effort != "max" {
+				t.Fatalf("/analyze mislabeled a direct child: %+v", metric)
+			}
+		} else if metric.ParentID != "" {
+			if metric.LayerSource != "measured" || metric.Provider != opencodego.ProviderID {
+				t.Fatalf("/analyze lost the nested child's role: %+v", metric)
+			}
+			switch metric.Layer {
+			case "worker":
+				workersBelowLead++
+				if metric.Model != "deepseek-v4.1-flash" || metric.Effort != "max" {
+					t.Fatalf("nested worker runtime: %+v", metric)
+				}
+			case "collector":
+				collectorsBelowLead++
+				if metric.Model != "kimi-k2.7-code" || metric.Effort != "" {
+					t.Fatalf("nested collector runtime: %+v", metric)
+				}
+			default:
+				t.Fatalf("unexpected nested layer: %+v", metric)
+			}
+		}
+	}
+	if direct != 11 || workersBelowLead != 2 || collectorsBelowLead != 1 {
+		t.Fatalf("analysis sessions: direct=%d worker=%d collector=%d", direct, workersBelowLead, collectorsBelowLead)
+	}
+	// Explicit Codex overrides bind the resolved lead role first, preserving
+	// fields that the CLI did not override and the workers' separate selections.
+	for _, override := range []struct {
+		template, model, effort string
+		flags                   []string
+	}{
+		{"worker-max", leadModel, "high", []string{"--effort", "high"}},
+		{"worker-low", "gpt-6-astra", "max", []string{"--model", "gpt-6-astra"}},
+		{"collector", "gpt-6-astra", "high", []string{"--model", "gpt-6-astra", "--effort", "high"}},
+	} {
+		started := h.mustCLI(t, "Keep explicit overrides.", append([]string{"start", "--template", override.template}, override.flags...)...)
+		handle := childHandle.FindStringSubmatch(started)[1]
+		summary := "worker done"
+		if override.template == "collector" {
+			summary = "collector done"
+		}
+		h.waitReport(t, handle, summary)
+		child, err := subagent.ReadChildSnapshot(t.Context(), filepath.Join(h.directory, "sessions"), subagent.ChildID("designer", operation.ID(handle)))
+		if err != nil || child.Configuration == nil {
+			t.Fatal("missing override child configuration", err)
+		}
+		selection := sessionstore.SelectionFromConfiguration(child.Configuration.Runtime)
+		if child.Configuration.Layer != "lead" || selection == nil || selection.Provider != "openai-codex" || selection.Model != override.model || string(selection.Effort) != override.effort {
+			t.Fatalf("explicit override changed: layer=%q runtime=%+v", child.Configuration.Layer, selection)
+		}
+	}
 	// U33 also permits the inverse: Go owns the issue, Codex does the work.
 	if _, err := h.chooseRole(t, "lead", opencodego.ProviderID, "deepseek-v4.1-flash", ""); err != nil {
 		t.Fatal(err)
@@ -281,7 +387,7 @@ func TestSubagentRoleSelectionRoutingAndRestart(t *testing.T) {
 	if _, err := h.chooseRole(t, "worker", "openai-codex", leadModel, "high"); err != nil {
 		t.Fatal(err)
 	}
-	started = h.mustCLI(t, "Verify the inverse role assignment.", "start", "--template", "lead")
+	started := h.mustCLI(t, "Verify the inverse role assignment.", "start", "--template", "lead")
 	h.waitReport(t, childHandle.FindStringSubmatch(started)[1], "lead done")
 	h.gpt.mu.Lock()
 	lastWorker := h.gpt.workerEffort[len(h.gpt.workerEffort)-1]
@@ -291,11 +397,119 @@ func TestSubagentRoleSelectionRoutingAndRestart(t *testing.T) {
 	}
 }
 
+func TestRunningLeadUsesCurrentRoleSelection(t *testing.T) {
+	t.Parallel()
+	for _, role := range []string{"worker", "collector"} {
+		for _, restart := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/restart=%t", role, restart), func(t *testing.T) {
+				t.Parallel()
+				h := startOpenCodeGoChildren(t, true, false, true)
+				t.Cleanup(func() {
+					if t.Failed() {
+						h.gpt.mu.Lock()
+						defer h.gpt.mu.Unlock()
+						t.Log("last lead input:", h.gpt.leadLastInput)
+					}
+				})
+				hold := make(chan struct{})
+				var release sync.Once
+				defer release.Do(func() { close(hold) })
+				h.gpt.mu.Lock()
+				h.gpt.routingOnly, h.gpt.leadHold = true, hold
+				if role == "collector" {
+					h.gpt.leadChildTemplate = "collector"
+				}
+				h.gpt.mu.Unlock()
+				h.designer(t)
+				if restart {
+					if _, err := h.chooseRole(t, role, "openai-codex", leadModel, "high"); err != nil {
+						t.Fatal(err)
+					}
+					saved := h.mustCLI(t, "", "model", "show")
+					h.stop()
+					h.client, h.stop = startMultiChildCLIEnvironment(t, h.binary, h.cfg, h.directory, 4*time.Minute, h.environment, "--credential-directory", h.store, "--subagent-model-file", h.modelFile, "--codex-auth-file", h.codexAuth)
+					view, err := h.client.Open(t.Context(), host.Resume, "designer")
+					if err != nil {
+						t.Fatal(err)
+					}
+					control, err := h.client.WatchPermissions(t.Context(), "designer", view.Generation)
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(control.Cancel)
+					setGatewayHumanMode(t, control, permission.Ask)
+					if restored := h.mustCLI(t, "", "model", "show"); restored != saved {
+						t.Fatalf("restart changed saved role selections: %s -> %s", saved, restored)
+					}
+				}
+				started := h.mustCLI(t, "Start before the saved role selection changes.", "start", "--template", "lead")
+				handle := childHandle.FindStringSubmatch(started)
+				if handle == nil {
+					t.Fatal(started)
+				}
+				waitInteractiveContext(t, func(context.Context) bool { return h.codexCalls.Load() > 0 })
+				leadID := subagent.ChildID("designer", operation.ID(handle[1]))
+				before, err := subagent.ReadChildSnapshot(t.Context(), filepath.Join(h.directory, "sessions"), leadID)
+				if err != nil || before.Configuration == nil {
+					t.Fatal("lead did not start before model set", err)
+				}
+				original := before.Configuration.Runtime.Clone()
+				choice := sessionstore.SelectionFromConfiguration(original)
+				if choice == nil || choice.Provider != "openai-codex" || choice.Model != leadModel || choice.Effort != leadEffort {
+					t.Fatal("unexpected lead runtime before model set", choice)
+				}
+				if _, err := h.chooseRole(t, role, opencodego.ProviderID, "deepseek-v4.1-flash", "max"); err != nil {
+					t.Fatal(err)
+				}
+				release.Do(func() { close(hold) })
+				h.waitReport(t, handle[1], "lead done")
+				after, err := subagent.ReadChildSnapshot(t.Context(), filepath.Join(h.directory, "sessions"), leadID)
+				if err != nil || after.Configuration == nil || !bytes.Equal(original, after.Configuration.Runtime) {
+					t.Fatal("model set or restart changed the running lead's runtime", err)
+				}
+				h.gpt.mu.Lock()
+				leads, leadEfforts := slices.Clone(h.gpt.leadModels), slices.Clone(h.gpt.leadEfforts)
+				efforts := slices.Clone(h.gpt.workerEffort)
+				if role == "collector" {
+					efforts = slices.Clone(h.gpt.collectorEfforts)
+				}
+				h.gpt.mu.Unlock()
+				if len(leads) == 0 || slices.ContainsFunc(leads, func(m string) bool { return m != leadModel }) || slices.ContainsFunc(leadEfforts, func(e string) bool { return e != "max" }) {
+					t.Fatalf("lead wire runtime changed: models=%v efforts=%v", leads, leadEfforts)
+				}
+				h.server.check(t)
+				if len(efforts) == 0 || slices.ContainsFunc(efforts, func(e string) bool { return e != "max" }) {
+					t.Fatalf("%s ignored the role selection saved after lead start: %v", role, efforts)
+				}
+				starts := 0
+				for _, op := range after.View.Operations {
+					worker, err := subagent.DecodePlan(op)
+					if err != nil || worker.Action != "start" {
+						continue
+					}
+					starts++
+					selection := sessionstore.SelectionFromConfiguration(worker.Configuration.Runtime)
+					if worker.Configuration.Layer != role || selection == nil || selection.Provider != opencodego.ProviderID || selection.Model != "deepseek-v4.1-flash" || selection.Effort != llm.ReasoningEffortMax {
+						t.Fatalf("nested %s canonical selection: %+v", role, selection)
+					}
+				}
+				if starts != 1 {
+					t.Fatalf("expected exactly one nested child, got %d", starts)
+				}
+			})
+		}
+	}
+}
+
 func TestSubagentUnavailableWorkerDoesNotFallback(t *testing.T) {
 	t.Parallel()
 	h := startOpenCodeGoChildren(t, true, false, true)
 	h.designer(t)
 	if _, err := h.chooseRole(t, "worker", opencodego.ProviderID, "deepseek-v4.1-flash", "max"); err != nil {
+		t.Fatal(err)
+	}
+	// A direct worker uses the lead selection, so make that route unavailable.
+	if _, err := h.chooseRole(t, "lead", opencodego.ProviderID, "deepseek-v4.1-flash", "max"); err != nil {
 		t.Fatal(err)
 	}
 	store, err := credential.OpenLocal(h.store)
@@ -353,6 +567,8 @@ func TestSubagentRoleClaudeGuidance(t *testing.T) {
 		"lead: openai-codex · gpt-6.2-sol · max effort · Templates: lead",
 		"worker: opencode-go · deepseek-v4.1-flash · max effort · Templates: worker-high, worker-low, worker-max, worker-medium, worker-xhigh",
 		`use Claude Code's Agent tool with model set to "claude-configured-a" for this role`,
+		"Worker and collector templates started directly by the main Session run on the lead model and effort",
+		"Send hands-on work through a lead",
 	} {
 		if !strings.Contains(prompt, text) {
 			t.Fatalf("missing %q in guidance:\n%s", text, prompt)
@@ -632,13 +848,13 @@ func TestOpenCodeGoSubagentsWithoutCodexAfterHostRestart(t *testing.T) {
 	}
 	h.mustCLI(t, "", "approve", handle[1], request[1], "allow")
 	h.waitReport(t, handle[1], "worker done")
-	if list := h.mustCLI(t, "", "list", "--all"); !strings.Contains(list, handle[1]+"  worker-low (deepseek-v4.1-flash low)  completed  worker done") {
+	if list := h.mustCLI(t, "", "list", "--all"); !strings.Contains(list, handle[1]+"  worker-low (deepseek-v4.1-flash max)  completed  worker done") {
 		t.Fatal(list)
 	}
 	h.gpt.mu.Lock()
 	efforts := slices.Clone(h.gpt.workerEffort)
 	h.gpt.mu.Unlock()
-	if len(efforts) == 0 || slices.ContainsFunc(efforts, func(e string) bool { return e != "low" }) {
+	if len(efforts) == 0 || slices.ContainsFunc(efforts, func(e string) bool { return e != "max" }) {
 		t.Fatal("worker efforts", efforts)
 	}
 	h.server.check(t)

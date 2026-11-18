@@ -12,11 +12,13 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
+	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/subagent/identity"
 	"io"
 	"path/filepath"
+	"strings"
 )
 
 const PlanType operation.RemoteJobPlanType = "subagent"
@@ -25,6 +27,8 @@ const PlanVersion operation.RemoteJobPlanVersion = 1
 // Template is resolved by the Host, not supplied by model arguments. Runtime is
 // non-secret versioned provider/profile selection and configuration references.
 type Template struct {
+	// Layer is the role resolved at start, independent of the template name.
+	Layer                  string `json:",omitzero"`
 	Workspace              string
 	MutationStateDirectory string `json:",omitzero"`
 	Runtime                jsontext.Value
@@ -48,6 +52,7 @@ type Plan struct {
 	Configuration *Template                  `json:",omitzero"`
 	Handle        operation.ID               `json:",omitzero"`
 	Text          string                     `json:",omitzero"`
+	Brief         BriefFields                `json:",omitzero"`
 	Result        *sessionstore.FinishResult `json:",omitzero"`
 	RuntimeBound  bool                       `json:",omitzero"`
 	// RuntimeOverride records explicit CLI model/effort overrides of the
@@ -68,6 +73,7 @@ type ChildConfig struct {
 	Version                uint32
 	ParentID               session.ID
 	Template               string `json:",omitzero"`
+	Layer                  string `json:",omitzero"`
 	ChildID                session.ID
 	OperationID            operation.ID
 	SessionDirectory       string
@@ -76,6 +82,7 @@ type ChildConfig struct {
 	Policy                 permission.Config
 	ReadyID                inbox.ID
 	Task                   string
+	Brief                  *DelegationBrief              `json:",omitzero"`
 	MutationStateDirectory string                        `json:",omitzero"`
 	ProjectInstructions    *projectinstructions.Snapshot `json:",omitzero"`
 	Baseline               *permission.Config            `json:",omitzero"`
@@ -86,11 +93,13 @@ type ChildConfig struct {
 	ProviderProcess bool `json:",omitzero"`
 }
 type Handle struct {
-	Version     uint32
-	ParentID    session.ID
-	ChildID     session.ID
-	OperationID operation.ID
-	Finish      *sessionstore.FinishRecord `json:",omitzero"`
+	Version       uint32
+	ParentID      session.ID
+	ChildID       session.ID
+	OperationID   operation.ID
+	Finish        *sessionstore.FinishRecord `json:",omitzero"`
+	FinishLocator record.Locator             `json:",omitzero"`
+	Brief         *DelegationBrief           `json:",omitzero"`
 	// Approvals are the child's requests waiting for this parent (U17).
 	Approvals []Approval `json:",omitzero"`
 }
@@ -122,7 +131,7 @@ func (p Plan) Validate() error {
 	}
 	switch p.Action {
 	case "start":
-		if p.Template == "" || p.Configuration == nil || p.Text == "" || !filepath.IsAbs(p.Configuration.Workspace) || !p.Configuration.Runtime.IsValid() {
+		if p.Template == "" || p.Configuration == nil || !filepath.IsAbs(p.Configuration.Workspace) || !p.Configuration.Runtime.IsValid() {
 			return fmt.Errorf("invalid child configuration")
 		}
 	case "send", "cancel":
@@ -201,7 +210,7 @@ func DecodeHandle(op operation.Operation) (Handle, error) {
 	return h, err
 }
 func (c ChildConfig) Validate() error {
-	if c.Version != 1 || c.ParentID == "" || c.ChildID != ChildID(c.ParentID, c.OperationID) || c.OperationID == "" || c.ReadyID != inbox.ID("ready:"+string(c.OperationID)) || !filepath.IsAbs(c.SessionDirectory) || !filepath.IsAbs(c.Workspace) || !c.Runtime.IsValid() || c.Task == "" || len(c.Task) > 32768 {
+	if c.Version != 1 || c.ParentID == "" || c.ChildID != ChildID(c.ParentID, c.OperationID) || c.OperationID == "" || c.ReadyID != inbox.ID("ready:"+string(c.OperationID)) || !filepath.IsAbs(c.SessionDirectory) || !filepath.IsAbs(c.Workspace) || !c.Runtime.IsValid() || (c.Task == "" && c.Brief == nil) || len(c.Task) > 32768 {
 		return fmt.Errorf("invalid child handshake configuration")
 	}
 	if c.MutationStateDirectory != "" && !filepath.IsAbs(c.MutationStateDirectory) {
@@ -254,6 +263,17 @@ func ValidateWorkers(templates map[string]Template) error {
 	return nil
 }
 func (c ChildConfig) InitialInput() inbox.Input {
-	data, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(c.ParentID), Target: string(c.ChildID), Handle: string(c.OperationID), Kind: "message", Text: c.Task})
+	text := c.Task
+	if c.Brief != nil {
+		text = c.Brief.Render(c.Task)
+	}
+	data, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(c.ParentID), Target: string(c.ChildID), Handle: string(c.OperationID), Kind: "message", Text: text})
 	return inbox.Input{ID: inbox.ID("task:" + string(c.OperationID)), Kind: inbox.InputPeer, Payload: data}
+}
+
+func (p Plan) Title() string {
+	if strings.TrimSpace(p.Brief.Title) != "" {
+		return p.Brief.Title
+	}
+	return p.Text
 }

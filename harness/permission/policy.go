@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 )
 
 type Code string
@@ -48,7 +50,8 @@ const (
 	ProcessSandboxed    ProcessMode = "sandboxed"
 )
 
-// Config is copied by New. Zero values deny access. Root directories must exist.
+// Config is copied by New. Zero values deny access to external resources.
+// Root directories must exist.
 // ProcessUnrestricted permits the process to access the ambient filesystem,
 // network, environment and OS resources; it cannot be combined with filesystem
 // or network restrictions. No process sandbox is supplied by this package.
@@ -90,6 +93,11 @@ func New(config Config) (*Policy, error) {
 		return nil, errors.New("invalid process permission mode")
 	}
 	config.Tools = slices.Clone(config.Tools)
+	// These built-ins address the owning Session. Concrete evidence reads
+	// continue to check the same filesystem roots and permission mode.
+	for _, action := range contextstate.Actions() {
+		config.Tools = append(config.Tools, string(action))
+	}
 	config.ReadRoots = slices.Clone(config.ReadRoots)
 	config.WriteRoots = slices.Clone(config.WriteRoots)
 	config.NetworkOrigins = slices.Clone(config.NetworkOrigins)

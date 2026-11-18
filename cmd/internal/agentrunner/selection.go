@@ -63,6 +63,16 @@ func selectionClient(c RuntimeConfig, s sessionstore.RuntimeSelection, workspace
 		return nil, err
 	}
 	build := provider.BuildConfig{Selection: selected, Resolver: c.Credentials, HTTPClient: c.HTTPClient}
+	if s.Provider == "openai-codex" && s.Fast {
+		build.SupportsFast = func(ctx context.Context, model string) bool {
+			catalog, err := c.Catalog(ctx, s.Provider)
+			if err != nil {
+				return false
+			}
+			found, err := catalog.FindSelection(model)
+			return err == nil && found.AllowsFast(s.Provider)
+		}
+	}
 	if c.Providers.CatalogModels(s.Provider) {
 		build.RequestEffort = func(ctx context.Context, model string, selected llm.ReasoningEffort) llm.ReasoningEffort {
 			if catalog, err := c.Catalog(ctx, s.Provider); err == nil {

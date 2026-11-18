@@ -14,6 +14,7 @@ import (
 	"uuid"
 
 	"github.com/unreallabsai/unreal-agent/harness/authflow"
+	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
@@ -33,6 +34,17 @@ func NewClient(socket string) *Client {
 	return &Client{http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, transport: transport}
 }
 func (c *Client) Close() error { c.transport.CloseIdleConnections(); return nil }
+
+func (c *Client) ContextCommand(ctx context.Context, id session.ID, generation, inputID string, command contextstate.Command) (contextstate.Result, error) {
+	f, err := c.call(ctx, "context", request{ID: id, Generation: generation, ContextInputID: inputID, Context: &command})
+	if err != nil {
+		return contextstate.Result{}, err
+	}
+	if f.Context == nil {
+		return contextstate.Result{}, errors.New("gateway: missing context result")
+	}
+	return *f.Context, nil
+}
 
 func (c *Client) Version(ctx context.Context, id session.ID) (host.ObservationVersion, error) {
 	f, err := c.call(ctx, "version", request{ID: id})

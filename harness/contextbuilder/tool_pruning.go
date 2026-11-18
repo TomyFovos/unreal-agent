@@ -92,14 +92,14 @@ func (b *builder) toolCalls() map[string]llm.ToolCall {
 	return calls
 }
 
-// Match the existing conservative estimator to the most recent measured
+// Calibrate the provider-specific token estimate to the most recent measured
 // request when available. The original request size is captured at its Turn,
 // before its response and tool results are added, also during canonical replay.
-func (b *builder) toolTokens(bytes int64) int64 {
+func (b *builder) toolTokens(tokens int64) int64 {
 	if b.pruneInput > 0 && b.pruneEstimate > 0 {
-		return int64(float64(bytes) * float64(b.pruneInput) / float64(b.pruneEstimate))
+		return int64(float64(tokens) * float64(b.pruneInput) / float64(b.pruneEstimate))
 	}
-	return bytes
+	return tokens
 }
 
 func (b *builder) activeToolOperations() map[operation.ID]bool {
@@ -142,7 +142,7 @@ func (b *builder) pruneToolEpoch(persist func(sessionstore.ContextRecord) error)
 	active, calls := b.activeToolOperations(), b.toolCalls()
 	units := b.engine.Units()
 	seenFiles := map[string]bool{}
-	var recentBytes, removableBytes int64
+	var recentTokens, removableTokens int64
 	record := sessionstore.ContextRecord{Kind: "prune"}
 	for i := len(units) - 1; i >= 0; i-- {
 		u := units[i]
@@ -177,24 +177,24 @@ func (b *builder) pruneToolEpoch(persist func(sessionstore.ContextRecord) error)
 		for _, path := range info.changed {
 			seenFiles[filepath.Clean(path)] = true
 		}
-		old := b.toolTokens(recentBytes) >= b.contextConfig.ToolResultKeepTokens
-		recentBytes += contextengine.Estimate(r)
+		old := b.toolTokens(recentTokens) >= b.contextConfig.ToolResultKeepTokens
+		recentTokens += b.tokenEstimator().ToolResult(r)
 		if b.pruned[u.ID] {
 			continue
 		}
 		if (!old && !obsolete) || !b.canPruneTool(u, required, active) {
 			continue
 		}
-		before := contextengine.Estimate(r)
+		before := b.tokenEstimator().ToolResult(r)
 		r.Output = []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: b.omittedOutput(u, r, call)}}
-		saved := before - contextengine.Estimate(r)
+		saved := before - b.tokenEstimator().ToolResult(r)
 		if saved <= 0 {
 			continue
 		}
-		removableBytes += saved
+		removableTokens += saved
 		record.Projections = append(record.Projections, sessionstore.ContextProjection{UnitID: u.ID, Items: []llm.Item{{Type: llm.ItemToolResult, Data: r}}})
 	}
-	record.PrunedTokens = b.toolTokens(removableBytes)
+	record.PrunedTokens = b.toolTokens(removableTokens)
 	if len(record.Projections) == 0 || record.PrunedTokens < b.contextConfig.ToolResultMinPruneTokens {
 		return nil
 	}

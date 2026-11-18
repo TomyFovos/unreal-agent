@@ -145,11 +145,11 @@ func TestProgressSteeringContinuationKeepsStreaming(t *testing.T) {
 		}
 		return llm.Response{}, nil
 	}))
-	_, err := a.Respond(t.Context(), llm.Request{}, llm.RequestOptions{Steering: func(context.Context) ([]string, error) {
+	_, err := a.Respond(t.Context(), llm.Request{}, llm.RequestOptions{Steering: func(context.Context) ([]llm.BatchInput, error) {
 		s.mu.Lock()
 		s.rememberItem(sessionstore.Item{Kind: sessionstore.ItemTurn, Data: session.Turn{ID: "steered", PreviousTurnID: "turn1", ToolContinuation: "turn1"}}, false)
 		s.mu.Unlock()
-		return []string{"answer me"}, nil
+		return []llm.BatchInput{{Text: "answer me"}}, nil
 	}})
 	if err != nil {
 		t.Fatal(err)

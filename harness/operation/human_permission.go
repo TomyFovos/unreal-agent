@@ -5,6 +5,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 )
 
@@ -36,6 +37,10 @@ func humanPermissionRequest(op Operation) permission.Request {
 		}
 	case TypeRemoteJob:
 		state, err := DecodeRemoteJobState(op)
+		if err == nil && state.Plan.Type == contextstate.OperationType && contextstate.IsTool(op.ToolName) {
+			r.Privileged = false
+			r.Scope = "Session state and evidence"
+		}
 		if err == nil && state.Plan.Type == "subagent" {
 			// A child follows this Session's mode and its parent answers its
 			// requests (D1, U17), so orchestration itself needs no approval

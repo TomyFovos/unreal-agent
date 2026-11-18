@@ -29,8 +29,8 @@ type Dependencies struct {
 	// executor. Restoration persists it before closing the Operation.
 	InterruptedInput func(operation.Operation) (*inbox.Input, error)
 	RetainOperation  func(context.Context, operation.Operation) (bool, error)
-	// CompletedInput projects a standalone child's terminal Operation after the
-	// current model call has ended, so a report it already read can be omitted.
+	// CompletedInput supplies a standalone child's end notice at a read
+	// boundary, after recording any tool receipts that already carry the report.
 	CompletedInput func(operation.Operation) (*inbox.Input, error)
 	// ContextBuilt publishes derived, body-free request diagnostics. It does
 	// not append a canonical record or change scheduling/lifecycle decisions.

@@ -8,8 +8,46 @@ import (
 	"testing"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/tool/observed"
 )
+
+func TestContextCLIUsesLiteralHostPathInReadOnly(t *testing.T) {
+	const cli = "/opt/unreal/bin/unreal"
+	config := SubagentCLI{ContextCommand: cli, Socket: "/run/host.sock"}
+	if got := launchSettings(t.TempDir(), nil, config); !strings.Contains(got, config.Socket) {
+		t.Fatal("state and record CLI did not get its Host socket", got)
+	}
+	prompt := subagentPrompt(config)
+	for _, words := range []string{"state show", "state decide", "state plan", "state rule add", "state accept", "state reject", "state question", "state answer", "record show", "record find"} {
+		if !strings.Contains(prompt, cli+" "+words) {
+			t.Error("missing context instruction", words)
+		}
+	}
+	controller := permission.NewController(t.Context(), permission.DenyAll(), permission.DenyAll(), 0)
+	defer controller.Close()
+	ctx := permission.WithController(t.Context(), controller)
+	a := approver{contextCLI: cli}
+	for _, command := range []string{
+		cli + " state show",
+		cli + " record show 'rec:session/1/user?line=2'",
+		cli + " state decide - <<'END'\nKeep the literal text $VAR.\nEND",
+	} {
+		raw, _ := json.Marshal(map[string]string{"command": command})
+		if ok, reason := a.decide(ctx, "Bash", raw, "fixture"); !ok {
+			t.Errorf("command rejected in Read Only: %s (%s)", command, reason)
+		}
+	}
+	command, ok := currentSessionCommand("/older/bin/unreal-agent state show", cli, "state", "record")
+	if !ok || command != cli+" state show" {
+		t.Fatal("stale command path not rewritten", command)
+	}
+	for _, command := range []string{cli + " state show; printf x", cli + " record find $(id)", cli + " record show x > out"} {
+		if a.hostCommand(command) {
+			t.Error("nonliteral shell expression treated as a Session command", command)
+		}
+	}
+}
 
 // Only the Host's own subagent command with literal words and a quoted
 // heredoc skips approval; anything that could run something else does not.
@@ -84,10 +122,15 @@ func TestSubagentPromptNamesTheCommandAndRoles(t *testing.T) {
 		t.Fatal("prompt without subagents", got)
 	}
 	prompt := subagentPrompt(SubagentCLI{Binary: "/opt/unreal/bin/unreal", Socket: "/run/host.sock", Templates: []string{"lead", "worker-high"}})
+	for _, want := range []string{"Worker and collector templates started directly by the main Session run on the lead model and effort", "Send hands-on work through a lead"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt lacks %q", want)
+		}
+	}
 	if strings.Contains(prompt, "ultra") {
 		t.Fatal("prompt advertises disabled effort", prompt)
 	}
-	for _, want := range []string{"run the project", "GPT does the work", "over-implementation", "collector template (gpt-6-luna)", "never to a gpt-6.2-sol worker", "/opt/unreal/bin/unreal subagent start --template lead <<'EOF'", "/opt/unreal/bin/unreal subagent wait HANDLE --timeout 60s", "end your turn; do not wait", "Monitor is unavailable", "Agent tool only when a Claude model is wanted", "You decide; children do the work", "writing documents and commits", "within tens of seconds", "at most --timeout 60s", "ignore versioned command paths", "【報告】", "【要確認】", "one-line title", "subagent approve HANDLE REQUEST allow|deny", "gpt-6.2-sol at max effort", "worker-low through worker-max", "lead, worker-high", "every permission mode, Read Only included"} {
+	for _, want := range []string{"run the project", "GPT does the work", "over-implementation", "collector template (gpt-6-luna)", "never to a gpt-6.2-sol worker", "/opt/unreal/bin/unreal subagent start --template lead <<'EOF'", "/opt/unreal/bin/unreal subagent wait HANDLE --timeout 60s", "Continue independent work while children run", "arrive at your next tool-batch boundary", "If you are idle, their messages start a new turn", "Monitor is unavailable", "Agent tool only when a Claude model is wanted", "You decide; children do the work", "writing documents and commits", "within tens of seconds", "at most --timeout 60s", "ignore versioned command paths", "【報告】", "【要確認】", "one-line title", "subagent approve HANDLE REQUEST allow|deny", "gpt-6.2-sol at max effort", "worker-low through worker-max", "lead, worker-high", "every permission mode, Read Only included"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt lacks %q", want)
 		}
@@ -108,7 +151,7 @@ func TestSubagentPromptNamesTheChosenModel(t *testing.T) {
 	}
 	cli.Models = func() SubagentModels { return SubagentModels{Family: "OpenCode Go", Lead: "deepseek-v4.1-flash"} }
 	prompt := subagentPrompt(cli)
-	for _, want := range []string{"OpenCode Go does the work, because OpenCode Go models cost less than you", "Review what OpenCode Go delivers", "redoing OpenCode Go's work", "runs deepseek-v4.1-flash at max effort", "its own OpenCode Go workers", "each OpenCode Go agent reads", "collector template (deepseek-v4.1-flash at low effort) and never to a higher-effort worker", "/opt/unreal/bin/unreal subagent start --template lead <<'EOF'"} {
+	for _, want := range []string{"OpenCode Go does the work, because OpenCode Go models cost less than you", "Review what OpenCode Go delivers", "redoing OpenCode Go's work", "runs deepseek-v4.1-flash at max effort", "its own OpenCode Go workers", "Each OpenCode Go agent reads", "collector template (deepseek-v4.1-flash at low effort) and never to a higher-effort worker", "/opt/unreal/bin/unreal subagent start --template lead <<'EOF'"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt lacks %q", want)
 		}

@@ -15,14 +15,21 @@ const (
 )
 
 type ValueState struct {
-	Value jsontext.Value
+	Value        jsontext.Value
+	WrittenPaths []string `json:",omitempty"`
 }
 
 func NewValueSpec(value jsontext.Value) (Spec, error) {
+	return NewRecordedValueSpec(value, nil)
+}
+
+// NewRecordedValueSpec includes paths the caller observed a completed write to.
+// They are receipt metadata and grant no access to those files.
+func NewRecordedValueSpec(value jsontext.Value, writtenPaths []string) (Spec, error) {
 	if len(value) == 0 || !value.IsValid() {
 		return Spec{}, errors.New("value operation result must be valid JSON")
 	}
-	encoded, err := json.Marshal(ValueState{Value: value})
+	encoded, err := json.Marshal(ValueState{Value: value, WrittenPaths: writtenPaths})
 	if err != nil {
 		return Spec{}, fmt.Errorf("encode value operation state: %w", err)
 	}
@@ -30,8 +37,18 @@ func NewValueSpec(value jsontext.Value) (Spec, error) {
 }
 
 func DecodeValue(current Operation) (jsontext.Value, error) {
+	state, err := decodeValueState(current)
+	return state.Value, err
+}
+
+func RecordedWritePaths(current Operation) []string {
+	state, _ := decodeValueState(current)
+	return state.WrittenPaths
+}
+
+func decodeValueState(current Operation) (ValueState, error) {
 	if current.Type != TypeValue {
-		return nil, fmt.Errorf(
+		return ValueState{}, fmt.Errorf(
 			"decode value operation %q: type %q: %w",
 			current.ID,
 			current.Type,
@@ -39,7 +56,7 @@ func DecodeValue(current Operation) (jsontext.Value, error) {
 		)
 	}
 	if current.Version != VersionValue {
-		return nil, fmt.Errorf(
+		return ValueState{}, fmt.Errorf(
 			"decode value operation %q: version %d: %w",
 			current.ID,
 			current.Version,
@@ -48,12 +65,12 @@ func DecodeValue(current Operation) (jsontext.Value, error) {
 	}
 	var state ValueState
 	if err := json.Unmarshal(current.State, &state); err != nil {
-		return nil, fmt.Errorf("decode value operation %q state: %w", current.ID, err)
+		return ValueState{}, fmt.Errorf("decode value operation %q state: %w", current.ID, err)
 	}
 	if len(state.Value) == 0 || !state.Value.IsValid() {
-		return nil, fmt.Errorf("decode value operation %q state: result must be valid JSON", current.ID)
+		return ValueState{}, fmt.Errorf("decode value operation %q state: result must be valid JSON", current.ID)
 	}
-	return state.Value, nil
+	return state, nil
 }
 
 func AdvanceValue(current Operation, event *primitives.PrimitiveEvent) (Step, error) {

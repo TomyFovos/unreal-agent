@@ -11,6 +11,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
@@ -20,7 +21,7 @@ import (
 type bridgeReply struct {
 	outcomes []llm.ToolOutcome
 	err      error
-	inputs   []string
+	inputs   []llm.BatchInput
 }
 type bridgeRequest struct {
 	ctx                context.Context
@@ -32,8 +33,8 @@ type bridgeRequest struct {
 	steering           bool
 }
 
-func (current *coordinator) steeringRendezvous(ctx context.Context, origin session.TurnID) func(context.Context) ([]string, error) {
-	return func(callCtx context.Context) ([]string, error) {
+func (current *coordinator) steeringRendezvous(ctx context.Context, origin session.TurnID) func(context.Context) ([]llm.BatchInput, error) {
+	return func(callCtx context.Context) ([]llm.BatchInput, error) {
 		request := bridgeRequest{ctx: callCtx, origin: origin, reply: make(chan bridgeReply, 1), steering: true}
 		select {
 		case current.bridgeRequests <- request:
@@ -53,38 +54,19 @@ func (current *coordinator) steeringRendezvous(ctx context.Context, origin sessi
 	}
 }
 
-// External inputs projected here precede the next Claude response. Peer inputs
-// remain deferred for their own turn, and are not acknowledged by this batch.
+// The next model response acknowledges the watermark of this continuation.
 func (current *coordinator) deliverSteering(ctx context.Context, request bridgeRequest) error {
-	var inputs []string
-	var remaining []sessionstore.Item
-	for _, item := range current.deferredContext {
-		input := item.Data.(inbox.Input)
-		if input.Kind != inbox.InputExternal {
-			remaining = append(remaining, item)
-			continue
-		}
-		var text string
-		if err := json.Unmarshal(input.Payload, &text); err != nil {
-			return err
-		}
-		text = safeSteeringText(text)
-		inputs = append(inputs, text)
-		if b, ok := current.dependencies.ContextBuilder.(interface{ SetHistoryItem(sessionstore.Item) }); ok {
-			b.SetHistoryItem(item)
-		}
-		if err := current.dependencies.ContextBuilder.AddExternalInput(input); err != nil {
-			return err
-		}
+	queued := len(current.deferredContext)
+	inputs, records, err := current.projectDeferredContext(true)
+	if err != nil {
+		return err
 	}
 	if len(inputs) > 0 {
-		current.modelInputs += len(inputs)
+		current.modelInputs += queued
 		current.turnExternals = current.state.externalInputs
-		if err := current.commitBridgeContinuation(ctx); err != nil {
+		if err := current.commitBridgeContinuation(ctx, true, records); err != nil {
 			return err
 		}
-		current.deferredContext = remaining
-		current.state.callModel = false
 	}
 	request.reply <- bridgeReply{inputs: inputs}
 	return nil
@@ -131,24 +113,69 @@ type bridgeRound struct {
 	results map[string]llm.ToolOutcome
 }
 
-func (current *coordinator) flushDeferredContext() error {
+// Project in inbox order at a tool-batch or regular request boundary. A ready
+// notice contributes to scheduling only and has no model-visible text.
+func (current *coordinator) projectDeferredContext(batch bool) ([]llm.BatchInput, []record.Locator, error) {
+	var inputs []llm.BatchInput
+	var records []record.Locator
+	var peers, quiet int
 	for _, item := range current.deferredContext {
 		if b, ok := current.dependencies.ContextBuilder.(interface{ SetHistoryItem(sessionstore.Item) }); ok {
 			b.SetHistoryItem(item)
 		}
 		input := item.Data.(inbox.Input)
-		var err error
-		if input.Kind == inbox.InputExternal {
-			err = current.dependencies.ContextBuilder.AddExternalInput(input)
-		} else {
-			err = current.dependencies.ContextBuilder.(interface{ AddPeerInput(inbox.Input) error }).AddPeerInput(input)
+		retain := func(kind record.Kind) {
+			if item.Sequence != 0 {
+				records = append(records, record.Input(string(current.dependencies.SessionID), uint64(item.Sequence), kind))
+			}
 		}
-		if err != nil {
-			return err
+		if input.Kind == inbox.InputPeer {
+			if !batch {
+				if err := current.addPeerInput(input); err != nil {
+					return nil, nil, err
+				}
+				continue
+			}
+			b, ok := current.dependencies.ContextBuilder.(interface {
+				ProjectPeerInput(inbox.Input) (string, error)
+			})
+			if !ok {
+				return nil, nil, errors.New("context builder cannot project peer input through the tool bridge")
+			}
+			text, err := b.ProjectPeerInput(input)
+			if err != nil {
+				return nil, nil, err
+			}
+			if text != "" {
+				inputs = append(inputs, llm.BatchInput{Text: secretguard.Redact(text), Peer: true})
+				retain(record.PeerMessage)
+			}
+			peers++
+			if quietPeer(input) {
+				quiet++
+			}
+			continue
+		}
+		if err := current.dependencies.ContextBuilder.AddExternalInput(input); err != nil {
+			return nil, nil, err
+		}
+		if batch {
+			var text string
+			if err := json.Unmarshal(input.Payload, &text); err != nil {
+				return nil, nil, err
+			}
+			inputs = append(inputs, llm.BatchInput{Text: safeSteeringText(text)})
+			retain(record.UserMessage)
 		}
 	}
-	current.deferredContext = nil
-	return nil
+	if !batch || len(inputs) > 0 {
+		current.deferredContext = nil
+	}
+	if len(inputs) > 0 {
+		current.state.turnPeerInputs += peers
+		current.state.turnQuietInputs += quiet
+	}
+	return inputs, records, nil
 }
 
 // This rendezvous is provider neutral. Only the Coordinator goroutine mutates
@@ -191,6 +218,16 @@ func (current *coordinator) acceptBridgeRequest(ctx context.Context, request bri
 		return nil
 	}
 	if request.steering {
+		if err := current.drainInbox(ctx); err != nil {
+			return err
+		}
+		if current.cancelModel == nil || current.stop.request.Mode == inbox.StopHard || request.ctx.Err() != nil {
+			request.reply <- bridgeReply{err: context.Canceled}
+			return nil
+		}
+		if err := current.recordChildCompletions(ctx); err != nil {
+			return err
+		}
 		return current.deliverSteering(ctx, request)
 	}
 	round := &bridgeRound{request: request, turn: current.state.currentTurnID, results: map[string]llm.ToolOutcome{}}
@@ -265,7 +302,7 @@ func (current *coordinator) deliverBridgeResults(ctx context.Context) error {
 		outcomes = append(outcomes, round.results[id])
 	}
 	current.modelInputs += len(outcomes)
-	if err := current.commitBridgeContinuation(ctx); err != nil {
+	if err := current.commitBridgeContinuation(ctx, false, nil); err != nil {
 		return err
 	}
 	current.bridge = nil
@@ -273,12 +310,12 @@ func (current *coordinator) deliverBridgeResults(ctx context.Context) error {
 	return nil
 }
 
-func (current *coordinator) commitBridgeContinuation(ctx context.Context) error {
+func (current *coordinator) commitBridgeContinuation(ctx context.Context, batchInputs bool, records []record.Locator) error {
 	turn := session.Turn{
 		ID: session.TurnID(uuid.New().String()), PreviousTurnID: current.state.currentTurnID,
 		Type: session.TurnRegular, RuntimeRevision: current.modelRevision,
 		ToolContinuation: current.modelOrigin, InputWatermark: current.modelInputs,
-		ExternalInputWatermark: current.turnExternals,
+		ExternalInputWatermark: current.turnExternals, BatchInputs: batchInputs, BatchRecords: records,
 	}
 	item, err := current.addItemToLocalState(sessionstore.Item{Kind: sessionstore.ItemTurn, Data: turn})
 	if err != nil {

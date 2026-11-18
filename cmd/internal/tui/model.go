@@ -254,6 +254,10 @@ func (m *Model) apply(v host.View) error {
 			s.TurnID = data.ID
 		case sessionstore.HostRecord:
 			switch data.Kind {
+			case sessionstore.HostActivity:
+				if data.Activity != nil && data.Activity.Kind == llm.ActivityModelFailure {
+					s.WaitingForModel = false
+				}
 			case sessionstore.HostContext:
 				if data.Context != nil && data.Context.Usage != nil {
 					s.CacheLatest = viewer.Usage{}

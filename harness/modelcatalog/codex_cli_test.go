@@ -45,6 +45,26 @@ func TestCodexModelListOmitsUltraAndResolvesDefault(t *testing.T) {
 	}
 }
 
+func TestCodexModelListFastServiceTier(t *testing.T) {
+	input := `{"id":1,"result":{}}
+{"id":2,"result":{"data":[
+	{"model":"gpt-6-luna","defaultReasoningEffort":"max","supportedReasoningEfforts":[{"reasoningEffort":"max"}],"serviceTiers":[{"id":"priority","name":"Fast"}]},
+	{"model":"standard","defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}],"serviceTiers":[],"additionalSpeedTiers":["fast"]}
+]}}
+`
+	// The JSON-RPC transport sends one object per line.
+	lines := strings.SplitN(input, "\n", 2)
+	frame := strings.ReplaceAll(lines[1], "\n", "") + "\n"
+	catalog, err := readCodexCatalog(strings.NewReader(lines[0]+"\n"+frame), &bytes.Buffer{})
+	if err != nil || !catalog.Available || len(catalog.Models) != 2 {
+		t.Fatal(catalog, err)
+	}
+	luna, standard := catalog.Models[0], catalog.Models[1]
+	if luna.ID != "gpt-6-luna" || !luna.AllowsFast("openai-codex") || standard.AllowsFast("openai-codex") {
+		t.Fatalf("incorrect model/list Fast capabilities: %+v", catalog.Models)
+	}
+}
+
 func TestCodexCatalogProtocolMetadataOnly(t *testing.T) {
 	text := `{"id":1,"result":{"userAgent":"synthetic","codexHome":"private-path"}}
 {"method":"account/updated","params":{"accountId":"account-private"}}

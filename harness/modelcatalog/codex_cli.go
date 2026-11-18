@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -312,7 +313,19 @@ type codexModelInfo struct {
 	Efforts []struct {
 		Effort llm.ReasoningEffort `json:"reasoningEffort"`
 	} `json:"supportedReasoningEfforts"`
-	IsDefault bool `json:"isDefault"`
+	IsDefault    bool               `json:"isDefault"`
+	ServiceTiers []codexServiceTier `json:"serviceTiers"`
+}
+
+type codexServiceTier struct {
+	ID string `json:"id"`
+}
+
+func codexFastMode(tiers []codexServiceTier) *bool {
+	if tiers == nil {
+		return nil
+	}
+	return new(slices.ContainsFunc(tiers, func(t codexServiceTier) bool { return t.ID == "priority" }))
 }
 
 func normalizeCodexModels(rows []codexModelInfo) (Catalog, error) {
@@ -330,7 +343,7 @@ func normalizeCodexModels(rows []codexModelInfo) (Catalog, error) {
 			continue
 		}
 		seen[row.Model] = true
-		m := Model{ID: row.Model, Name: row.Name, DefaultEffort: row.Default}
+		m := Model{ID: row.Model, Name: row.Name, DefaultEffort: row.Default, FastMode: codexFastMode(row.ServiceTiers)}
 		if m.Name == "" {
 			m.Name = m.ID
 		}

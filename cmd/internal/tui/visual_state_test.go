@@ -23,6 +23,7 @@ func TestVisualStatePresentation(t *testing.T) {
 		{stateFailed, "✗", "x", "失敗", stateBad, true},
 		{stateCanceled, "⊘", "-", "取消", dimColor, true},
 		{stateEnded, "▪", "#", "終了", dimColor, true},
+		{stateUsageWait, "◌", ".", "利用上限待ち", stateStall, false},
 		{stateUnknown, "?", "?", "不明", stateStall, false},
 	} {
 		for _, theme := range []Theme{{}, {ASCII: true}} {

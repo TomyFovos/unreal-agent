@@ -3,6 +3,7 @@
 package testclaude
 
 import (
+	"bytes"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"os"
@@ -131,7 +132,7 @@ func (f *Fixture) BatchContexts(t testing.TB) []string {
 		t.Fatal(err)
 	}
 	var contexts []string
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for _, line := range completeRecords(data) {
 		if line == "" {
 			continue
 		}
@@ -169,7 +170,7 @@ func (f *Fixture) calls(t testing.TB, name string) []Call {
 		t.Fatal(err)
 	}
 	var calls []Call
-	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+	for _, line := range completeRecords(b) {
 		if line == "" {
 			continue
 		}
@@ -180,4 +181,15 @@ func (f *Fixture) calls(t testing.TB, name string) []Call {
 		calls = append(calls, c)
 	}
 	return calls
+}
+
+// The fake CLI appends newline-terminated records while tests poll this file.
+// A read may observe part of an append. Only the final newline publishes a
+// record; malformed complete records still fail JSON decoding in the caller.
+func completeRecords(data []byte) []string {
+	end := bytes.LastIndexByte(data, '\n')
+	if end < 0 {
+		return nil
+	}
+	return strings.Split(string(data[:end]), "\n")
 }

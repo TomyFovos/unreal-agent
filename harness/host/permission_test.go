@@ -68,3 +68,24 @@ func TestResumeReevaluatesHostPolicy(t *testing.T) {
 		t.Fatal("resume retained stale privileges", permissions)
 	}
 }
+
+func TestCapabilityPreflightFromOwnerContextPreservesRestrictions(t *testing.T) {
+	maximum := permission.Unrestricted()
+	controller := permission.NewController(t.Context(), permission.DenyAll(), maximum, 0)
+	defer controller.Close()
+	ctx := permission.WithController(permission.WithPolicy(t.Context(), maximum), controller)
+	s := &Session{ctx: ctx}
+	if permission.FromContext(ctx).CheckProcess() == nil {
+		t.Fatal("execution context unexpectedly allows process creation")
+	}
+	if err := permission.FromContext(s.WithCapabilityPolicy(ctx)).CheckProcess(); err != nil {
+		t.Fatal("owner's current mode narrowed capability preflight", err)
+	}
+	if permission.FromContext(ctx).CheckProcess() == nil {
+		t.Fatal("preflight granted execution permission")
+	}
+	narrow := permission.WithPolicy(ctx, permission.DenyAll())
+	if permission.FromContext(s.WithCapabilityPolicy(narrow)).CheckProcess() == nil {
+		t.Fatal("capability preflight widened an immutable caller restriction")
+	}
+}

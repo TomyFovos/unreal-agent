@@ -9,7 +9,7 @@ Unreal Agent は共通の `/model` で、Claude・ChatGPT のサブスク、任�
 ## モデルの選択と切り替え (`/model`)
 
 1. TUI で `/model` を入力し、`ChatGPT（サブスク）`、`Claude（サブスク）`、`OpenAI API（API キー・別課金）`、`Claude（API キー・別課金）` から接続を選びます。キーを保存すると `OpenCode Go` も選べます。API の行は明示的に登録した場合だけ表示されます。
-2. その接続のモデル一覧からモデルを選び、対応する場合は推論の深さ（effort）を選択します。
+2. その接続のモデル一覧からモデルを選び、対応する場合は推論の深さ（effort）と Fast モードを選択します。
 3. 後からログインした場合や外部 CLI を更新した場合は、`/model refresh` で認証状態とモデル一覧を再検出し、`/model` で選択します。インストールのやり直しは不要です。既存 Session のプロバイダは自分で選び直すまで維持されます。
 
 > **補足:**
@@ -61,6 +61,14 @@ Unreal Agent は共通の `/model` で、Claude・ChatGPT のサブスク、任�
   ※ 通常のプライベートファイルである必要があり、同じフォルダ内の `models_cache.json` からモデル一覧を読み取ります。
 
 - **モデル一覧の取得規則:** 通常 Codex のモデル探索は、選択した認証ファイルと同じディレクトリの `models_cache.json` の読み取りのみを行います（`/model refresh` 時にも CLI を起動して列挙することはしません）。モデル一覧の取得と認証・推論権限の検査は独立しています。
+
+### Fast モード
+
+ChatGPT サブスクのモデル一覧で Fast 対応が確認できると、`/model` の effort 選択後に **Fast mode** が出ます。既定は off です。変更は次のターンから適用し、Session の再開後も保持します。Codex CLI 0.169.1 は選択したモデルへの Responses リクエストに `"service_tier": "priority"` を付けます。Unreal も on のときだけ同じ項目を送ります。対応モデルは公式キャッシュの `service_tiers[].id` または `model/list` の `serviceTiers[].id` で確認します。[Codex CLI の選択処理](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/tui/src/chatwidget/service_tiers.rs#L75-L95)、[送信処理](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/core/src/client.rs#L1278-L1306)、[Luna のカタログ項目](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/models-manager/models.json#L1197-L1207)
+
+ChatGPT ログイン時、GPT-6 Luna の Fast は同じモデルの標準速度に比べて、サブスクに含まれる利用枠を **2.5 倍**のペースで消費します。購入済みクレジットや対象の Enterprise 従量課金を使う場合は **2 倍**です。倍率はモデルによって異なります。[OpenAI の速度設定](https://learn.chatgpt.com/docs/agent-configuration/speed#fast-mode)、[OpenAI の料金表](https://learn.chatgpt.com/docs/pricing?codex-pricing-speed=fast#speed-multipliers)
+
+Fast を使えない場合は `fast unsupported for <model>` を表示します。保存後に対応情報がなくなった場合は、同じモデルに標準速度で送信し、この通知を表示します。`/analyze` の **Layers** ではリクエストに付けたモードごとに、トークン使用量と出力 tok/s を集計します。モードの記録がない旧 Codex 履歴は `fast unknown` と表示します。
 
 ---
 
@@ -163,8 +171,8 @@ Claude の統括は、役割ごとに選んだ接続の可用性を確認して�
 ### 委譲の動き
 
 1. Claude に「サブエージェントに委譲して」「lead に実装を渡して」と指示します。
-2. Claude は `~/.local/bin/unreal-agent subagent` コマンドでサブエージェントを起動してタスクを渡し、いったん自分のターンを終了します。
-3. サブエージェントが完了または連絡を送ると、親セッションが自動的に再開して結果を処理します。
+2. Claude は `~/.local/bin/unreal-agent subagent` コマンドで子を起動し、並行して進められる作業を続けます。
+3. 依頼文の欄を再掲する依頼はハーネスが回答します。転送された質問、承認要求、完了報告の全文は、Claude Code ではツールバッチ後のフック、Responses 系ではツール結果を含む継続リクエストで親に届きます。判断が必要な連絡で待機中の親が動きます。 [委譲の依頼文](usage.md#委譲の依頼文)
 4. サブエージェントの権限モードは親セッションの選択モード（および上限ポリシー）に従い、承認要求は親エージェントが判断します。詳しくは [権限管理](permissions.md) を参照してください。
 
 > **環境変数の継承:** 子は Host の環境（`PATH`、`HOME`、ツール設定など）を継承し、除去するのは `OPENAI_CODEX_ACCESS_TOKEN` と `OPENAI_CODEX_ACCOUNT_ID` のみです。環境隔離を保証するものではありません。
@@ -176,7 +184,7 @@ Claude の統括は、役割ごとに選んだ接続の可用性を確認して�
 ```sh
 unreal-agent subagent model show
 unreal-agent subagent model set --role lead --provider openai-codex --model gpt-6.2-sol --effort max
-unreal-agent subagent model set --role worker --provider opencode-go --model deepseek-v4.1-flash --effort max
+unreal-agent subagent model set --role worker --provider openai-codex --model gpt-6-luna --effort max --fast on
 unreal-agent subagent model show --role worker
 ```
 
@@ -185,6 +193,8 @@ unreal-agent subagent model show --role worker
 `--effort` の省略時はテンプレートから決めます。明示した worker の effort は全 worker に適用します。
 collector は別設定で、変更しなければ `gpt-6-luna` / medium です。役割と provider の組み合わせは固定しません。
 API キー接続は利用者が明示した場合だけ使い、利用不能な provider から自動で切り替えません。
+
+対応する ChatGPT サブスクモデルなら、どの役割でも `--fast on` を選べます。モデルを設定するときに `--fast off` を指定するか、`--fast` を省略すると標準速度になります。モデルの保存後は `model set --role worker --fast off` で、provider・model・effort を保持したまま速度を変更できます。`model show` に保存済みのモードが表示されます。
 
 設定・参照は Host 経由で処理し、Session に記録します。選択は `~/.local/state/unreal-agent/subagent-model.json`
 （`XDG_STATE_HOME` 設定時は `$XDG_STATE_HOME/unreal-agent/subagent-model.json`）に保存し、

@@ -2,6 +2,7 @@ package openaicodex
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"io"
@@ -67,6 +68,70 @@ func TestClientUsesSubscriptionProtocol(t *testing.T) {
 	response, err := client.Respond(t.Context(), request, llm.RequestOptions{CacheKey: "session"})
 	if err != nil || response.ID != "r" || response.Stop != llm.StopComplete || requests.Load() != 1 {
 		t.Fatalf("response = %#v, %v", response, err)
+	}
+}
+
+func TestClientFastServiceTier(t *testing.T) {
+	for _, tc := range []struct {
+		name, tier      string
+		fast, supported bool
+	}{
+		{name: "off", supported: true},
+		{name: "on", tier: "priority", fast: true, supported: true},
+		{name: "unsupported", fast: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				var body struct {
+					Model     string `json:"model"`
+					Reasoning struct {
+						Effort string `json:"effort"`
+					} `json:"reasoning"`
+					ServiceTier jsontext.Value `json:"service_tier"`
+				}
+				if err := json.UnmarshalRead(r.Body, &body); err != nil {
+					t.Error(err)
+				}
+				if body.Model != "gpt-6-luna" || body.Reasoning.Effort != "max" {
+					t.Errorf("fast changed model or effort: %+v", body)
+				}
+				if tc.tier == "" && len(body.ServiceTier) != 0 || tc.tier != "" && string(body.ServiceTier) != `"`+tc.tier+`"` {
+					t.Errorf("service_tier = %s, want %q (empty means omitted)", body.ServiceTier, tc.tier)
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n")
+			}))
+			defer server.Close()
+			client, err := NewClient(Config{AccessToken: "t", AccountID: "a", BaseURL: server.URL, SupportsFast: func(_ context.Context, model string) bool {
+				if !tc.fast || model != "gpt-6-luna" {
+					t.Errorf("unexpected fast support lookup for %q", model)
+				}
+				return tc.supported
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			var notices []llm.ActivityRecord
+			response, err := client.Respond(t.Context(), llm.Request{Model: llm.Model{ID: "gpt-6-luna", ReasoningEffort: "max", Fast: tc.fast}}, llm.RequestOptions{
+				RecordActivity: func(_ context.Context, record llm.ActivityRecord) error {
+					notices = append(notices, record)
+					return nil
+				},
+			})
+			if err != nil || response.Usage.Fast == nil || *response.Usage.Fast != (tc.tier != "") || requests.Load() != 1 {
+				t.Fatalf("response = %+v, requests = %d, err = %v", response, requests.Load(), err)
+			}
+			if tc.fast && !tc.supported {
+				if len(notices) != 1 || notices[0].Kind != llm.ActivityFastUnsupported || notices[0].Reason != "fast unsupported for gpt-6-luna" {
+					t.Fatalf("unsupported fast notice: %+v", notices)
+				}
+			} else if len(notices) != 0 {
+				t.Fatalf("unexpected notices: %+v", notices)
+			}
+		})
 	}
 }
 

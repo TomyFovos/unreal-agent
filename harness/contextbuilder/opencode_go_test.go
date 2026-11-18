@@ -19,11 +19,11 @@ func TestAppendOnlyContextIncludesOpenCodeGo(t *testing.T) {
 	}
 }
 
-// Mirrors TestMeasuredInputTakesPrecedenceOverByteEstimate.
-func TestOpenCodeGoMeasuredInputTakesPrecedenceOverByteEstimate(t *testing.T) {
+// Mirrors TestMeasuredInputTakesPrecedenceOverTokenEstimate.
+func TestOpenCodeGoMeasuredInputTakesPrecedenceOverTokenEstimate(t *testing.T) {
 	f := newContextFixture(t, "opencode-go", contextengine.Config{})
 	f.b.SetContextRuntime(sessionstore.RuntimeSelection{Provider: "opencode-go", Model: "deepseek-v4.1-flash", ContextWindow: 200000}, true)
-	f.user(t, "task", "Continue this task")
+	f.user(t, "task", "Continue this task"+strings.Repeat("x", 840000))
 	f.item(t, sessionstore.ItemTurn, session.Turn{ID: "turn", Type: session.TurnRegular})
 	f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{Usage: llm.Usage{InputTokens: 2000}, Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: strings.Repeat("x", 210000)}}}}})
 	if err := f.b.PrepareContext(t.Context(), nil, llm.RequestOptions{}, func(r sessionstore.ContextRecord) error { f.b.ApplyContext(r); return nil }, false); err != nil {
@@ -31,10 +31,10 @@ func TestOpenCodeGoMeasuredInputTakesPrecedenceOverByteEstimate(t *testing.T) {
 	}
 	built, err := f.b.Build()
 	if err != nil {
-		t.Fatal("byte estimate overrode actual usage", err)
+		t.Fatal("token estimate overrode measured prefix plus delta", err)
 	}
 	if built.Report.Context.EstimatedInputTokens <= built.Report.Context.Budget.Input {
-		t.Fatal("fixture did not exceed the byte estimate budget")
+		t.Fatal("fixture did not exceed the token estimate budget")
 	}
 	f.item(t, sessionstore.ItemTurn, session.Turn{ID: "unreported", Type: session.TurnRegular})
 	f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "unreported", Response: llm.Response{}})

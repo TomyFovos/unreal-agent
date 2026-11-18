@@ -71,7 +71,7 @@ func response(source openaiapi.Response) (llm.Response, error) {
 		return llm.Response{}, fmt.Errorf("unsupported response status %q", *source.Status)
 	}
 	for index, output := range source.Output {
-		item, included, err := responseOutputItem(output)
+		item, included, err := responseOutputItem(output, converted.Stop == llm.StopMaxOutputTokens)
 		if err != nil {
 			return llm.Response{}, fmt.Errorf("output item %d: %w", index, err)
 		}
@@ -83,7 +83,7 @@ func response(source openaiapi.Response) (llm.Response, error) {
 	return converted, nil
 }
 
-func responseOutputItem(source openaiapi.OutputItem) (llm.Item, bool, error) {
+func responseOutputItem(source openaiapi.OutputItem, outputLimited bool) (llm.Item, bool, error) {
 	itemType, err := source.Discriminator()
 	if err != nil {
 		return llm.Item{}, false, fmt.Errorf("decode output item type: %w", err)
@@ -134,20 +134,20 @@ func responseOutputItem(source openaiapi.OutputItem) (llm.Item, bool, error) {
 		if err != nil {
 			return llm.Item{}, false, err
 		}
-		if call.Status != nil {
-			switch *call.Status {
-			case openaiapi.FunctionToolCallStatusInProgress,
-				openaiapi.FunctionToolCallStatusIncomplete:
-				return llm.Item{}, false, nil
-			}
+		status := dereference(call.Status)
+		incomplete := status == string(openaiapi.FunctionToolCallStatusInProgress) ||
+			status == string(openaiapi.FunctionToolCallStatusIncomplete)
+		if incomplete && !outputLimited {
+			return llm.Item{}, false, nil
 		}
 		return llm.Item{
 			ProviderID: dereference(call.Id),
 			Type:       llm.ItemToolCall,
 			Data: llm.ToolCall{
-				CallID:    call.CallId,
-				Name:      call.Name,
-				Arguments: call.Arguments,
+				CallID:     call.CallId,
+				Name:       call.Name,
+				Arguments:  call.Arguments,
+				Incomplete: incomplete,
 			},
 		}, true, nil
 	case "reasoning":
@@ -180,13 +180,14 @@ func incompleteStopReason(source openaiapi.Response) (llm.StopReason, error) {
 	if source.IncompleteDetails == nil || source.IncompleteDetails.Reason == nil {
 		return "", fmt.Errorf("unsupported incomplete reason %q", "")
 	}
-	switch *source.IncompleteDetails.Reason {
-	case openaiapi.MaxOutputTokens:
+	reason := *source.IncompleteDetails.Reason
+	switch {
+	case llm.IsOutputLimit(string(reason)):
 		return llm.StopMaxOutputTokens, nil
-	case openaiapi.ContentFilter:
+	case reason == openaiapi.ContentFilter:
 		return llm.StopRefused, nil
 	default:
-		return "", fmt.Errorf("unsupported incomplete reason %q", *source.IncompleteDetails.Reason)
+		return "", fmt.Errorf("unsupported incomplete reason %q", reason)
 	}
 }
 

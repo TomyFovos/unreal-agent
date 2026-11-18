@@ -116,6 +116,7 @@ type streamEvent struct {
 	} `json:"delta"`
 	// message_start carries the step's input usage; message_delta its output.
 	Message struct {
+		ID    string `json:"id"`
 		Model string `json:"model"`
 		Usage *usage `json:"usage"`
 	} `json:"message"`

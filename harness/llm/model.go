@@ -24,6 +24,12 @@ type Item struct {
 	Type       ItemType
 	Data       any
 	Responses  *ItemEncoding `json:"-"`
+	// OutputLimit identifies output from a capped provider request inside a
+	// response that can also contain successful requests (Claude Code).
+	OutputLimit bool `json:",omitzero"`
+	// ClaudeResumeBoundary marks the verified prefix in Claude Code's private
+	// transcript, including hook inputs followed by an empty model response.
+	ClaudeResumeBoundary bool `json:"-"`
 }
 
 type Message struct {
@@ -36,6 +42,8 @@ type ToolCall struct {
 	CallID    string
 	Name      string
 	Arguments string
+	// Incomplete calls are recorded as evidence when a response hits its cap.
+	Incomplete bool `json:",omitzero"`
 }
 
 type ToolResultKind string
@@ -93,6 +101,7 @@ type Model struct {
 	ID              string
 	MaxOutputTokens *int64
 	ReasoningEffort ReasoningEffort
+	Fast            bool `json:",omitzero"`
 }
 
 type ReasoningEffort string
@@ -138,8 +147,19 @@ const (
 	StopRefused         StopReason = "refused"
 )
 
+// IsOutputLimit recognizes provider stop and finish reasons for exhausted output.
+func IsOutputLimit(reason string) bool {
+	switch reason {
+	case string(StopMaxOutputTokens), "max_tokens", "length":
+		return true
+	default:
+		return false
+	}
+}
+
 type Response struct {
 	ID         string
+	Provider   string `json:",omitzero"`
 	Model      string `json:",omitzero"`
 	Stop       StopReason
 	Output     []Item `json:",omitzero"`
@@ -151,7 +171,9 @@ type Response struct {
 // InputTokens includes CachedInputTokens and CacheWriteInputTokens.
 // OutputTokens includes ReasoningTokens.
 type Usage struct {
+	Provider              string `json:",omitzero"`
 	AuthMethod            string `json:",omitzero"` // api_key, oauth, or the selected subscription transport
+	Fast                  *bool  `json:",omitzero"` // whether the Codex request carried the Fast tier
 	InputTokens           int64
 	CachedInputTokens     int64
 	CacheWriteInputTokens int64

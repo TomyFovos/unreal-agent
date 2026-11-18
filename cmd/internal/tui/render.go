@@ -291,6 +291,9 @@ func headerModelLabel(s sessionstore.RuntimeSelection, t Theme) string {
 	if s.Effort != "" {
 		name += t.symbol(" · ", " / ") + string(s.Effort)
 	}
+	if s.Fast {
+		name += t.symbol(" · ", " / ") + "fast on"
+	}
 	return topologyText(name, 256)
 }
 
@@ -326,8 +329,16 @@ func conversation(s Snapshot, u UIState, l layout) []displayRow {
 		}
 	}
 	for _, e := range entries {
-		if e.Role == "error" && s.Selection != nil {
-			e.Text = usertext.Failure(e.Code, e.Text, s.Selection.Provider)
+		if e.Role == "error" && (s.Selection != nil || e.Code == llm.ActivityModelFailure) {
+			provider := ""
+			if s.Selection != nil {
+				provider = s.Selection.Provider
+			}
+			if e.Code == llm.ActivityModelFailure {
+				e.Text = usertext.TurnFailure(e.Text, provider)
+			} else {
+				e.Text = usertext.Failure(e.Code, e.Text, provider)
+			}
 			e.Code = "user_message"
 		}
 		switch e.Role {
@@ -952,10 +963,13 @@ func selectionLabel(s sessionstore.RuntimeSelection, t Theme) string {
 	if provider != "" {
 		name = provider + t.symbol(" · ", " / ") + name
 	}
-	if s.Effort == "" {
-		return SafeText(name)
+	if s.Effort != "" {
+		name += t.symbol(" · ", " / ") + string(s.Effort)
 	}
-	return SafeText(name) + t.symbol(" · ", " / ") + string(s.Effort)
+	if s.Fast {
+		name += t.symbol(" · ", " / ") + "fast on"
+	}
+	return SafeText(name)
 }
 
 // forHuman reports a message the agent marked for the user.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 )
@@ -25,6 +27,7 @@ const sessionFileSuffix = ".session.jsonl"
 type cachedWriteState struct {
 	head          sessionHead
 	committedSize int64
+	restoreIndex  *restoreIndex
 }
 
 type Store struct {
@@ -133,21 +136,26 @@ func (store *Store) Items(
 }
 
 func (store *Store) AppendInput(ctx context.Context, id session.ID, input inbox.Input) error {
+	_, err := store.AppendInputRecorded(ctx, id, input)
+	return err
+}
+
+func (store *Store) AppendInputRecorded(ctx context.Context, id session.ID, input inbox.Input) (sessionstore.Sequence, error) {
 	head, committedSize, err := store.loadWriteState(ctx, id)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	item, err := head.appendInput(input, time.Now().UTC())
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if err := store.append(id, head, committedSize, recordItem, itemRecord{
 		Item: item,
 	}); err != nil {
-		return err
+		return 0, err
 	}
 	store.notifyObservers(id, item)
-	return nil
+	return item.Sequence, nil
 }
 
 func (store *Store) AppendTurn(ctx context.Context, id session.ID, turn session.Turn) error {
@@ -222,23 +230,33 @@ func (store *Store) SaveOperation(
 	id session.ID,
 	value operation.Operation,
 ) error {
+	_, err := store.SaveOperationRecorded(ctx, id, value)
+	return err
+}
+
+func (store *Store) SaveOperationRecorded(ctx context.Context, id session.ID, value operation.Operation) (record.Locator, error) {
 	if err := validateOperation(value); err != nil {
-		return err
+		return "", err
 	}
 	head, committedSize, err := store.loadWriteState(ctx, id)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if err := head.saveOperation(value); err != nil {
-		return err
+	r := operationRecord{Operation: value}
+	if terminalOperationStatus(value.Status) {
+		r.RecordedAt = time.Now().UTC()
 	}
-	return store.append(
+	err = store.append(
 		id,
 		head,
 		committedSize,
 		recordOperation,
-		operationRecord{Operation: value},
+		r,
 	)
+	if err != nil {
+		return "", err
+	}
+	return record.Address{Kind: record.OperationCheckpoint, Session: string(id), Operation: string(value.ID), Offset: committedSize}.Locator(), nil
 }
 
 func (store *Store) Resume(ctx context.Context, id session.ID) (sessionstore.ResumeState, error) {
@@ -361,6 +379,17 @@ func (store *Store) append(
 	kind recordType,
 	value any,
 ) error {
+	var projectErr error
+	switch r := value.(type) {
+	case itemRecord:
+		projectErr = head.observeItem(r)
+	case operationRecord:
+		projectErr = head.applyOperationRecord(r, committedSize)
+	}
+	if projectErr != nil {
+		store.evictCachedWriteState(id)
+		return projectErr
+	}
 	if err := store.invalidateRestoreView(id); err != nil {
 		store.evictCachedWriteState(id)
 		return err
@@ -379,7 +408,25 @@ func (store *Store) append(
 		store.evictCachedWriteState(id)
 		return err
 	}
-	store.putCachedWriteState(id, head, committedSize+int64(len(encoded)))
+	store.writeStateCacheMutex.Lock()
+	index := store.writeStateCache[id].restoreIndex
+	store.writeStateCache[id] = cachedWriteState{head: head, committedSize: committedSize + int64(len(encoded)), restoreIndex: index}
+	store.writeStateCacheMutex.Unlock()
+	if index != nil {
+		switch r := value.(type) {
+		case itemRecord:
+			index.addItem(committedSize, r.Item.Sequence, len(head.Operations))
+		case operationRecord:
+			index.operations[head.operationPositions[r.Operation.ID]] = operationLocation{Offset: committedSize}
+		}
+		index.prefix.Write(encoded)
+		index.appends++
+		if index.appends >= restoreCheckpointInterval {
+			if err := store.SaveRestoreCheckpoint(id); err != nil {
+				slog.Debug("save restore checkpoint", "session", id, "error", err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -394,8 +441,12 @@ func (store *Store) getCachedWriteState(id session.ID) (sessionHead, int64, bool
 }
 
 func (store *Store) putCachedWriteState(id session.ID, head sessionHead, committedSize int64) {
+	store.setCachedWriteState(id, cachedWriteState{head: head, committedSize: committedSize})
+}
+
+func (store *Store) setCachedWriteState(id session.ID, cached cachedWriteState) {
 	store.writeStateCacheMutex.Lock()
-	store.writeStateCache[id] = cachedWriteState{head: head, committedSize: committedSize}
+	store.writeStateCache[id] = cached
 	store.writeStateCacheMutex.Unlock()
 }
 

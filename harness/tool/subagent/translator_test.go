@@ -1,6 +1,7 @@
 package subagent
 
 import (
+	"encoding/json/v2"
 	"slices"
 	"strings"
 
@@ -9,6 +10,66 @@ import (
 	runtime "github.com/unreallabsai/unreal-agent/harness/subagent"
 	"testing"
 )
+
+func TestSubagentStartKeepsOptionalBriefAndPreviewsChildText(t *testing.T) {
+	template := runtime.Template{Workspace: t.TempDir(), Runtime: []byte(`{}`)}
+	ext, err := Extensions("parent", map[string]runtime.Template{"worker": template}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var start *translator
+	for _, item := range ext {
+		if item.Definition.Tool.Name == "SubagentStart" {
+			if want := []string{"template"}; !slices.Equal(item.Definition.Tool.Parameters["required"].([]string), want) {
+				t.Fatal("task and brief fields must be optional", item.Definition.Tool.Parameters)
+			}
+			start = item.Translator.(*translator)
+		}
+	}
+	if start == nil {
+		t.Fatal("no start translator")
+	}
+	for _, tc := range []struct {
+		task  string
+		brief runtime.BriefFields
+	}{
+		{"legacy task", runtime.BriefFields{}},
+		{"", runtime.BriefFields{}},
+		{"", runtime.BriefFields{Title: "Structured task", Purpose: "Review", Inputs: "source", Outputs: "review",
+			Verification: "verify", AcceptanceCriteria: "check"}},
+	} {
+		args, _ := json.Marshal(map[string]any{"template": "worker", "task": tc.task, "brief": tc.brief})
+		c := &ctx{}
+		result := start.Translate(c, llm.ToolCall{Name: "SubagentStart", Arguments: string(args)})
+		if result.Error != "" || len(c.specs) != 1 {
+			t.Fatal("start refused optional fields", result)
+		}
+		spec := c.specs[0]
+		op := operation.Operation{ID: "start", Type: spec.Type, Version: spec.Version, State: spec.State, MaxOutputLength: spec.MaxOutputLength, Status: operation.StatusReady}
+		plan, err := runtime.DecodePlan(op)
+		if err != nil || plan.Text != tc.task || plan.Brief != tc.brief {
+			t.Fatal("start changed structured or free text", plan, err)
+		}
+		brief := &runtime.DelegationBrief{Root: template.Workspace, Fields: tc.brief}
+		handle := runtime.Handle{Version: 1, ParentID: plan.ParentID, ChildID: plan.ChildID, OperationID: op.ID, Brief: brief}
+		state, _ := operation.DecodeRemoteJobState(op)
+		state.Handle, _ = json.Marshal(handle)
+		step, err := operation.UpdateRemoteJob(op, state, operation.StatusCompleted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output, err := start.TranslateResult("call", result, []operation.Operation{*step.Operation})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var preview struct{ Preview string }
+		child := runtime.ChildConfig{ParentID: handle.ParentID, ChildID: handle.ChildID, OperationID: handle.OperationID, Task: tc.task, Brief: brief}
+		peer, err := child.InitialInput().DecodePeerMessage()
+		if err != nil || json.Unmarshal([]byte(output.Output[0].Value), &preview) != nil || preview.Preview != peer.Text {
+			t.Fatal("tool preview differs from child text", preview, peer, err)
+		}
+	}
+}
 
 func TestSendParentProgressIsOptional(t *testing.T) {
 	extensions, err := Extensions("child", nil, true)

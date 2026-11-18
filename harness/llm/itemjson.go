@@ -4,6 +4,8 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+
+	"github.com/unreallabsai/unreal-agent/internal/jsonspan"
 )
 
 type itemJSON Item
@@ -42,13 +44,13 @@ func (item Item) MarshalJSON() ([]byte, error) {
 func (item *Item) UnmarshalJSON(encoded []byte) error {
 	var decoded struct {
 		itemJSON
-		Data jsontext.Value
+		Data jsonspan.Span
 	}
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		return err
 	}
 
-	data, err := decodeItemData(decoded.Type, decoded.Data)
+	data, err := decodeItemData(decoded.Type, decoded.Data.Value(encoded))
 	if err != nil {
 		return err
 	}

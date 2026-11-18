@@ -30,6 +30,9 @@ func (s *Session) RecordChildReview(ctx context.Context, generation string, revi
 			return Receipt{ID: review.InputID, Sequence: item.Sequence}, nil
 		}
 	}
+	if !s.running {
+		return Receipt{}, ErrStopped
+	}
 	op, ok := s.operations[operation.ID(review.Handle)]
 	state, err := operation.DecodeRemoteJobState(op)
 	var plan struct{ Action, ParentID string }

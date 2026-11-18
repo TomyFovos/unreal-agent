@@ -174,6 +174,10 @@ func (m Model) AllowsEffort(e llm.ReasoningEffort) bool {
 	return false
 }
 
+func (m Model) AllowsFast(provider string) bool {
+	return provider == "openai-codex" && m.FastMode != nil && *m.FastMode
+}
+
 // Clone keeps UI-local appends/navigation from mutating the shared read cache.
 func (c Catalog) Clone() Catalog {
 	c.Models = append([]Model(nil), c.Models...)
@@ -201,8 +205,8 @@ func (c Catalog) FindSelection(id string) (Model, error) {
 	return Model{}, errors.New("model is not in the available catalog")
 }
 
-// ReadCodexCache accepts only the CLI's explicit list visibility and supported
-// reasoning metadata. Identity, instructions and other cache fields are ignored.
+// ReadCodexCache reads the CLI's visible models and their reasoning and speed
+// capabilities. Identity and instructions are ignored.
 func ReadCodexCache(path string) Catalog {
 	c := Catalog{Source: path, Problem: "catalog unavailable"}
 	fail := func(code string) Catalog {
@@ -233,8 +237,9 @@ func ReadCodexCache(path string) Catalog {
 			Levels     []struct {
 				Effort llm.ReasoningEffort `json:"effort"`
 			} `json:"supported_reasoning_levels"`
-			Context    int64               `json:"context_window"`
-			MultiAgent llm.ReasoningEffort `json:"multi_agent_reasoning_effort"`
+			Context      int64               `json:"context_window"`
+			MultiAgent   llm.ReasoningEffort `json:"multi_agent_reasoning_effort"`
+			ServiceTiers []codexServiceTier  `json:"service_tiers"`
 		} `json:"models"`
 	}
 	if json.Unmarshal(b, &raw) != nil {
@@ -250,7 +255,7 @@ func ReadCodexCache(path string) Catalog {
 			continue
 		}
 		seen[m.ID] = true
-		model := Model{ID: m.ID, Name: m.Name, DefaultEffort: m.Default, ContextWindow: max(0, m.Context)}
+		model := Model{ID: m.ID, Name: m.Name, DefaultEffort: m.Default, ContextWindow: max(0, m.Context), FastMode: codexFastMode(m.ServiceTiers)}
 		if m.MultiAgent.Valid() {
 			model.MultiAgentEffort = m.MultiAgent
 		}

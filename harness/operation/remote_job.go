@@ -51,6 +51,10 @@ type RemoteJobState struct {
 	ResultTruncated  bool           `json:",omitzero"`
 	ErrorBytes       int            `json:",omitzero"`
 	ErrorTruncated   bool           `json:",omitzero"`
+	// Original bytes are needed only when the existing model-facing value
+	// differs (including UTF-8 repair). They are never used for projection.
+	OriginalResult []byte `json:",omitzero"`
+	OriginalError  []byte `json:",omitzero"`
 }
 
 func NewRemoteJobSpec(plan RemoteJobPlan) (Spec, error) {
@@ -144,6 +148,7 @@ func FailRemoteJob(current Operation, err error) (Step, error) {
 	}
 	state.TerminalError = err.Error()
 	state.ErrorBytes, state.ErrorTruncated = 0, false
+	state.OriginalError = nil
 	state.TerminalResult = ""
 	state.Subscription = nil
 	return UpdateRemoteJob(current, state, StatusFailed)

@@ -258,7 +258,7 @@ func (m *Manager) run(j *job, p Plan) {
 		case "cancel":
 			_, err = m.ownedChild(p.Handle)
 			if err == nil {
-				_, err = m.config.Owner.CancelOperation(ctx, m.config.Owner.Generation, inbox.ID("cancel-request:"+string(op.ID)), p.Handle)
+				_, err = m.config.Owner.CancelChildOperation(ctx, m.config.Owner.Generation, inbox.ID("cancel-request:"+string(op.ID)), p.Handle)
 			}
 		case "parent":
 			if m.config.Child == nil || m.config.SendParent == nil {
@@ -266,11 +266,18 @@ func (m *Manager) run(j *job, p Plan) {
 			} else {
 				c := m.config.Child
 				kind := "message"
+				var result ParentMessageReceipt
 				if p.Progress {
 					kind = "progress"
+				} else {
+					result = c.routeQuestion(p.Text)
 				}
-				payload, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(c.ChildID), Target: string(c.ParentID), Handle: string(c.OperationID), Kind: kind, Text: p.Text})
-				_, err = m.config.SendParent(ctx, inbox.Input{ID: inbox.ID("send:" + string(op.ID)), Kind: inbox.InputPeer, Payload: payload})
+				if result.Answer == "" {
+					payload, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(c.ChildID), Target: string(c.ParentID), Handle: string(c.OperationID), Kind: kind, Text: p.Text, RuleID: result.RuleID})
+					_, err = m.config.SendParent(ctx, inbox.Input{ID: inbox.ID("send:" + string(op.ID)), Kind: inbox.InputPeer, Payload: payload})
+				} else {
+					state.Handle, _ = json.Marshal(result)
+				}
 			}
 		case "finish":
 			err = m.config.Owner.CommitFinish(ctx, op.ID, *p.Result)
@@ -313,7 +320,7 @@ func (m *Manager) run(j *job, p Plan) {
 	}
 }
 
-// CompletedInput is called by the owning Coordinator after a model call ends.
+// CompletedInput is called by the owning Coordinator at a model read boundary.
 // Its terminal Operation is already canonical. Publishing the notice in that
 // event boundary prevents one-shot completion from racing a background sender.
 func (m *Manager) CompletedInput(op operation.Operation) (*inbox.Input, error) {
@@ -344,18 +351,22 @@ func (m *Manager) CompletedInput(op operation.Operation) (*inbox.Input, error) {
 	if sender == "" {
 		sender = ChildID(p.ParentID, op.ID)
 	}
-	payload, err := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(sender), Target: string(p.ParentID), Handle: string(op.ID), Kind: "ended", Text: endedText(op.ID, op.Status, state)})
+	handle, _ := DecodeHandle(op)
+	payload, err := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(sender), Target: string(p.ParentID), Handle: string(op.ID), Kind: "ended",
+		Text: endedText(op.ID, op.Status, handle.Finish, state.TerminalError), ReportIncluded: handle.Finish != nil, ReportLocator: handle.FinishLocator})
 	if err != nil {
 		return nil, err
 	}
 	return &inbox.Input{ID: inbox.ID("ended:" + string(op.ID)), Kind: inbox.InputPeer, Payload: payload}, nil
 }
 
-func endedText(id operation.ID, status operation.Status, state operation.RemoteJobState) string {
+func endedText(id operation.ID, status operation.Status, finish *sessionstore.FinishRecord, failure string) string {
 	text := "Child " + string(id) + " ended: " + string(status)
-	var handle Handle
-	if json.Unmarshal(state.Handle, &handle) == nil && handle.Finish != nil {
-		r := handle.Finish.Result
+	if finish != nil {
+		r := finish.Result
+		if r.Status != string(status) {
+			text += "\nResult: " + r.Status
+		}
 		text += "\nSummary: " + r.Summary
 		if len(r.ChangedFiles) > 0 {
 			text += "\nChanged files: " + strings.Join(r.ChangedFiles, ", ")
@@ -366,10 +377,10 @@ func endedText(id operation.ID, status operation.Status, state operation.RemoteJ
 		if len(r.Blockers) > 0 {
 			text += "\nBlockers: " + strings.Join(r.Blockers, "; ")
 		}
-	} else if state.TerminalError != "" {
-		text += "\nError: " + state.TerminalError
+	} else if failure != "" {
+		text += "\nError: " + failure
 	}
-	return clipError(text) + "\n(Full report: subagent show " + string(id) + ")"
+	return text
 }
 func (m *Manager) ownedChild(id operation.ID) (Plan, error) {
 	view, err := m.config.Owner.Inspect(0, 1)
@@ -502,13 +513,20 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 	if err != nil {
 		return operation.StatusFailed, err
 	}
-	child := ChildConfig{MutationStateDirectory: allowed.MutationStateDirectory, ProjectInstructions: &snapshot, Version: 1, ParentID: p.ParentID, Template: p.Template, ChildID: p.ChildID, OperationID: j.operation.ID, SessionDirectory: m.config.Directory, Workspace: allowed.Workspace, Runtime: allowed.Runtime, Policy: allowed.Policy, Baseline: allowed.Baseline, Subagents: allowed.Subagents, ReadyID: inbox.ID("ready:" + string(j.operation.ID)), Task: p.Text}
+	child := ChildConfig{MutationStateDirectory: allowed.MutationStateDirectory, ProjectInstructions: &snapshot, Version: 1, ParentID: p.ParentID, Template: p.Template, Layer: allowed.Layer, ChildID: p.ChildID, OperationID: j.operation.ID, SessionDirectory: m.config.Directory, Workspace: allowed.Workspace, Runtime: allowed.Runtime, Policy: allowed.Policy, Baseline: allowed.Baseline, Subagents: allowed.Subagents, ReadyID: inbox.ID("ready:" + string(j.operation.ID)), Task: p.Text}
+	if child.Layer == "" {
+		parentLayer := "main"
+		if parent := m.config.Child; parent != nil {
+			parentLayer = parent.Layer
+			if parentLayer == "" {
+				parentLayer = RoleGroup(parent.Template)
+			}
+		}
+		child.Layer = ResolveLayer(p.Template, parentLayer)
+	}
 	if s := sessionstore.SelectionFromConfiguration(allowed.Runtime); s != nil && s.Provider == "claude-code" {
 		child.TextOnly = !sessionstore.ToolBridgeEnabledFromConfiguration(child.Runtime)
 		child.ProviderProcess = true
-	}
-	if err := child.Validate(); err != nil {
-		return operation.StatusFailed, err
 	}
 	// With permission modes the child follows this Session's mode (D1, U17),
 	// so its start holds the operator maximum (permission.Request.Orchestration),
@@ -522,12 +540,20 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 	if control != nil {
 		mode = control.Snapshot().Mode
 	}
+	brief := newBrief(child, p.Brief, child.Workspace, childTMPDIR(m.config.Environment), mode)
+	child.Brief = &brief
+	if prior, err := DecodeHandle(j.operation); err == nil && prior.Brief != nil {
+		child.Brief = prior.Brief
+	}
+	if err := child.Validate(); err != nil {
+		return operation.StatusFailed, err
+	}
 	for _, name := range child.Policy.Tools {
 		if err := policy.CheckTool(name); err != nil {
 			return operation.StatusFailed, err
 		}
 	}
-	handle := Handle{Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: j.operation.ID}
+	handle := Handle{Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: j.operation.ID, Brief: child.Brief}
 	collect := func(requireTerminal bool) (bool, error) {
 		view, err := ReadChild(ctx, m.config.Directory, p.ChildID, 0, 1)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -561,6 +587,12 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 		if view.Configuration.Template == "" {
 			child.Template = ""
 		}
+		if view.Configuration.Layer == "" {
+			child.Layer = ""
+		}
+		// Preserve the original permission/environment snapshot for this ID.
+		child.Brief = view.Configuration.Brief
+		handle.Brief = child.Brief
 		// Config bytes bind provider/profile/workspace/policy across restarts.
 		got, _ := json.Marshal(view.Configuration)
 		want, _ := json.Marshal(child)
@@ -581,6 +613,7 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 			}
 		}
 		handle.Finish = view.Finish
+		handle.FinishLocator = view.FinishLocator
 		handle.Approvals = nil
 		state.Handle, _ = json.Marshal(handle)
 		state.TerminalResult = view.Finish.Result.Summary
@@ -590,6 +623,9 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 		return finishStatus(handle), err
 	}
 	started := llm.ActivityRecord{Kind: "child_start", ID: string(j.operation.ID), StartedAt: time.Now().UTC(), Template: p.Template, Layer: RoleGroup(p.Template)}
+	if child.Layer != "" {
+		started.Layer = child.Layer
+	}
 	if selection := sessionstore.SelectionFromConfiguration(child.Runtime); selection != nil {
 		started.Provider, started.Model, started.Effort = selection.Provider, selection.Model, string(selection.Effort)
 	}
@@ -666,6 +702,9 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 			}
 		case <-channel.done:
 			if canceled {
+				// A Finish can commit while the cancellation is in flight.
+				// The cancel outcome and the report are independent facts.
+				_, _ = collect(false)
 				return operation.StatusCanceled, nil
 			}
 			if done, err := collect(false); done || err != nil {

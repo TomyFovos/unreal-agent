@@ -40,10 +40,14 @@ const defaultWait = 9 * time.Minute
 
 const subagentUsage = `usage: unreal-agent subagent COMMAND
   model show [--role lead|worker|collector|all]  show saved subagent settings
-  model set --role ROLE --provider ID --model ID [--effort LEVEL]
+  model set --role ROLE --provider ID --model ID [--effort LEVEL] [--fast on|off]
+  model set --role ROLE --fast on|off           change Fast for a saved model
                                          save settings for the next child start
   start [--template lead] [--model ID] [--effort LEVEL] [--task TEXT]
-                                         start a child; the task is read from stdin without --task
+        [--title TEXT] [--purpose TEXT] [--inputs TEXT] [--outputs TEXT]
+        [--verification TEXT] [--acceptance-criteria TEXT]
+                                         start a child and display its brief
+                                         optional task instructions can come from stdin
   wait [HANDLE ...] [--timeout 9m]        wait until a child finishes or asks for approval
   approve HANDLE REQUEST allow|deny       answer a child's approval request
   review HANDLE accept|reject [--reason TEXT]
@@ -78,7 +82,14 @@ func runSubagentCLI(ctx context.Context, args []string, stdin io.Reader, out io.
 		return c.model(ctx, args[1:])
 	case "start":
 		template := flags.String("template", "lead", "child template")
-		task := flags.String("task", "", "task text; read from stdin when empty")
+		task := flags.String("task", "", "task text, read from stdin when empty")
+		var brief subagent.BriefFields
+		flags.StringVar(&brief.Title, "title", "", "short task title")
+		flags.StringVar(&brief.Purpose, "purpose", "", "what the work will help decide")
+		flags.StringVar(&brief.Inputs, "inputs", "", "paths and references to read")
+		flags.StringVar(&brief.Outputs, "outputs", "", "artifacts and destinations")
+		flags.StringVar(&brief.Verification, "verification", "", "checks and expected results")
+		flags.StringVar(&brief.AcceptanceCriteria, "acceptance-criteria", "", "what to check before accepting")
 		model := flags.String("model", "", "override the template's model ID")
 		effort := flags.String("effort", "", "override reasoning effort: low, medium, high, xhigh, max")
 		if rest, err := parseAll(flags, args[1:]); err != nil || len(rest) != 0 {
@@ -91,11 +102,14 @@ func runSubagentCLI(ctx context.Context, args []string, stdin io.Reader, out io.
 				return fmt.Errorf("invalid effort %q; use low, medium, high, xhigh or max", *effort)
 			}
 		}
-		text, err := textArgument(*task, stdin)
-		if err != nil {
-			return err
+		if *task == "" && stdin != nil {
+			data, err := io.ReadAll(stdin)
+			if err != nil {
+				return err
+			}
+			*task = string(data)
 		}
-		return c.start(ctx, *template, text, runtime)
+		return c.start(ctx, *template, strings.TrimSpace(*task), brief, runtime)
 	case "wait":
 		timeout := flags.Duration("timeout", defaultWait, "longest wait")
 		handles, err := parseAll(flags, args[1:])
@@ -216,6 +230,7 @@ func (c subagentCLI) model(ctx context.Context, args []string) error {
 	flags.SetOutput(c.out)
 	role := flags.String("role", "all", "role: lead, worker, collector or all")
 	var selection sessionstore.RuntimeSelection
+	var fastSet bool
 	if args[0] == "set" {
 		flags.StringVar(&selection.Provider, "provider", "", "registered provider ID")
 		flags.StringVar(&selection.Model, "model", "", "model ID in the provider's catalog")
@@ -226,6 +241,16 @@ func (c subagentCLI) model(ctx context.Context, args []string) error {
 			}
 			return nil
 		})
+		flags.Func("fast", "Fast mode on or off (supported ChatGPT subscription models)", func(value string) error {
+			switch value {
+			case "on", "off":
+				selection.Fast = value == "on"
+				fastSet = true
+				return nil
+			default:
+				return fmt.Errorf("invalid fast mode %q; use on or off", value)
+			}
+		})
 	}
 	rest, err := parseAll(flags, args[1:])
 	if err != nil {
@@ -234,7 +259,8 @@ func (c subagentCLI) model(ctx context.Context, args []string) error {
 	if len(rest) != 0 || !slices.Contains(append([]string{"all"}, subagentRoleGroups...), *role) {
 		return errors.New(subagentUsage)
 	}
-	if args[0] == "set" && (selection.Provider == "" || selection.Model == "") {
+	fastOnly := fastSet && selection.Provider == "" && selection.Model == "" && selection.Effort == ""
+	if args[0] == "set" && !fastOnly && (selection.Provider == "" || selection.Model == "") {
 		return errors.New("subagent model set requires --provider and --model; " + subagentUsage)
 	}
 	view, err := c.client.Inspect(ctx, c.parent, 0, 1)
@@ -245,7 +271,7 @@ func (c subagentCLI) model(ctx context.Context, args []string) error {
 	if args[0] == "set" {
 		action = "subagent.select"
 	}
-	reply, err := modelExchange(ctx, c.client.Extension, modelRequest{Action: action, ID: c.parent, Generation: view.Generation, Role: *role, Selection: selection})
+	reply, err := modelExchange(ctx, c.client.Extension, modelRequest{Action: action, ID: c.parent, Generation: view.Generation, Role: *role, Selection: selection, FastOnly: fastOnly})
 	if err != nil {
 		return err
 	}
@@ -261,7 +287,11 @@ func (c subagentCLI) model(ctx context.Context, args []string) error {
 		if effort == "" {
 			effort = "template default"
 		}
-		fmt.Fprintf(c.out, "%s: provider=%s model=%s effort=%s\n", group, choice.Provider, model, effort)
+		fast := "off"
+		if choice.Fast {
+			fast = "on"
+		}
+		fmt.Fprintf(c.out, "%s: provider=%s model=%s effort=%s fast=%s\n", group, choice.Provider, model, effort, fast)
 	}
 	if args[0] == "set" {
 		if reply.Pending {
@@ -279,6 +309,7 @@ type childState struct {
 	child     session.ID
 	template  string
 	task      string
+	brief     *subagent.DelegationBrief
 	status    operation.Status
 	runtime   *sessionstore.RuntimeSelection
 	finish    *sessionstore.FinishRecord
@@ -307,6 +338,7 @@ func (c subagentCLI) children(ctx context.Context) ([]childState, host.View, err
 		}
 		if handle, err := subagent.DecodeHandle(op); err == nil {
 			state.finish, state.approvals = handle.Finish, handle.Approvals
+			state.brief = handle.Brief
 		}
 		if remote, err := operation.DecodeRemoteJobState(op); err == nil {
 			state.message = remote.TerminalError
@@ -335,20 +367,21 @@ func (c subagentCLI) child(ctx context.Context, handle string) (childState, host
 	return childState{}, view, fmt.Errorf("this Session has no child %q; see %s subagent list --all", handle, c.name)
 }
 
-func (c subagentCLI) start(ctx context.Context, template, task string, runtime *subagent.RuntimeRequest) error {
+func (c subagentCLI) start(ctx context.Context, template, task string, brief subagent.BriefFields, runtime *subagent.RuntimeRequest) error {
 	view, err := c.client.Inspect(ctx, c.parent, 0, 1)
 	if err != nil {
 		return fmt.Errorf("cannot reach this Session's Host: %w", err)
 	}
 	input := inbox.ID("cli-start-" + uuid.New().String())
-	if _, err = modelExchange(ctx, c.client.Extension, modelRequest{Action: "child.start", ID: c.parent, Generation: view.Generation, InputID: input, Template: template, Task: task, ChildRuntime: runtime}); err != nil {
+	if _, err = modelExchange(ctx, c.client.Extension, modelRequest{Action: "child.start", ID: c.parent, Generation: view.Generation, InputID: input, Template: template, Task: task, Brief: brief, ChildRuntime: runtime}); err != nil {
 		return fmt.Errorf("could not start %q: %w", template, err)
 	}
 	handle := subagent.StartOperationID(c.parent, input)
 	// The Session dispatches the start after accepting it; return once the
-	// child exists, so a wait right after this sees it.
+	// launch checkpoint provides the same brief the child will receive.
+	var child childState
 	for deadline := time.Now().Add(15 * time.Second); ; {
-		if _, _, err = c.child(ctx, string(handle)); err == nil {
+		if child, _, err = c.child(ctx, string(handle)); err == nil && (child.brief != nil || !child.running()) {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -360,7 +393,10 @@ func (c subagentCLI) start(ctx context.Context, template, task string, runtime *
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	fmt.Fprintf(c.out, "Started %s as %s.\nEnd your turn; completion will be sent as a message. Report: %s subagent show %s\n", template, handle, c.name, handle)
+	fmt.Fprintf(c.out, "Started %s as %s.\nEnd your turn to receive the completion report.\n", template, handle)
+	if child.brief != nil {
+		fmt.Fprintln(c.out, child.brief.Render(child.task))
+	}
 	return nil
 }
 
@@ -506,7 +542,11 @@ func (s childState) summary(out io.Writer) {
 func (s childState) report(out io.Writer, name string, includeTask bool) {
 	fmt.Fprintf(out, "== %s  %s  %s\n", s.handle, s.label(), s.status)
 	if includeTask {
-		fmt.Fprintf(out, "task: %s\n", s.task)
+		if s.brief != nil {
+			fmt.Fprintln(out, s.brief.Render(s.task))
+		} else {
+			fmt.Fprintf(out, "task: %s\n", s.task)
+		}
 	}
 	for _, a := range s.approvals {
 		fmt.Fprintf(out, "approval needed: request %s: %s %s\n  answer: %s subagent approve %s %s allow|deny\n", a.ID, a.Tool, a.Scope, name, s.handle, a.ID)
@@ -562,7 +602,7 @@ func claudeSubagents(templates map[string]subagent.Template, socket, modelFile s
 		return claudeagent.SubagentCLI{}, err
 	}
 	names := slices.Sorted(maps.Keys(templates))
-	cli := claudeagent.SubagentCLI{Socket: socket, Templates: names}
+	cli := claudeagent.SubagentCLI{Socket: socket, Templates: names, ContextCommand: binary}
 	if len(templates) > 0 {
 		cli.Binary = binary
 	}

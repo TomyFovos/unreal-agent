@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -74,8 +75,8 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 			if len(nested.Workers) != 0 {
 				return c, nil, fmt.Errorf("subagent template %q: workers cannot start children", name)
 			}
-			// A worker runs in its lead's process, which has no runtime
-			// choice: its template is fixed.
+			// Nested templates retain their recorded shape. Built-in workers
+			// resolve saved role choices separately at each new start.
 			nested.Pinned = false
 			converted, err := childTemplateFor(c, worker, nested, parentPolicy)
 			if err != nil {
@@ -110,6 +111,29 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 	arguments := []string{"child", "--stdio"}
 	if c.BuiltinSubagents {
 		arguments = append(arguments, "--builtin-subagents")
+		if subagentModelFile != "" {
+			modelFile, err := filepath.Abs(subagentModelFile)
+			if err != nil {
+				return c, nil, err
+			}
+			// Registrations are nonsecret connection references. A running lead
+			// needs the same routes to bind a later saved worker selection.
+			backends := maps.Clone(c.Backends)
+			if backends == nil {
+				backends = map[string]agentrunner.ProviderRuntime{}
+			}
+			backends[c.Identity.Provider.Provider] = agentrunner.ProviderRuntime{Provider: c.Identity.Provider, ReasoningEffort: c.Identity.ReasoningEffort, Claude: c.Identity.Claude}
+			for _, id := range c.Discovered.IDs() {
+				if b, ok := c.Discovered.Lookup(id); ok {
+					backends[id] = b.Runtime
+				}
+			}
+			raw, err := json.Marshal(backends)
+			if err != nil {
+				return c, nil, err
+			}
+			arguments = append(arguments, "--subagent-model-file", modelFile, "--subagent-backends", string(raw))
+		}
 	}
 	arguments = append(arguments, apiKeyArguments(c.CredentialSources)...)
 	if credentialDirectory != "" {
@@ -130,7 +154,7 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 	}
 	// An explicit nonempty, nonsecret environment prevents os/exec's nil-env
 	// inheritance, including provider tokens, .env overlays and proxy credentials.
-	execution := subagent.Config{Directory: directory, Binary: binary, Arguments: arguments, Environment: childEnvironment(c), Templates: templates, ResolveRuntime: childRuntimeResolver(c, subagentModelFile), ValidateTemplate: childTemplateValidator(c)}
+	execution := subagent.Config{Directory: directory, Binary: binary, Arguments: arguments, Environment: childEnvironment(c), Templates: templates, ResolveRuntime: childRuntimeResolverForLayer(c, subagentModelFile, "main", templates["lead"].Default), ValidateTemplate: childTemplateValidator(c)}
 	if len(c.Backends) == 0 && c.Discovered == nil {
 		execution.ResolveRuntime = nil
 		execution.ValidateTemplate = nil
@@ -234,6 +258,8 @@ func runChild(ctx context.Context, args []string, diagnostics io.Writer) error {
 	flags.SetOutput(diagnostics)
 	stdio := flags.Bool("stdio", false, "serve one parent-bound child protocol connection")
 	builtin := flags.Bool("builtin-subagents", false, "validate role selections of built-in worker templates (internal)")
+	modelFile := flags.String("subagent-model-file", "", "saved role selections read at each worker start (internal)")
+	backendsJSON := flags.String("subagent-backends", "", "nonsecret registered connections for worker starts (internal)")
 	directory := flags.String("credential-directory", "", "explicit managed credential store, never credential material")
 	defaultDirectory := flags.String("default-credential-directory", "", "the launcher's store OpenCode Go's key is read from, when it exists; never created")
 	codexFile := flags.String("codex-auth-file", "", "explicit existing private Codex auth file path, never credential material")
@@ -253,7 +279,13 @@ func runChild(ctx context.Context, args []string, diagnostics io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return subagent.Serve(ctx, os.Stdin, os.Stdout, childFactory(credential.WithSources(resolver, sources, os.Getenv), *codexFile, *builtin))
+	var backends map[string]agentrunner.ProviderRuntime
+	if *backendsJSON != "" {
+		if err := json.Unmarshal([]byte(*backendsJSON), &backends, json.RejectUnknownMembers(true)); err != nil {
+			return err
+		}
+	}
+	return subagent.Serve(ctx, os.Stdin, os.Stdout, childFactory(credential.WithSources(resolver, sources, os.Getenv), *codexFile, *builtin, *modelFile, backends, sources))
 }
 
 // childCredentials resolves a child's keys from the sources its Host passed.
@@ -286,23 +318,36 @@ func childCredentials(directory, defaultDirectory, codexFile string) (credential
 // (U17); a parent that stops ends it instead.
 const childApprovalTimeout = agentrunner.ChildApprovalTimeout
 
-func childFactory(resolver credential.Resolver, codexFile string, builtin ...bool) subagent.ChildFactory {
+func childFactory(resolver credential.Resolver, codexFile string, builtin bool, modelFile string, backends map[string]agentrunner.ProviderRuntime, sources map[string]credential.Source) subagent.ChildFactory {
 	base := agentrunner.RuntimeConfig{Credentials: resolver}
-	if len(builtin) > 0 && builtin[0] {
+	if builtin {
 		base.ResolveChildRuntime = boundWorkerRuntime
 	}
 	return agentrunner.NewChildFactory(base, func(c subagent.ChildConfig, runtime *agentrunner.RuntimeConfig) error {
+		if builtin && modelFile != "" {
+			runtime.BuiltinSubagents = true
+			runtime.Backends = maps.Clone(backends)
+			delete(runtime.Backends, runtime.Identity.Provider.Provider)
+			var err error
+			runtime.Providers, err = registeredProviders(runtime.Identity, runtime.Backends)
+			if err != nil {
+				return err
+			}
+		}
+		runtime.Catalogs = map[string]func(context.Context) (modelcatalog.Catalog, error){}
 		if codexFile != "" {
-			read := codexCatalogReader(codexFile, isDockerSandboxCodex(runtime.Identity.Provider.Auth), os.Getenv)
-			runtime.Catalogs = map[string]func(context.Context) (modelcatalog.Catalog, error){"openai-codex": func(ctx context.Context) (modelcatalog.Catalog, error) { return read(ctx, false) }}
+			read := codexCatalogReader(codexFile, isDockerSandboxCodex(runtime.Identity.Provider.Auth) || isDockerSandboxCodex(runtime.Backends["openai-codex"].Provider.Auth), os.Getenv)
+			runtime.Catalogs["openai-codex"] = func(ctx context.Context) (modelcatalog.Catalog, error) { return read(ctx, false) }
+		}
+		if builtin && modelFile != "" {
+			configureWorkerModels(runtime, modelFile, sources, c)
 		}
 		return nil
 	})
 }
 
-// A lead's worker selections were recorded at its start. In particular, a
-// role assigned to Claude Code's Agent cannot become an Unreal child just
-// because it is invoked by a non-Claude lead.
+// Legacy/operator children without a shared role-model file keep their bound
+// templates. A Claude Agent role still cannot become an Unreal child.
 func boundWorkerRuntime(_ context.Context, _ *host.Session, _ string, template subagent.Template, requested *subagent.RuntimeRequest) (subagent.Template, error) {
 	if requested != nil {
 		return template, &subagent.RuntimeError{Code: "selection_unsupported"}

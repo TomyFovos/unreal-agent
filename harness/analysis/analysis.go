@@ -68,6 +68,7 @@ type Errors struct {
 }
 type Report struct {
 	Tree                *TreeReport              `json:",omitzero"`
+	Routing             []RoutingCount           `json:",omitzero"`
 	Activities          []llm.ActivityRecord     `json:",omitzero"`
 	Redactions          []RedactionTotals        `json:",omitzero"`
 	Compactions         []llm.ConversationRecord `json:",omitzero"`
@@ -143,6 +144,8 @@ type Accumulator struct {
 	toolBridgeMode      string
 	calls               map[string]*call
 	operations          map[operation.ID]operation.Operation
+	routingInputs       routingCounts
+	deliveredReports    map[operation.ID]bool
 	events, errors      []Event
 	providerErrors      int
 	crashes             int
@@ -150,7 +153,11 @@ type Accumulator struct {
 }
 
 func New(id session.ID) *Accumulator {
-	return &Accumulator{metrics: newSessionMetrics(id), id: id, turnIndex: map[session.TurnID]int{}, calls: map[string]*call{}, operations: map[operation.ID]operation.Operation{}}
+	return &Accumulator{
+		metrics: newSessionMetrics(id), id: id, turnIndex: map[session.TurnID]int{},
+		calls: map[string]*call{}, operations: map[operation.ID]operation.Operation{},
+		routingInputs: routingCounts{}, deliveredReports: map[operation.ID]bool{},
+	}
 }
 func summarize(s *sessionstore.RuntimeSelection) *Selection {
 	if s == nil {
@@ -168,9 +175,13 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 			if v.Activity != nil {
 				a.activities = append(a.activities, *v.Activity)
 				e.Kind, e.Name = v.Activity.Kind, viewer.SafeText(v.Activity.ID)
-				if v.Activity.Kind == "model_retry" {
+				switch v.Activity.Kind {
+				case "model_retry":
 					a.providerErrors++
 					a.addError(Event{At: item.RecordedAt, Kind: "provider retry", Name: viewer.SafeText(v.Activity.Reason)})
+				case llm.ActivityModelFailure:
+					a.providerErrors++
+					a.addError(Event{At: item.RecordedAt, Kind: "provider", Name: viewer.SafeText(v.Activity.Reason)})
 				}
 			}
 		case sessionstore.HostContext:
@@ -240,6 +251,7 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 		a.toolBridgeMode = ""
 		e.Kind = "fork"
 	case inbox.Input:
+		a.observeRoutingInput(v)
 		if v.Kind == inbox.InputExternal {
 			e.Kind = "user input"
 		} else if v.Kind == inbox.InputPeer {
@@ -293,6 +305,11 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 			}
 		}
 	case sessionstore.ToolCallStatus:
+		for _, op := range v.Operations {
+			if op.ToolName == "SubagentStart" {
+				a.observeRoutingReport(op)
+			}
+		}
 		key := string(v.TurnID) + "\x00" + v.CallID
 		if c := a.calls[key]; c != nil {
 			copy := v
@@ -410,6 +427,7 @@ func (a *Accumulator) Snapshot(now time.Time, _ bool, resync bool, rows []viewer
 	for _, op := range ops {
 		a.operations[op.ID] = op
 	}
+	r.Routing = a.routing().sorted()
 	byTool := map[string]*Tool{}
 	nativeTimes := map[string]viewer.Duration{}
 	for _, activity := range a.activities {

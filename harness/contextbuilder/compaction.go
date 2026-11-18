@@ -58,7 +58,7 @@ func EnableCompaction(b Builder, config contextengine.Config, constraints contex
 	concrete.callGroups = map[string]string{}
 	concrete.continuations = map[string]*continuationGroup{}
 	concrete.turnBounds = map[session.TurnID]string{}
-	concrete.turnEstimates = map[session.TurnID]int64{}
+	concrete.turnEstimates = map[session.TurnID]requestEstimate{}
 	concrete.pruned = map[string]bool{}
 	concrete.receiptInfo = map[string]receiptInfo{}
 	concrete.callInfo = map[string]receiptInfo{}
@@ -66,6 +66,9 @@ func EnableCompaction(b Builder, config contextengine.Config, constraints contex
 }
 
 func (b *builder) SetContextRuntime(s sessionstore.RuntimeSelection, tools bool) {
+	if b.contextRuntime.Revision != s.Revision {
+		b.estimate.prefixValid = false
+	}
 	b.contextRuntime = contextengine.Runtime{Provider: s.Provider, Model: s.Model, Effort: string(s.Effort), Revision: s.Revision, ContextWindow: s.ContextWindow, Tools: tools}
 	if b.engine != nil {
 		b.engine.Configure(b.contextRuntime, b.constraints, b.instructions != "")
@@ -172,19 +175,35 @@ func (b *builder) contextResponse(response llm.Response) {
 	if b.engine == nil {
 		return
 	}
-	b.acknowledgeContinuation(response)
+	limited := response.Stop == llm.StopMaxOutputTokens
 	b.responseSerial++
-	b.lastInput = 0
-	if reported := llm.ReportedTokens(response.Usage); reported.InputKnown {
-		b.lastInput = reported.Input
-		if source, ok := b.source.Data.(sessionstore.ModelResponse); ok {
-			if estimate := b.turnEstimates[source.TurnID]; estimate > 0 && reported.Input > 0 {
-				b.pruneInput, b.pruneEstimate = reported.Input, estimate
+	if !limited && response.Failure == nil {
+		b.acknowledgeContinuation(response)
+		b.lastInput, b.lastInputKnown = 0, false
+		b.lastEstimate = requestEstimate{}
+		input, known := int64(0), false
+		if response.Generation != nil {
+			input, known = response.Generation.ContextInput()
+		}
+		if !known {
+			reported := llm.ReportedTokens(response.Usage)
+			input, known = reported.Input, reported.InputKnown
+		}
+		if known && b.historyProvider == b.provider && (b.historyModel == "" || b.historyModel == b.request.Model.ID) {
+			b.lastInput, b.lastInputKnown = input, true
+			if source, ok := b.source.Data.(sessionstore.ModelResponse); ok {
+				if estimate, found := b.turnEstimates[source.TurnID]; found {
+					b.lastEstimate = estimate
+					if estimate.epoch != nil && estimate.tokens > 0 && input > 0 {
+						b.pruneInput, b.pruneEstimate = input, estimate.tokens
+					}
+				}
 			}
 		}
 	}
 	if source, ok := b.source.Data.(sessionstore.ModelResponse); ok {
 		delete(b.turnEstimates, source.TurnID)
+		delete(b.turnBounds, source.TurnID)
 	}
 	groupID := fmt.Sprintf("response:%s:%d", b.historyProvider, b.responseSerial)
 	group := &continuationGroup{calls: map[string]*continuationCall{}}
@@ -194,6 +213,9 @@ func (b *builder) contextResponse(response llm.Response) {
 	for index, item := range response.Output {
 		b.sourceOutputIndex = index
 		if call, ok := item.Data.(llm.ToolCall); ok {
+			if call.Incomplete {
+				continue
+			}
 			var args struct {
 				MaxOutputLength int `json:"max_output_length"`
 			}
@@ -201,9 +223,12 @@ func (b *builder) contextResponse(response llm.Response) {
 			b.outputLimits[call.CallID] = args.MaxOutputLength
 		}
 		if item.Type == llm.ItemReasoning {
-			private = append(private, item)
+			if !item.OutputLimit {
+				private = append(private, item)
+			}
 			continue
 		}
+		omit := limited || item.OutputLimit
 		kind := contextengine.ModelMessage
 		switch v := item.Data.(type) {
 		case llm.Message:
@@ -212,6 +237,9 @@ func (b *builder) contextResponse(response llm.Response) {
 			b.callGroups[v.CallID] = groupID
 			group.calls[v.CallID] = &continuationCall{}
 			group.chain = true
+			// A completed call can already have a durable receipt. Send it
+			// as historical data when its generating call is omitted.
+			group.portable = group.portable || omit
 		default:
 			continue
 		}
@@ -231,12 +259,18 @@ func (b *builder) contextResponse(response llm.Response) {
 			replay := b.native[id]
 			replay.extra = nil
 			b.native[id] = replay
+			if omit {
+				b.omitResponseUnit(id)
+			}
 			// Preserve eligibility accounting without retaining the original body
 			// in the public index or adding an OMIT member to a native group.
 			// Never send redacted arguments under the original native provider ID.
 			group.portable = true
 			item = llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "[Prior Unreal response content redacted; sensitive data omitted.]"}}
 			id = b.addUnit(item, kind, contextengine.Keep, false, groupID, private)
+		}
+		if omit {
+			b.omitResponseUnit(id)
 		}
 		last = id
 		private = nil
@@ -248,14 +282,23 @@ func (b *builder) contextResponse(response llm.Response) {
 			replay.only = true
 			b.native[last] = replay
 		}
-		replay := b.native[last]
-		replay.after = private
-		b.native[last] = replay
+		if limited {
+			b.omitResponseUnit(last)
+		} else if replay, ok := b.native[last]; ok {
+			replay.after = private
+			b.native[last] = replay
+		}
 	}
-	if response.Failure != nil {
+	if response.Failure != nil && !limited {
 		b.sourceOutputIndex = len(response.Output)
 		b.addUnit(llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: response.Failure.Message}}, contextengine.ErrorUnit, contextengine.Pin, false, "", nil)
 	}
+}
+
+func (b *builder) omitResponseUnit(id string) {
+	b.engine.Omit(id)
+	delete(b.native, id)
+	b.filteredOutput = true
 }
 
 func (b *builder) contextReceipt(callID string, output []llm.ToolResultOutput, running bool, state llm.ToolResultState) {
@@ -341,7 +384,11 @@ func (b *builder) deriveItems() []llm.Item {
 		if u.ID <= b.viewThrough && !b.retained[u.ID] || u.Class == contextengine.Omit {
 			continue
 		}
-		items = append(items, b.deriveUnit(u)...)
+		rendered := b.deriveUnit(u)
+		items = append(items, rendered...)
+		if u.ID == b.claudeBatchThrough && len(rendered) > 0 {
+			items[len(items)-1].ClaudeResumeBoundary = true
+		}
 	}
 	return items
 }
@@ -398,22 +445,23 @@ func (b *builder) buildDerived() (Result, error) {
 	request.Input = b.deriveItems()
 	runtime := b.contextRuntime
 	runtime.Provider, runtime.Model = b.provider, b.request.Model.ID
-	budget, err := b.contextConfig.BudgetFor(runtime, contextengine.Estimate(request.Tools))
+	budget, err := b.contextConfig.BudgetFor(runtime, 0)
 	if err != nil {
 		return Result{}, err
 	}
-	estimate := contextengine.Estimate(request)
-	// The byte estimator is deliberately conservative. Once actual input usage
-	// exists, it is the admission signal; the API overflow path covers new tails.
-	overBudget := estimate > budget.Input
-	if appendOnlyProviders[b.provider] && b.lastInput > 0 {
-		overBudget = b.lastInput > budget.Input
-	}
-	if overBudget && b.provider != "claude-code" && b.provider != "claude" {
-		return Result{}, &contextengine.Error{Code: "required_context_exceeds_budget"}
-	}
+	// Tool schemas are already included in the payload token count. Reserving
+	// them again would charge the same input twice.
+	used, estimate, delta, measurement := b.inputTokens()
+	overBudget := used > budget.Input
 	units := b.engine.Units()
-	d := contextengine.Diagnostics{Version: contextengine.Version, Provider: b.provider, Model: request.Model.ID, Effort: string(request.Model.ReasoningEffort), RuntimeRevision: runtime.Revision, ThroughSequence: b.engine.State().ThroughSequence, CanonicalUnits: len(units), Budget: budget, EstimatedInputTokens: estimate, Measurement: "estimated", Cache: "append-only"}
+	d := contextengine.Diagnostics{Version: contextengine.Version, Provider: b.provider, Model: request.Model.ID, Effort: string(request.Model.ReasoningEffort), RuntimeRevision: runtime.Revision, ThroughSequence: b.engine.State().ThroughSequence, CanonicalUnits: len(units), Budget: budget, EstimatedInputTokens: estimate, RequestBytes: contextengine.JSONBytes(request), InputTokens: used, MeasuredInputTokens: b.lastInput, EstimatedDeltaTokens: delta, Measurement: measurement, Estimator: b.tokenEstimator().Profile(), HeaderFingerprint: b.admissionFingerprint(b.estimate.header), Cache: "append-only"}
+	if measurement == "estimated" {
+		d.MeasuredInputTokens = 0
+	}
+	d.Utilization = 100 * float64(used) / float64(budget.Input)
+	if overBudget && b.provider != "claude-code" && b.provider != "claude" {
+		return Result{Report: Report{Context: &d}}, &contextengine.Error{Code: "required_context_exceeds_budget"}
+	}
 	p := contextengine.Package{Version: contextengine.Version, Runtime: runtime, Instructions: request.Input[0], Budget: budget, EstimatedTokens: estimate}
 	for _, u := range units {
 		if u.Class == contextengine.Omit {
@@ -428,7 +476,6 @@ func (b *builder) buildDerived() (Result, error) {
 		p.IncludedUnitIDs = append(p.IncludedUnitIDs, u.ID)
 		d.Recent++
 	}
-	d.Utilization = 100 * float64(estimate) / float64(budget.Input)
 	return Result{Request: request, Report: Report{Context: &d}, Package: &p}, nil
 }
 
@@ -447,7 +494,17 @@ func (b *builder) commitContext() {
 	}
 	if t, ok := b.source.Data.(session.Turn); ok {
 		b.turnBounds[t.ID] = b.lastUnit
-		b.turnEstimates[t.ID] = b.estimateRequest()
+		estimate := b.requestEstimate()
+		recorded := ""
+		if t.ContextAdmission != nil {
+			recorded = t.ContextAdmission.HeaderFingerprint
+		}
+		if (recorded != "" || b.filteredOutput) && recorded != b.admissionFingerprint(estimate.header) {
+			// Replay may use a different permission/system/schema header. Its old
+			// response input cannot measure this newly projected prefix.
+			estimate.epoch = nil
+		}
+		b.turnEstimates[t.ID] = estimate
 	}
 }
 
@@ -549,6 +606,13 @@ func (b *builder) applyToolProjection(id string, originalItems []llm.Item, prune
 	b.estimate = derivedEstimate{}
 }
 
+// SummaryModelError distinguishes a failed summary request from a failure to
+// persist a context change.
+type SummaryModelError struct{ cause error }
+
+func (e *SummaryModelError) Error() string { return e.cause.Error() }
+func (e *SummaryModelError) Unwrap() error { return e.cause }
+
 // PrepareContext runs only on the Coordinator goroutine. Each view change is
 // persisted before it is used by a model request.
 func (b *builder) PrepareContext(ctx context.Context, adapter llm.Adapter, options llm.RequestOptions, persist func(sessionstore.ContextRecord) error, force bool) error {
@@ -603,11 +667,7 @@ func (b *builder) PrepareContext(ctx context.Context, adapter llm.Adapter, optio
 		return err
 	}
 	input := b.deriveItems()
-	estimate := contextengine.Estimate(llm.Request{Model: b.request.Model, Tools: b.request.Tools, Input: input})
-	used := estimate
-	if b.lastInput > 0 {
-		used = b.lastInput
-	}
+	used, _, _, _ := b.inputTokens()
 	maximum := int64(0)
 	if b.request.Model.MaxOutputTokens != nil {
 		maximum = *b.request.Model.MaxOutputTokens
@@ -635,12 +695,12 @@ func (b *builder) PrepareContext(ctx context.Context, adapter llm.Adapter, optio
 				r = v
 			}
 		}
-		if contextengine.Estimate(r) <= b.contextConfig.LargeToolTokens {
+		if b.tokenEstimator().ToolResult(r) <= b.contextConfig.LargeToolTokens {
 			continue
 		}
-		before := contextengine.Estimate(r)
+		before := b.tokenEstimator().ToolResult(r)
 		r.Output = []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: b.omittedOutput(u, r, calls[r.CallID])}}
-		saved := before - contextengine.Estimate(r)
+		saved := before - b.tokenEstimator().ToolResult(r)
 		if saved <= 0 {
 			continue
 		}
@@ -650,8 +710,8 @@ func (b *builder) PrepareContext(ctx context.Context, adapter llm.Adapter, optio
 			return err
 		}
 		input = b.deriveItems()
-		estimate = contextengine.Estimate(llm.Request{Model: b.request.Model, Tools: b.request.Tools, Input: input})
-		if estimate <= threshold {
+		used, _, _, _ = b.inputTokens()
+		if used <= threshold {
 			b.lastInput = 0
 			return nil
 		}
@@ -668,7 +728,7 @@ func (b *builder) PrepareContext(ctx context.Context, adapter llm.Adapter, optio
 	var cost int64
 	for cut > 0 && cost < retain {
 		cut--
-		cost += contextengine.Estimate(b.derived[units[cut].ID])
+		cost += b.tokenEstimator().Items(b.derived[units[cut].ID])
 	}
 	// Keep complete native groups, including any group crossing the suffix
 	// boundary, without retaining the unrelated history between its partners.
@@ -686,10 +746,17 @@ func (b *builder) PrepareContext(ctx context.Context, adapter llm.Adapter, optio
 	request.Input = append(slices.Clone(input), llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: summaryInstruction}})
 	response, err := adapter.Respond(ctx, request, options)
 	if err != nil {
-		return err
+		return &SummaryModelError{cause: err}
 	}
 	if response.Failure != nil {
-		return fmt.Errorf("context summary: %s", response.Failure.Code)
+		return &SummaryModelError{cause: fmt.Errorf("context summary: %s", response.Failure.Code)}
+	}
+	if response.Stop == llm.StopMaxOutputTokens {
+		record := sessionstore.ContextRecord{Kind: "summary_failed", Items: response.Output, Usage: &response.Usage, Text: string(response.Stop), Provider: b.provider, Model: b.request.Model.ID}
+		if err := persist(record); err != nil {
+			return err
+		}
+		return &SummaryModelError{cause: fmt.Errorf("context summary: Incomplete response returned, reason: %s", response.Stop)}
 	}
 	var texts []string
 	for _, item := range response.Output {
@@ -764,7 +831,8 @@ func (b *builder) recordToolProjections(persist func(sessionstore.ContextRecord)
 
 // appendOnlyProviders cache the request prefix and report input usage that
 // includes cached tokens. Their requests only append to the committed context,
-// and the reported usage is the admission signal.
+// and can compact their Unreal-owned request view. Admission accounting itself
+// uses the same measured-prefix plus token-estimate policy for every provider.
 // OpenCode Go qualifies by the 2026-11-02 probe (docs/opencode-go.md).
 var appendOnlyProviders = map[string]bool{"openai-codex": true, "opencode-go": true}
 

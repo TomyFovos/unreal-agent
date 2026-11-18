@@ -2,6 +2,9 @@ package host
 
 import (
 	"encoding/json/v2"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -98,6 +101,9 @@ func (s *Session) observeDisplay(item sessionstore.Item) {
 			}
 		}
 	case sessionstore.HostRecord:
+		if d.Activity != nil && d.Activity.Kind == llm.ActivityModelFailure {
+			part("error", "", "", 0, "", "")
+		}
 		if d.Kind == sessionstore.HostContext && d.Context != nil && d.Context.Conversation != nil {
 			r := d.Context.Conversation
 			if r.Compacted || r.Interrupted || r.Error != "" {
@@ -109,7 +115,15 @@ func (s *Session) observeDisplay(item sessionstore.Item) {
 		tools := 0
 		for _, output := range d.Response.Output {
 			if message, ok := output.Data.(llm.Message); ok && output.Type == llm.ItemMessage && (message.Role == "" || message.Role == llm.RoleAssistant) && (message.Phase == "" || message.Phase == "commentary" || message.Phase == "final" || message.Phase == "final_answer") {
-				messages = append(messages, displaytext.Message(message.Text))
+				// The folded history uses only leading human-facing markers.
+				// A safe leading rune survives cleaning, so an ordinary message
+				// can be folded without sanitizing or copying its entire body.
+				first, _ := utf8.DecodeRuneInString(strings.TrimLeftFunc(message.Text, unicode.IsSpace))
+				text := ""
+				if first == '【' || displaytext.UnsafeRune(first) {
+					text = displaytext.Message(message.Text)
+				}
+				messages = append(messages, text)
 			}
 			if _, ok := output.Data.(llm.ToolCall); ok {
 				tools++

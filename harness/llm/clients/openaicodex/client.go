@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -40,12 +41,14 @@ type Config struct {
 	// RequestEffort turns a selected effort into the one sent, from the
 	// model catalog; nil sends max for ultra (see modelcatalog.RequestEffort).
 	RequestEffort func(ctx context.Context, model string, selected llm.ReasoningEffort) llm.ReasoningEffort
+	SupportsFast  func(ctx context.Context, model string) bool
 }
 
 type Client struct {
 	adapter       llm.Adapter
 	remote        *primitives.RemoteClient
 	requestEffort func(context.Context, string, llm.ReasoningEffort) llm.ReasoningEffort
+	supportsFast  func(context.Context, string) bool
 }
 
 var _ llm.Adapter = (*Client)(nil)
@@ -120,13 +123,14 @@ func NewClient(config Config) (*Client, error) {
 		CacheKeyPlacement: responsesapi.CacheKeyPlacement{UsePromptCacheKeyField: true, Header: "session-id"},
 		MaxAttempts:       attempts,
 		MaxStreamAttempts: streamAttempts,
+		AllowFast:         true,
 		Trace:             config.Trace,
 	})
 	if err != nil {
 		_ = remote.Close()
 		return nil, err
 	}
-	return &Client{adapter: adapter, remote: remote, requestEffort: config.RequestEffort}, nil
+	return &Client{adapter: adapter, remote: remote, requestEffort: config.RequestEffort, supportsFast: config.SupportsFast}, nil
 }
 
 func (client *Client) Respond(ctx context.Context, request llm.Request, options llm.RequestOptions) (llm.Response, error) {
@@ -135,6 +139,19 @@ func (client *Client) Respond(ctx context.Context, request llm.Request, options 
 	}
 	if request.Model.MaxOutputTokens != nil {
 		return llm.Response{}, errors.New("codex does not support max_output_tokens")
+	}
+	if request.Model.Fast && (client.supportsFast == nil || !client.supportsFast(ctx, request.Model.ID)) {
+		if err := ctx.Err(); err != nil {
+			return llm.Response{}, err
+		}
+		request.Model.Fast = false
+		notice := llm.ActivityRecord{
+			Kind: llm.ActivityFastUnsupported, Model: request.Model.ID,
+			Reason: "fast unsupported for " + request.Model.ID,
+		}
+		if options.RecordActivity == nil || options.RecordActivity(ctx, notice) != nil {
+			slog.Warn(notice.Reason)
+		}
 	}
 	// Legacy ultra and its max alias use the highest effort this model supports.
 	if selected := request.Model.ReasoningEffort; selected.Normalize() == llm.ReasoningEffortMax {
@@ -147,6 +164,9 @@ func (client *Client) Respond(ctx context.Context, request llm.Request, options 
 	var apiErr *responsesapi.APIError
 	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
 		return llm.Response{}, fmt.Errorf("codex credentials rejected; renew them externally and recreate the client: %w", err)
+	}
+	if err == nil {
+		response.Usage.Fast = new(request.Model.Fast)
 	}
 	return response, err
 }

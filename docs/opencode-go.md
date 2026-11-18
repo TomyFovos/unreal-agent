@@ -83,9 +83,15 @@ unreal-agent subagent model show --role worker
 | `--role` | 適用するテンプレート |
 | --- | --- |
 | `lead` | issue を担当する統括の子。組み込み既定は `gpt-6.2-sol` / max |
-| `worker` | `worker-low`〜`worker-max` のすべて |
-| `collector` | 収集担当。変更しなければ `gpt-6-luna` / medium |
+| `worker` | lead 配下の `worker-low`〜`worker-max` のすべて |
+| `collector` | lead 配下の収集担当。変更しなければ `gpt-6-luna` / medium |
 | `all` | 全役割の設定を置き換える |
+
+メイン Session が `worker-*`・`collector` を直接開始した場合、起動は成功し、`lead` の provider・model・effort を使います。
+実作業は lead に委譲し、その配下の worker・collector の結果を lead がレビューしてメインへ返します。
+worker・collector の役割設定は lead 配下だけに適用され、worker を挟む深い階層でも維持します。
+解決した layer は開始記録に保存され、`/analyze` でもメイン直下を `lead` と表示します。
+明示的な `--model`・`--effort` は、解決した役割で従来の指定規則に従います。
 
 全役割を同じ設定にする場合も CLI を使います。
 
@@ -103,7 +109,8 @@ unreal-agent subagent model set --role all --provider opencode-go --model deepse
 全 Session・フォルダ・instance で共有します。
 Host 再起動後も保持します。Version 1 の旧単一設定は全役割への選択として読み込み、役割別設定は Version 2 で保存します。
 変更しない役割は以前の一括設定を引き継ぎます。設定は次の子から有効で、実行中の子は記録済みの選択を維持します。
-lead 配下の worker・collector も lead 開始時に選択を記録します。
+実行中の lead 配下でも、新しく開始する worker・collector はその開始時点の保存済み設定を使います。
+lead 自身と開始済みの worker・collector は、Host 再起動後もそれぞれの記録済み選択を維持します。
 明示的な `Subagents`・`SubagentDefaults` と、runtime を明示した `/children start` は共有設定の対象外です。
 
 旧共通キットでリポジトリ別の State に保存した `subagent-model.json` は、共有ファイルがないときに
@@ -117,7 +124,7 @@ Codex を明示した役割は、API の親からでもサブスク接続を使�
 `override_unavailable` を返します。変更には `subagent model set` を使います。
 Claude の委譲案内と可用性確認も役割ごとの選択を使い、使えない役割を別接続へ回しません。
 
-Go で effort を省略した場合、従来どおり lead / worker-max は最高、worker-low / collector は最低、
+Go で effort を省略した場合、lead とメイン直下の子は最高を使います。lead 配下では worker-max は最高、worker-low / collector は最低、
 他の worker は自分の effort（なければ既定。既定が自分より低ければ、自分より低い中で最高）を使います。
 effort がないモデルには指定を送りません。Flash では次のようになります。
 

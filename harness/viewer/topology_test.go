@@ -161,3 +161,43 @@ func TestEndedTopologyUsesParentMetadataAndAnalysisReadsHistoryOnDemand(t *testi
 		t.Fatal("explicit analysis omitted archived child", r.inspected)
 	}
 }
+
+func TestPanelWorkerChangesNotifyWithoutNewLeadActivity(t *testing.T) {
+	m := New(Options{DecodeChild: childDecoder})
+	must(t, m.Replace("parent", parentView(operation.StatusAwaiting)))
+	lead := view("child", "", 0, input(1, "lead between turns"))
+	r := &topologyReader{views: map[session.ID]host.View{"child": lead}}
+	controls := &fakeControls{}
+	p := &Panel{client: NewClient(r, m, controls), parent: "parent", ctx: t.Context(), updates: make(chan struct{}, 1)}
+	p.SetTopologyVisible(true)
+	p.refreshChildren()
+	select {
+	case <-p.Updates():
+	default:
+		t.Fatal("initial lead observation did not request a panel redraw")
+	}
+	before := p.Snapshot(epoch)
+	leadBefore := row(t, m, "child")
+	for _, status := range []operation.Status{operation.StatusAwaiting, operation.StatusCompleted} {
+		lead.Operations = []operation.Operation{{ID: "spawn-worker", Type: "child", ToolName: "worker", Status: status}}
+		r.views["child"] = lead
+		p.refreshChildren()
+		select {
+		case <-p.Updates():
+		default:
+			t.Fatalf("worker %s did not request a panel redraw", status)
+		}
+		after := p.Snapshot(epoch)
+		leadAfter, worker := row(t, m, "child"), row(t, m, "worker")
+		if after.Version <= before.Version || leadAfter.Cursor != leadBefore.Cursor || leadAfter.Activity != leadBefore.Activity || !leadAfter.LastActivityAt.Equal(leadBefore.LastActivityAt) || leadAfter.Runtime != RuntimeUnknown {
+			t.Fatalf("worker %s lost the independent lead projection: before=%+v after=%+v", status, leadBefore, leadAfter)
+		}
+		if worker.ParentID != "child" || worker.Depth != 2 || worker.ParentOperationStatus != status {
+			t.Fatalf("worker %s lineage/status: %+v", status, worker)
+		}
+		before = after
+	}
+	if len(controls.calls) != 0 || row(t, m, "child").ParentOperationStatus != operation.StatusAwaiting {
+		t.Fatal("observation controlled or completed the lead")
+	}
+}

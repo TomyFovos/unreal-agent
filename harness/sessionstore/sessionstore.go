@@ -26,10 +26,10 @@ const (
 	ItemTurn           ItemKind = "turn"
 	ItemModelResponse  ItemKind = "model_response"
 	ItemToolCallStatus ItemKind = "tool_call_status"
+	ItemContextEvent   ItemKind = "context_state_event"
 )
 
-// Item Data is Fork, inbox.Input, session.Turn, ModelResponse, or
-// ToolCallStatus according to Kind.
+// Item Data is the canonical typed payload associated with Kind.
 type Item struct {
 	Sequence   Sequence
 	RecordedAt time.Time
@@ -51,6 +51,8 @@ type Fork struct {
 type ModelResponse struct {
 	TurnID   session.TurnID
 	Response llm.Response
+	// AdapterError records observed output returned alongside a terminal error.
+	AdapterError bool `json:",omitzero"`
 }
 
 // HistoricalOperation is inspection-only evidence projected from canonical

@@ -198,6 +198,23 @@ func TestRestartOrphanRecordsLastTimeAndNotifiesOnce(t *testing.T) {
 func TestRestartRetainsLiveChildThatReconnects(t *testing.T) {
 	dir := t.TempDir()
 	_, child, op := restartFixture(t, dir)
+	store, err := localfile.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	if err = store.AppendInput(ctx, "parent", inbox.Input{ID: "failed-task", Kind: inbox.InputExternal, Payload: jsontext.Value(`"already attempted"`)}); err != nil {
+		t.Fatal(err)
+	}
+	const failedTurn = "failed-turn"
+	if err = store.AppendTurn(ctx, "parent", session.Turn{ID: failedTurn, Type: session.TurnRegular}); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.AppendHostRecord(ctx, "parent", sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostActivity, Activity: &llm.ActivityRecord{
+		Kind: llm.ActivityModelFailure, ID: failedTurn, Reason: "parent model unavailable",
+	}}); err != nil {
+		t.Fatal(err)
+	}
 	h, parent, _ := boundaryParent(t, dir, host.Resume)
 	defer h.Close()
 	// The reconnect uses the new parent generation and the original child/start
@@ -230,6 +247,35 @@ func TestRestartRetainsLiveChildThatReconnects(t *testing.T) {
 	terminal := awaitChild(t, parent, true)
 	if terminal.ID != op.ID || terminal.Status != operation.StatusCompleted {
 		t.Fatal(terminal)
+	}
+	awaitBoundary(t, func() bool { return len(endedNotices(t, parent, op.ID)) > 0 })
+	stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err = parent.Stop(stopCtx, parent.Generation, inbox.StopWhenIdle, "check restored wake"); err != nil {
+		t.Fatal(err)
+	}
+	if err = parent.Wait(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+	v, err = parent.Inspect(0, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reportSequence sessionstore.Sequence
+	turns := 0
+	for _, item := range v.History.Items {
+		if in, ok := item.Data.(inbox.Input); ok && in.ID == inbox.ID("ended:"+string(op.ID)) {
+			reportSequence = item.Sequence
+		}
+		if turn, ok := item.Data.(session.Turn); ok && turn.ID != failedTurn {
+			turns++
+			if reportSequence == 0 {
+				t.Fatal("restore retried the failed turn before the child report")
+			}
+		}
+	}
+	if turns != 1 || len(endedNotices(t, parent, op.ID)) != 1 {
+		t.Fatal("child report did not wake the restored parent exactly once", turns)
 	}
 	after, err := sub.ReadChildSnapshot(t.Context(), dir, child.ID)
 	if err != nil || after.End != nil || after.Finish == nil {

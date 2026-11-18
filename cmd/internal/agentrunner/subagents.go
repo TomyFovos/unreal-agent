@@ -112,9 +112,17 @@ func NewChildFactory(base RuntimeConfig, configure func(subagent.ChildConfig, *R
 		if err != nil {
 			return nil, nil, err
 		}
+		runtime := base
+		runtime.Identity, runtime.SessionDirectory, runtime.Providers = identity, c.SessionDirectory, registry
+		runtime.ProviderProcess, runtime.TaskInput = c.ProviderProcess, c.InitialInput().ID
+		if configure != nil {
+			if err := configure(c, &runtime); err != nil {
+				return nil, nil, err
+			}
+		}
 		var tools ToolFactory
 		if !c.TextOnly {
-			execution := subagent.Config{Child: &c, SendParent: link.Send, ResolveRuntime: base.ResolveChildRuntime}
+			execution := subagent.Config{Child: &c, SendParent: link.Send, ResolveRuntime: runtime.ResolveChildRuntime, ValidateTemplate: runtime.ValidateChildTemplate}
 			if len(c.Subagents) > 0 {
 				// A lead starts its workers with this same child process command.
 				binary, err := os.Executable()
@@ -129,14 +137,7 @@ func NewChildFactory(base RuntimeConfig, configure func(subagent.ChildConfig, *R
 				return DefaultTools(ctx, tools, identity.DisallowedTools)
 			}, execution, identity.DisallowedTools)
 		}
-		runtime := base
-		runtime.Identity, runtime.SessionDirectory, runtime.Providers = identity, c.SessionDirectory, registry
-		runtime.NewTools, runtime.ProviderProcess, runtime.TaskInput = tools, c.ProviderProcess, c.InitialInput().ID
-		if configure != nil {
-			if err := configure(c, &runtime); err != nil {
-				return nil, nil, err
-			}
-		}
+		runtime.NewTools = tools
 		factory, resolved, err := NewRuntimeFactory(runtime)
 		if err != nil {
 			return nil, nil, err

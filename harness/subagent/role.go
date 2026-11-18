@@ -15,3 +15,18 @@ func RoleGroup(template string) string {
 		return "unknown"
 	}
 }
+
+// ResolveLayer keeps worker and collector selections below a lead. Those
+// layers carry that ancestry to further descendants, regardless of depth.
+func ResolveLayer(template, parentLayer string) string {
+	role := RoleGroup(template)
+	if role == "worker" || role == "collector" {
+		switch parentLayer {
+		case "lead", "worker", "collector":
+			return role
+		default:
+			return "lead"
+		}
+	}
+	return role
+}

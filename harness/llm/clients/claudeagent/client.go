@@ -61,12 +61,14 @@ type Config struct {
 // Host's own "subagent" command (U21). Zero means the Session has none.
 type SubagentCLI struct {
 	// SettingsCommand remains available when no Unreal child provider is available.
-	SettingsCommand string   `json:"-"`
-	Binary          string   // stable kit launcher, or the executable for a source build
-	Socket          string   // the Host's gateway socket
-	Templates       []string // the child templates, for the prompt
-	LeadModel       string
-	LeadEffort      string
+	SettingsCommand string `json:"-"`
+	// ContextCommand connects the main Session to its state and record CLI.
+	ContextCommand string   `json:"-"`
+	Binary         string   // stable kit launcher, or the executable for a source build
+	Socket         string   // the Host's gateway socket
+	Templates      []string // the child templates, for the prompt
+	LeadModel      string
+	LeadEffort     string
 	// Models names what the templates run now; it is read for each turn, so a
 	// model chosen with subagent model shows from the next turn. Nil is GPT.
 	Models func() SubagentModels
@@ -131,13 +133,16 @@ func NewClient(config Config) (*Client, error) {
 	if !filepath.IsAbs(config.Subagents.SettingsCommand) || !filepath.IsAbs(config.Subagents.Socket) {
 		config.Subagents.SettingsCommand = ""
 	}
+	if !filepath.IsAbs(config.Subagents.ContextCommand) || !filepath.IsAbs(config.Subagents.Socket) {
+		config.Subagents.ContextCommand = ""
+	}
 	if !filepath.IsAbs(config.Subagents.Binary) || !filepath.IsAbs(config.Subagents.Socket) {
-		config.Subagents = SubagentCLI{AgentModel: config.Subagents.AgentModel, Roles: config.Subagents.Roles, SettingsCommand: config.Subagents.SettingsCommand, Socket: config.Subagents.Socket}
+		config.Subagents = SubagentCLI{AgentModel: config.Subagents.AgentModel, Roles: config.Subagents.Roles, SettingsCommand: config.Subagents.SettingsCommand, ContextCommand: config.Subagents.ContextCommand, Socket: config.Subagents.Socket}
 	}
 	if config.CompactThresholdTokens <= 0 {
 		config.CompactThresholdTokens = DefaultCompactThresholdTokens
 	}
-	return &Client{config: config, approver: approver{cli: subagentCommandPath(config.Subagents), agentModel: config.AgentModel, agentEffort: config.AgentEffort}, contextTokens: map[string]int64{}, activityInterval: streamActivityInterval}, nil
+	return &Client{config: config, approver: approver{cli: subagentCommandPath(config.Subagents), contextCLI: config.Subagents.ContextCommand, agentModel: config.AgentModel, agentEffort: config.AgentEffort}, contextTokens: map[string]int64{}, activityInterval: streamActivityInterval}, nil
 }
 
 func (c *Client) Close() error { return nil }
@@ -245,7 +250,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 			subagents.Binary = ""
 		}
 	} else if subagents.Available != nil && !subagents.Available(ctx) {
-		subagents = SubagentCLI{AgentModel: subagents.AgentModel, SettingsCommand: subagents.SettingsCommand, Socket: subagents.Socket}
+		subagents = SubagentCLI{AgentModel: subagents.AgentModel, SettingsCommand: subagents.SettingsCommand, ContextCommand: subagents.ContextCommand, Socket: subagents.Socket}
 	}
 	if opt.Identity.SessionID == "" {
 		subagents = SubagentCLI{AgentModel: subagents.AgentModel}
@@ -279,7 +284,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	cmd := exec.CommandContext(processCtx, c.config.Binary, args...)
 	cmd.Dir = c.config.Directory
 	cmd.Env = env
-	if subagents.Binary != "" || subagents.SettingsCommand != "" {
+	if sessionCommandAvailable(subagents) {
 		cmd.Env = append(cmd.Env, SubagentSocketEnv+"="+subagents.Socket, SubagentSessionEnv+"="+opt.Identity.SessionID)
 	}
 	isolate(cmd)
@@ -425,12 +430,21 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 			c.recordConversation(ctx, opt, session, llm.ConversationRecord{Provider: ProviderID, InputTokens: *lastInput, InputKnown: true})
 		}
 	}
-	if result.IsError || result.Subtype != "success" {
+	if result.IsError || result.Subtype != "success" || llm.IsOutputLimit(result.StopReason) {
 		message := strings.TrimSpace(result.Result)
 		if len(result.Errors) > 0 {
 			message = strings.Join(result.Errors, "; ")
 		}
-		message = streams.outputLimitFailure(result, message)
+		message, limited := streams.outputLimitFailure(result, message)
+		if limited && compact == nil {
+			failure := &Error{Code: "turn_failed", Message: clip(message, 2000)}
+			// The result may repeat the CLI's error rather than model output.
+			result.Result = ""
+			response := t.finish(result)
+			response.Stop = llm.StopMaxOutputTokens
+			response.Failure = &llm.Failure{Code: failure.Code, Message: failure.Message}
+			return response, failure
+		}
 		if strings.Contains(message, "No conversation found") {
 			return llm.Response{}, &startError{kind: "missing", message: message}
 		}

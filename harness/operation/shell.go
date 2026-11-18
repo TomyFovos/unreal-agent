@@ -63,6 +63,7 @@ type ShellState struct {
 	Result          *ShellResult
 	TerminalError   string
 	ErrorTruncated  bool
+	OriginalError   []byte `json:",omitzero"`
 	OutTruncated    bool
 	ErrTruncated    bool
 	OutPath         string
@@ -585,7 +586,11 @@ func (shell *Shell) checkpoint() (Step, error) {
 	current, state := &shell.current, &shell.state
 
 	if !state.ErrorTruncated {
+		original := state.TerminalError
 		state.TerminalError, state.ErrorTruncated = BoundOutput(state.TerminalError, current.MaxOutputLength)
+		if state.OriginalError == nil {
+			state.OriginalError = originalBytes(original, state.TerminalError)
+		}
 	}
 	encoded, err := json.Marshal(state)
 	if err != nil {

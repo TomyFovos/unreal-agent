@@ -56,18 +56,26 @@ func Extensions(owner session.ID, templates map[string]runtime.Template, child b
 	if err = json.Unmarshal(data, &copied); err != nil {
 		return nil, err
 	}
+	brief := map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
+		"title":               map[string]any{"type": "string", "description": "One-line task title"},
+		"purpose":             map[string]any{"type": "string", "description": "What the work will help decide"},
+		"inputs":              map[string]any{"type": "string", "description": "Paths, references and sections to read"},
+		"outputs":             map[string]any{"type": "string", "description": "Artifacts, formats and destinations"},
+		"verification":        map[string]any{"type": "string", "description": "Checks to run and expected results"},
+		"acceptance_criteria": map[string]any{"type": "string", "description": "What the parent will check before accepting, including evidence, completeness, verification, format and scope as applicable"},
+	}}
 	definitions := []struct {
 		name, action, description string
 		properties                map[string]any
 		required                  []string
 		isChild                   bool
 	}{
-		{"SubagentStart", "start", "Start a child; ready messages provide its operation handle. End the turn to wait.", map[string]any{"template": map[string]any{"type": "string"}, "task": map[string]any{"type": "string"}}, []string{"template", "task"}, false},
+		{"SubagentStart", "start", "Start a child. Supply optional brief fields and/or task instructions. The harness adds launch conditions and report guidance. End the turn to wait.", map[string]any{"template": map[string]any{"type": "string"}, "task": map[string]any{"type": "string"}, "brief": brief}, []string{"template"}, false},
 		{"SubagentSend", "send", "Message an owned child by operation handle; acknowledgement confirms receipt only.", map[string]any{"handle": map[string]any{"type": "string"}, "text": map[string]any{"type": "string"}}, []string{"handle", "text"}, false},
 		{"SubagentCancel", "cancel", "Cancel an owned child by operation handle.", map[string]any{"handle": map[string]any{"type": "string"}}, []string{"handle"}, false},
 		{"SubagentApprove", "approve", "Allow or deny an owned child request; escalate to your parent/user if unsure.", map[string]any{"handle": map[string]any{"type": "string"}, "request": map[string]any{"type": "string"}, "allow": map[string]any{"type": "boolean"}}, []string{"handle", "request", "allow"}, false},
 		{"SubagentReview", "review", "Optionally record your accept/reject assessment of an owned child for /analyze. Reason is optional; this does not change the child's finish.", map[string]any{"handle": map[string]any{"type": "string"}, "decision": map[string]any{"type": "string", "enum": []string{"accept", "reject"}}, "reason": map[string]any{"type": "string"}}, []string{"handle", "decision"}, false},
-		{"SendParent", "parent", "Message the parent; end the turn when awaiting a reply.", map[string]any{"text": map[string]any{"type": "string"}, "progress": map[string]any{"type": "boolean", "description": "True: progress does not wake the parent; delivered next turn. False (default): wakes it for a question or decision."}}, []string{"text"}, true},
+		{"SendParent", "parent", "Message the parent. For one stored delegation brief field, send exactly 'brief <field>' to get its value in the tool result. End the turn when awaiting a parent reply.", map[string]any{"text": map[string]any{"type": "string"}, "progress": map[string]any{"type": "boolean", "description": "True: progress does not wake the parent. False (default): a brief lookup returns locally and other questions wake the parent."}}, []string{"text"}, true},
 		{"Finish", "finish", "Record the final report and stop this child. Call alone after all other calls/operations finish.", map[string]any{"status": map[string]any{"type": "string", "enum": []string{"completed", "failed"}}, "summary": map[string]any{"type": "string"}, "changedFiles": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "tests": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "blockers": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, []string{"status", "summary", "changedFiles", "tests", "blockers"}, true},
 	}
 	var result []tool.Extension
@@ -81,6 +89,7 @@ func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallSta
 	var args struct {
 		Template     string                  `json:"template"`
 		Task         string                  `json:"task"`
+		Brief        runtime.BriefFields     `json:"brief"`
 		Handle       operation.ID            `json:"handle"`
 		Text         string                  `json:"text"`
 		Progress     bool                    `json:"progress"`
@@ -141,6 +150,7 @@ func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallSta
 		}
 		p.Configuration = &config
 		p.Text = args.Task
+		p.Brief = args.Brief
 	}
 	if t.action == "finish" {
 		eligibility, ok := ctx.(interface{ CanFinish() bool })
@@ -176,11 +186,18 @@ func (t *translator) TranslateResult(id string, status tool.CallStatus, ops []op
 		if op.Denial != nil {
 			text = op.Denial.Error()
 		} else {
+			if t.action == "parent" && op.Status == operation.StatusCompleted && len(s.Handle) > 0 {
+				var receipt runtime.ParentMessageReceipt
+				if json.Unmarshal(s.Handle, &receipt) == nil && receipt.Answer != "" {
+					return llm.ToolResult{CallID: id, Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: receipt.Answer}}}, nil
+				}
+			}
 			value := struct {
 				Handle  operation.ID
 				Status  operation.Status
 				Message string
 				Result  *runtime.Handle
+				Preview string `json:",omitzero"`
 			}{Handle: op.ID, Status: op.Status, Message: s.TerminalResult}
 			if s.TerminalError != "" {
 				value.Message = s.TerminalError
@@ -189,6 +206,14 @@ func (t *translator) TranslateResult(id string, status tool.CallStatus, ops []op
 				handle, err := runtime.DecodeHandle(op)
 				if err != nil {
 					return llm.ToolResult{}, err
+				}
+				if handle.Brief != nil {
+					plan, err := runtime.DecodePlan(op)
+					if err != nil {
+						return llm.ToolResult{}, err
+					}
+					value.Preview = handle.Brief.Render(plan.Text)
+					handle.Brief = nil // the preview carries the same facts
 				}
 				value.Result = &handle
 			}

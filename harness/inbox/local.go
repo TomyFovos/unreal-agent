@@ -9,6 +9,7 @@ type Inbox struct {
 	ctx         context.Context
 	submissions chan Input
 	output      chan Input
+	drains      chan chan []Input
 }
 
 var _ Writer = (*Inbox)(nil)
@@ -25,6 +26,7 @@ func New(ctx context.Context, seenIDs []ID) (*Inbox, error) {
 		ctx:         ctx,
 		submissions: make(chan Input),
 		output:      make(chan Input),
+		drains:      make(chan chan []Input),
 	}
 	go inputs.run(seen, inputs.submissions)
 	return inputs, nil
@@ -56,6 +58,21 @@ func (inputs *Inbox) Output() <-chan Input {
 	return inputs.output
 }
 
+// Drain gives the sole consumer a FIFO snapshot before a model request. It
+// includes submissions already accepted by the Inbox, even if Output had not
+// yet been read. Output also tells the consumer when the Inbox closes.
+func (inputs *Inbox) Drain(ctx context.Context) ([]Input, error) {
+	reply := make(chan []Input, 1)
+	select {
+	case inputs.drains <- reply:
+		return <-reply, nil
+	case <-ctx.Done():
+		return nil, context.Cause(ctx)
+	case <-inputs.ctx.Done():
+		return nil, context.Cause(ctx)
+	}
+}
+
 func (inputs *Inbox) run(seen map[ID]struct{}, submissions <-chan Input) {
 	defer close(inputs.output)
 
@@ -79,6 +96,10 @@ func (inputs *Inbox) run(seen map[ID]struct{}, submissions <-chan Input) {
 		case output <- next:
 			queued[0] = Input{}
 			queued = queued[1:]
+
+		case reply := <-inputs.drains:
+			reply <- queued
+			queued = nil
 
 		case <-inputs.ctx.Done():
 			return

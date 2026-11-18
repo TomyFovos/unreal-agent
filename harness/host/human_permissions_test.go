@@ -1,9 +1,11 @@
 package host
 
 import (
+	"bytes"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"os"
@@ -11,6 +13,46 @@ import (
 	"testing"
 	"time"
 )
+
+func TestContextStateTracksActualPermissionApproval(t *testing.T) {
+	h := modeHost(t, t.TempDir())
+	s, err := h.Create(t.Context(), Options{ID: "approval-state", Policy: permission.Unrestricted()})
+	checkHostRestore(t, err)
+	c, err := s.PermissionControl(s.Generation)
+	checkHostRestore(t, err)
+	key, release := c.AcquireControl()
+	defer release()
+	controlMode(t, c, key, permission.Ask)
+	_, err = s.SubmitOperation(timeout(t), s.Generation, "input", "op", "Bash", humanShell(t, t.TempDir()))
+	checkHostRestore(t, err)
+	waitOperation(t, s, "op", func(o operation.Operation) bool { return o.Permission != nil && o.Permission.State == "pending" })
+	state, err := s.ContextState(t.Context())
+	checkHostRestore(t, err)
+	open := state.Approvals.Current["op"]
+	page, err := s.RecordShow(t.Context(), open.Locator, 0)
+	checkHostRestore(t, err)
+	if !bytes.Contains(page.Bytes, []byte("printf one")) || len(state.Waiting.Current["approval:op"].Sources) == 0 {
+		t.Fatal("approval wait did not preserve its canonical request")
+	}
+	checkHostRestore(t, c.Decide(key, c.Snapshot().Revision, "op", false))
+	waitOperation(t, s, "op", func(o operation.Operation) bool { return o.Status == operation.StatusFailed })
+	state, err = s.ContextState(t.Context())
+	checkHostRestore(t, err)
+	if len(state.Approvals.Current) != 0 || state.Approvals.Processed.Count != 1 || state.Waiting.Processed.Count != 1 {
+		t.Fatalf("approval not settled: %+v", state.Approvals)
+	}
+	answered := record.Locator("")
+	for loc := range state.Approvals.Processed.Sources {
+		if loc != open.Locator {
+			answered = loc
+		}
+	}
+	page, err = s.RecordShow(t.Context(), answered, 0)
+	checkHostRestore(t, err)
+	if !bytes.Contains(page.Bytes, []byte(`"Decision":"denied"`)) {
+		t.Fatalf("approval answer locator: %s", page.Bytes)
+	}
+}
 
 func modeHost(t *testing.T, directory string) *Host {
 	t.Helper()

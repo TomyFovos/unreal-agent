@@ -124,7 +124,7 @@ func TestLegacyBuilderRedactedCallDropsNativeReplayState(t *testing.T) {
 func TestSummaryRedactionRetainsUsefulTextAndReplay(t *testing.T) {
 	f := newContextFixture(t, "openai-codex", contextengine.Config{FallbackWindow: 100000, InputBudget: 85000})
 	for i := range 8 {
-		f.turn(t, fmt.Sprint(i), "Continue the feature.", strings.Repeat("Old explanation. ", 300))
+		f.turn(t, fmt.Sprint(i), "Continue the feature.", strings.Repeat("Old explanation. ", 1200))
 	}
 	const text = "Keep state_store.py and test results. token=synthetic-private\n" +
 		"private_key=-----BEGIN PRIVATE KEY-----\nsynthetic-private\n-----END PRIVATE KEY-----\nNext: production_writeback.py."

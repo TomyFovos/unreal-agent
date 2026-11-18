@@ -73,3 +73,19 @@ func TestPeerFormatCutoverIsDurableAndLeavesRecordedInputsIntact(t *testing.T) {
 		t.Fatal("canonical inputs changed or cutover was not recorded once", boundaries, inputs)
 	}
 }
+
+func TestLegacyPeerDuringToolCallKeepsRecordedProjection(t *testing.T) {
+	run := newStopTestRun(t, 1)
+	run.store.items = append(run.store.items, storedItem(4, sessionstore.ItemInput, progressPeerInput(t, "old", "message", "old report during a tool call")))
+	if err := run.current.loadHistory(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	built, err := run.current.dependencies.ContextBuilder.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := requestDump(t, built.Request)
+	if strings.Count(text, "old report during a tool call") != 1 || !strings.Contains(text, "Peer agent message") {
+		t.Fatal("legacy peer lost its recorded projection", text)
+	}
+}

@@ -38,6 +38,10 @@ type fakeGPT struct {
 	mu                        sync.Mutex
 	leadEfforts, workerEffort []string
 	leadModels                []string
+	workerModels, workerTiers []string
+	collectorEfforts          []string
+	leadChildTemplate         string
+	leadLastInput             string
 	refusedLead               bool
 	sawEmailInstruction       bool
 	leadHold                  <-chan struct{}
@@ -53,6 +57,7 @@ func (g *fakeGPT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var request struct {
 		Model        string           `json:"model"`
+		ServiceTier  string           `json:"service_tier"`
 		Instructions string           `json:"instructions"`
 		Input        []map[string]any `json:"input"`
 		Reasoning    *struct {
@@ -113,6 +118,7 @@ func (g *fakeGPT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	switch {
 	case strings.Contains(all, "You are the implementation lead"):
+		g.leadLastInput = strings.Join(texts, "\n")
 		g.sawEmailInstruction = g.sawEmailInstruction || strings.Contains(all, "email=implementer@example.com")
 		g.leadEfforts = append(g.leadEfforts, effort)
 		g.leadModels = append(g.leadModels, request.Model)
@@ -123,7 +129,11 @@ func (g *fakeGPT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			output = call("lead-start-lead", "SubagentStart", map[string]string{"template": "lead", "task": "another lead"})
 		case !calls["lead-start-worker"]:
 			g.refusedLead = strings.Contains(all, "Unknown child template")
-			output = call("lead-start-worker", "SubagentStart", map[string]string{"template": "worker-high", "task": "printf worker > " + g.workerMarker})
+			template := g.leadChildTemplate
+			if template == "" {
+				template = "worker-high"
+			}
+			output = call("lead-start-worker", "SubagentStart", map[string]string{"template": template, "task": "printf worker > " + g.workerMarker})
 		case !g.routingOnly && !calls["lead-approve"] && strings.Contains(all, "asks for approval of request"):
 			for _, text := range texts {
 				header, body, ok := strings.Cut(text, "\n")
@@ -135,13 +145,16 @@ func (g *fakeGPT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-		case !calls["lead-finish"] && strings.Contains(all, "worker done"):
+		case !calls["lead-finish"] && (strings.Contains(all, "worker done") || strings.Contains(all, "collector done")):
 			output = call("lead-finish", "Finish", map[string]any{"status": "completed", "summary": "lead done", "changedFiles": []string{"lead", "worker"}, "tests": []string{"printf: ok"}, "blockers": []string{}})
 		}
 	case strings.Contains(all, "You are a collector"):
+		g.collectorEfforts = append(g.collectorEfforts, effort)
 		output = call("collector-finish", "Finish", map[string]any{"status": "completed", "summary": "collector done", "changedFiles": []string{}, "tests": []string{}, "blockers": []string{}})
 	case strings.Contains(all, "You are a worker"):
 		g.workerEffort = append(g.workerEffort, effort)
+		g.workerModels = append(g.workerModels, request.Model)
+		g.workerTiers = append(g.workerTiers, request.ServiceTier)
 		if !g.routingOnly && !calls["worker-bash"] {
 			output = call("worker-bash", "Bash", map[string]string{"command": "printf worker > " + g.workerMarker})
 		} else if !calls["worker-finish"] {

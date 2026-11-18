@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/host"
+	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
@@ -16,6 +17,7 @@ type ChildView struct {
 	View           host.View
 	Configuration  *ChildConfig
 	Finish         *sessionstore.FinishRecord
+	FinishLocator  record.Locator
 	End            *sessionstore.EndRecord
 	LastRecordedAt time.Time
 }
@@ -58,6 +60,7 @@ func ReadChildSnapshot(ctx context.Context, directory string, id session.ID) (Ch
 	}
 	page := sessionstore.Page{Items: items, NextAfter: sessionstore.Sequence(len(items))}
 	result := ChildView{View: host.View{Session: snapshot, History: host.ProjectHistoryPage(page), Operations: ops}, LastRecordedAt: snapshot.Session.CreatedAt}
+	var finishSequence sessionstore.Sequence
 	for _, item := range items {
 		if item.RecordedAt.After(result.LastRecordedAt) {
 			result.LastRecordedAt = item.RecordedAt
@@ -65,6 +68,7 @@ func ReadChildSnapshot(ctx context.Context, directory string, id session.ID) (Ch
 		if item.Kind == sessionstore.ItemFork {
 			result.Configuration = nil
 			result.Finish = nil
+			finishSequence = 0
 			result.End = nil
 		}
 		if item.Kind != sessionstore.ItemHostRecord {
@@ -82,9 +86,14 @@ func ReadChildSnapshot(ctx context.Context, directory string, id session.ID) (Ch
 			result.View.ProjectInstructions = &metadata
 		case "finish":
 			result.Finish = record.Finish
+			finishSequence = item.Sequence
 		case sessionstore.HostEnded:
 			result.End = record.End
 		}
+	}
+	if finishSequence != 0 && result.Configuration != nil {
+		result.FinishLocator = record.Address{Session: string(id), Sequence: uint64(finishSequence), Kind: record.ChildReport,
+			Handle: string(result.Configuration.OperationID)}.Locator()
 	}
 	return result, nil
 }

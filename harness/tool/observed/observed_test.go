@@ -65,10 +65,16 @@ func TestReportedErrorIsAFailedReceipt(t *testing.T) {
 func TestLongResultKeepsHeadAndTail(t *testing.T) {
 	results := NewResults()
 	translator := New(results)
-	results.Put("toolu_3", Result{Content: "HEAD" + strings.Repeat("x", 2*operation.DefaultMaxOutputLength) + "TAIL"})
+	original := "HEAD" + strings.Repeat("x", 2*operation.DefaultMaxOutputLength) + "TAIL"
+	results.Put("toolu_3", Result{Content: original})
 	ctx := &submitted{}
 	status := translator.Translate(ctx, llm.ToolCall{CallID: "toolu_3", Name: "claude_code", Arguments: `{"tool":"Read"}`})
-	got, err := translator.TranslateResult("toolu_3", status, []operation.Operation{completed(ctx.specs[0])})
+	op := completed(ctx.specs[0])
+	canonical, err := decode(op)
+	if err != nil || canonical.Content != original {
+		t.Fatalf("canonical original lost: %d bytes, %v", len(canonical.Content), err)
+	}
+	got, err := translator.TranslateResult("toolu_3", status, []operation.Operation{op})
 	if err != nil {
 		t.Fatal(err)
 	}

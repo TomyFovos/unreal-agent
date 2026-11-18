@@ -43,22 +43,24 @@ type streamRequestActivity struct {
 	output, reasoning        *int64
 	input                    *usage
 	stopReason               string
+	messageID                string
 	phase                    string
 }
 
 // Native Agent streams have independent parent_tool_use_id values. Keep them
 // separate so a busy native child cannot make a silent main stream look active.
 type streamActivities struct {
-	mu        sync.Mutex
-	turnID    string
-	mainModel string
-	seq       int
-	active    map[string]*streamRequestActivity
-	counts    map[string]map[string]int64
-	limits    map[string][]outputLimitHit
-	usage     map[string]llm.Usage
-	now       func() time.Time
-	record    func(llm.ActivityRecord)
+	mu              sync.Mutex
+	turnID          string
+	mainModel       string
+	seq             int
+	active          map[string]*streamRequestActivity
+	counts          map[string]map[string]int64
+	limits          map[string][]outputLimitHit
+	limitedMessages map[string]bool
+	usage           map[string]llm.Usage
+	now             func() time.Time
+	record          func(llm.ActivityRecord)
 }
 
 func (t *turn) observeStreams(interval time.Duration) (*streamActivities, func()) {
@@ -121,7 +123,7 @@ func (s *streamActivities) observe(f frame) {
 	switch event.Type {
 	case "message_start":
 		s.seq++
-		r = &streamRequestActivity{id: s.turnID + "/stream/" + strconv.Itoa(s.seq), model: event.Message.Model, started: now}
+		r = &streamRequestActivity{id: s.turnID + "/stream/" + strconv.Itoa(s.seq), messageID: event.Message.ID, model: event.Message.Model, started: now}
 		if scope == "" && r.model != "" && r.model != "<synthetic>" {
 			s.mainModel = r.model
 		}
@@ -168,6 +170,12 @@ func (s *streamActivities) observe(f frame) {
 			}
 			if event.Delta.StopReason != "" {
 				r.stopReason = event.Delta.StopReason
+				if r.messageID != "" && llm.IsOutputLimit(r.stopReason) {
+					if s.limitedMessages == nil {
+						s.limitedMessages = map[string]bool{}
+					}
+					s.limitedMessages[r.messageID] = true
+				}
 			}
 		}
 	case "message_stop":
@@ -182,7 +190,7 @@ func (s *streamActivities) observe(f frame) {
 			}
 			observation := r.snapshot("message_stop")
 			observation.StopReason = r.stopReason
-			if r.stopReason == "max_tokens" || r.stopReason == "max_output_tokens" {
+			if llm.IsOutputLimit(r.stopReason) {
 				if s.limits == nil {
 					s.limits = map[string][]outputLimitHit{}
 				}

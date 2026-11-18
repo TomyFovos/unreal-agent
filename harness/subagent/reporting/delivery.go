@@ -44,6 +44,9 @@ func (d *Index) ObserveItem(item sessionstore.Item) {
 			return
 		}
 		d.mark(operation.ID(peer.Handle))
+		if peer.ReportIncluded {
+			return
+		}
 		// Before 16c78d4 one ended input could contain several reports. Its
 		// ID, Sender and Handle identified only the first child. Match each
 		// additional report's exact header AND footer, not handle mentions.

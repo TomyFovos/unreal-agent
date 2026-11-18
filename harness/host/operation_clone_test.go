@@ -10,10 +10,12 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
@@ -387,9 +389,11 @@ func TestSavedOperationChangedStateKeepsFullWireAndPublicDetachment(t *testing.T
 	changed.Execution = &operation.ExecutionMetadata{Dependencies: []operation.ID{"prior"}}
 	changed.Idempotence = &operation.IdempotencyMetadata{Idempotency: jsontext.Value(` {"key":"\u0041"} `)}
 	want := clone(changed)
+	beforeSave := time.Now()
 	if err = w.SaveOperation(t.Context(), id, changed); err != nil {
 		t.Fatal(err)
 	}
+	afterSave := time.Now()
 	if len(s.operations) != 1 || !reflect.DeepEqual(s.operations[changed.ID], want) || len(events) != 1 {
 		t.Fatal("changed checkpoint was not saved and published exactly once")
 	}
@@ -402,12 +406,31 @@ func TestSavedOperationChangedStateKeepsFullWireAndPublicDetachment(t *testing.T
 		t.Fatal(err)
 	}
 	lines := bytes.Split(bytes.TrimSuffix(encoded, []byte{'\n'}), []byte{'\n'})
+	type checkpointData struct {
+		Operation  operation.Operation
+		RecordedAt time.Time
+	}
+	var recorded struct {
+		Data struct{ RecordedAt time.Time } `json:"data"`
+	}
+	if err := json.Unmarshal(lines[len(lines)-1], &recorded); err != nil ||
+		recorded.Data.RecordedAt.Before(beforeSave) || recorded.Data.RecordedAt.After(afterSave) {
+		t.Fatalf("terminal checkpoint has an invalid record time %s: %v", recorded.Data.RecordedAt, err)
+	}
 	wire, err := json.Marshal(struct {
-		Type string                                  `json:"type"`
-		Data struct{ Operation operation.Operation } `json:"data"`
-	}{Type: "operation", Data: struct{ Operation operation.Operation }{changed}})
+		Type string         `json:"type"`
+		Data checkpointData `json:"data"`
+	}{Type: "operation", Data: checkpointData{changed, recorded.Data.RecordedAt}})
 	if err != nil || !bytes.Equal(lines[len(lines)-1], wire) || bytes.Count(encoded, append(wire, '\n')) != 1 {
 		t.Fatal("changed checkpoint lost its single complete canonical record", err)
+	}
+	if len(public.Records) == 0 {
+		t.Fatal("terminal checkpoint has no source locator")
+	}
+	source, err := public.Records[0].Locator.Address()
+	if err != nil || source.Kind != record.OperationCheckpoint || source.Operation != string(changed.ID) ||
+		source.Offset != int64(len(encoded)-len(wire)-1) {
+		t.Fatalf("terminal checkpoint locator does not address its canonical bytes: %+v (%v)", source, err)
 	}
 	view, err := s.Inspect(0, 1)
 	if err != nil || len(view.Operations) != 1 || !reflect.DeepEqual(view.Operations[0], want) {

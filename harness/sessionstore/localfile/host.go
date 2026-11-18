@@ -80,7 +80,11 @@ func (s *Store) CreateWithHostRecords(ctx context.Context, id session.ID, record
 		if err := r.Validate(); err != nil {
 			return sessionstore.Snapshot{}, err
 		}
-		state.Items = append(state.Items, state.appendItem(sessionstore.ItemHostRecord, r, now))
+		item := state.appendItem(sessionstore.ItemHostRecord, r, now)
+		if err := state.observeItem(itemRecord{Item: item}); err != nil {
+			return sessionstore.Snapshot{}, err
+		}
+		state.Items = append(state.Items, item)
 	}
 	if err := s.publishInitialState(state); err != nil {
 		return sessionstore.Snapshot{}, fmt.Errorf("create session %q: %w", id, err)

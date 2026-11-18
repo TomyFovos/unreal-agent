@@ -21,7 +21,7 @@ func TestChildStartRecordsResolvedRuntimeInParent(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := []byte(`{"Provider":{"provider":"fake","model":{"id":"test-model"}},"ReasoningEffort":"high"}`)
-	templates := map[string]sub.Template{"worker-test": {Workspace: dir, Runtime: runtime, Policy: permission.Config{Tools: []string{"Finish", "SendParent"}}}}
+	templates := map[string]sub.Template{"worker-test": {Layer: "lead", Workspace: dir, Runtime: runtime, Policy: permission.Config{Tools: []string{"Finish", "SendParent"}}}}
 	config := sub.Config{Directory: dir, Binary: binary, Arguments: []string{"-test.run=^TestChildServerHelper$"}, Environment: append(os.Environ(), "UNREAL_SUBAGENT_HELPER=1"), Templates: templates}
 	h, err := host.New(t.Context(), host.Config{Directory: dir, Build: factory(config, adapter(func(context.Context, llm.Request, llm.RequestOptions) (llm.Response, error) {
 		return llm.Response{}, nil
@@ -42,12 +42,15 @@ func TestChildStartRecordsResolvedRuntimeInParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if plan.Configuration.Layer != "lead" {
+		t.Fatal("canonical start lost its resolved layer", plan.Configuration.Layer)
+	}
 	child, err := sub.ReadChild(t.Context(), dir, plan.ChildID, 0, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if child.Configuration == nil || child.Configuration.Template != "worker-test" {
-		t.Fatal("child creation lost its template", child.Configuration)
+	if child.Configuration == nil || child.Configuration.Template != "worker-test" || child.Configuration.Layer != "lead" {
+		t.Fatal("child creation lost its template or resolved layer", child.Configuration)
 	}
 	v, err := parent.Inspect(0, 256)
 	if err != nil {
@@ -58,7 +61,7 @@ func TestChildStartRecordsResolvedRuntimeInParent(t *testing.T) {
 		if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Activity != nil && record.Activity.Kind == "child_start" {
 			count++
 			r := record.Activity
-			if r.Template != "worker-test" || r.Layer != "worker" || r.Provider != "fake" || r.Model != "test-model" || r.Effort != "high" || r.ID != string(op.ID) || r.StartedAt.IsZero() {
+			if r.Template != "worker-test" || r.Layer != "lead" || r.Provider != "fake" || r.Model != "test-model" || r.Effort != "high" || r.ID != string(op.ID) || r.StartedAt.IsZero() {
 				data, _ := json.Marshal(r)
 				t.Fatal(string(data))
 			}

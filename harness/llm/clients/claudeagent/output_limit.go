@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 )
 
 type outputLimitHit struct {
@@ -16,10 +18,10 @@ var outputLimitMessage = regexp.MustCompile(`response exceeded the ([0-9]+) outp
 
 // Recovery belongs to Claude Code. Only replace its final failure explanation;
 // never retry, change effort or suggest increasing a model's output ceiling.
-func (s *streamActivities) outputLimitFailure(result *frame, message string) string {
+func (s *streamActivities) outputLimitFailure(result *frame, message string) (string, bool) {
 	match := outputLimitMessage.FindStringSubmatch(message)
-	if result.StopReason != "max_output_tokens" && result.StopReason != "max_tokens" && len(match) == 0 {
-		return message
+	if !llm.IsOutputLimit(result.StopReason) && len(match) == 0 {
+		return message, false
 	}
 	s.mu.Lock()
 	hits := append([]outputLimitHit(nil), s.limits[""]...)
@@ -62,5 +64,18 @@ func (s *streamActivities) outputLimitFailure(result *frame, message string) str
 		}
 		frequency += " (" + strings.Join(phases, ", ") + ")"
 	}
-	return "Claude Code reached " + limit + " " + frequency + ". Its recovery attempts did not complete the response. Lowering effort or splitting the work among child agents may allow it to continue."
+	return "Claude Code reached " + limit + " " + frequency + ". Its recovery attempts did not complete the response. Lowering effort or splitting the work among child agents may allow it to continue.", true
+}
+
+// Claude Code emits assistant blocks before their final message_delta. Match
+// the stop reason by provider message ID when handing the blocks to the Host.
+func (s *streamActivities) markLimitedOutput(output []llm.Item) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range output {
+		id, _, _ := strings.Cut(strings.TrimPrefix(output[i].ProviderID, itemPrefix), "/")
+		if s.limitedMessages[id] {
+			output[i].OutputLimit = true
+		}
+	}
 }

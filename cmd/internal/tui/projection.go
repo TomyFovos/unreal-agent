@@ -73,6 +73,12 @@ func entriesFor(item host.HistoryItem) []Entry {
 	}
 	switch d := item.Data.(type) {
 	case sessionstore.HostRecord:
+		if a := d.Activity; a != nil && a.Kind == llm.ActivityModelFailure {
+			add("error", a.Reason, llm.ActivityModelFailure)
+			result[len(result)-1].TurnID = session.TurnID(a.ID)
+		} else if a != nil && a.Kind == llm.ActivityFastUnsupported {
+			add("host", a.Reason, "")
+		}
 		if d.Kind == sessionstore.HostContext && d.Context != nil && d.Context.Conversation != nil {
 			r := d.Context.Conversation
 			if r.Compacted {

@@ -25,6 +25,17 @@ type WorkerTierFixture struct {
 // WriteWorkerTierTree uses synthetic, deterministic logs and no inference.
 // The caller can archive any of its settled children before inspecting them.
 func WriteWorkerTierTree(tb testing.TB, directory string) WorkerTierFixture {
+	return writeWorkerTierTree(tb, directory, false)
+}
+
+// WriteLegacyWorkerTierTree reproduces pre-resolved-runtime grandchildren:
+// both the start plan and child configuration contain the GPT template default,
+// while the child's responses record its actual OpenCode Go model and API auth.
+func WriteLegacyWorkerTierTree(tb testing.TB, directory string) WorkerTierFixture {
+	return writeWorkerTierTree(tb, directory, true)
+}
+
+func writeWorkerTierTree(tb testing.TB, directory string, legacyRuntime bool) WorkerTierFixture {
 	tb.Helper()
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		tb.Fatal(err)
@@ -47,7 +58,7 @@ func WriteWorkerTierTree(tb testing.TB, directory string) WorkerTierFixture {
 	}
 	response := func(log *settledLog, second int, model string, input, output, cached int64, duration int64, source string) {
 		itemAt(log, second-1, sessionstore.ItemTurn, session.Turn{ID: "turn", Type: session.TurnRegular})
-		r := llm.Response{Model: model, Usage: llm.Usage{InputTokens: input, OutputTokens: output, CachedInputTokens: cached, Raw: []byte(`{}`)}}
+		r := llm.Response{Model: model, Usage: llm.Usage{InputTokens: input, OutputTokens: output, CachedInputTokens: cached, AuthMethod: "api_key", Raw: []byte(`{}`)}}
 		if duration > 0 {
 			r.Generation = &llm.GenerationStatistics{Model: model, Tokens: llm.ReportedTokens(r.Usage), DurationMicros: duration * 1e6, Source: source}
 		}
@@ -70,6 +81,9 @@ func WriteWorkerTierTree(tb testing.TB, directory string) WorkerTierFixture {
 		a := llm.ActivityRecord{Kind: "child_start", ID: string(handle), Template: template, Provider: selection.Provider, Model: selection.Model, Effort: string(selection.Effort), StartedAt: at.Add(time.Duration(second) * time.Second), Layer: subagent.RoleGroup(template)}
 		if legacy {
 			a.Layer = ""
+		}
+		if legacyRuntime && parentID == f.Lead {
+			a.Layer, a.Provider, a.Model, a.Effort = "", "", "", ""
 		}
 		activity(log, second, a)
 		spec, err := subagent.NewSpec(subagent.Plan{Version: 1, Action: "start", ParentID: parentID, Template: template, Text: title + "\nprivate-task-body-sensitive", Configuration: &subagent.Template{Workspace: directory, Runtime: raw, Policy: permission.Config{Tools: []string{"Finish"}}}, Notify: true})
@@ -107,6 +121,9 @@ func WriteWorkerTierTree(tb testing.TB, directory string) WorkerTierFixture {
 		id := subagent.ChildID(f.Lead, handle)
 		f.Workers[c.handle] = id
 		raw := runtime("opencode-go", c.model)
+		if legacyRuntime {
+			raw = runtime("openai-codex", "gpt-6.2-sol")
+		}
 		child := &settledLog{tb: tb, at: at.Add(time.Duration(c.start) * time.Second)}
 		child.header(id, subagent.ChildConfig{Version: 1, ParentID: f.Lead, ChildID: id, OperationID: handle, Template: "worker-max", SessionDirectory: directory, Workspace: directory, Runtime: raw, ReadyID: inbox.ID("ready:" + c.handle), Task: c.title, Policy: permission.Config{Tools: []string{"Finish"}}})
 		if c.wait {

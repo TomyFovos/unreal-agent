@@ -5,6 +5,7 @@ import (
 	"unicode"
 
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
 
@@ -75,6 +76,28 @@ func childVisualState(r viewer.Row, s Snapshot) visualState {
 		}
 	}
 	return operationVisualState(r.ParentOperationStatus)
+}
+
+// A lead can be idle between turns while its descendants work. Its own last
+// canonical item is not a measure of that lineage's inactivity. Use the same
+// states as the working-child counts, without guessing liveness from a role,
+// provider, transcript text or a read-only observation's RuntimeUnknown.
+func activeChildAncestors(rows []viewer.Row, s Snapshot) map[session.ID]bool {
+	byID := make(map[session.ID]viewer.Row, len(rows))
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+	active := make(map[session.ID]bool)
+	for _, r := range rows {
+		if state := childVisualState(r, s); state != stateWorking && state != stateCanceling {
+			continue
+		}
+		seen := map[session.ID]bool{r.ID: true}
+		for id := r.ParentID; id != "" && !seen[id]; id = byID[id].ParentID {
+			seen[id], active[id] = true, true
+		}
+	}
+	return active
 }
 
 func toolVisualState(r Receipt, s Snapshot) visualState {

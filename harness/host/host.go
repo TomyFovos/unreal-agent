@@ -26,6 +26,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
+	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
@@ -134,6 +135,7 @@ type Host struct {
 type Receipt struct {
 	ID       inbox.ID
 	Sequence sessionstore.Sequence
+	Locator  record.Locator `json:",omitzero"`
 }
 type submission struct {
 	input     inbox.Input
@@ -149,6 +151,7 @@ type Event struct {
 	Kind       string
 	Item       *HistoryItem         `json:",omitzero"`
 	Operation  *operation.Operation `json:",omitzero"`
+	Records    []record.Reference   `json:",omitzero"`
 }
 type View struct {
 	HistoryReceipts []HistoryReceipt `json:",omitzero"`
@@ -233,6 +236,7 @@ type Session struct {
 	err                   error
 	selection             *sessionstore.RuntimeSelection
 	pendingSelection      *sessionstore.RuntimeSelection
+	workspace             string
 }
 
 func New(ctx context.Context, c Config) (*Host, error) {
@@ -291,8 +295,12 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 			lock.Close()
 		}
 	}()
+	openRestoreView := raw.OpenCheckpointedRestoreView
+	if o.Lifecycle == "child" {
+		openRestoreView = raw.OpenRestoreView
+	}
 	readDone := startupPhase(ctx, o.ID, "host.read_restore")
-	readView, viewErr := raw.OpenRestoreView(ctx, o.ID)
+	readView, viewErr := openRestoreView(ctx, o.ID)
 	readDone()
 	closeReadView := func() error {
 		if readView == nil {
@@ -334,7 +342,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 
 	}
 	if readView == nil {
-		readView, err = raw.OpenRestoreView(ctx, o.ID)
+		readView, err = openRestoreView(ctx, o.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -371,8 +379,11 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	}
 	s := &Session{ID: o.ID, Generation: uuid.New().String(), ctx: cctx, cancel: cancel, lock: lock, store: raw,
 		snapshot: restored.Snapshot, operations: map[operation.ID]operation.Operation{}, submissions: map[inbox.ID]*submission{},
-		subscribers: map[uint64]chan Event{}, done: make(chan struct{}), running: true, archiveWake: make(chan struct{}, 1)}
+		subscribers: map[uint64]chan Event{}, done: make(chan struct{}), running: true, archiveWake: make(chan struct{}, 1), workspace: o.Workspace}
 	s.permissions = controller
+	if controller != nil {
+		controller.RecordApproval = s.recordApproval
+	}
 	defer func() {
 		if err != nil {
 			s.background.close()
@@ -395,6 +406,11 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	if e != nil {
 		return nil, e
 	}
+	// Reuse the slice handed over by Take while rebuilding the Host indexes.
+	s.items = items[:0]
+	s.historyBackground = make([]bool, 0, len(items))
+	s.historyCopy.before = make([]bool, 0, len(items))
+	s.historyWorkBefore = make([]*HistoryWork, 0, len(items))
 	for _, item := range items {
 		s.rememberOwnedItem(item, false)
 	}
@@ -552,6 +568,9 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		s.archiveChildren(context.WithoutCancel(cctx))
 		// No writer can be handed over until all canonical writes have stopped.
 		s.mu.Lock()
+		if checkpointErr := raw.SaveRestoreCheckpoint(o.ID); checkpointErr != nil {
+			slog.Debug("save restore checkpoint", "session", o.ID, "error", checkpointErr)
+		}
 		runErr = errors.Join(runErr, lock.Close())
 		s.running = false
 		s.progress = nil
@@ -855,14 +874,19 @@ func (s *Session) rememberOwnedItem(item sessionstore.Item, notify bool) {
 	}
 	if item.Kind == sessionstore.ItemHostRecord {
 		r := item.Data.(sessionstore.HostRecord)
-		if a := r.Activity; a != nil && a.Kind == "usage_limit_wait" {
-			s.progress = nil
-			if !a.RetryAt.IsZero() {
-				s.progressEpoch++
-				s.progress = &Progress{TurnID: s.currentTurn(), Epoch: s.progressEpoch, Mode: "usage_limit_wait", RetryAt: a.RetryAt}
-			}
-			if notify {
-				s.broadcast(Event{Kind: "progress", Progress: s.progress})
+		if a := r.Activity; a != nil {
+			switch a.Kind {
+			case llm.ActivityModelFailure:
+				s.progress = nil
+			case "usage_limit_wait":
+				s.progress = nil
+				if !a.RetryAt.IsZero() {
+					s.progressEpoch++
+					s.progress = &Progress{TurnID: s.currentTurn(), Epoch: s.progressEpoch, Mode: "usage_limit_wait", RetryAt: a.RetryAt}
+				}
+				if notify {
+					s.broadcast(Event{Kind: "progress", Progress: s.progress})
+				}
 			}
 		}
 		if r.Kind == "configuration" && s.selection == nil {
@@ -906,7 +930,7 @@ func (s *Session) rememberOwnedItem(item sessionstore.Item, notify bool) {
 			s.submissions[input.ID] = p
 		}
 		if !p.committed {
-			p.receipt = Receipt{ID: input.ID, Sequence: item.Sequence}
+			p.receipt = Receipt{ID: input.ID, Sequence: item.Sequence, Locator: inputLocator(s.ID, item.Sequence, input.Kind)}
 			p.committed = true
 			close(p.done)
 		}
@@ -927,7 +951,7 @@ func (s *Session) rememberOwnedItem(item sessionstore.Item, notify bool) {
 	if notify {
 		s.wakeChildArchive()
 		projected := ProjectHistoryItem(item)
-		s.broadcast(Event{Kind: "item", Item: &projected})
+		s.broadcast(Event{Kind: "item", Item: &projected, Records: s.itemReferences(item)})
 	}
 }
 func (s *Session) configure(ctx context.Context, config jsontext.Value) error {

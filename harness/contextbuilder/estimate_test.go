@@ -1,7 +1,6 @@
 package contextbuilder
 
 import (
-	"encoding/json/jsontext"
 	"fmt"
 	"strings"
 	"testing"
@@ -13,10 +12,10 @@ import (
 )
 
 func fullTurnEstimate(b *builder) int64 {
-	return contextengine.Estimate(llm.Request{Model: b.request.Model, Tools: b.request.Tools, Input: b.deriveItems()})
+	return b.tokenEstimator().Request(llm.Request{Model: b.request.Model, Tools: b.request.Tools, Input: b.deriveItems()})
 }
 
-func TestIncrementalTurnEstimateMatchesFullJSONAcrossViewChanges(t *testing.T) {
+func TestIncrementalTurnEstimateMatchesFullTokenEstimateAcrossViewChanges(t *testing.T) {
 	f := newContextFixture(t, "openai-codex", contextengine.Config{})
 	for i := range 14 {
 		switch i {
@@ -40,9 +39,10 @@ func TestIncrementalTurnEstimateMatchesFullJSONAcrossViewChanges(t *testing.T) {
 		f.user(t, string(id)+"-input", strings.Repeat("quotes \"\n日本語👨‍👩‍👧‍👦 ", i+1))
 		f.item(t, sessionstore.ItemTurn, session.Turn{ID: id, Type: session.TurnRegular})
 		want := fullTurnEstimate(f.b)
-		if got := f.b.turnEstimates[id]; got != want {
-			t.Fatalf("turn %d: incremental=%d full JSON=%d", i, got, want)
+		if got := f.b.turnEstimates[id].tokens; got != want {
+			t.Fatalf("turn %d: incremental=%d full tokens=%d", i, got, want)
 		}
+		f.b.SetHistoryRuntime(f.b.provider, f.b.request.Model.ID)
 		f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: id, Response: llm.Response{Usage: llm.Usage{InputTokens: 123, OutputTokens: 4}, Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "response"}}}}})
 		if f.b.pruneInput != 123 || f.b.pruneEstimate != want {
 			t.Fatal("replay changed measured pruning calibration")
@@ -50,30 +50,32 @@ func TestIncrementalTurnEstimateMatchesFullJSONAcrossViewChanges(t *testing.T) {
 	}
 }
 
-func TestIncrementalEstimateKeepsCombinedOpaqueJSONDepthFailure(t *testing.T) {
+// Opaque reasoning is replay state, not tokenized JSON. Its nesting or
+// ciphertext size must not manufacture an admission overflow sentinel.
+func TestIncrementalTokenEstimateIgnoresOpaqueJSONOverhead(t *testing.T) {
 	for _, depth := range []int{9994, 9995, 9996, 9997, 9998} {
 		t.Run(fmt.Sprint(depth), func(t *testing.T) {
 			f := newContextFixture(t, "openai-codex", contextengine.Config{})
 			f.user(t, "input", "hello")
+			before := fullTurnEstimate(f.b)
 			id := f.b.lastUnit
 			native := f.b.native[id]
-			native.extra = []llm.Item{{Type: llm.ItemReasoning, Data: llm.Reasoning{Raw: jsontext.Value(strings.Repeat("[", depth) + "0" + strings.Repeat("]", depth))}}}
+			native.extra = []llm.Item{{Type: llm.ItemReasoning, Data: llm.Reasoning{Raw: []byte(strings.Repeat("[", depth) + "0" + strings.Repeat("]", depth))}}}
 			f.b.native[id] = native
-			got := f.b.estimateRequest()
-			if want := fullTurnEstimate(f.b); got != want {
-				t.Fatalf("depth %d: incremental=%d full JSON=%d", depth, got, want)
+			if got, want := f.b.estimateRequest(), fullTurnEstimate(f.b); got != want || got != before {
+				t.Fatalf("depth %d: incremental=%d full tokens=%d before=%d", depth, got, want, before)
 			}
 		})
 	}
 }
 
-// The legacy sub-benchmark is the complete pre-optimization estimate at every
-// Turn. It intentionally retains that cost as a reproducible comparison oracle.
+// The full-token sub-benchmark walks the complete request at every Turn,
+// retaining an independent oracle for the incremental estimate.
 func BenchmarkRestoreTurnEstimates(b *testing.B) {
 	for _, legacy := range []bool{true, false} {
 		name := "incremental"
 		if legacy {
-			name = "full-json"
+			name = "full-tokens"
 		}
 		b.Run(name, func(b *testing.B) {
 			b.ReportAllocs()
@@ -84,7 +86,7 @@ func BenchmarkRestoreTurnEstimates(b *testing.B) {
 					f.user(b, string(id)+"-input", "synthetic input")
 					f.item(b, sessionstore.ItemTurn, session.Turn{ID: id, Type: session.TurnRegular})
 					if legacy {
-						f.b.turnEstimates[id] = fullTurnEstimate(f.b)
+						f.b.turnEstimates[id] = requestEstimate{tokens: fullTurnEstimate(f.b), header: f.b.estimate.header, epoch: f.b.estimate.epoch}
 					}
 					f.item(b, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: id, Response: llm.Response{Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: strings.Repeat("x", 4500)}}}}})
 				}

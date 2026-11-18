@@ -2,6 +2,11 @@ package llm
 
 import "time"
 
+const (
+	ActivityModelFailure    = "model_failure"
+	ActivityFastUnsupported = "fast_unsupported"
+)
+
 // ActivityRecord contains timing and runtime metadata, never commands, file
 // contents, provider credentials, or tool arguments. Missing fields in older
 // histories remain unknown.

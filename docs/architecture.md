@@ -12,9 +12,9 @@ The [Host](../harness/host/host.go) manages active Sessions and enforces single-
 
 - **One Coordinator per live Session:** Before creating or resuming a Session, the Host acquires a process-shared writer lock on the Session store.
 - **Canonical Store vs. Projections:** The Session store on disk is the single source of truth. The TUI and model context views are projections derived from canonical history; provider-owned conversations are associated runtime state. Claude Code owns a separate conversation transcript and normally continues it with `--resume`.
-- **Session Lifetime:** For each live Session, the runtime factory constructs a dedicated context builder, provider client, tool registry, and Operation Manager. Detaching the TUI (`Ctrl+D`) or canceling a single prompt does **not** terminate the Session. Only an explicit Session stop (`/stop session`) or Host shutdown cancels execution, drains active handlers, and releases the writer lock.
+- **Session lifetime.** Each live Session owns a context builder, provider client, tool registry, and Operation Manager. Detaching the TUI (`Ctrl+D`) or interrupting a single prompt leaves the Session running. When a parent model call fails, the failed turn ends and the Session keeps its children, their Operations, and pending approval requests. An explicit Session stop (`/stop session`) or Host shutdown drains active handlers and releases the writer lock.
 - **Idempotent Submissions & Receipts:** Every user or peer input carries the current Host generation and a stable `Inbox` ID. A submission **receipt** confirms that the input was durably committed to the store (not that all downstream tool side effects have finished). Retrying with the same ID returns the original receipt; stale generations or conflicting payloads with the same ID are rejected.
-- **Restart & Recovery:** Pending stops are applied before any Operation is dispatched on resume. If the Host restarts while child agents are running, unfinished children are canceled and their end notices are delivered to the parent Session (they are not automatically respawned).
+- **Restart and recovery.** Pending stops are applied before Operation dispatch on resume. The reopened parent retains children whose executors still hold their writer leases. The Host reconciles abandoned children as canceled and records one end notice per child.
 
 ---
 

@@ -64,6 +64,8 @@ type Config struct {
 	MaxAttempts *int
 	// Nil shares MaxAttempts; Codex distinguishes request and stream retries.
 	MaxStreamAttempts *int
+	// AllowFast enables the request's Fast selection for this route.
+	AllowFast bool
 	// Trace borrows read-only bodies: request JSON and terminal response JSON or HTTP error.
 	Trace func(Exchange)
 	// Extensions are provider-specific top-level fields merged into every request
@@ -85,6 +87,7 @@ type adapter struct {
 	cacheKeyPlacement CacheKeyPlacement
 	maxAttempts       int
 	maxStreamAttempts int
+	allowFast         bool
 	extensions        map[string]jsontext.Value
 	classifyError     func(*APIError, http.Header) *APIError
 }
@@ -120,6 +123,7 @@ func NewAdapter(remote *primitives.RemoteClient, config Config) (llm.Adapter, er
 		cacheKeyPlacement: config.CacheKeyPlacement,
 		maxAttempts:       maxAttempts,
 		maxStreamAttempts: maxStreamAttempts,
+		allowFast:         config.AllowFast,
 		extensions:        config.Extensions,
 		classifyError:     config.ClassifyError,
 	}, nil
@@ -134,6 +138,7 @@ func (adapter *adapter) Respond(ctx context.Context, request llm.Request, option
 	if adapter.cacheKeyPlacement.UsePromptCacheKeyField {
 		promptCacheKey = key
 	}
+	request.Model.Fast = adapter.allowFast && request.Model.Fast
 	body, err := requestBody(request, promptCacheKey, adapter.extensions)
 	if err != nil {
 		return llm.Response{}, diagnosed(err, FailureDiagnostic{Stage: "request_build"})

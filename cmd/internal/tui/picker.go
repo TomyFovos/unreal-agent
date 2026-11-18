@@ -23,6 +23,8 @@ type Picker struct {
 	Selection, Offset   int
 	Catalog             modelcatalog.Catalog
 	Model               modelcatalog.Model
+	Effort              llm.ReasoningEffort
+	back                *Picker
 	Revision            uint64
 	Provider            string
 	Providers           []modelcatalog.Provider
@@ -217,6 +219,19 @@ func (p *Picker) selectedEffort() llm.ReasoningEffort {
 	}
 	return p.Model.Efforts[p.Selection]
 }
+
+func (p *Picker) fast(model modelcatalog.Model, effort llm.ReasoningEffort, current *sessionstore.RuntimeSelection) *Picker {
+	n := &Picker{
+		Kind: "fast", Title: SafeText(model.Name) + " · Fast mode",
+		Options: []string{"Off (Standard)", "On (higher usage)"},
+		Model:   model, Effort: effort, Provider: p.Provider, Revision: p.Revision, back: p,
+	}
+	if current != nil && current.Provider == p.Provider && model.Matches(current.Model) && current.Fast {
+		n.Selection = 1
+	}
+	return n
+}
+
 func (p *Picker) move(delta int) {
 	p.Selection = min(max(0, p.Selection+delta), max(0, len(p.Options)-1))
 }

@@ -25,6 +25,9 @@ type Input struct {
 	ID      ID
 	Kind    InputKind
 	Payload jsontext.Value `json:",omitzero"`
+	// Deferred records that the Coordinator queued this input for the next
+	// model read boundary. Only the Coordinator sets it.
+	Deferred bool `json:",omitzero"`
 }
 
 func (input Input) Validate() error {

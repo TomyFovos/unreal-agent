@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -12,12 +13,16 @@ import (
 // quoted heredoc as its input. Such orchestration needs no approval: a child
 // follows the Session's mode and asks its parent (U17).
 func subagentCommand(command, cli string) bool {
+	return literalSessionCommand(command, cli, "subagent")
+}
+
+func literalSessionCommand(command, cli string, groups ...string) bool {
 	if cli == "" {
 		return false
 	}
 	first, body, multiline := strings.Cut(command, "\n")
 	words, delimiter, ok := literalWords(first)
-	if !ok || len(words) < 2 || words[0] != cli || words[1] != "subagent" {
+	if !ok || len(words) < 2 || words[0] != cli || !slices.Contains(groups, words[1]) {
 		return false
 	}
 	if delimiter == "" {
@@ -40,12 +45,16 @@ func subagentCommand(command, cli string) bool {
 // the bare name) to this Host's command. Running the old binary would reach
 // an old Host, and an unrecognized path would stop the user for approval.
 func currentSubagentCommand(command, cli string) (string, bool) {
-	if cli == "" || subagentCommand(command, cli) {
+	return currentSessionCommand(command, cli, "subagent")
+}
+
+func currentSessionCommand(command, cli string, groups ...string) (string, bool) {
+	if cli == "" || literalSessionCommand(command, cli, groups...) {
 		return "", false
 	}
 	first, rest, multiline := strings.Cut(command, "\n")
 	words, _, ok := literalWords(first)
-	if !ok || len(words) < 2 || words[1] != "subagent" {
+	if !ok || len(words) < 2 || !slices.Contains(groups, words[1]) {
 		return "", false
 	}
 	if name := filepath.Base(words[0]); name != "unreal" && name != "unreal-agent" {
@@ -67,7 +76,7 @@ func currentSubagentCommand(command, cli string) (string, bool) {
 	if multiline {
 		rewritten += "\n" + rest
 	}
-	if !subagentCommand(rewritten, cli) {
+	if !literalSessionCommand(rewritten, cli, groups...) {
 		return "", false
 	}
 	return rewritten, true
@@ -136,6 +145,10 @@ func subagentCommandPath(s SubagentCLI) string {
 	return s.SettingsCommand
 }
 
+func sessionCommandAvailable(s SubagentCLI) bool {
+	return subagentCommandPath(s) != "" || s.ContextCommand != ""
+}
+
 func subagentPrompt(s SubagentCLI) string {
 	prompt := subagentWorkPrompt(s)
 	if cli := s.SettingsCommand; cli != "" {
@@ -143,6 +156,12 @@ func subagentPrompt(s SubagentCLI) string {
 			cli = "'" + cli + "'"
 		}
 		prompt += fmt.Sprintf("\nOn the user's instruction, read settings with %[1]s subagent model show; set the next child's provider/model/effort with %[1]s subagent model set --role lead|worker|collector|all --provider ID --model ID [--effort LEVEL]. The Host validates and records the choice. Use API-key providers only when the user explicitly chooses them; never substitute another provider.", cli)
+	}
+	if cli := s.ContextCommand; cli != "" {
+		if !literalCLI(cli) {
+			cli = "'" + cli + "'"
+		}
+		prompt += fmt.Sprintf("\nUse these Session commands through literal Bash in every permission mode. Read current state with %[1]s state show. Record decisions with %[1]s state decide 'TEXT' [--why 'TEXT'] and steps with %[1]s state plan ID --text 'TEXT' --status todo|doing|done|dropped. Quote a user's explicit rule with %[1]s state rule add 'EXCERPT' --source LOCATOR. Record child reviews with %[1]s state accept HANDLE or %[1]s state reject HANDLE [--why 'TEXT']; these use the same review as subagent review. Use %[1]s state question 'TEXT' to note a question and %[1]s state answer ID --source LOCATOR to link the user message that answers it. Questions beginning with 【要確認】 in your reply are recorded automatically. Find raw evidence with %[1]s record find 'QUERY' and read it with %[1]s record show 'LOCATOR'. Use --help after a command for its flags.", cli)
 	}
 	return prompt
 }
@@ -171,16 +190,16 @@ func subagentWorkPrompt(s SubagentCLI) string {
 		collector = "the collector template (" + m.Lead + " at low effort) and never to a higher-effort worker"
 	}
 	prompt := fmt.Sprintf("\n\nYour role in this Session is to run the project: you design, decide, keep the work moving and talk with the user; %[3]s does the work, because %[3]s models cost less than you. Keep your own reasoning to design and verification planning; do not solve the task yourself, including calculations, search, algorithm trials or substantial code. Delegate that work to the lead or a worker. Review what %[3]s delivers before accepting it, especially for over-implementation: limits, checks, abstractions or features nobody asked for, and changes beyond the task. Send back what goes beyond the specification, and keep the project moving rather than redoing %[3]s's work yourself.\n"+
-		"For implementation work, give your design to the implementation lead, which runs %[4]s at max effort and works through its own %[3]s workers in parallel (worker-low through worker-max). For an investigation or another small task, start one worker directly instead (worker-low or worker-medium): each %[3]s agent reads the whole AGENTS.md again, and the lead at max costs most.\n"+
+		"For implementation work, give your design to the implementation lead, which runs %[4]s at max effort and works through its own %[3]s workers in parallel (worker-low through worker-max). Each %[3]s agent reads the whole AGENTS.md again. Worker and collector templates started directly by the main Session run on the lead model and effort. Send hands-on work through a lead, which delegates to workers and collectors and reviews their results before reporting to you.\n"+
 		"Collector tasks, which must go to %[5]s: fetching a URL or API (curl, gh api, gh pr/issue/run view) and reporting fields; checking CI or run status and pulling the failing log lines; listing or searching files (ls, find, rg, grep) and reporting matches; reading files or logs to extract specific values, counts or sections; read-only git summaries (status, log, diff, show); disk, process and environment checks (df, du, ps); summarizing an existing report or document. Give one collector several such questions at once. A single read-only command that answers your question directly you may still run yourself; do not split such a step off.\n"+
-		"Use unreal-agent subagent for parallel work and waits; Claude Code Monitor is unavailable. %[3]s children stay the default for implementation, investigation and review. Use Claude Code's Agent tool only when a Claude model is wanted for the task (for example a review the user asks to run on Fable): set its model, and it finishes within your turn. Hand the work over and end your turn; do not wait for it. While children work, the user can talk to you. When a child asks a question, asks for approval or ends, its message starts a new turn for you.\n"+
+		"Use unreal-agent subagent for parallel work and waits. Claude Code Monitor is unavailable. %[3]s children stay the default for implementation, investigation and review. Use Claude Code's Agent tool only when a Claude model is wanted for the task (for example a review the user asks to run on Fable). Set its model, and it finishes within your turn. Continue independent work while children run. Their questions, approval requests and reports arrive at your next tool-batch boundary. If you are idle, their messages start a new turn. While children work, the user can talk to you.\n"+
 		"Turns that children's messages start run in the background: the user sees only their first line. Handle there what you can decide within the design and the permission mode: answer questions, approve or deny requests, send follow-up instructions, review results and have problems fixed. You decide; children do the work. Hand investigations, data analysis, log and file reading beyond the few files a decision needs, GitHub checks, builds and tests, writing documents and commits to the lead or a worker, and review what they report. In background turns, run yourself only commands that need no approval (reading files, read-only commands such as git diff), since your own other commands would stop the user for approval. Address the user only for what needs them, and start that message with 【報告】 (the work the user asked for is done, or failed in a way you cannot resolve) or 【要確認】 (a decision or approval beyond your authority, a change of requirements or design direction, publishing, or anything you are unsure about). When the user writes while a background turn runs, their message comes first.\n"+
-		"Begin each task you give a child with a one-line title on the first line; the views show it as what the child works on.\n"+
+		"Set --title to a one-line title for the child view, or put the title on the first line of the task text.\n"+
 		"Always use the command path shown below, including after an update; ignore versioned command paths in older messages. Run these commands with Bash exactly in these forms. Unreal Agent approves them itself in every permission mode, Read Only included; the children follow the mode, so in Read Only they read files and run read-only commands such as git log, git show or rg, which is enough for investigations:\n"+
-		"- Start the lead, with the task in a quoted heredoc: %[1]s subagent start --template lead <<'EOF' (then the title line, the goal, design, files and interfaces, constraints and how to verify, then a line EOF)\n"+
+		"- Start the lead with %[1]s subagent start --template lead <<'EOF' (task instructions, then EOF). The command accepts optional --title, --purpose, --inputs, --outputs, --verification and --acceptance-criteria, and --task for free text. The harness fills the launch conditions and report guidance and prints the brief the child receives.\n"+
 		"- Answer a child's approval request: %[1]s subagent approve HANDLE REQUEST allow|deny. Children ask you instead of the user.\n"+
-		"- Send more instructions or answers: %[1]s subagent send HANDLE <<'EOF' (text, then EOF). Stop a child: %[1]s subagent cancel HANDLE. Active children and ended counts: %[1]s subagent list; all children: %[1]s subagent list --all. Report: %[1]s subagent show HANDLE; include its original instructions with --task. Optionally record your assessment: %[1]s subagent review HANDLE accept|reject [--reason TEXT] (reason optional, for /analyze). Reuse the one-line title for rework. Do not use wait unless you know the result will arrive within tens of seconds; use at most --timeout 60s: %[1]s subagent wait HANDLE --timeout 60s.\n"+
-		"Templates: %[2]s (worker-<effort> starts one worker directly).%[6]s", cli, strings.Join(s.Templates, ", "), m.Family, m.Lead, collector, overrides)
+		"- Send more instructions or answers: %[1]s subagent send HANDLE <<'EOF' (text, then EOF). Stop a child: %[1]s subagent cancel HANDLE. Active children and ended counts: %[1]s subagent list; all children: %[1]s subagent list --all. The ended notice includes the completion report. Use %[1]s subagent show HANDLE to reread it, with --task for the brief. Optionally record your assessment: %[1]s subagent review HANDLE accept|reject [--reason TEXT] (reason optional, for /analyze). Reuse the one-line title for rework. Do not use wait unless you know the result will arrive within tens of seconds; use at most --timeout 60s: %[1]s subagent wait HANDLE --timeout 60s.\n"+
+		"Templates: %[2]s.%[6]s", cli, strings.Join(s.Templates, ", "), m.Family, m.Lead, collector, overrides)
 	if m.Family == "GPT" {
 		if s.LeadModel != "" {
 			prompt = strings.ReplaceAll(prompt, "gpt-6.2-sol", s.LeadModel)
@@ -216,7 +235,7 @@ func roleSubagentPrompt(s SubagentCLI) string {
 				fmt.Fprintf(&p, " · use Claude Code's Agent tool with model set to %q for this role; finish within this turn.\n", role.Model)
 			}
 		} else {
-			fmt.Fprintf(&p, " · Templates: %s. Start with %s subagent start --template %s <<'EOF' (title, task and verification, then EOF).", strings.Join(role.Templates, ", "), cli, role.Templates[0])
+			fmt.Fprintf(&p, " · Templates: %s. Start with %s subagent start --template %s <<'EOF' (task instructions, then EOF).", strings.Join(role.Templates, ", "), cli, role.Templates[0])
 			if role.Provider == "openai-codex" {
 				p.WriteString(" For this role only, --model ID and --effort LEVEL may override the template.")
 			}
@@ -224,9 +243,11 @@ func roleSubagentPrompt(s SubagentCLI) string {
 		}
 	}
 	p.WriteString("Use lead for implementation ownership, workers for hands-on implementation, investigation and tests, and collector for URL/API retrieval, CI/log checks, file searches and extraction, read-only git summaries and document summaries. Roles may use different providers; do not assume the lead's workers use its provider or model.\n")
+	p.WriteString("Worker and collector templates started directly by the main Session run on the lead model and effort. Worker and collector role selections apply only below a lead, including deeper descendants. Send hands-on work through a lead, which delegates and reviews results before reporting to you.\n")
 	if cli != "" {
+		p.WriteString("For Unreal children, start accepts optional --title, --purpose, --inputs, --outputs, --verification and --acceptance-criteria. Task instructions can go in --task or a quoted heredoc. The command prints the brief the child receives. The ended notice includes the completion report.\n")
 		fmt.Fprintf(&p, "Optionally record your assessment with %s subagent review HANDLE accept|reject [--reason TEXT]; reason is optional. This supports /analyze. Reuse the task title for rework, and report how you verified the result.\n", cli)
-		fmt.Fprintf(&p, "Use exactly %s subagent for Unreal children. Begin each task with a one-line title. Hand work over and end your turn; completion or questions start a new turn. Do not use Claude Code Monitor. Do not wait unless the result is due within tens of seconds; use at most --timeout 60s.\nAnswer child approvals yourself with %[1]s subagent approve HANDLE REQUEST allow|deny. Send instructions with %[1]s subagent send HANDLE <<'EOF' (text, then EOF). Inspect with %[1]s subagent list or %[1]s subagent show HANDLE; cancel with %[1]s subagent cancel HANDLE. Children follow the Session's permission mode and ask you for approvals.\n", cli)
+		fmt.Fprintf(&p, "Use exactly %s subagent for Unreal children. Begin each task with a one-line title. Continue independent work while children run. Their questions, approval requests and reports arrive at your next tool-batch boundary or wake you when idle. Claude Code Monitor is unavailable. Do not wait unless the result is due within tens of seconds. Use at most --timeout 60s.\nAnswer child approvals yourself with %[1]s subagent approve HANDLE REQUEST allow|deny. Send instructions with %[1]s subagent send HANDLE <<'EOF' (text, then EOF). Inspect with %[1]s subagent list or %[1]s subagent show HANDLE. Cancel with %[1]s subagent cancel HANDLE. Children follow the Session's permission mode and ask you for approvals.\n", cli)
 	}
 	return p.String()
 }

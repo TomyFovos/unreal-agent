@@ -20,6 +20,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	sub "github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
@@ -82,7 +83,7 @@ func TestStoppedLeadHelper(t *testing.T) {
 }
 
 func TestStoppedLeadCancelsGrandchildAndReapsProcess(t *testing.T) {
-	for _, mode := range []string{"failure", "cancel", "host-close", "crash"} {
+	for _, mode := range []string{"cancel-after-failure", "cancel", "host-close", "crash"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
 			binary, err := os.Executable()
@@ -156,9 +157,29 @@ func TestStoppedLeadCancelsGrandchildAndReapsProcess(t *testing.T) {
 			}
 			control := sub.ControlRequest{ParentID: parent.ID, ParentGeneration: parent.Generation, OperationID: leadOp.ID, ChildID: plan.ChildID, InputID: "stop-lead"}
 			switch mode {
-			case "failure":
+			case "cancel-after-failure":
+				control.InputID = "fail-lead-turn"
 				control.Text = "fail lead now"
-				_, err = sub.SteerChild(t.Context(), parent, control)
+				if _, err = sub.SteerChild(t.Context(), parent, control); err != nil {
+					t.Fatal(err)
+				}
+				awaitBoundary(t, func() bool {
+					view, err := sub.ReadChild(t.Context(), dir, plan.ChildID, 0, 256)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, item := range view.View.History.Items {
+						if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Activity != nil && record.Activity.Kind == llm.ActivityModelFailure {
+							if view.Finish != nil || view.End != nil || len(view.View.Operations) != 1 || view.View.Operations[0].Status != operation.StatusAwaiting || syscall.Kill(pid, 0) != nil {
+								t.Fatal("lead model failure stopped the grandchild", view.View.Operations)
+							}
+							return true
+						}
+					}
+					return false
+				})
+				control.InputID, control.Text = "stop-lead", ""
+				_, err = sub.CancelChild(t.Context(), parent, control)
 			case "cancel":
 				_, err = sub.CancelChild(t.Context(), parent, control)
 			case "host-close":
@@ -179,7 +200,7 @@ func TestStoppedLeadCancelsGrandchildAndReapsProcess(t *testing.T) {
 			if mode != "host-close" {
 				ended := awaitChild(t, parent, true)
 				want := operation.StatusFailed
-				if mode == "cancel" {
+				if mode == "cancel" || mode == "cancel-after-failure" {
 					want = operation.StatusCanceled
 				}
 				if ended.Status != want {

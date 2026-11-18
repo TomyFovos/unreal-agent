@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"syscall"
 )
 
@@ -27,6 +28,9 @@ func runExecutableWithStreams(ctx context.Context, name string, args []string, s
 	}
 	if isSubagentCommand(name, args) {
 		return runSubagentCLI(ctx, args[1:], os.Stdin, stdout)
+	}
+	if len(args) > 0 && slices.Contains([]string{"state", "record"}, args[0]) && (name != "unreal" || os.Getenv(subagentSessionEnv) != "") {
+		return runContextCLI(ctx, args, os.Stdin, stdout)
 	}
 	output := diagnostics
 	// The metadata-only subcommand is consumed by setup as machine JSON, and

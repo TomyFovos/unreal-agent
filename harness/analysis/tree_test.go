@@ -16,8 +16,66 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
+	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/internal/testsession"
 )
+
+func TestRecordedLayerOverridesWorkerTemplate(t *testing.T) {
+	for _, source := range []string{"plan", "configuration", "activity", "legacy"} {
+		t.Run(source, func(t *testing.T) {
+			main, child := New("main"), New("child")
+			node := &treeNode{acc: child, parent: "main", handle: "start", template: "worker-max", observed: true}
+			switch source {
+			case "plan":
+				node.layer = "lead"
+			case "configuration":
+				child.Apply(host.HistoryItem{Data: sessionstore.HostRecord{Kind: "configuration", Configuration: []byte(`{"ParentID":"main","Template":"worker-max","Layer":"lead"}`)}})
+			case "activity":
+				main.metrics.starts["start"] = childStart{activity: llm.ActivityRecord{Layer: "lead"}}
+			}
+			r := (&Tree{nodes: []*treeNode{{acc: main, observed: true}, node}}).Snapshot(nil)
+			wantLayer, wantSource := "lead", "measured"
+			if source == "legacy" {
+				wantLayer, wantSource = "worker", "derived"
+			}
+			if s := r.Sessions[1]; s.Layer != wantLayer || s.LayerSource != wantSource {
+				t.Fatalf("layer=%q (%s); want %q (%s)", s.Layer, s.LayerSource, wantLayer, wantSource)
+			}
+			lines := strings.Join(treeLines(r), "\n")
+			if !strings.Contains(lines, "child ["+wantLayer+"; layer "+wantSource+";") {
+				t.Fatal("/analyze does not show the resolved layer", lines)
+			}
+			// A child opened as the analysis root uses its own recorded layer.
+			if source == "configuration" {
+				standalone := (&Tree{nodes: []*treeNode{{acc: child, observed: true}}}).Snapshot(nil)
+				if standalone.Sessions[0].Layer != "lead" || standalone.Sessions[0].LayerSource != "measured" {
+					t.Fatal("child-only analysis lost its layer", standalone.Sessions[0])
+				}
+			}
+		})
+	}
+}
+
+func TestReadTreeUsesLayerFromStartPlan(t *testing.T) {
+	spec, err := subagent.NewSpec(subagent.Plan{Version: 1, Action: "start", ParentID: "main", Template: "collector", Text: "collect", Configuration: &subagent.Template{Layer: "lead", Workspace: t.TempDir(), Runtime: []byte(`{}`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := ReadTree(t.Context(), "main", func(_ context.Context, id session.ID, _ sessionstore.Sequence, _ int) (host.View, error) {
+		v := host.View{}
+		if id == "main" {
+			v.Operations = []operation.Operation{{ID: "start", Type: spec.Type, Version: spec.Version, State: spec.State, MaxOutputLength: spec.MaxOutputLength, Status: operation.StatusCompleted}}
+		}
+		return v, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := tree.Snapshot(nil)
+	if r.Partial || len(r.Sessions) != 2 || r.Sessions[1].Layer != "lead" || r.Sessions[1].LayerSource != "measured" || len(r.Workers) != 0 {
+		t.Fatal("plan's resolved layer lost without activity telemetry", r)
+	}
+}
 
 func storeInspect(t *testing.T, dir string) InspectFunc {
 	t.Helper()
@@ -137,6 +195,159 @@ func TestWorkerTierMissingDescendantKeepsPartialCosts(t *testing.T) {
 	for _, g := range r.Layers {
 		if g.Model == "qwen3.8-flash" && (g.Unobserved != 1 || g.ListPriceUSD.Unknown != 2 || g.RequestDuration.Unknown != 1 || !g.Usage.Partial) {
 			t.Fatal("partial cost/volume presented as complete", g)
+		}
+	}
+}
+
+func TestWorkerTierLegacyRuntimeDerivedFromRecordedResponses(t *testing.T) {
+	dir := t.TempDir()
+	f := testsession.WriteLegacyWorkerTierTree(t, dir)
+	tree, err := ReadTree(t.Context(), "main", storeInspect(t, dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range tree.nodes {
+		if n.acc.id == f.Lead {
+			for _, start := range n.acc.metrics.starts {
+				if start.activity.Provider != "" || start.activity.Model != "" {
+					t.Fatal("fixture unexpectedly recorded the resolved start runtime", start)
+				}
+			}
+		}
+	}
+	r := tree.Snapshot(nil)
+	var found bool
+	for _, g := range r.Layers {
+		if g.Layer == "worker" && g.Provider == "opencode-go" && g.Model == "deepseek-v4.1-flash" {
+			found = true
+			if g.Requests != 3 || g.Sessions != 3 || g.Usage.Input != 2100 || g.Usage.Output != 1300 || g.Usage.CachedInput != 400 || g.Effort != "" || g.OutputTPS.Measured != 3 {
+				t.Fatalf("legacy response usage/runtime lost: %+v", g)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("missing worker / opencode-go / deepseek-v4.1-flash row: %+v", r.Layers)
+	}
+	for _, s := range r.Sessions {
+		if s.ID == f.Workers["flash-first"] && (s.SelectionSource != "derived-from-responses" || s.LayerSource != "derived" || s.Provider != "opencode-go" || s.Model != "deepseek-v4.1-flash") {
+			t.Fatalf("legacy selection source/runtime incorrect: %+v", s)
+		}
+	}
+	for _, format := range []string{"json", "markdown"} {
+		data, err := Encode(Report{Version: 1, Session: "main", Tree: r}, format)
+		if err != nil || !strings.Contains(string(data), "derived-from-responses") || !strings.Contains(string(data), "deepseek-v4.1-flash") {
+			t.Fatalf("missing derived response identity in %s export: %s, %v", format, data, err)
+		}
+	}
+}
+
+func TestWorkerTierResponseIdentityAndModelSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		response llm.Response
+		activity llm.ActivityRecord
+		provider string
+	}{
+		{name: "catalog", provider: "opencode-go"},
+		{name: "response provider", response: llm.Response{Provider: "explicit-response"}, provider: "explicit-response"},
+		{name: "usage provider", response: llm.Response{Usage: llm.Usage{Provider: "explicit-usage"}}, provider: "explicit-usage"},
+		{name: "response precedes usage and activity", response: llm.Response{Provider: "explicit-response", Usage: llm.Usage{Provider: "explicit-usage"}}, activity: llm.ActivityRecord{Provider: "activity", Model: "deepseek-v4.1-flash"}, provider: "explicit-response"},
+		{name: "own model activity", activity: llm.ActivityRecord{Provider: "activity", Model: "deepseek-v4.1-flash"}, provider: "activity"},
+		{name: "own response activity", response: llm.Response{ID: "response"}, activity: llm.ActivityRecord{ID: "response", Provider: "activity"}, provider: "activity"},
+		{name: "unrelated activity", activity: llm.ActivityRecord{Provider: "activity", Model: "other"}, provider: "opencode-go"},
+		{name: "descendant activity", activity: llm.ActivityRecord{Kind: "child_start", Provider: "activity", Model: "deepseek-v4.1-flash"}, provider: "opencode-go"},
+		{name: "unknown API model", response: llm.Response{Model: "deepseek-unlisted"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := New("worker")
+			a.Apply(host.HistoryItem{Data: sessionstore.HostRecord{Kind: "configuration", Configuration: []byte(`{"Provider":{"provider":"openai-codex","model":{"id":"gpt-6.2-sol"}},"ReasoningEffort":"max"}`)}})
+			a.Apply(host.HistoryItem{Data: sessionstore.HostRecord{Kind: sessionstore.HostActivity, Activity: &tc.activity}})
+			response := tc.response
+			if response.Model == "" {
+				response.Model = "deepseek-v4.1-flash"
+			}
+			response.Usage.AuthMethod = "api_key"
+			response.Usage.InputTokens, response.Usage.OutputTokens = 10, 20
+			a.Apply(host.HistoryItem{Data: sessionstore.ModelResponse{Response: response}})
+			a.Apply(host.HistoryItem{Data: sessionstore.ModelResponse{Response: llm.Response{Model: "qwen3.8-flash", Usage: llm.Usage{AuthMethod: "api_key", InputTokens: 30, OutputTokens: 40}}}})
+			r := (&Tree{nodes: []*treeNode{{acc: a, parent: "lead", template: "worker-max", observed: true}}}).Snapshot(nil)
+			if len(r.Layers) != 2 || r.Sessions[0].SelectionSource != "derived-from-responses" || r.Sessions[0].Provider != tc.provider || r.Sessions[0].Model != response.Model || !r.Tasks[0].MixedModels {
+				t.Fatalf("response identity/split incorrect: %+v", r)
+			}
+			for _, g := range r.Layers {
+				if g.Requests != 1 || g.Effort != "" || g.RequestDuration.Known || g.RequestDuration.Unknown != 1 {
+					t.Fatalf("invented effort/timing or merged models: %+v", g)
+				}
+				if g.Model == response.Model && (g.Provider != tc.provider || g.Usage.Input != 10 || g.Usage.Output != 20) || g.Model == "qwen3.8-flash" && (g.Provider != "opencode-go" || g.Usage.Input != 30 || g.Usage.Output != 40) {
+					t.Fatalf("tokens assigned to the wrong model: %+v", g)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkerTierSharedRoleModelPreservesRecordedProvider(t *testing.T) {
+	for _, provider := range []string{"openai-codex", "opencode-go"} {
+		t.Run(provider, func(t *testing.T) {
+			a := New("worker")
+			a.active = &sessionstore.RuntimeSelection{Provider: provider, Model: "gpt-6-luna", Effort: llm.ReasoningEffortHigh}
+			a.Apply(host.HistoryItem{Data: sessionstore.ModelResponse{Response: llm.Response{Model: "gpt-6-luna", Usage: llm.Usage{InputTokens: 10, OutputTokens: 20}}}})
+			r := (&Tree{nodes: []*treeNode{{acc: a, template: "worker-high", observed: true}}}).Snapshot(nil)
+			if len(r.Layers) != 1 || r.Layers[0].Provider != provider || r.Layers[0].Usage.Input != 10 || r.Layers[0].Usage.Output != 20 || r.Layers[0].Effort != "high" {
+				t.Fatalf("catalog reassigned the role's recorded runtime: %+v", r.Layers)
+			}
+		})
+	}
+}
+
+func TestWorkerTierLayersSplitFastRequests(t *testing.T) {
+	a := New("root")
+	a.Apply(host.HistoryItem{Data: sessionstore.HostRecord{Kind: "configuration", Configuration: []byte(`{"Provider":{"provider":"openai-codex","model":{"id":"gpt-6-luna"}},"ReasoningEffort":"max","Fast":true}`)}})
+	for _, sample := range []struct {
+		fast                    *bool
+		input, output, duration int64
+	}{
+		{nil, 30, 3, 1_000_000},
+		{new(false), 40, 10, 2_000_000},
+		{new(true), 50, 30, 1_000_000},
+		{new(true), 60, 30, 2_000_000},
+	} {
+		usage := llm.Usage{InputTokens: sample.input, OutputTokens: sample.output, Fast: sample.fast}
+		a.Apply(host.HistoryItem{Data: sessionstore.ModelResponse{Response: llm.Response{
+			Usage: usage, Generation: &llm.GenerationStatistics{
+				Tokens: llm.ReportedTokens(usage), DurationMicros: sample.duration, Source: "client_clock",
+			},
+		}}})
+	}
+	a.Apply(host.HistoryItem{Data: sessionstore.HostRecord{Kind: sessionstore.HostContext, Context: &sessionstore.ContextRecord{
+		Usage: &llm.Usage{InputTokens: 20, OutputTokens: 1, Fast: new(true)},
+	}}})
+	r := (&Tree{nodes: []*treeNode{{acc: a, observed: true}}}).Snapshot(nil)
+	if len(r.Layers) != 3 {
+		t.Fatalf("Fast rows: %+v", r.Layers)
+	}
+	want := map[string]struct {
+		requests      int
+		input, output int64
+		tps           float64
+	}{
+		"":    {1, 30, 3, 3},
+		"off": {1, 40, 10, 5},
+		"on":  {3, 130, 61, 20},
+	}
+	for _, g := range r.Layers {
+		expected, ok := want[g.Fast]
+		if !ok || g.Provider != "openai-codex" || g.Model != "gpt-6-luna" || g.Effort != "max" ||
+			g.Requests != expected.requests || g.Usage.Input != expected.input || g.Usage.Output != expected.output ||
+			!g.OutputTPS.Known || g.OutputTPS.Value != expected.tps {
+			t.Fatalf("incorrect speed or usage by tier: %+v", g)
+		}
+		delete(want, g.Fast)
+	}
+	lines := strings.Join(treeLines(r), "\n")
+	for _, label := range []string{"fast on", "fast off", "fast unknown"} {
+		if !strings.Contains(lines, "main / openai-codex / gpt-6-luna / max / "+label) {
+			t.Fatalf("Layers missing %q:\n%s", label, lines)
 		}
 	}
 }

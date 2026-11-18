@@ -37,8 +37,10 @@ type modelRequest struct {
 	Refresh        bool                     `json:",omitzero"`
 	Provider       string                   `json:",omitzero"`
 	Role           string                   `json:",omitzero"`
+	FastOnly       bool                     `json:",omitzero"`
 	InputID        inbox.ID                 `json:",omitzero"`
 	Template, Task string                   `json:",omitzero"`
+	Brief          subagent.BriefFields     `json:",omitzero"`
 	ChildRuntime   *subagent.RuntimeRequest `json:",omitzero"`
 	HostBinding    *launcherHostBinding     `json:",omitzero"`
 }
@@ -123,7 +125,8 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if peek.Action == "child.start" {
 				templates := h.templates
 				chosen, _ := readSubagentModel(h.subagentModel)
-				roleChoice := chosen.choice(q.Template)
+				layer := subagent.ResolveLayer(q.Template, "main")
+				roleChoice := chosen.choice(layer)
 				_, retry := s.OperationIntent(q.InputID)
 				if !retry && chosen.Roles == nil && h.runtime.BuiltinSubagents && q.ChildRuntime != nil && q.ChildRuntime.Provider == "" && roleChoice.Provider != opencodego.ProviderID && roleChoice.Provider != claudeagent.ProviderID {
 					templates = make(map[string]subagent.Template, len(h.templates))
@@ -144,7 +147,7 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
-				resolve := childRuntimeResolver(h.runtime, h.subagentModel)
+				resolve := childRuntimeResolverForLayer(h.runtime, h.subagentModel, "main", h.templates["lead"].Default)
 				if len(h.runtime.Backends) == 0 && h.runtime.Discovered == nil {
 					resolve = nil
 				}
@@ -152,7 +155,7 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// the gateway's read-only baseline would only narrow that, and the
 				// child then follows the Session's mode itself.
 				var receipt host.Receipt
-				e := subagentOverrideRefusal(h.subagentModel, h.templates[q.Template], q.ChildRuntime, retry, q.Template)
+				e := subagentOverrideRefusal(h.subagentModel, h.templates[q.Template], q.ChildRuntime, retry, layer)
 				if e == nil && !retry && q.ChildRuntime != nil && q.ChildRuntime.Provider == "" && claudeModel(q.ChildRuntime.Model) {
 					selected := sessionstore.SelectionFromConfiguration(templates[q.Template].Runtime)
 					if selected != nil && (selected.Provider == "openai-codex" || selected.Provider == "openai") {
@@ -160,7 +163,7 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if e == nil {
-					receipt, e = subagent.StartChild(r.Context(), s, q.Generation, q.InputID, q.Template, q.Task, templates, q.ChildRuntime, resolve, chosen.Roles != nil && h.runtime.BuiltinSubagents)
+					receipt, e = subagent.StartChildWithBrief(r.Context(), s, q.Generation, q.InputID, q.Template, q.Task, q.Brief, templates, q.ChildRuntime, resolve, chosen.Roles != nil && h.runtime.BuiltinSubagents)
 				}
 				if e != nil {
 					out.Error = "child_start_failed"
@@ -248,7 +251,9 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					m = modelcatalog.Model{ID: active.Model, Name: active.Name, Efforts: []llm.ReasoningEffort{active.Effort}, ContextWindow: active.ContextWindow}
 					e = nil
 				}
-				if active == nil || e != nil || !m.AllowsEffort(q.Selection.Effort) {
+				if q.Selection.Fast && !m.AllowsFast(id) {
+					out.Error, out.Hint = llm.ActivityFastUnsupported, "fast unsupported for "+viewer.SafeText(q.Selection.Model)
+				} else if active == nil || e != nil || !m.AllowsEffort(q.Selection.Effort) {
 					out.Error = "selection_unavailable"
 				} else {
 					choice := q.Selection
@@ -312,54 +317,21 @@ func (h modelUI) subagentChoice(ctx context.Context, owner *host.Session, q mode
 	}
 	save := q.Action == "subagent.select"
 	if save {
-		selection := q.Selection
-		if buildfeatures.Disabled(selection.Provider) {
-			out.Error, out.Hint = buildfeatures.OpenCodeGoDisabledCode, buildfeatures.OpenCodeGoChildDisabledMessage
+		if !h.setSubagentChoice(ctx, q, role, &chosen, out) {
 			return
 		}
-		if _, err := h.runtime.ProviderRuntime(selection.Provider); err != nil || h.runtime.CheckProvider(ctx, selection.Provider) != nil {
-			out.Error, out.Hint = "provider_unavailable", fmt.Sprintf("%s is not registered or available; %s", selection.Provider, modelcatalog.AuthRequired.ProviderHint(selection.Provider))
-			return
-		}
-		catalog, err := h.catalog(ctx, selection.Provider, false)
-		if err != nil || !catalog.Available {
-			out.Error, out.Hint = "provider_unavailable", modelcatalog.CatalogUnavailable.ProviderHint(selection.Provider)
-			return
-		}
-		model, err := catalog.FindSelection(selection.Model)
-		if err != nil {
-			out.Error, out.Hint = "invalid_model", fmt.Sprintf("model %q is not in %s's catalog", selection.Model, selection.Provider)
-			return
-		}
-		if selection.Effort != "" && !model.AllowsEffort(selection.Effort) {
-			out.Error, out.Hint = "unsupported_effort", fmt.Sprintf("model %q does not offer effort %q; offered: %v", selection.Model, selection.Effort, model.Efforts)
-			return
-		}
-		choice := subagentModelChoice{Provider: selection.Provider, Model: selection.Model, Effort: selection.Effort}
-		out.SubagentModel = &sessionstore.RuntimeSelection{Version: 1, Provider: choice.Provider, Model: choice.Model, Name: viewer.SafeText(model.Name), Effort: choice.Effort}
-		if role == "all" {
-			legacy := subagentModel{Version: 1, Provider: choice.Provider, Model: choice.Model}
-			if choice.Effort == "" && legacy.valid() {
-				chosen = legacy
-			} else {
-				chosen = subagentModel{Version: 2, Roles: &subagentRoleModels{}}
-				for _, group := range subagentRoleGroups {
-					chosen.setRole(group, choice)
-				}
+		if chosen.Version != 0 {
+			if err := writeSubagentModel(h.subagentModel, chosen); err != nil {
+				out.Error = "subagent_model_unwritable"
+				return
 			}
-		} else {
-			chosen.setRole(role, choice)
-		}
-		if err := writeSubagentModel(h.subagentModel, chosen); err != nil {
-			out.Error = "subagent_model_unwritable"
-			return
 		}
 		out.Pending = len(h.templates) == 0
 	}
 	out.Providers = h.subagentProviders(ctx)
 	if out.SubagentModel == nil {
 		current := chosen.choice("lead")
-		out.SubagentModel = &sessionstore.RuntimeSelection{Version: 1, Provider: current.Provider, Model: current.Model, Effort: current.Effort}
+		out.SubagentModel = &sessionstore.RuntimeSelection{Version: 1, Provider: current.Provider, Model: current.Model, Effort: current.Effort, Fast: current.Fast}
 		if out.SubagentModel.Provider == "" {
 			out.SubagentModel.Provider = "openai-codex"
 		}
@@ -370,7 +342,7 @@ func (h modelUI) subagentChoice(ctx context.Context, owner *host.Session, q mode
 		if choice.Provider == "" {
 			choice.Provider = "openai-codex"
 		}
-		out.SubagentRoles[group] = sessionstore.RuntimeSelection{Version: 1, Provider: choice.Provider, Model: choice.Model, Effort: choice.Effort}
+		out.SubagentRoles[group] = sessionstore.RuntimeSelection{Version: 1, Provider: choice.Provider, Model: choice.Model, Effort: choice.Effort, Fast: choice.Fast}
 		if role != "all" && role != group {
 			continue
 		}
@@ -383,6 +355,82 @@ func (h modelUI) subagentChoice(ctx context.Context, owner *host.Session, q mode
 			return
 		}
 	}
+}
+
+func (h modelUI) setSubagentChoice(ctx context.Context, q modelRequest, role string, chosen *subagentModel, out *modelReply) bool {
+	selection := q.Selection
+	if q.FastOnly {
+		for _, group := range subagentRoleGroups {
+			if role != "all" && role != group {
+				continue
+			}
+			choice := chosen.choice(group)
+			if selection.Fast {
+				if choice.Model == "" {
+					out.Error, out.Hint = "invalid_model", fmt.Sprintf("set --provider and --model for %s to enable fast", group)
+					return false
+				}
+				if _, ok := h.validateSubagentChoice(ctx, subagentModelChoice{Provider: choice.Provider, Model: choice.Model, Fast: true}, out); !ok {
+					return false
+				}
+			}
+			if choice.Fast != selection.Fast {
+				choice.Fast = selection.Fast
+				chosen.setRole(group, choice)
+			}
+		}
+		return true
+	}
+	choice := subagentModelChoice{Provider: selection.Provider, Model: selection.Model, Effort: selection.Effort, Fast: selection.Fast}
+	model, ok := h.validateSubagentChoice(ctx, choice, out)
+	if !ok {
+		return false
+	}
+	out.SubagentModel = &sessionstore.RuntimeSelection{Version: 1, Provider: choice.Provider, Model: choice.Model, Name: viewer.SafeText(model.Name), Effort: choice.Effort, Fast: choice.Fast}
+	if role == "all" {
+		legacy := subagentModel{Version: 1, Provider: choice.Provider, Model: choice.Model}
+		if choice.Effort == "" && !choice.Fast && legacy.valid() {
+			*chosen = legacy
+			return true
+		}
+		*chosen = subagentModel{Version: 2, Roles: &subagentRoleModels{}}
+		for _, group := range subagentRoleGroups {
+			chosen.setRole(group, choice)
+		}
+	} else {
+		chosen.setRole(role, choice)
+	}
+	return true
+}
+
+func (h modelUI) validateSubagentChoice(ctx context.Context, selection subagentModelChoice, out *modelReply) (modelcatalog.Model, bool) {
+	if buildfeatures.Disabled(selection.Provider) {
+		out.Error, out.Hint = buildfeatures.OpenCodeGoDisabledCode, buildfeatures.OpenCodeGoChildDisabledMessage
+		return modelcatalog.Model{}, false
+	}
+	if _, err := h.runtime.ProviderRuntime(selection.Provider); err != nil || h.runtime.CheckProvider(ctx, selection.Provider) != nil {
+		out.Error, out.Hint = "provider_unavailable", fmt.Sprintf("%s is not registered or available; %s", selection.Provider, modelcatalog.AuthRequired.ProviderHint(selection.Provider))
+		return modelcatalog.Model{}, false
+	}
+	catalog, err := h.catalog(ctx, selection.Provider, false)
+	if err != nil || !catalog.Available {
+		out.Error, out.Hint = "provider_unavailable", modelcatalog.CatalogUnavailable.ProviderHint(selection.Provider)
+		return modelcatalog.Model{}, false
+	}
+	model, err := catalog.FindSelection(selection.Model)
+	if err != nil {
+		out.Error, out.Hint = "invalid_model", fmt.Sprintf("model %q is not in %s's catalog", selection.Model, selection.Provider)
+		return modelcatalog.Model{}, false
+	}
+	if selection.Fast && !model.AllowsFast(selection.Provider) {
+		out.Error, out.Hint = llm.ActivityFastUnsupported, "fast unsupported for "+viewer.SafeText(selection.Model)
+		return modelcatalog.Model{}, false
+	}
+	if selection.Effort != "" && !model.AllowsEffort(selection.Effort) {
+		out.Error, out.Hint = "unsupported_effort", fmt.Sprintf("model %q does not offer effort %q; offered: %v", selection.Model, selection.Effort, model.Efforts)
+		return modelcatalog.Model{}, false
+	}
+	return model, true
 }
 
 // subagentProviders includes registered API connections only as explicit choices.

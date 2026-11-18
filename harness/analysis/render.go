@@ -70,6 +70,7 @@ func Lines(r Report, view string, ascii bool) []string {
 		out = append(out, usageLines(r.Usage)...)
 		out = append(out, compactionLines(r)...)
 		out = append(out, fmt.Sprintf("Tools       %d calls · %d completed · %d failed · %d canceled", r.Tools.Calls, r.Tools.Completed, r.Tools.Failed, r.Tools.Canceled), fmt.Sprintf("Agents      %d discovered · %d observed", r.AgentCounts.Discovered, r.AgentCounts.Observed), fmt.Sprintf("            %d success · %d failed · %d canceled · %d finish unknown", r.AgentCounts.Success, r.AgentCounts.Failed, r.AgentCounts.Canceled, r.AgentCounts.UnknownFinish))
+		out = append(out, routingLines(r)...)
 	case "usage":
 		out = append(out, TelemetryLines(r, "claude_usage")...)
 		out = append(out, cacheLines(r)...)
@@ -136,8 +137,13 @@ func Lines(r Report, view string, ascii bool) []string {
 		out = append(out, cacheLines(r)...)
 		out = append(out, compactionLines(r)...)
 		if d := r.ContextPackage; d != nil {
+			input := d.InputTokens
+			if d.Estimator == "" {
+				// Legacy diagnostics predate the separate admission input count.
+				input = d.EstimatedInputTokens
+			}
 			out = append(out, "Context Engine v1 · estimated (not actual usage)", "Provider / model  "+viewer.SafeText(d.Provider)+" / "+viewer.SafeText(d.Model), fmt.Sprintf("Runtime revision  %d", d.RuntimeRevision))
-			out = append(out, fmt.Sprintf("Canonical context units  %d", d.CanonicalUnits), fmt.Sprintf("History in view          %d", d.Recent), fmt.Sprintf("Outside view             %d", d.Omitted), fmt.Sprintf("Security exclusions      %d", d.Excluded), fmt.Sprintf("Request source boundary  %d", d.ThroughSequence), fmt.Sprintf("Estimated input tokens   %d / %d · %.1f%%", d.EstimatedInputTokens, d.Budget.Input, d.Utilization), fmt.Sprintf("Window                   %d (%s)", d.Budget.Window, d.Budget.WindowSource), "Derived view             "+d.Cache)
+			out = append(out, fmt.Sprintf("Canonical context units  %d", d.CanonicalUnits), fmt.Sprintf("History in view          %d", d.Recent), fmt.Sprintf("Outside view             %d", d.Omitted), fmt.Sprintf("Security exclusions      %d", d.Excluded), fmt.Sprintf("Request source boundary  %d", d.ThroughSequence), fmt.Sprintf("Estimated input tokens   %d", d.EstimatedInputTokens), fmt.Sprintf("Admission input tokens   %d / %d · %.1f%%", input, d.Budget.Input, d.Utilization), "Input measurement        "+viewer.SafeText(d.Measurement), fmt.Sprintf("Window                   %d (%s)", d.Budget.Window, d.Budget.WindowSource), "Derived view             "+d.Cache)
 
 		} else {
 			out = append(out, "Context package unknown (no prepared request observed)")

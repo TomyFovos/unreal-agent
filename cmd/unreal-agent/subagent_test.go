@@ -322,6 +322,11 @@ func TestCLIChildDiscoversCurrentInstructions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			handle, err := subagent.DecodeHandle(completed)
+			if err != nil || handle.Brief == nil || plan.Text != "delegated task only" {
+				t.Fatal("start lost its original task or preview", handle, err)
+			}
+			preview := handle.Brief.Render(plan.Text)
 			child, err := subagent.ReadChild(ctx, store, plan.ChildID, 0, 256)
 			if err != nil {
 				t.Fatal(err)
@@ -368,11 +373,11 @@ func TestCLIChildDiscoversCurrentInstructions(t *testing.T) {
 					bindings++
 				}
 				if in, ok := item.Data.(inbox.Input); ok && in.Kind == inbox.InputPeer {
-					peer, _ := in.DecodePeerMessage()
-					if in.ID == inbox.ID("task:"+string(completed.ID)) && peer.Text != "delegated task only" {
-						t.Error("task payload includes extra context")
-					}
 					if in.ID == inbox.ID("task:"+string(completed.ID)) {
+						peer, err := in.DecodePeerMessage()
+						if err != nil || peer.Text != preview {
+							t.Fatalf("task payload differs from parent preview: %q, %v", peer.Text, err)
+						}
 						tasks++
 					}
 				}

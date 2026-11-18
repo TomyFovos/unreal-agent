@@ -26,6 +26,9 @@ type Result struct {
 	Tool    string `json:"tool"`
 	Content string `json:"content"`
 	IsError bool   `json:"is_error,omitzero"`
+	// Complete marks canonical values persisted before model-display bounding.
+	Complete     bool     `json:"complete,omitzero"`
+	WrittenPaths []string `json:"-"`
 }
 
 // Results hands reported results from the Claude adapter to the Translator.
@@ -87,12 +90,12 @@ func (t *Translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallSta
 		}
 		return tool.ErrorStatus(content, operation.DefaultMaxOutputLength)
 	}
-	result.Content, _ = operation.BoundOutput(content, operation.DefaultMaxOutputLength)
+	result.Content, result.Complete = content, true
 	value, err := json.Marshal(result)
 	if err != nil {
 		return tool.CallStatus{Error: fmt.Sprintf("encode Claude Code result: %v", err)}
 	}
-	spec, err := operation.NewValueSpec(value)
+	spec, err := operation.NewRecordedValueSpec(value, result.WrittenPaths)
 	if err != nil {
 		return tool.CallStatus{Error: err.Error()}
 	}
@@ -113,7 +116,11 @@ func (t *Translator) TranslateResult(callID string, status tool.CallStatus, oper
 	if err != nil {
 		return llm.ToolResult{}, fmt.Errorf("decode claude_code call %q result: %w", callID, err)
 	}
-	return text(result.Content), nil
+	content := result.Content
+	if result.Complete {
+		content, _ = operation.BoundOutput(content, operation.DefaultMaxOutputLength)
+	}
+	return text(content), nil
 }
 
 func (t *Translator) ResultFailed(status tool.CallStatus, operations []operation.Operation) bool {

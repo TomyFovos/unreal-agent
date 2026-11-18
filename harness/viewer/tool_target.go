@@ -25,6 +25,9 @@ func SafeToolTarget(c llm.ToolCall) string {
 		Query   string `json:"query"`
 		Name    string `json:"name"`
 		Task    string `json:"task"`
+		Brief   struct {
+			Title string `json:"title"`
+		} `json:"brief"`
 		Source  string `json:"source"`
 		Targets []struct {
 			Path string `json:"path"`
@@ -69,6 +72,9 @@ func SafeToolTarget(c llm.ToolCall) string {
 		target = a.Name
 	case "SubagentStart":
 		target = a.Task
+		if strings.TrimSpace(a.Brief.Title) != "" {
+			target = a.Brief.Title
+		}
 	case "claude_code":
 		// A call Claude Code ran itself: show its tool and what it acted on.
 		var o struct {

@@ -11,6 +11,8 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -63,6 +65,7 @@ type coordinator struct {
 	modelRetry         <-chan time.Time
 	usageRetryAt       time.Time
 	completedChildren  []operation.Operation
+	failedModel        *failedModelTurn
 }
 
 type stopState struct {
@@ -77,10 +80,12 @@ type loopState struct {
 	operations      map[operation.ID]operation.Operation
 	availableInputs int
 	deliveredInputs int
-	// quietInputs counts inputs since the latest regular turn began that the
-	// next model call consumes but that do not call the model themselves:
-	// a child's ready notice or progress update.
+	// Peer and quiet counts cover inputs still awaiting a model response. The
+	// per-turn counts capture only those included in the current request.
+	peerInputs        int
 	quietInputs       int
+	turnPeerInputs    int
+	turnQuietInputs   int
 	currentTurnInputs int
 	callModel         bool
 	grace             <-chan time.Time
@@ -159,7 +164,11 @@ func (current *coordinator) Run(ctx context.Context) error {
 		}
 	}()
 
-	return current.runLoop(ctx)
+	err := current.runLoop(ctx)
+	if err == nil && current.stop.request.Mode == inbox.StopWhenIdle && current.failedModel != nil {
+		return current.failedModel.cause
+	}
+	return err
 }
 
 func (current *coordinator) runLoop(ctx context.Context) error {
@@ -321,6 +330,12 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 			received.turnID = current.state.currentTurnID
 			if !current.contextRetry && llm.IsContextOverflow(received.err, received.response) {
 				if b, ok := current.dependencies.ContextBuilder.(interface{ UsesAppendOnlyContext() bool }); ok && b.UsesAppendOnlyContext() {
+					if err := current.drainInbox(ctx); err != nil {
+						return err
+					}
+					if current.held() || current.stop.request.Mode == inbox.StopHard {
+						break
+					}
 					current.contextRetry, current.forceCompaction = true, true
 					if err := current.requestModelResponse(modelContext, modelResponses); err != nil {
 						return err
@@ -421,18 +436,8 @@ func (current *coordinator) processEvents(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if current.cancelModel == nil {
-		for len(current.completedChildren) > 0 {
-			op := current.completedChildren[0]
-			input, err := current.dependencies.CompletedInput(op)
-			if err != nil {
-				return false, err
-			}
-			if input != nil && !current.recordedInputIDs[input.ID] {
-				if err := current.handleInboxInputs(ctx, []inbox.Input{*input}); err != nil {
-					return false, err
-				}
-			}
-			current.completedChildren = current.completedChildren[1:]
+		if err := current.recordChildCompletions(ctx); err != nil {
+			return false, err
 		}
 	}
 	if current.cancelModel != nil && current.bridgeActive {
@@ -449,9 +454,17 @@ func (current *coordinator) processEvents(ctx context.Context) (bool, error) {
 	if current.idleDone != nil || current.modelRetry != nil {
 		return false, nil
 	}
-	current.state.interrupted = false
 	callModel := current.state.callModel || (current.wakingInputs() > 0 && current.cancelModel == nil && len(current.state.graceToolCalls) == 0)
-	if !callModel && current.isIdle() && !current.finished() && current.dependencies.OnIdle != nil {
+	if callModel {
+		if err := current.drainInbox(ctx); err != nil {
+			return false, err
+		}
+		if current.held() {
+			return false, nil
+		}
+	}
+	current.state.interrupted = false
+	if !callModel && current.isIdle() && !current.finished() && current.failedModel == nil && current.dependencies.OnIdle != nil {
 		if err := current.dependencies.OnIdle(ctx, current.state.currentTurnID); err != nil {
 			return false, err
 		}
@@ -511,6 +524,14 @@ func (current *coordinator) processInputs(ctx context.Context, inputs []inbox.In
 	return current.handleInboxInputs(ctx, inputs)
 }
 
+func (current *coordinator) drainInbox(ctx context.Context) error {
+	inputs, err := current.dependencies.Inbox.Drain(ctx)
+	if err != nil {
+		return err
+	}
+	return current.processInputs(ctx, inputs)
+}
+
 func (current *coordinator) processOperations(ctx context.Context, updates []operation.Operation) error {
 	for _, update := range updates {
 		if err := current.handleOperationUpdate(ctx, update); err != nil {
@@ -523,9 +544,15 @@ func (current *coordinator) processOperations(ctx context.Context, updates []ope
 func (current *coordinator) processModelResponse(ctx context.Context, modelResponse modelResponseResult) error {
 	current.interruptModel()
 	if modelResponse.err != nil {
-
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if modelResponse.response.Stop == llm.StopMaxOutputTokens && modelResponse.response.Failure != nil {
+			// A CLI can report both observed output and a terminal execution error.
+			result := sessionstore.ModelResponse{TurnID: modelResponse.turnID, Response: modelResponse.response, AdapterError: true}
+			if err := current.recordModelResponse(ctx, result); err != nil {
+				return err
+			}
 		}
 		var limited llm.UsageLimitFailure
 		if errors.As(modelResponse.err, &limited) {
@@ -555,7 +582,7 @@ func (current *coordinator) processModelResponse(ctx context.Context, modelRespo
 			current.modelRetry = time.After(2 * time.Second)
 			return nil
 		}
-		return fmt.Errorf("call model for turn %q: %w", modelResponse.turnID, modelResponse.err)
+		return current.failModelTurn(ctx, modelResponse.turnID, fmt.Errorf("call model for turn %q: %w", modelResponse.turnID, modelResponse.err))
 	}
 	statuses, err := current.handleModelResponse(ctx, sessionstore.ModelResponse{
 		TurnID:   modelResponse.turnID,
@@ -677,11 +704,36 @@ func (current *coordinator) wakingInputs() int {
 	if current.held() {
 		return 0
 	}
-	return max(current.pendingInputs()-current.state.quietInputs, 0)
+	pending, peers, quiet := current.pendingInputs(), current.state.peerInputs, current.state.quietInputs
+	if failed := current.failedModel; failed != nil {
+		pending -= failed.inputs
+		peers -= failed.peers
+		quiet -= failed.quiet
+	}
+	if current.waitingForOwnToolBatch() {
+		quiet = peers
+	}
+	return max(pending-quiet, 0)
 }
 
-// quietPeer reports whether a peer input waits for the parent's next turn:
-// a child's ready notice or progress update.
+// Peer input alone never starts inference during the parent's tool batch.
+// Child operations are asynchronous and may need a parent reply to finish.
+func (current *coordinator) waitingForOwnToolBatch() bool {
+	for key, call := range current.state.toolCalls {
+		if key.turnID != current.state.currentTurnID {
+			continue
+		}
+		for id := range call.operations {
+			op := current.state.operations[id]
+			if !operationIsTerminal(op.Status) && !subagentOperation(op) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Ready notices and progress updates never wake an idle parent.
 func quietPeer(input inbox.Input) bool {
 	peer, err := input.DecodePeerMessage()
 	return err == nil && (peer.Kind == "ready" || peer.Kind == "progress")
@@ -754,8 +806,10 @@ func (current *coordinator) requestModelResponse(
 		}
 	}
 
-	if err := current.flushDeferredContext(); err != nil {
-		return err
+	if len(current.deferredContext) > 0 {
+		if err := current.persistContext(ctx, sessionstore.ContextRecord{Kind: "deferred_inputs"}); err != nil {
+			return err
+		}
 	}
 	if b, ok := current.dependencies.ContextBuilder.(interface {
 		PrepareContext(context.Context, llm.Adapter, llm.RequestOptions, func(sessionstore.ContextRecord) error, bool) error
@@ -770,7 +824,13 @@ func (current *coordinator) requestModelResponse(
 					return current.processModelResponse(ctx, modelResponseResult{turnID: current.state.currentTurnID, err: err})
 				}
 			}
-			return fmt.Errorf("prepare context: %w", err)
+			cause := fmt.Errorf("prepare context: %w", err)
+			var summary *contextbuilder.SummaryModelError
+			if errors.As(err, &summary) || contextengine.IsBudgetError(err) {
+				current.forceCompaction = false
+				return current.failModelTurn(ctx, "", cause)
+			}
+			return cause
 		}
 		current.forceCompaction = false
 	}
@@ -779,7 +839,11 @@ func (current *coordinator) requestModelResponse(
 		return recordErr
 	}
 	if err != nil {
-		return fmt.Errorf("build model request: %w", err)
+		cause := fmt.Errorf("build model request: %w", err)
+		if contextengine.IsBudgetError(err) {
+			return current.failModelTurn(ctx, "", cause)
+		}
+		return cause
 	}
 	if built.Report.Context != nil && current.dependencies.ContextBuilt != nil {
 		current.dependencies.ContextBuilt(*built.Report.Context)
@@ -791,6 +855,15 @@ func (current *coordinator) requestModelResponse(
 		RuntimeRevision: runtimeRevision,
 	}
 
+	if d := built.Report.Context; d != nil {
+		turn.ContextAdmission = &session.ContextAdmission{
+			InputTokens: d.InputTokens, EstimatedInputTokens: d.EstimatedInputTokens,
+			MeasuredPrefixTokens: d.MeasuredInputTokens, EstimatedDeltaTokens: d.EstimatedDeltaTokens,
+			BudgetTokens: d.Budget.Input, WindowTokens: d.Budget.Window,
+			RequestBytes: d.RequestBytes, Measurement: d.Measurement,
+			Estimator: d.Estimator, WindowSource: d.Budget.WindowSource, HeaderFingerprint: d.HeaderFingerprint,
+		}
+	}
 	item, err := current.addItemToLocalState(sessionstore.Item{
 		Kind: sessionstore.ItemTurn,
 		Data: turn,
@@ -859,6 +932,12 @@ func (current *coordinator) persistContext(ctx context.Context, r sessionstore.C
 }
 
 func (current *coordinator) handleInboxInput(ctx context.Context, input inbox.Input) error {
+	// Capture deferral when the input is written so replay can use the same
+	// projection boundary even though no provider or executor is live then.
+	modelActive := current.cancelModel != nil
+	deferPeer := input.Kind == inbox.InputPeer && (modelActive || current.waitingForOwnToolBatch())
+	input.Deferred = (input.Kind == inbox.InputExternal || input.Kind == inbox.InputPeer) &&
+		(len(current.deferredContext) > 0 || modelActive && current.bridgeActive || deferPeer)
 	if input.Kind == inbox.InputPeer {
 		if b, ok := current.dependencies.ContextBuilder.(interface {
 			PeerInputFormatRecord() *sessionstore.ContextRecord
@@ -916,28 +995,31 @@ func (current *coordinator) handleInboxInput(ctx context.Context, input inbox.In
 			current.acceptStop(request)
 		}
 	}
-	current.clearToolGrace()
+	if input.Kind != inbox.InputPeer {
+		current.clearToolGrace()
+	}
 	return nil
 }
 
 func (current *coordinator) handleInboxInputs(ctx context.Context, inputs []inbox.Input) error {
 	for _, input := range inputs {
+		if input.Kind == inbox.InputPeer && current.recordedInputIDs[input.ID] {
+			continue
+		}
 		if err := current.handleInboxInput(ctx, input); err != nil {
 			return err
 		}
 		if input.Kind == inbox.InputExternal {
 			current.state.callModel = true
 		}
-		if input.Kind == inbox.InputPeer && !quietPeer(input) && current.cancelModel == nil {
+		if input.Kind == inbox.InputPeer && !quietPeer(input) && current.cancelModel == nil && !current.waitingForOwnToolBatch() {
 			current.stopIdle("peer_input")
 			if current.usageRetryAt.IsZero() {
 				current.modelRetry = nil
 			}
 			current.state.callModel = true
 		}
-		// The user comes first: a background turn or child wait of a provider that holds
-		// inputs until its turn ends (Claude Code) yields, and its messages
-		// are answered again with the user's input.
+		// A background turn or child wait on the tool bridge yields to user input.
 		if input.Kind == inbox.InputExternal && (current.backgroundTurn || current.waitingForChildren) && current.bridgeActive && current.cancelModel != nil {
 			current.interruptModel()
 		}
@@ -973,14 +1055,7 @@ func (current *coordinator) handleModelResponse(
 	ctx context.Context,
 	response sessionstore.ModelResponse,
 ) ([]scheduledToolCall, error) {
-	item := sessionstore.Item{
-		Kind: sessionstore.ItemModelResponse,
-		Data: response,
-	}
-	if err := current.storeItemInSessionStore(ctx, item); err != nil {
-		return nil, err
-	}
-	if _, err := current.addItemToLocalState(item); err != nil {
+	if err := current.recordModelResponse(ctx, response); err != nil {
 		return nil, err
 	}
 	if current.state.currentTurnType == session.TurnCompaction && response.TurnID == current.state.currentTurnID {
@@ -992,6 +1067,15 @@ func (current *coordinator) handleModelResponse(
 	}
 	current.state.callModel = toolCallStatusesRequireModelResponse(statuses)
 	return statuses, nil
+}
+
+func (current *coordinator) recordModelResponse(ctx context.Context, response sessionstore.ModelResponse) error {
+	item := sessionstore.Item{Kind: sessionstore.ItemModelResponse, Data: response}
+	if err := current.storeItemInSessionStore(ctx, item); err != nil {
+		return err
+	}
+	_, err := current.addItemToLocalState(item)
+	return err
 }
 
 func (current *coordinator) handleOperationUpdate(
@@ -1033,6 +1117,22 @@ func (current *coordinator) queueChildCompletion(op operation.Operation) {
 	if current.dependencies.CompletedInput != nil && subagentOperation(op) && operationIsTerminal(op.Status) {
 		current.completedChildren = append(current.completedChildren, op)
 	}
+}
+
+func (current *coordinator) recordChildCompletions(ctx context.Context) error {
+	for len(current.completedChildren) > 0 {
+		input, err := current.dependencies.CompletedInput(current.completedChildren[0])
+		if err != nil {
+			return err
+		}
+		if input != nil {
+			if err := current.handleInboxInputs(ctx, []inbox.Input{*input}); err != nil {
+				return err
+			}
+		}
+		current.completedChildren = current.completedChildren[1:]
+	}
+	return nil
 }
 
 func (current *coordinator) restore(ctx context.Context) error {
@@ -1189,8 +1289,17 @@ func (current *coordinator) loadHistory(ctx context.Context) (result error) {
 }
 
 func (current *coordinator) restoreItem(item sessionstore.Item) error {
-	if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Activity != nil && record.Activity.Kind == "usage_limit_wait" {
-		current.usageRetryAt = record.Activity.RetryAt
+	if item.Kind == sessionstore.ItemContextEvent {
+		// The Session store replays L2. These items have no model projection.
+		return nil
+	}
+	if record, ok := item.Data.(sessionstore.HostRecord); ok && record.Activity != nil {
+		switch a := record.Activity; a.Kind {
+		case "usage_limit_wait":
+			current.usageRetryAt = a.RetryAt
+		case llm.ActivityModelFailure:
+			current.noteModelFailure(session.TurnID(a.ID), errors.New(a.Reason))
+		}
 	}
 	if input, ok := item.Data.(inbox.Input); ok && current.recordedInputIDs != nil {
 		current.recordedInputIDs[input.ID] = true
@@ -1223,6 +1332,14 @@ func toolCallRequiresTranslator(status sessionstore.ToolCallStatus) bool {
 	return status.Status.Error == "" || len(status.Status.WaitingFor) != 0 || len(status.Operations) != 0
 }
 
+func (current *coordinator) addPeerInput(input inbox.Input) error {
+	b, ok := current.dependencies.ContextBuilder.(interface{ AddPeerInput(inbox.Input) error })
+	if !ok {
+		return errors.New("context builder does not support peer provenance")
+	}
+	return b.AddPeerInput(input)
+}
+
 func (current *coordinator) addItemToLocalState(
 	item sessionstore.Item,
 ) (sessionstore.Item, error) {
@@ -1237,6 +1354,10 @@ func (current *coordinator) addItemToLocalState(
 			return sessionstore.Item{}, fmt.Errorf("invalid host record")
 		}
 		if r.Kind == sessionstore.HostContext && r.Context != nil {
+			if r.Context.Kind == "deferred_inputs" {
+				_, _, err := current.projectDeferredContext(false)
+				return item, err
+			}
 			if b, ok := current.dependencies.ContextBuilder.(interface {
 				ApplyContext(sessionstore.ContextRecord)
 			}); ok {
@@ -1277,6 +1398,7 @@ func (current *coordinator) addItemToLocalState(
 		clear(current.state.operations)
 		clear(current.pendingCancels)
 		current.clearToolGrace()
+		current.failedModel = nil
 
 	case sessionstore.ItemInput:
 		input, ok := item.Data.(inbox.Input)
@@ -1289,12 +1411,11 @@ func (current *coordinator) addItemToLocalState(
 		if err := input.Validate(); err != nil {
 			return sessionstore.Item{}, fmt.Errorf("invalid input: %w", err)
 		}
-		deferProjection := current.bridgeActive && current.cancelModel != nil && (input.Kind == inbox.InputExternal || input.Kind == inbox.InputPeer)
-		if deferProjection {
+		if input.Deferred && (input.Kind == inbox.InputExternal || input.Kind == inbox.InputPeer) {
 			current.deferredContext = append(current.deferredContext, item)
 		}
 		if input.Kind == inbox.InputExternal {
-			if !deferProjection {
+			if !input.Deferred {
 				if err := current.dependencies.ContextBuilder.AddExternalInput(input); err != nil {
 					return sessionstore.Item{}, fmt.Errorf(
 						"add input %q to context: %w",
@@ -1307,16 +1428,13 @@ func (current *coordinator) addItemToLocalState(
 			current.state.externalInputs++
 		}
 		if input.Kind == inbox.InputPeer {
-			peerBuilder, ok := current.dependencies.ContextBuilder.(interface{ AddPeerInput(inbox.Input) error })
-			if !ok {
-				return sessionstore.Item{}, fmt.Errorf("context builder does not support peer provenance")
-			}
-			if !deferProjection {
-				if err := peerBuilder.AddPeerInput(input); err != nil {
+			if !input.Deferred {
+				if err := current.addPeerInput(input); err != nil {
 					return sessionstore.Item{}, err
 				}
 			}
 			current.state.availableInputs++
+			current.state.peerInputs++
 			if quietPeer(input) {
 				current.state.quietInputs++
 			}
@@ -1373,7 +1491,7 @@ func (current *coordinator) addItemToLocalState(
 		}
 		current.state.currentTurnInputs = current.state.availableInputs
 		if turn.Type == session.TurnRegular && turn.ToolContinuation == "" {
-			current.state.quietInputs = 0 // this request carries every input so far
+			current.state.turnPeerInputs, current.state.turnQuietInputs = current.state.peerInputs, current.state.quietInputs
 		}
 
 		if turn.ToolContinuation != "" {
@@ -1381,6 +1499,14 @@ func (current *coordinator) addItemToLocalState(
 				return sessionstore.Item{}, errors.New("invalid tool continuation input watermark")
 			}
 			current.state.currentTurnInputs = turn.InputWatermark
+		}
+		if turn.BatchInputs && len(current.deferredContext) > 0 {
+			if _, _, err := current.projectDeferredContext(true); err != nil {
+				return sessionstore.Item{}, err
+			}
+			if b, ok := current.dependencies.ContextBuilder.(interface{ SetHistoryItem(sessionstore.Item) }); ok {
+				b.SetHistoryItem(item)
+			}
 		}
 		current.dependencies.ContextBuilder.Commit()
 
@@ -1396,17 +1522,19 @@ func (current *coordinator) addItemToLocalState(
 			return item, nil
 		}
 
-		// The complete output includes messages, reasoning, and tool calls.
 		current.dependencies.ContextBuilder.AddModelResponse(response.Response)
+		if failure := response.Response.Failure; response.AdapterError && failure != nil {
+			current.noteModelFailure(response.TurnID, errors.New(failure.Message))
+			return item, nil
+		}
 		if response.TurnID == current.state.currentTurnID {
+			current.failedModel = nil
 			current.state.deliveredInputs = current.state.currentTurnInputs
+			current.state.peerInputs -= current.state.turnPeerInputs
+			current.state.quietInputs -= current.state.turnQuietInputs
+			current.state.turnPeerInputs, current.state.turnQuietInputs = 0, 0
 
 			current.state.selectionBoundary = true
-			for _, out := range response.Response.Output {
-				if out.Type == llm.ItemToolCall {
-					current.state.selectionBoundary = false
-				}
-			}
 		}
 		current.addToolCallsToLocalState(response)
 
@@ -1441,6 +1569,12 @@ func (current *coordinator) addToolCallsToLocalState(response sessionstore.Model
 			continue
 		}
 		call := output.Data.(llm.ToolCall)
+		if call.Incomplete {
+			continue
+		}
+		if response.TurnID == current.state.currentTurnID {
+			current.state.selectionBoundary = false
+		}
 		current.state.toolCalls[toolCallKey{
 			turnID: response.TurnID,
 			callID: call.CallID,
@@ -1698,6 +1832,18 @@ func (current *coordinator) storeItemInSessionStore(
 	switch item.Kind {
 	case sessionstore.ItemInput:
 		input := item.Data.(inbox.Input)
+		if store, ok := current.dependencies.Sessions.(interface {
+			AppendInputRecorded(context.Context, session.ID, inbox.Input) (sessionstore.Sequence, error)
+		}); ok {
+			seq, err := store.AppendInputRecorded(ctx, current.dependencies.SessionID, input)
+			if err != nil {
+				return fmt.Errorf("store input %q: %w", input.ID, err)
+			}
+			if input.Deferred && len(current.deferredContext) > 0 {
+				current.deferredContext[len(current.deferredContext)-1].Sequence = seq
+			}
+			return nil
+		}
 		if err := current.dependencies.Sessions.AppendInput(
 			ctx,
 			current.dependencies.SessionID,

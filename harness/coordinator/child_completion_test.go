@@ -3,19 +3,19 @@ package coordinator
 import (
 	"encoding/json/v2"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"testing/synctest"
 
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 )
 
 func TestStandaloneChildCompletionWakesBeforeWhenIdleStop(t *testing.T) {
-	for _, bridge := range []bool{false, true} {
+	for _, provider := range []string{"responses", "claude-without-hook", "claude-at-hook"} {
 		for _, status := range []operation.Status{operation.StatusCompleted, operation.StatusFailed, operation.StatusCanceled} {
-			t.Run(string(status)+"/bridge="+fmt.Sprint(bridge), func(t *testing.T) {
+			t.Run(string(status)+"/"+provider, func(t *testing.T) {
 				synctest.Test(t, func(t *testing.T) {
 					run := newStopTestRun(t, 0)
 					projected := 0
@@ -29,8 +29,8 @@ func TestStandaloneChildCompletionWakesBeforeWhenIdleStop(t *testing.T) {
 					}
 					run.start(t)
 					run.input(t, externalEvent(t, 0, "task", "delegate"))
-					if bridge {
-						opt := run.current.dependencies.LLM.(*fakeAdapter).requestOptionsSnapshot()[0]
+					opt := run.current.dependencies.LLM.(*fakeAdapter).requestOptionsSnapshot()[0]
+					if provider != "responses" {
 						if err := opt.BeginTools(run.calls[0].ctx, true); err != nil {
 							t.Fatal(err)
 						}
@@ -59,6 +59,23 @@ func TestStandaloneChildCompletionWakesBeforeWhenIdleStop(t *testing.T) {
 					synctest.Wait()
 					if projected != 0 {
 						t.Fatal("projected before active model could read the result")
+					}
+					if provider == "claude-at-hook" {
+						inputs, err := opt.Steering(run.calls[0].ctx)
+						if err != nil || len(inputs) != 2 || projected != 2 || !inputs[0].Peer || !inputs[1].Peer {
+							t.Fatalf("terminal child notices absent at the boundary: %+v, %v", inputs, err)
+						}
+						if text := inputs[0].Text + "\n" + inputs[1].Text; strings.Count(text, "child-one ended:") != 1 || strings.Count(text, "child-two ended:") != 1 {
+							t.Fatalf("batch lost or repeated child notices: %s", text)
+						}
+						synctest.Sleep(2 * slurpIdleTimeout) // finish the hook's event phase
+						synctest.Wait()
+						run.respond(t, 0, llm.Response{})
+						run.assertStopped(t)
+						if run.modelCallCount() != 1 || len(run.store.appendedInputs) != 6 {
+							t.Fatal("delivered child notices were lost or woke an additional turn")
+						}
+						return
 					}
 					run.respond(t, 0, textResponse("delegated"))
 					run.assertRunning(t)

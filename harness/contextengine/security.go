@@ -117,14 +117,11 @@ func PublicPayloadBytes(item llm.Item) int64 {
 	}
 }
 
-// Estimate deliberately uses UTF-8/JSON bytes, not the optimistic chars/4 rule.
-// It includes escaping, per-item framing and a margin; it is still an estimate.
-func Estimate(v any) int64 {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return 1 << 60
-	}
-	return int64(len(b)) + 64
+// JSONBytes is transport-size telemetry only. It must never be compared to a
+// token budget. Encoding errors belong to the provider encoder, not admission.
+func JSONBytes(v any) int64 {
+	b, _ := json.Marshal(v)
+	return int64(len(b))
 }
 
 func Text(item llm.Item) string {

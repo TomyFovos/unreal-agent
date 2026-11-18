@@ -243,6 +243,7 @@ func childDock(s Snapshot, u UIState, l layout, compact bool) []line {
 	if len(rows) == 0 || l.rail > 0 {
 		return nil
 	}
+	activeDescendant := activeChildAncestors(rows, s)
 	if id := focus(u, s); id != "" && !compact && !l.tiny {
 		limit := 7
 		if l.height < 20 {
@@ -302,7 +303,7 @@ func childDock(s Snapshot, u UIState, l layout, compact bool) []line {
 	var badges line
 	for i, r := range rows {
 		mark, _, color := childVisualState(r, s).presentation(u.Theme)
-		if childStalled(r, s, u.Now) {
+		if !activeDescendant[r.ID] && childStalled(r, s, u.Now) {
 			mark, color = "!", visualStyle(stateStall)
 		}
 		badge := joined(textLine("["+marks[r.ID]+"]", visualStyle(badgeColor)), textLine(mark, color))

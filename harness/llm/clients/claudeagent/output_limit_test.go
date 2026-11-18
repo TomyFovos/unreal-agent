@@ -7,7 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/llm/claudeprompt"
 )
 
 func fakeOutputLimit(f *fake, scenario string) int {
@@ -22,7 +25,7 @@ func fakeOutputLimit(f *fake, scenario string) int {
 	limit := 128000
 	phases := []string{"thinking", "thinking", "thinking", "thinking"}
 	switch scenario {
-	case "output_limit_text":
+	case "output_limit_text", "output_limit_recovered":
 		limit, phases = 4096, []string{"text"}
 	case "output_limit_mixed":
 		phases = []string{"thinking", "thinking", "text", ""}
@@ -31,15 +34,20 @@ func fakeOutputLimit(f *fake, scenario string) int {
 	case "output_limit_no_stream":
 		phases = nil
 	}
-	for _, phase := range phases {
-		event(nil, `{"type":"message_start","message":{"model":"claude-opus-5-5"}}`)
+	for i, phase := range phases {
+		id := fmt.Sprintf("msg-capped-%d", i)
+		event(nil, fmt.Sprintf(`{"type":"message_start","message":{"id":%q,"model":"claude-opus-5-5"}}`, id))
 		if phase != "" {
 			event(nil, fmt.Sprintf(`{"type":"content_block_start","content_block":{"type":%q}}`, phase))
+		}
+		if phase == "text" {
+			f.text(id, "capped Claude text")
 		}
 		event(nil, fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":%d}}`, limit))
 		event(nil, `{"type":"message_stop"}`)
 	}
 	if scenario == "output_limit_recovered" {
+		f.text("msg-recovered", "Recovered.")
 		f.result("Recovered.")
 		return 0
 	}
@@ -53,6 +61,44 @@ func fakeOutputLimit(f *fake, scenario string) int {
 	}
 	f.emit(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true, "stop_reason": stop, "errors": []string{message}})
 	return 0
+}
+
+func TestOutputLimitProjectsClaudeHistory(t *testing.T) {
+	for _, scenario := range []string{"text", "recovered"} {
+		t.Run(scenario, func(t *testing.T) {
+			h := newHarness(t, "output_limit_"+scenario)
+			response, err := h.respond(t.Context(), user("work"))
+			if scenario == "text" {
+				if err == nil || response.Stop != llm.StopMaxOutputTokens || response.Failure == nil {
+					t.Fatalf("terminal stop was not preserved: %+v %v", response, err)
+				}
+			} else if err != nil || response.Stop != llm.StopComplete {
+				t.Fatalf("CLI recovery was lost: %+v %v", response, err)
+			}
+			if len(response.Output) == 0 || !response.Output[0].OutputLimit || response.Output[0].Data.(llm.Message).Text != "capped Claude text" {
+				t.Fatalf("lost capped fragment or its stop: %+v", response.Output)
+			}
+			b := contextbuilder.NewBuilder()
+			if _, err := contextbuilder.EnableCompaction(b, contextengine.Config{}, contextengine.Constraints{}); err != nil {
+				t.Fatal(err)
+			}
+			b.(interface{ SetRuntimeProvider(string) }).SetRuntimeProvider(ProviderID)
+			b.AddModelResponse(response)
+			next, err := b.Build()
+			if err != nil {
+				t.Fatal(err)
+			}
+			next.Request.Input = append(next.Request.Input, user("follow up after the limit"))
+			for _, prompt := range []string{claudeprompt.Plan(next.Request.Input).New, claudeprompt.Plan(next.Request.Input).Full} {
+				if strings.Contains(prompt, "capped Claude text") || !strings.Contains(prompt, "follow up after the limit") {
+					t.Fatalf("unexpected projected Claude prompt: %s", prompt)
+				}
+			}
+			if got := strings.Contains(claudeprompt.Plan(next.Request.Input).Full, "Recovered."); got != (scenario == "recovered") {
+				t.Fatal("successful continuation was changed")
+			}
+		})
+	}
 }
 
 func TestOutputLimitFailureFakeCLI(t *testing.T) {

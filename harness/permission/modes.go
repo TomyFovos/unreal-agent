@@ -69,6 +69,12 @@ type Pending struct {
 	ID, Tool, Scope string
 	Deadline        time.Time
 }
+
+// Approval records a request that actually waited for a decision.
+type Approval struct {
+	Request  Pending
+	Decision string `json:",omitzero"`
+}
 type ModeSnapshot struct {
 	Enabled bool
 	Mode    Mode
@@ -111,6 +117,10 @@ type Controller struct {
 	// OnModeChange hears each mode the human selects, so the Host can keep
 	// it for the workspace (U20). It runs with the controller locked.
 	OnModeChange func(Mode)
+	// RecordApproval is set before the Controller is shared. It runs outside
+	// the lock and receives an open observation followed by its disposition.
+	RecordApproval  func(Approval)
+	approvalRecords sync.WaitGroup
 }
 type controllerKey struct{}
 
@@ -130,8 +140,9 @@ func NewController(ctx context.Context, baseline, maximum *Policy, timeout time.
 func (c *Controller) Close() {
 	c.cancel()
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.stopLocked()
+	c.mu.Unlock()
+	c.approvalRecords.Wait()
 }
 func (c *Controller) stopLocked() {
 	if c.stopped {
@@ -218,28 +229,44 @@ func (c *Controller) permitLocked(ctx context.Context, r Request, state string, 
 // Request returns immediately. The operation manager records pending evidence
 // before observing this result; waiting never blocks its cancellation actor.
 func (c *Controller) Request(ctx context.Context, r Request) <-chan Permit {
+	result, pending := c.request(ctx, r)
+	if pending == nil || c.RecordApproval == nil {
+		return result
+	}
+	c.RecordApproval(Approval{Request: *pending})
+	recorded := make(chan Permit, 1)
+	go func() {
+		defer c.approvalRecords.Done()
+		permit := <-result
+		c.RecordApproval(Approval{Request: *pending, Decision: permit.Decision.State})
+		recorded <- permit
+	}()
+	return recorded
+}
+
+func (c *Controller) request(ctx context.Context, r Request) (<-chan Permit, *Pending) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	result := make(chan Permit, 1)
 	if c.ctx.Err() != nil || ctx.Err() != nil {
 		result <- c.denied(c.mode, "canceled")
-		return result
+		return result, nil
 	}
 	if r.ID == "" || r.Tool == "" {
 		result <- c.denied(c.mode, "denied")
-		return result
+		return result, nil
 	}
 	if _, ok := c.pending[r.ID]; ok {
 		result <- c.denied(c.mode, "denied")
-		return result
+		return result, nil
 	}
 	if _, ok := c.active[r.ID]; ok {
 		result <- c.denied(c.mode, "denied")
-		return result
+		return result, nil
 	}
 	if c.maximum.CheckTool(r.Tool) != nil {
 		result <- c.denied(c.mode, "denied")
-		return result
+		return result, nil
 	}
 	if !r.Privileged {
 		grant := c.baseline
@@ -255,7 +282,7 @@ func (c *Controller) Request(ctx context.Context, r Request) <-chan Permit {
 			grant = c.maximum
 		}
 		result <- c.permitLocked(ctx, r, state, grant)
-		return result
+		return result, nil
 	}
 	switch c.mode {
 	case ReadOnly:
@@ -286,10 +313,14 @@ func (c *Controller) Request(ctx context.Context, r Request) <-chan Permit {
 		oldStop := p.stop
 		p.stop = func() bool { ok := oldStop(); stop(); return ok }
 		c.notifyLocked()
+		if c.RecordApproval != nil {
+			c.approvalRecords.Add(1)
+			return result, &Pending{ID: r.ID, Tool: r.Tool, Scope: r.Scope, Deadline: p.deadline}
+		}
 	default:
 		result <- c.denied(c.mode, "denied")
 	}
-	return result
+	return result, nil
 }
 func (c *Controller) finishLocked(p *pendingApproval, result Permit) {
 	delete(c.pending, p.request.ID)

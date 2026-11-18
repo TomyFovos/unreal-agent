@@ -25,6 +25,7 @@ func TestRunModelAndAnalyzePickersCancelScrollConfirmExportAndLiveUpdates(t *tes
 			for i := range 12 {
 				catalog.Models = append(catalog.Models, modelcatalog.Model{ID: fmt.Sprintf("m%d", i), Name: fmt.Sprintf("Model %d", i), Efforts: []llm.ReasoningEffort{llm.ReasoningEffortHigh, llm.ReasoningEffortMax}, DefaultEffort: llm.ReasoningEffortHigh})
 			}
+			catalog.Models[11].FastMode = new(true)
 			keys := make(chan Key, 128)
 			out := &screenObserver{}
 			done := make(chan error, 1)
@@ -111,13 +112,26 @@ func TestRunModelAndAnalyzePickersCancelScrollConfirmExportAndLiveUpdates(t *tes
 			keys <- Key{Name: "tab"}
 			pick("max")
 			keys <- Key{Name: "enter"}
+			pick("Off (Standard)")
+			select {
+			case <-selected:
+				t.Fatal("model committed before Fast confirmation")
+			default:
+			}
+			keys <- Key{Name: "escape"}
+			pick("max")
+			keys <- Key{Name: "enter"}
+			pick("Off (Standard)")
+			keys <- Key{Name: "down"}
+			pick("On (higher usage)")
+			keys <- Key{Name: "enter"}
 			var choice sessionstore.RuntimeSelection
 			select {
 			case choice = <-selected:
 			case <-time.After(3 * time.Second):
 				t.Fatal("selection not confirmed")
 			}
-			if choice.Model != "m11" || choice.Effort != llm.ReasoningEffortMax || choice.RequestID == "" {
+			if choice.Model != "m11" || choice.Effort != llm.ReasoningEffortMax || !choice.Fast || choice.RequestID == "" {
 				t.Fatal(choice)
 			}
 			waitFor(t, func() bool { return strings.Contains(out.text(), "モデルを変更しました") })

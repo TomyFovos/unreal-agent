@@ -47,11 +47,12 @@ func (s *Session) cancelStoppedChildren(ctx context.Context, interrupted bool) e
 		}
 		step, err := operation.CancelRemoteJob(op)
 		if err == nil {
-			err = s.store.SaveOperation(ctx, s.ID, *step.Operation)
-		}
-		if err == nil {
-			s.setOperation(*step.Operation)
-			s.broadcast(Event{Kind: "operation", Operation: step.Operation})
+			locator, saveErr := s.store.SaveOperationRecorded(ctx, s.ID, *step.Operation)
+			err = saveErr
+			if err == nil {
+				s.setOperation(*step.Operation)
+				s.broadcast(s.operationEvent(*step.Operation, locator))
+			}
 		}
 		result = errors.Join(result, err)
 	}

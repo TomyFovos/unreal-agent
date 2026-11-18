@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"encoding/json/v2"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 )
 
@@ -35,21 +37,30 @@ func (s *Session) Observe(ctx context.Context, recent int) (View, error) {
 			return View{}, err
 		}
 		if i < start {
-			item = observationItem(item)
+			items[i] = observationItem(item)
+		} else {
+			items[i] = clone(ProjectHistoryItem(item))
 		}
-		items[i] = ProjectHistoryItem(item)
 	}
-	v.History.Items = clone(items)
+	v.History.Items = items
 	return v, nil
 }
 
 // observationItem retains the exact inputs to viewer statistics, activity,
 // selection, operation timing and tool-target linkage. It is never persisted or
 // used to restore execution, and it does not modify the Session-owned values.
-func observationItem(item sessionstore.Item) sessionstore.Item {
+func observationItem(item sessionstore.Item) HistoryItem {
 	switch data := item.Data.(type) {
+	case session.Turn:
+		data.BatchRecords = slices.Clone(data.BatchRecords)
+		if data.ContextAdmission != nil {
+			admission := *data.ContextAdmission
+			data.ContextAdmission = &admission
+		}
+		item.Data = data
+		return HistoryItem(item)
 	case sessionstore.ModelResponse:
-		response := llm.Response{ID: data.Response.ID, Model: data.Response.Model, Usage: data.Response.Usage}
+		response := llm.Response{ID: data.Response.ID, Model: data.Response.Model, Usage: usageMetadata(data.Response.Usage)}
 		for _, output := range data.Response.Output {
 			switch value := output.Data.(type) {
 			case llm.Message:
@@ -63,6 +74,7 @@ func observationItem(item sessionstore.Item) sessionstore.Item {
 		}
 		data.Response = response
 		item.Data = data
+		return HistoryItem(item)
 	case inbox.Input:
 		if data.Kind == inbox.InputExternal {
 			var text string
@@ -84,21 +96,66 @@ func observationItem(item sessionstore.Item) sessionstore.Item {
 		item.Data = data
 	case sessionstore.HostRecord:
 		if data.Kind == sessionstore.HostContext && data.Context != nil {
-			context := &sessionstore.ContextRecord{Usage: data.Context.Usage}
+			context := &sessionstore.ContextRecord{}
+			if usage := data.Context.Usage; usage != nil {
+				metadata := usageMetadata(*usage)
+				context.Usage = &metadata
+			}
 			if data.Context.Conversation != nil {
-				context.Conversation = &llm.ConversationRecord{Usage: data.Context.Conversation.Usage}
+				context.Conversation = &llm.ConversationRecord{}
+				if usage := data.Context.Conversation.Usage; usage != nil {
+					metadata := usageMetadata(*usage)
+					context.Conversation.Usage = &metadata
+				}
 			}
 			data.Context = context
 			item.Data = data
 		}
 	}
-	return item
+	return clone(ProjectHistoryItem(item))
+}
+
+func usageMetadata(usage llm.Usage) llm.Usage {
+	usage.Unknown = slices.Clone(usage.Unknown)
+	if len(usage.Raw) != 0 {
+		// The viewer only distinguishes reported usage from an absent value.
+		if string(usage.Raw) == "null" {
+			usage.Raw = []byte("null")
+		} else {
+			usage.Raw = []byte("{}")
+		}
+	}
+	return usage
 }
 
 // Retain the first grapheme crossing the viewer's 160-rune activity boundary.
 // The viewer then applies its normal short() exactly once. Returning an already
 // ellipsized string would change output at some Unicode grapheme boundaries.
 func observationText(text string) string {
+	// One additional ASCII rune settles the boundary of the crossing
+	// grapheme. Fall back to Unicode segmentation if it might be extended.
+	var prefix [162]byte
+	size := 0
+	for field := range strings.FieldsSeq(text) {
+		if size != 0 {
+			prefix[size] = ' '
+			size++
+		}
+		for i := 0; i < min(len(field), len(prefix)-size); i++ {
+			if field[i] >= utf8.RuneSelf {
+				return unicodeObservationText(text)
+			}
+			prefix[size+i] = field[i]
+		}
+		size += min(len(field), len(prefix)-size)
+		if size == len(prefix) {
+			return string(prefix[:161])
+		}
+	}
+	return string(prefix[:size])
+}
+
+func unicodeObservationText(text string) string {
 	text = strings.Join(strings.Fields(text), " ")
 	if utf8.RuneCountInString(text) <= 160 {
 		return text

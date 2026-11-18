@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
@@ -19,6 +20,8 @@ type toolCallStatusKey struct {
 
 type sessionHead struct {
 	Snapshot           sessionstore.Snapshot
+	ContextProjection  contextstate.Projection
+	ContextFacts       contextFacts
 	Operations         []operation.Operation
 	itemSequence       sessionstore.Sequence
 	latestTurnID       session.TurnID
@@ -461,6 +464,8 @@ func (state *storedState) inheritItem(item sessionstore.Item) {
 }
 
 func (head *sessionHead) resetOwnedState() {
+	head.ContextProjection = contextstate.Projection{}
+	head.ContextFacts = contextFacts{}
 	head.ownedTurns = make(map[session.TurnID]struct{})
 	head.respondedTurns = make(map[session.TurnID]struct{})
 	head.toolCallStatuses = make(map[toolCallStatusKey]struct{})

@@ -162,11 +162,16 @@ func (t *turn) handle(f frame) *frame {
 			t.mu.Unlock()
 		}
 	case "assistant":
-		var m message
-		if json.Unmarshal(f.Message, &m) != nil {
+		var incoming struct {
+			message
+			StopReason string `json:"stop_reason"`
+		}
+		if json.Unmarshal(f.Message, &incoming) != nil {
 			return nil
 		}
+		m := incoming.message
 		t.mu.Lock()
+		limited := llm.IsOutputLimit(incoming.StopReason)
 		if m.ID != "" && m.Usage != nil {
 			if t.messages == nil {
 				t.messages = map[string]message{}
@@ -178,7 +183,7 @@ func (t *turn) handle(f frame) *frame {
 			// transcript. These are observations, never executable tool calls.
 			t.seq++
 			publicMessage, _ := json.Marshal(m)
-			t.text = append(t.text, llm.Item{ProviderID: itemPrefix + m.ID + "/native/" + strconv.Itoa(t.seq), Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "[Claude Code Agent " + *f.ParentToolUseID + "] " + string(publicMessage)}})
+			t.text = append(t.text, llm.Item{ProviderID: itemPrefix + m.ID + "/native/" + strconv.Itoa(t.seq), Type: llm.ItemMessage, OutputLimit: limited, Data: llm.Message{Role: llm.RoleAssistant, Text: "[Claude Code Agent " + *f.ParentToolUseID + "] " + string(publicMessage)}})
 		}
 		t.mu.Unlock()
 		for _, b := range m.Content {
@@ -189,7 +194,7 @@ func (t *turn) handle(f frame) *frame {
 			case b.Type == "text" && f.ParentToolUseID == nil && strings.TrimSpace(b.Text) != "":
 				t.mu.Lock()
 				t.seq++
-				t.text = append(t.text, llm.Item{ProviderID: itemPrefix + m.ID + "/" + strconv.Itoa(t.seq), Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: b.Text}})
+				t.text = append(t.text, llm.Item{ProviderID: itemPrefix + m.ID + "/" + strconv.Itoa(t.seq), Type: llm.ItemMessage, OutputLimit: limited, Data: llm.Message{Role: llm.RoleAssistant, Text: b.Text}})
 				t.mu.Unlock()
 			case b.Type == "tool_use" && f.ParentToolUseID == nil && t.opt.Progress != nil:
 				t.opt.Progress(llm.Progress{Attempt: 1, Delta: "\n› " + t.callSubject(b.Name, b.Input) + "\n"})
@@ -295,7 +300,9 @@ func (t *turn) hook(id, callback string, in hookInput) {
 		}
 		_ = t.out.reply(id, answer)
 	case batchHook:
-		_ = t.out.reply(id, t.batch(in))
+		if err := t.out.reply(id, t.batch(in)); err != nil {
+			t.fail(err)
+		}
 	case compactStartHook:
 		_ = t.out.reply(id, map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "SessionStart", "additionalContext": t.compactContext()}})
 	case preCompactHook:
@@ -316,7 +323,7 @@ func (t *turn) hook(id, callback string, in hookInput) {
 func (t *turn) batch(in hookInput) (answer map[string]any) {
 	t.record.Lock()
 	defer t.record.Unlock()
-	// Even an empty batch is a steering boundary. Preserve any U22 result in
+	// Even an empty batch can carry inbox inputs. Preserve any U22 result in
 	// the same additionalContext and acknowledge input only through the Host.
 	defer func() {
 		if t.opt.Steering == nil || t.ctx.Err() != nil {
@@ -343,7 +350,11 @@ func (t *turn) batch(in hookInput) (answer map[string]any) {
 			notes = append(notes, prior)
 		}
 		for _, input := range inputs {
-			notes = append(notes, fmt.Sprintf("The user wrote while you were working: %q. Answer the user first, then continue if still appropriate.", input))
+			if input.Peer {
+				notes = append(notes, input.Text)
+			} else {
+				notes = append(notes, fmt.Sprintf("The user wrote while you were working: %q. Answer the user first, then continue if still appropriate.", input.Text))
+			}
 		}
 		output["additionalContext"] = strings.Join(notes, "\n\n")
 	}()
@@ -369,8 +380,7 @@ func (t *turn) batch(in hookInput) (answer map[string]any) {
 		}
 	}
 	t.mu.Lock()
-	output, model := t.text, t.model
-	t.text = nil
+	output, model := t.takeOutput(), t.model
 	steps := t.takeSteps()
 	t.mu.Unlock()
 	type handed struct{ id, command string }
@@ -396,6 +406,15 @@ func (t *turn) batch(in hookInput) (answer map[string]any) {
 		}
 		if !reported {
 			result = observed.Result{Content: contentText(call.ToolResponse)}
+		}
+		if !result.IsError && (reported || call.ToolResponse.Kind() != jsontext.KindNull && len(call.ToolResponse) != 0) {
+			switch call.ToolName {
+			case "Write", "Edit", "MultiEdit", "NotebookEdit":
+				fields := inputFields(call.ToolInput)
+				if path := first(fields.FilePath, fields.NotebookPath); path != "" {
+					result.WrittenPaths = []string{path}
+				}
+			}
 		}
 		t.results.Put(call.ToolUseID, result)
 		observedIDs = append(observedIDs, call.ToolUseID)
@@ -483,8 +502,7 @@ func (t *turn) failed() error {
 func (t *turn) finish(result *frame) llm.Response {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	output := t.text
-	t.text = nil
+	output := t.takeOutput()
 	if len(output) == 0 && strings.TrimSpace(result.Result) != "" {
 		output = []llm.Item{{ProviderID: itemPrefix + uuid.New().String(), Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: result.Result}}}
 	}
@@ -507,6 +525,16 @@ func (t *turn) finish(result *frame) llm.Response {
 		response.Stop = llm.StopRefused
 	}
 	return response
+}
+
+// takeOutput is called with t.mu held.
+func (t *turn) takeOutput() []llm.Item {
+	output := t.text
+	t.text = nil
+	if t.streams != nil {
+		t.streams.markLimitedOutput(output)
+	}
+	return output
 }
 
 // takeSteps hands over the steps since the last recorded response. t.mu held.
