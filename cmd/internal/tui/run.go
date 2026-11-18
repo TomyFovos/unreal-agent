@@ -8,7 +8,6 @@ import (
 	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 	"github.com/unreallabsai/unreal-agent/internal/usertext"
 	"io"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -61,11 +60,6 @@ type Config struct {
 	SelectModel         func(context.Context, string, uint64, sessionstore.RuntimeSelection) error
 	ProviderCatalogs    func(context.Context) ([]modelcatalog.Provider, error)
 	ProviderCatalog     func(context.Context, string, bool) (modelcatalog.Catalog, error)
-	// SubagentModels lists the providers /model-sub offers and the current
-	// choice; SelectSubagentModel saves one. Pending means it applies once
-	// the Host starts again.
-	SubagentModels      func(context.Context) ([]modelcatalog.Provider, *sessionstore.RuntimeSelection, error)
-	SelectSubagentModel func(ctx context.Context, provider, model string) (choice sessionstore.RuntimeSelection, pending bool, err error)
 	RuntimeCapabilities func(context.Context) (map[string]modelcatalog.Capabilities, error)
 	ExportAnalysis      func(context.Context, analysis.Report, string) (string, error)
 	PrepareAnalysis     func(context.Context) error
@@ -616,10 +610,6 @@ func Run(ctx context.Context, c Config) error {
 						u.Picker.Provider = p.Provider
 						u.Picker.Providers = p.Providers
 						u.Picker.Hint = p.Hint
-					} else if p.Kind == "sub-model" {
-						// Back on the provider the model list came from.
-						u.Picker = subagentProviderPicker(p.Providers, p.Current)
-						u.Picker.Selection = max(0, slices.IndexFunc(p.Providers, func(b modelcatalog.Provider) bool { return b.ID == p.Provider }))
 					} else if p.Kind == "model" && len(p.Providers) > 1 {
 						u.Picker = providerPicker(p.Providers, s.Selection)
 						u.Picker.Revision = p.Revision
@@ -761,57 +751,6 @@ func Run(ctx context.Context, c Config) error {
 							continue
 						}
 						u.Picker = p.effort(s.Selection)
-						continue
-					}
-					if p.Kind == "sub-provider" {
-						b := p.Providers[p.Selection]
-						if b.ID == "openai-codex" {
-							// Codex is the templates as built: no model to choose.
-							u.Picker = nil
-							start("changing the sub-agents' model", func(ctx context.Context) commandResult {
-								choice, pending, err := c.SelectSubagentModel(ctx, b.ID, "")
-								return commandResult{text: subagentModelNotice(b.Name, choice, pending), err: err}
-							})
-							continue
-						}
-						if b.Availability != "available" {
-							label := SafeText(b.Name) + " · " + SafeText(b.Availability)
-							if hint := b.Reason.ProviderHint(b.ID); hint != "" {
-								label += " · " + hint
-							}
-							notice(label, "warning")
-							continue
-						}
-						current := p.Current
-						start("loading "+b.Name+" catalog", func(ctx context.Context) commandResult {
-							catalog, e := c.ProviderCatalog(ctx, b.ID, false)
-							if e != nil {
-								return commandResult{err: e, errorProvider: b.ID}
-							}
-							var selected *sessionstore.RuntimeSelection
-							if current != nil && current.Provider == b.ID {
-								selected = current
-							}
-							next := modelPicker(catalog, selected)
-							next.Kind, next.Title = "sub-model", b.Name+" · Sub-agent model"
-							next.Provider, next.Providers, next.Current = b.ID, p.Providers, current
-							return commandResult{picker: next}
-						})
-						continue
-					}
-					if p.Kind == "sub-model" {
-						m := p.Catalog.Models[p.Selection]
-						id, name := p.Provider, p.Provider
-						for _, b := range p.Providers {
-							if b.ID == id {
-								name = b.Name
-							}
-						}
-						u.Picker = nil
-						start("changing the sub-agents' model", func(ctx context.Context) commandResult {
-							choice, pending, err := c.SelectSubagentModel(ctx, id, m.ID)
-							return commandResult{text: subagentModelNotice(name, choice, pending), err: err}
-						})
 						continue
 					}
 					if p.Kind == "analyze" {
@@ -1218,22 +1157,6 @@ func Run(ctx context.Context, c Config) error {
 						result.capabilities, _ = c.RuntimeCapabilities(ctx)
 					}
 					return result
-				})
-			case "/model-sub":
-				if len(parts) > 1 {
-					notice("usage: /model-sub", "warning")
-					continue
-				}
-				if c.SubagentModels == nil || c.SelectSubagentModel == nil || c.ProviderCatalog == nil {
-					notice("sub-agent model selection unavailable", "warning")
-					continue
-				}
-				start("loading sub-agent providers", func(ctx context.Context) commandResult {
-					providers, current, err := c.SubagentModels(ctx)
-					if err != nil {
-						return commandResult{err: err}
-					}
-					return commandResult{picker: subagentProviderPicker(providers, current)}
 				})
 			case "/analyze":
 				start("loading full history for analysis", func(ctx context.Context) commandResult {

@@ -39,6 +39,9 @@ const (
 const defaultWait = 9 * time.Minute
 
 const subagentUsage = `usage: unreal-agent subagent COMMAND
+  model show [--role lead|worker|collector|all]  show saved subagent settings
+  model set --role ROLE --provider ID --model ID [--effort LEVEL]
+                                         save settings for the next child start
   start [--template lead] [--model ID] [--effort LEVEL] [--task TEXT]
                                          start a child; the task is read from stdin without --task
   wait [HANDLE ...] [--timeout 9m]        wait until a child finishes or asks for approval
@@ -69,6 +72,8 @@ func runSubagentCLI(ctx context.Context, args []string, stdin io.Reader, out io.
 	flags := flag.NewFlagSet("unreal-agent subagent "+args[0], flag.ContinueOnError)
 	flags.SetOutput(out)
 	switch args[0] {
+	case "model":
+		return c.model(ctx, args[1:])
 	case "start":
 		template := flags.String("template", "lead", "child template")
 		task := flags.String("task", "", "task text; read from stdin when empty")
@@ -191,6 +196,72 @@ type subagentCLI struct {
 	parent session.ID
 	out    io.Writer
 	name   string // this command as invoked, for the next commands it suggests
+}
+
+// model uses the Host's settings endpoint; the CLI never reads shared state itself.
+func (c subagentCLI) model(ctx context.Context, args []string) error {
+	if len(args) == 0 || args[0] != "show" && args[0] != "set" {
+		return errors.New(subagentUsage)
+	}
+	flags := flag.NewFlagSet("unreal-agent subagent model "+args[0], flag.ContinueOnError)
+	flags.SetOutput(c.out)
+	role := flags.String("role", "all", "role: lead, worker, collector or all")
+	var selection sessionstore.RuntimeSelection
+	if args[0] == "set" {
+		flags.StringVar(&selection.Provider, "provider", "", "registered provider ID")
+		flags.StringVar(&selection.Model, "model", "", "model ID in the provider's catalog")
+		flags.Func("effort", "reasoning effort offered by the model", func(value string) error {
+			selection.Effort = llm.ReasoningEffort(value)
+			if !slices.Contains(workerEfforts, selection.Effort) {
+				return fmt.Errorf("invalid effort %q; use low, medium, high, xhigh or max", value)
+			}
+			return nil
+		})
+	}
+	rest, err := parseAll(flags, args[1:])
+	if err != nil {
+		return err
+	}
+	if len(rest) != 0 || !slices.Contains(append([]string{"all"}, subagentRoleGroups...), *role) {
+		return errors.New(subagentUsage)
+	}
+	if args[0] == "set" && (selection.Provider == "" || selection.Model == "") {
+		return errors.New("subagent model set requires --provider and --model; " + subagentUsage)
+	}
+	view, err := c.client.Inspect(ctx, c.parent, 0, 1)
+	if err != nil {
+		return fmt.Errorf("cannot reach this Session's Host: %w", err)
+	}
+	action := "subagent.providers"
+	if args[0] == "set" {
+		action = "subagent.select"
+	}
+	reply, err := modelExchange(ctx, c.client.Extension, modelRequest{Action: action, ID: c.parent, Generation: view.Generation, Role: *role, Selection: selection})
+	if err != nil {
+		return err
+	}
+	for _, group := range subagentRoleGroups {
+		if *role != "all" && *role != group {
+			continue
+		}
+		choice := reply.SubagentRoles[group]
+		model, effort := choice.Model, string(choice.Effort)
+		if model == "" {
+			model = "template default"
+		}
+		if effort == "" {
+			effort = "template default"
+		}
+		fmt.Fprintf(c.out, "%s: provider=%s model=%s effort=%s\n", group, choice.Provider, model, effort)
+	}
+	if args[0] == "set" {
+		if reply.Pending {
+			fmt.Fprintln(c.out, "Saved. This Host has no built-in children; restart the Host to enable them.")
+		} else {
+			fmt.Fprintln(c.out, "Saved. Applies to the next child start.")
+		}
+	}
+	return nil
 }
 
 // childState is one child as its parent's start Operation records it.
@@ -462,15 +533,8 @@ func firstLine(text string) string {
 
 // claudeSubagents tells the Claude route how its Bash reaches this Host's
 // children: this executable's subagent command and the gateway socket, and
-// the model chosen with /model-sub when modelFile is set.
+// the model chosen with subagent model when modelFile is set.
 func claudeSubagents(templates map[string]subagent.Template, socket, modelFile string) (claudeagent.SubagentCLI, error) {
-	if len(templates) == 0 {
-		cli := claudeagent.SubagentCLI{}
-		if modelFile != "" {
-			cli.AgentModel = subagentAgentModel(modelFile)
-		}
-		return cli, nil
-	}
 	binary, err := os.Executable()
 	if err != nil {
 		return claudeagent.SubagentCLI{}, err
@@ -485,7 +549,13 @@ func claudeSubagents(templates map[string]subagent.Template, socket, modelFile s
 		return claudeagent.SubagentCLI{}, err
 	}
 	names := slices.Sorted(maps.Keys(templates))
-	cli := claudeagent.SubagentCLI{Binary: binary, Socket: socket, Templates: names}
+	cli := claudeagent.SubagentCLI{Socket: socket, Templates: names}
+	if len(templates) > 0 {
+		cli.Binary = binary
+	}
+	if modelFile != "" {
+		cli.SettingsCommand = binary
+	}
 	if lead, ok := templates["lead"]; ok && lead.Default != nil {
 		cli.LeadModel, cli.LeadEffort = lead.Default.Model, string(lead.Default.Effort)
 	}

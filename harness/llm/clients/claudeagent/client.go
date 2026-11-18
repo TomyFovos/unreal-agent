@@ -60,27 +60,39 @@ type Config struct {
 // SubagentCLI lets Claude drive the Session's children through Bash with the
 // Host's own "subagent" command (U21). Zero means the Session has none.
 type SubagentCLI struct {
-	Binary     string   // stable kit launcher, or the executable for a source build
-	Socket     string   // the Host's gateway socket
-	Templates  []string // the child templates, for the prompt
-	LeadModel  string
-	LeadEffort string
+	// SettingsCommand remains available when no Unreal child provider is available.
+	SettingsCommand string   `json:"-"`
+	Binary          string   // stable kit launcher, or the executable for a source build
+	Socket          string   // the Host's gateway socket
+	Templates       []string // the child templates, for the prompt
+	LeadModel       string
+	LeadEffort      string
 	// Models names what the templates run now; it is read for each turn, so a
-	// model chosen with /model-sub shows from the next turn. Nil is GPT.
+	// model chosen with subagent model shows from the next turn. Nil is GPT.
 	Models func() SubagentModels
 	// AgentModel names the model Claude's own Agent sub-agents run on, chosen
-	// with /model-sub as "claude"; it is read for each turn. Nil or "" keeps
+	// with subagent model as "claude"; it is read for each turn. Nil or "" keeps
 	// Claude Code's own choice.
 	AgentModel func() string `json:"-"`
 	// Available checks the Host's existing provider health/catalog at each turn.
 	// Nil retains the explicitly configured CLI behavior.
 	Available func(context.Context) bool `json:"-"`
+	// Roles resolves explicitly selected role groups once per turn. An empty
+	// result preserves the legacy all-roles delegation behavior.
+	Roles       func(context.Context) []SubagentRole `json:"-"`
+	RoleChoices []SubagentRole                       `json:"-"`
+}
+
+type SubagentRole struct {
+	Role, Provider, Model, Effort string
+	Templates                     []string
+	Available                     bool
 }
 
 // SubagentModels names the children's models for the prompt.
 type SubagentModels struct {
 	Family    string // who does the work: "GPT"
-	Lead      string // the lead's and the workers' model: "gpt-6.1-sol"
+	Lead      string // the lead's and the workers' model: "gpt-6.2-sol"
 	Collector string // the collector's model when it is another one: "gpt-6-luna"
 }
 
@@ -116,13 +128,16 @@ func NewClient(config Config) (*Client, error) {
 	if config.Environ == nil {
 		config.Environ = os.Environ
 	}
+	if !filepath.IsAbs(config.Subagents.SettingsCommand) || !filepath.IsAbs(config.Subagents.Socket) {
+		config.Subagents.SettingsCommand = ""
+	}
 	if !filepath.IsAbs(config.Subagents.Binary) || !filepath.IsAbs(config.Subagents.Socket) {
-		config.Subagents = SubagentCLI{}
+		config.Subagents = SubagentCLI{AgentModel: config.Subagents.AgentModel, Roles: config.Subagents.Roles, SettingsCommand: config.Subagents.SettingsCommand, Socket: config.Subagents.Socket}
 	}
 	if config.CompactThresholdTokens <= 0 {
 		config.CompactThresholdTokens = DefaultCompactThresholdTokens
 	}
-	return &Client{config: config, approver: approver{cli: config.Subagents.Binary, agentModel: config.AgentModel, agentEffort: config.AgentEffort}, contextTokens: map[string]int64{}, activityInterval: streamActivityInterval}, nil
+	return &Client{config: config, approver: approver{cli: subagentCommandPath(config.Subagents), agentModel: config.AgentModel, agentEffort: config.AgentEffort}, contextTokens: map[string]int64{}, activityInterval: streamActivityInterval}, nil
 }
 
 func (c *Client) Close() error { return nil }
@@ -216,7 +231,23 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	env := authenticatedEnvironment(c.config.Environ(), key)
 	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--replay-user-messages", "--forward-subagent-text"}
 	subagents := c.config.Subagents
-	if opt.Identity.SessionID == "" || subagents.Available != nil && !subagents.Available(ctx) {
+	if subagents.Roles != nil {
+		subagents.RoleChoices = subagents.Roles(ctx)
+	}
+	if len(subagents.RoleChoices) > 0 {
+		subagents.Templates = nil
+		for _, role := range subagents.RoleChoices {
+			if role.Available && role.Provider != ProviderID {
+				subagents.Templates = append(subagents.Templates, role.Templates...)
+			}
+		}
+		if len(subagents.Templates) == 0 {
+			subagents.Binary = ""
+		}
+	} else if subagents.Available != nil && !subagents.Available(ctx) {
+		subagents = SubagentCLI{AgentModel: subagents.AgentModel, SettingsCommand: subagents.SettingsCommand, Socket: subagents.Socket}
+	}
+	if opt.Identity.SessionID == "" {
 		subagents = SubagentCLI{AgentModel: subagents.AgentModel}
 	}
 	// The measured allowlist omits Monitor and AskUserQuestion. Agent remains
@@ -248,7 +279,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	cmd := exec.CommandContext(processCtx, c.config.Binary, args...)
 	cmd.Dir = c.config.Directory
 	cmd.Env = env
-	if subagents.Binary != "" {
+	if subagents.Binary != "" || subagents.SettingsCommand != "" {
 		cmd.Env = append(cmd.Env, SubagentSocketEnv+"="+subagents.Socket, SubagentSessionEnv+"="+opt.Identity.SessionID)
 	}
 	isolate(cmd)

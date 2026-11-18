@@ -141,4 +141,4 @@ go build -tags=disable_opencode_go ./cmd/unreal-agent
 
 Mac では同じ commit の有効版と無効版を別のディレクトリに置き、有効版を使い回しません。Release workflow は配布者のリポジトリ変数 `UNREAL_OPENCODE_GO_ENABLED=false` をビルド時に参照します。利用者の環境変数とは別です。
 
-`SNAPSHOT.json`・`KIT.json`・Harbor の `manifest.json` に真偽値 `opencode_go_enabled` を記録し、各実行ファイルの `--version` でも確認できます。無効版は discovery・モデル一覧・`/model`・`/model-sub`・認証方式一覧に OpenCode Go を表示しません。インストーラーへのキー指定はファイル・環境変数とも値を表示せず拒否します。OpenCode Go を選んでいた Session は選択を保持して開き、無効化の理由と「`/model` でほかの接続を選ぶ」案内を表示します。推論は行わず、自動切替もしません。OpenCode Go を指定した子も、`/model-sub` での選び直しを案内して失敗します。
+`SNAPSHOT.json`・`KIT.json`・Harbor の `manifest.json` に真偽値 `opencode_go_enabled` を記録し、各実行ファイルの `--version` でも確認できます。無効版は discovery・モデル一覧・`/model`・認証方式一覧に OpenCode Go を表示しません。インストーラーへのキー指定はファイル・環境変数とも値を表示せず拒否します。OpenCode Go を選んでいた Session は選択を保持して開き、無効化の理由と「`/model` でほかの接続を選ぶ」案内を表示します。推論は行わず、自動切替もしません。OpenCode Go を指定した子も、メインエージェント経由の `unreal-agent subagent model set` での選び直しを案内して失敗します。

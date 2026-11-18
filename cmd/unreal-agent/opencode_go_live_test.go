@@ -290,7 +290,7 @@ Do nothing else yourself: run no commands, read no files and start no other work
 
 // The live sub-agent check (docs/opencode-go.md, テスト方針): a Host with
 // Codex registered on a server that must get nothing chooses Flash with
-// /model-sub, and a lead on the real API starts a worker-low that reads one
+// subagent model, and a lead on the real API starts a worker-low that reads one
 // file. At most liveSubagentBudget Responses requests reach OpenCode Go;
 // approvals the lead asks of the test are denied. It runs only with
 // UNREAL_LIVE_OPENCODE_GO=1. The test never reads the key; the Host does.

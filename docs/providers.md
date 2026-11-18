@@ -139,7 +139,7 @@ Unreal can add OpenCode Go as an additional provider with an API key saved in th
 
 - **Provider ID:** `opencode-go`
 - **Registration:** No config is needed. The provider is registered only while a key is saved in the managed store; without one nothing changes, `/model` does not list it, and nothing is sent to OpenCode.
-- **Selection:** Saving a key only registers the connection. Choose OpenCode Go in `/model` or `/model-sub`, or set `UNREAL_HARNESS_LLM_PROVIDER=opencode-go` explicitly at first launch. It is excluded from automatic initial selection.
+- **Selection:** Saving a key only registers the connection. Choose OpenCode Go in `/model` or `unreal-agent subagent model`, or set `UNREAL_HARNESS_LLM_PROVIDER=opencode-go` explicitly at first launch. It is excluded from automatic initial selection.
 - **Endpoint:** Requests go only to the Go subscription endpoint above. Unreal never switches to Zen, to another provider, or to an API key automatically: if the selected model is unavailable, the request fails.
 
 Full details: [OpenCode Go](opencode-go.md) (Japanese).
@@ -150,15 +150,14 @@ Full details: [OpenCode Go](opencode-go.md) (Japanese).
 
 When Codex is configured or enabled for discovery, or an OpenAI API connection is explicitly registered, Unreal prepares built-in GPT templates if Permission Modes have a configured `Maximum` and no explicit `Subagents` configuration replaces the defaults. Template models are independent of the parent Session's active model.
 
-Without a saved `/model-sub` choice, an **OpenAI API** parent uses `openai` for its built-in GPT children and their workers. Other parents retain the `openai-codex` subscription route. Availability never changes that choice. API children keep their template models and configured effort; the subscription defaults below remain unchanged. Explicit operator templates and existing children retain their recorded connections.
+Without a saved `unreal-agent subagent model` choice, an **OpenAI API** parent uses `openai` for its built-in GPT children and their workers. Other parents retain the `openai-codex` subscription route. Availability never changes that choice. API children keep their template models and configured effort; the subscription defaults below remain unchanged. Explicit operator templates and existing children retain their recorded connections.
 
-Claude is guided to use GPT children only while Codex authentication and its model catalog are available. Otherwise it uses Claude Code's Agent tool with `haiku` or `sonnet`, or the Claude model chosen with `/model-sub`. An unavailable selected GPT connection produces guidance without switching to another connection.
-With OpenCode Go selected for sub-agents, availability follows its registered key; the catalog is read when a child starts. Explicit Claude-model work through Agent remains available alongside GPT children.
+Claude guidance and provider availability follow each selected role. An unavailable explicit choice produces recovery guidance without changing its connection. Without shared role settings, Claude uses the Codex children while available, or its own Agent tool otherwise. Explicit Claude-model work through Agent remains available alongside Unreal children.
 
 | Template / Role | Model & Effort | Purpose |
 | --- | --- | --- |
-| `lead` | `gpt-6.1-sol` (`max`) | Coordinates multi-step implementation and can spawn its own `worker-*` or `collector` sub-agents |
-| `worker-low`, `worker-medium`, `worker-high`, `worker-xhigh`, `worker-max` | `gpt-6.1-sol` (named effort) | Implements code changes and runs assigned tests |
+| `lead` | `gpt-6.2-sol` (`max`) | Coordinates multi-step implementation and can spawn its own `worker-*` or `collector` sub-agents |
+| `worker-low`, `worker-medium`, `worker-high`, `worker-xhigh`, `worker-max` | `gpt-6.2-sol` (named effort) | Implements code changes and runs assigned tests |
 | `collector` | `gpt-6-luna` (`medium`) | Fast read-only search, log/file extraction, CI status checks, and summaries |
 
 ### How Delegation Works
@@ -170,24 +169,25 @@ With OpenCode Go selected for sub-agents, availability follows its registered ke
 
 > **Environment Inheritance:** Children inherit the Host environment (including `PATH`, `HOME`, and tool configuration), excluding `OPENAI_CODEX_ACCESS_TOKEN` and `OPENAI_CODEX_ACCOUNT_ID`. This is process inheritance, not environment isolation.
 
-### Choosing the sub-agents' model (`/model-sub`)
+### Choosing subagent models
 
-`/model-sub` chooses the model sub-agents use: **OpenAI Codex** (the subscription connection, shown as `ChatGPT（サブスク）`), **OpenCode Go** then one of the 24 verified models (DeepSeek V4.1 Flash first), or **Claude**, which appears when Claude is registered (the same provider list `/model` shows) and then offers the same Claude models `/model` lists. The choice is stored in `STATE/subagent-model.json`, applies to every Session using the installation's shared state, and takes effect for children started afterwards; running children keep their model. Children started with an explicit runtime (`/children start ...`) and explicit `Subagents` templates or `SubagentDefaults` in the config file are not affected. `subagent start --model ID --effort LEVEL`, which changes only a template's model and effort and keeps its provider, works on the built-in templates only while `/model-sub` is OpenAI Codex: with OpenCode Go or Claude selected it is refused (`override_unavailable`) rather than run on Codex, and Claude's instructions leave it out.
+On the user's instruction, the main agent reads and changes settings from its Session's shell using the agent-facing CLI. There is no child-model TUI menu.
 
-Without a saved choice, an OpenAI API parent keeps its explicitly selected API connection for built-in GPT children; other parents use Codex. Saving **OpenAI Codex** explicitly pins the subscription route, including for an API parent. An unavailable explicit choice fails without using the parent's API connection.
+```sh
+unreal-agent subagent model show
+unreal-agent subagent model set --role lead --provider openai-codex --model gpt-6.2-sol --effort max
+unreal-agent subagent model set --role worker --provider opencode-go --model deepseek-v4.1-flash --effort max
+unreal-agent subagent model show --role worker
+```
 
-With Claude selected, Claude Code's Agent tool runs the sub-agents on the chosen model instead of Unreal's children: Unreal sets `CLAUDE_CODE_SUBAGENT_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` in Claude Code's launch environment, and the delegation prompt names that model instead of `haiku` or `sonnet`. The force variable puts every Agent sub-agent, the built-in Explore and Plan included, on the chosen model and leaves the Agent tool without a per-call model, so Claude cannot pass another model per call; it needs Claude Code 2.1.257 or later. Per Claude Code's docs, a fork and a skill that runs in a sub-agent with `model: inherit` stay on Claude's own model. Agent uses the parent Session's selected Claude authentication; choosing a child model does not switch between subscription and API-key connections. A Claude parent gets no Unreal children, so the choice applies from Claude's next turn and running children keep their model. A parent on Codex or OpenCode Go that starts a built-in child template is refused with `provider_unavailable` and a hint to choose OpenAI Codex or OpenCode Go with `/model-sub`; Unreal never switches to another provider. Whether the environment variables reach Claude Code's Agent sub-agents on the real CLI, and whether their tool calls show in the TUI, is unconfirmed until a real check.
+Roles are `lead`, `worker` (all `worker-*` templates), `collector`, and `all` (replace every role). Any registered, available provider may be chosen; its model must exist in its catalog, and an explicit `--effort` must be offered by that model. Omitting effort keeps template-derived defaults. An explicit worker effort applies to every worker. The collector remains independent, defaulting to `gpt-6-luna` / medium. Roles are not tied to providers. API-key connections require an explicit user choice; unavailable connections never cause fallback.
 
-With OpenCode Go selected, every template runs the model chosen in `/model-sub`. For DeepSeek V4.1 Flash the mapping is unchanged:
+The Host handles and records reads and changes in the owning Session. Settings remain in shared `STATE/subagent-model.json`, across Sessions, folders and Host restarts. Old Version 1 files apply their single choice to all roles; role settings use Version 2. Unchanged roles inherit the previous global choice. Settings apply to the next child start; running children and their recorded worker selections stay fixed. Explicit `Subagents`, `SubagentDefaults`, and `/children start` commands with an explicit runtime remain independent.
 
-| Template | Effort |
-| --- | --- |
-| `lead`, `worker-max` | `max` |
-| `worker-xhigh`, `worker-high`, `worker-medium` | `high` |
-| `worker-low`, `collector` | `low` |
+For OpenCode Go, omitting effort keeps the previous mapping: lead / worker-max use the highest effort, worker-low / collector the lowest, and other workers their own supported effort or the model-derived default. Selecting worker effort `max` overrides that mapping for all workers. `subagent start --model/--effort` is refused with `override_unavailable` for roles assigned to Go or Claude; change their settings with `subagent model set`.
 
-The effort for each role comes from the selected model's list: `lead` and `worker-max` take its highest effort, `worker-low` and `collector` its lowest, and the other workers their own effort when the model has it, otherwise the model's default (or, when that default is below their own, the highest effort the model offers below their own; `qwen3.8-max` runs `worker-high` at `medium`). Models whose list names no reasoning effort run without one. If the selected model is unavailable (limit reached, outage), the child start or request fails; Unreal never switches to Codex or another provider automatically. With OpenCode Go selected, Claude is offered the children while OpenCode Go is registered and its key is saved, instead of while Codex is available; the model list is read when a child starts. The templates are kept ready before a Codex login when provider discovery is on (the default), so a later choice applies from the next child start. Only on a Host with Codex disabled or discovery off, where OpenCode Go was not selected when the Host started, there are no templates: the choice is saved and used from the next Host start (`/model-sub` says so).
+Claude delegation guidance and availability checks follow each role. Roles assigned to Claude use Claude Code's Agent tool with the selected model. A uniform Claude choice uses `CLAUDE_CODE_SUBAGENT_MODEL` and its FORCE flag; mixed choices use role-specific guidance. They cannot be started directly as Unreal children. If this Host has no templates yet, the CLI reports that a Host restart is needed. See [the detailed CLI instructions](opencode-go.md#サブエージェントのモデルを選ぶ).
 
 ### Distributor-disabled OpenCode Go
 
-A distribution built with `disable_opencode_go` omits the entire OpenCode Go connection from `/model`, `/model-sub`, discovery, model lists and auth methods. Environment variables, old configuration, keys and saved Session selections cannot enable it. Existing Sessions retain their choice, display why it is unavailable, and ask you to choose another connection with `/model`. Children fail with guidance to use `/model-sub`; no automatic fallback occurs. Check `--version` for `opencode_go_enabled=false`. See [disabled distribution builds](distribution.md#distribution-builds-without-opencode-go).
+A distribution built with `disable_opencode_go` omits the entire OpenCode Go connection from `/model`, discovery, model lists and auth methods. `unreal-agent subagent model set --provider opencode-go` is rejected. Environment variables, old configuration, keys and saved Session selections cannot enable it. Existing Sessions retain their choice, display why it is unavailable, and ask you to choose another connection with `/model`. Children fail with guidance to use `unreal-agent subagent model`; no automatic fallback occurs. Check `--version` for `opencode_go_enabled=false`. See [disabled distribution builds](distribution.md#distribution-builds-without-opencode-go).

@@ -37,6 +37,7 @@ type fakeGPT struct {
 	routingOnly               bool // exercise provider binding without repeating approval scenarios
 	mu                        sync.Mutex
 	leadEfforts, workerEffort []string
+	leadModels                []string
 	refusedLead               bool
 	sawEmailInstruction       bool
 	leadHold                  <-chan struct{}
@@ -51,6 +52,7 @@ func (g *fakeGPT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
+		Model        string           `json:"model"`
 		Instructions string           `json:"instructions"`
 		Input        []map[string]any `json:"input"`
 		Reasoning    *struct {
@@ -113,6 +115,7 @@ func (g *fakeGPT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.Contains(all, "You are the implementation lead"):
 		g.sawEmailInstruction = g.sawEmailInstruction || strings.Contains(all, "email=implementer@example.com")
 		g.leadEfforts = append(g.leadEfforts, effort)
+		g.leadModels = append(g.leadModels, request.Model)
 		switch {
 		case !g.routingOnly && g.leadRuns && !calls["lead-bash"]:
 			output = call("lead-bash", "Bash", map[string]string{"command": "printf lead > " + g.leadMarker})
@@ -135,6 +138,8 @@ func (g *fakeGPT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case !calls["lead-finish"] && strings.Contains(all, "worker done"):
 			output = call("lead-finish", "Finish", map[string]any{"status": "completed", "summary": "lead done", "changedFiles": []string{"lead", "worker"}, "tests": []string{"printf: ok"}, "blockers": []string{}})
 		}
+	case strings.Contains(all, "You are a collector"):
+		output = call("collector-finish", "Finish", map[string]any{"status": "completed", "summary": "collector done", "changedFiles": []string{}, "tests": []string{}, "blockers": []string{}})
 	case strings.Contains(all, "You are a worker"):
 		g.workerEffort = append(g.workerEffort, effort)
 		if !g.routingOnly && !calls["worker-bash"] {
@@ -176,7 +181,7 @@ func startGPTHost(t *testing.T, leadRuns bool) *gptHost {
 		t.Fatal(err)
 	}
 	writeCodexAuth(t, filepath.Join(auth, "auth.json"), "gpt-token-sensitive", "gpt-account-sensitive")
-	cache := `{"models":[{"slug":"gpt-6.1-sol","display_name":"GPT-6.1 Sol","visibility":"list","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}],"multi_agent_reasoning_effort":"xhigh"}]}`
+	cache := `{"models":[{"slug":"gpt-6.2-sol","display_name":"GPT-6.2 Sol","visibility":"list","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}],"multi_agent_reasoning_effort":"xhigh"}]}`
 	if err := os.WriteFile(filepath.Join(auth, "models_cache.json"), []byte(cache), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +277,7 @@ func TestSubagentCommandRunsLeadAndWorkers(t *testing.T) {
 	if !strings.Contains(report, "result: completed") || !strings.Contains(report, "  - worker") {
 		t.Fatal(report)
 	}
-	if list := cli("", "list", "--all"); !strings.Contains(list, handle[1]+"  lead (gpt-6.1-sol max)  completed  lead done") {
+	if list := cli("", "list", "--all"); !strings.Contains(list, handle[1]+"  lead (gpt-6.2-sol max)  completed  lead done") {
 		t.Fatal(list)
 	}
 	// The designer need not wait: the lead's end arrives as a message that
@@ -330,7 +335,7 @@ func TestClaudeDrivesGPTThroughBash(t *testing.T) {
 	if err != nil {
 		t.Fatal("Claude did not finish the delegated run", err)
 	}
-	if !strings.Contains(history, "summary: lead done") || !strings.Contains(history, "lead (gpt-6.1-sol max)") {
+	if !strings.Contains(history, "summary: lead done") || !strings.Contains(history, "lead (gpt-6.2-sol max)") {
 		v, _ := h.client.Inspect(t.Context(), "designer", 0, 1)
 		for _, op := range v.Operations {
 			t.Logf("op %s %s %s %.400s", op.ToolName, op.ID, op.Status, op.State)

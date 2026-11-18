@@ -36,7 +36,7 @@ func TestAPIKeyBuiltInLeadAndGrandchildProcess(t *testing.T) {
 			t.Error("API child used another connection")
 		}
 		if r.URL.Path == "/models" {
-			io.WriteString(w, `{"data":[{"id":"gpt-6.1-sol"},{"id":"gpt-6-luna"}]}`)
+			io.WriteString(w, `{"data":[{"id":"gpt-6.2-sol"},{"id":"gpt-6-luna"}]}`)
 			return
 		}
 		body, err := io.ReadAll(r.Body)
@@ -152,7 +152,7 @@ func TestAPIKeyBuiltInLeadAndGrandchildProcess(t *testing.T) {
 	if leadCalls == 0 || workerCalls == 0 {
 		t.Fatal("API lead and grandchild did not both use the API")
 	}
-	// An explicit /model-sub choice takes priority over the API parent's
+	// An explicit subagent model choice takes priority over the API parent's
 	// connection. Neither unavailable provider may fall back to that API.
 	for _, chosen := range []subagentModel{{Version: 1, Provider: "openai-codex"}, {Version: 1, Provider: "opencode-go", Model: "deepseek-v4.1-flash"}} {
 		if err := writeSubagentModel(modelFile, chosen); err != nil {
@@ -160,12 +160,12 @@ func TestAPIKeyBuiltInLeadAndGrandchildProcess(t *testing.T) {
 		}
 		_, err := modelExchange(t.Context(), client.Extension, modelRequest{Action: "child.start", ID: "api-parent", Generation: v.Generation, InputID: "unavailable-" + inbox.ID(chosen.Provider), Template: "collector", Task: "This selected provider is unavailable."})
 		if err == nil || !strings.Contains(err.Error(), "provider_unavailable") {
-			t.Fatal("an unavailable /model-sub choice did not report its own failure", chosen.Provider, err)
+			t.Fatal("an unavailable subagent model choice did not report its own failure", chosen.Provider, err)
 		}
 	}
 	gpt.mu.Lock()
 	if len(gpt.leadEfforts) != leadCalls || len(gpt.workerEffort) != workerCalls {
-		t.Error("an unavailable /model-sub choice used the parent's API connection")
+		t.Error("an unavailable subagent model choice used the parent's API connection")
 	}
 	gpt.mu.Unlock()
 	// child.wait joins the lead, but its completion also wakes the parent.

@@ -578,6 +578,53 @@ func TestSubagentSocketIsAllowedThroughTheSandbox(t *testing.T) {
 	}
 }
 
+// Settings must remain reachable when children are unavailable, including
+// through Claude Code's socket sandbox, so the main agent can change them.
+func TestSubagentSettingsCommandReachesHostWithoutChildren(t *testing.T) {
+	t.Parallel()
+	const cli = "/opt/unreal/bin/unreal"
+	const socket = "/tmp/settings/host.sock"
+	for _, unavailable := range []bool{false, true} {
+		h := newHarness(t, "subagent", "CLAUDEAGENT_CLI="+cli)
+		settings := SubagentCLI{SettingsCommand: cli, Socket: socket}
+		if unavailable {
+			settings.Binary = cli
+			settings.Available = func(context.Context) bool { return false }
+		}
+		h.client.config.Subagents = settings
+		h.client.approver.cli = subagentCommandPath(settings)
+		ctx, controller, _ := withMode(t, permission.ReadOnly)
+		response, err := h.respond(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := response.Output[len(response.Output)-1].Data.(llm.Message).Text; got != "env:"+socket+":session-1 gate:pass use:allow" {
+			t.Fatalf("settings command could not reach Host: %s", got)
+		}
+		if len(controller.Snapshot().Pending) != 0 {
+			t.Fatal("settings command asked the human for approval")
+		}
+		args := strings.Split(read(t, h.args), "\n")
+		var decoded struct {
+			Sandbox struct {
+				Network struct {
+					AllowUnixSockets []string `json:"allowUnixSockets"`
+				} `json:"network"`
+			} `json:"sandbox"`
+		}
+		if err := json.Unmarshal([]byte(flagValue(args, "--settings")), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if sockets := decoded.Sandbox.Network.AllowUnixSockets; len(sockets) != 1 || sockets[0] != socket {
+			t.Fatalf("settings socket unavailable: %v", sockets)
+		}
+		prompt := read(t, h.args)
+		if !strings.Contains(prompt, "subagent model show") || !strings.Contains(prompt, "subagent model set --role") || strings.Contains(prompt, "Templates:") {
+			t.Fatalf("wrong settings guidance without children: %s", prompt)
+		}
+	}
+}
+
 // Without the subagent CLI, without a Session to reach, or when no providers
 // can run children, --settings carries no sandbox (it may still carry
 // upstream's claudeMdExcludes), and no environment names the Host and Session.
@@ -624,7 +671,7 @@ func TestSubagentSandboxIsAbsentWithoutTheCLI(t *testing.T) {
 }
 
 // A turn without available children drops Unreal's subagent CLI but keeps the
-// Claude model chosen with /model-sub and its force flag, so Claude's own
+// Claude model chosen with subagent model and its force flag, so Claude's own
 // Agent runs every sub-agent, Explore and Plan included, on it.
 func TestAgentModelSurvivesATurnWithoutChildren(t *testing.T) {
 	t.Parallel()

@@ -114,7 +114,7 @@ func NewChildFactory(base RuntimeConfig, configure func(subagent.ChildConfig, *R
 		}
 		var tools ToolFactory
 		if !c.TextOnly {
-			execution := subagent.Config{Child: &c, SendParent: link.Send}
+			execution := subagent.Config{Child: &c, SendParent: link.Send, ResolveRuntime: base.ResolveChildRuntime}
 			if len(c.Subagents) > 0 {
 				// A lead starts its workers with this same child process command.
 				binary, err := os.Executable()

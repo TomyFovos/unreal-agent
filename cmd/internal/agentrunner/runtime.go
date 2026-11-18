@@ -20,6 +20,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/provider"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 	"github.com/unreallabsai/unreal-agent/harness/tool/bash"
 	"github.com/unreallabsai/unreal-agent/harness/tool/observed"
@@ -46,7 +47,10 @@ type RuntimeIdentity struct {
 }
 type RuntimeConfig struct {
 	CredentialSources map[string]credential.Source // nonsecret Host-owned locations, never Session identity
-	BuiltinSubagents  bool                         // defaults follow /model-sub or the owning Session's explicit GPT connection
+	BuiltinSubagents  bool                         // defaults follow subagent model or the owning Session's explicit GPT connection
+	// ResolveChildRuntime validates a lead's already bound worker templates.
+	// Their recorded selections remain fixed for the lifetime of the lead.
+	ResolveChildRuntime subagent.RuntimeResolver
 	// Context is a versioned, disposable projection strategy. It is deliberately
 	// outside immutable runtime/auth identity, so old histories need no migration.
 	Context contextengine.Config

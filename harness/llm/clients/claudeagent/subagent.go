@@ -128,10 +128,29 @@ func literalWords(line string) (words []string, delimiter string, ok bool) {
 	return words, "", true
 }
 
-// subagentPrompt tells Claude its role and how to run the implementers (the
-// user's structure: Claude designs, GPT or the model chosen with /model-sub
-// implements).
+// subagentCommandPath keeps the settings CLI reachable without child templates.
+func subagentCommandPath(s SubagentCLI) string {
+	if s.Binary != "" {
+		return s.Binary
+	}
+	return s.SettingsCommand
+}
+
 func subagentPrompt(s SubagentCLI) string {
+	prompt := subagentWorkPrompt(s)
+	if cli := s.SettingsCommand; cli != "" {
+		if !literalCLI(cli) {
+			cli = "'" + cli + "'"
+		}
+		prompt += fmt.Sprintf("\nOn the user's instruction, read settings with %[1]s subagent model show; set the next child's provider/model/effort with %[1]s subagent model set --role lead|worker|collector|all --provider ID --model ID [--effort LEVEL]. The Host validates and records the choice. Use API-key providers only when the user explicitly chooses them; never substitute another provider.", cli)
+	}
+	return prompt
+}
+
+func subagentWorkPrompt(s SubagentCLI) string {
+	if len(s.RoleChoices) > 0 {
+		return roleSubagentPrompt(s)
+	}
 	if s.Binary == "" {
 		return claudeDelegationPromptFor(s)
 	}
@@ -139,11 +158,11 @@ func subagentPrompt(s SubagentCLI) string {
 	if !literalCLI(cli) {
 		cli = "'" + cli + "'"
 	}
-	m := SubagentModels{Family: "GPT", Lead: "gpt-6.1-sol", Collector: "gpt-6-luna"}
+	m := SubagentModels{Family: "GPT", Lead: "gpt-6.2-sol", Collector: "gpt-6-luna"}
 	overrides := " Add --model ID and --effort LEVEL to subagent start to override a template's model and reasoning effort."
 	if s.Models != nil {
 		if chosen := s.Models(); chosen.Family != "" && chosen.Lead != "" {
-			// The model chosen with /model-sub refuses those overrides.
+			// The model chosen with subagent model refuses those overrides.
 			m, overrides = chosen, ""
 		}
 	}
@@ -164,13 +183,51 @@ func subagentPrompt(s SubagentCLI) string {
 		"Templates: %[2]s (worker-<effort> starts one worker directly).%[6]s", cli, strings.Join(s.Templates, ", "), m.Family, m.Lead, collector, overrides)
 	if m.Family == "GPT" {
 		if s.LeadModel != "" {
-			prompt = strings.ReplaceAll(prompt, "gpt-6.1-sol", s.LeadModel)
+			prompt = strings.ReplaceAll(prompt, "gpt-6.2-sol", s.LeadModel)
 		}
 		if s.LeadEffort != "" {
 			prompt = strings.ReplaceAll(prompt, "at max effort", "at "+s.LeadEffort+" effort")
 		}
 	}
 	return prompt
+}
+
+// Role guidance names only the templates available on each selected provider.
+// A missing route is an error for that role, never a reason to use Agent or
+// another provider instead.
+func roleSubagentPrompt(s SubagentCLI) string {
+	var p strings.Builder
+	p.WriteString("\n\nRun the project: design, decide, communicate with the user, delegate work and review the results for correctness and unrequested changes. The user selected these subagent roles:\n")
+	cli := s.Binary
+	if cli != "" && !literalCLI(cli) {
+		cli = "'" + cli + "'"
+	}
+	for _, role := range s.RoleChoices {
+		fmt.Fprintf(&p, "- %s: %s · %s", role.Role, role.Provider, role.Model)
+		if role.Effort != "" {
+			fmt.Fprintf(&p, " · %s effort", role.Effort)
+		}
+		if !role.Available {
+			p.WriteString(" · unavailable; report provider_unavailable for this role and ask the user to restore its connection or change subagent model. Do not substitute another provider.\n")
+		} else if role.Provider == ProviderID {
+			if s.AgentModel != nil && s.AgentModel() != "" {
+				fmt.Fprintf(&p, " · use Claude Code's Agent tool, which is forced to run %s; finish within this turn.\n", role.Model)
+			} else {
+				fmt.Fprintf(&p, " · use Claude Code's Agent tool with model set to %q for this role; finish within this turn.\n", role.Model)
+			}
+		} else {
+			fmt.Fprintf(&p, " · Templates: %s. Start with %s subagent start --template %s <<'EOF' (title, task and verification, then EOF).", strings.Join(role.Templates, ", "), cli, role.Templates[0])
+			if role.Provider == "openai-codex" {
+				p.WriteString(" For this role only, --model ID and --effort LEVEL may override the template.")
+			}
+			p.WriteByte('\n')
+		}
+	}
+	p.WriteString("Use lead for implementation ownership, workers for hands-on implementation, investigation and tests, and collector for URL/API retrieval, CI/log checks, file searches and extraction, read-only git summaries and document summaries. Roles may use different providers; do not assume the lead's workers use its provider or model.\n")
+	if cli != "" {
+		fmt.Fprintf(&p, "Use exactly %s subagent for Unreal children. Begin each task with a one-line title. Hand work over and end your turn; completion or questions start a new turn. Do not use Claude Code Monitor. Do not wait unless the result is due within tens of seconds; use at most --timeout 60s.\nAnswer child approvals yourself with %[1]s subagent approve HANDLE REQUEST allow|deny. Send instructions with %[1]s subagent send HANDLE <<'EOF' (text, then EOF). Inspect with %[1]s subagent list or %[1]s subagent show HANDLE; cancel with %[1]s subagent cancel HANDLE. Children follow the Session's permission mode and ask you for approvals.\n", cli)
+	}
+	return p.String()
 }
 
 func literalCLI(path string) bool {

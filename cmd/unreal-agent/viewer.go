@@ -57,17 +57,6 @@ func attachViewer(ctx context.Context, client *gateway.Client, id session.ID) er
 			}
 			return *out.Catalog, e
 		},
-		SubagentModels: func(ctx context.Context) ([]modelcatalog.Provider, *sessionstore.RuntimeSelection, error) {
-			out, e := modelExchange(ctx, client.Extension, modelRequest{Action: "subagent.providers", ID: id})
-			return out.Providers, out.SubagentModel, e
-		},
-		SelectSubagentModel: func(ctx context.Context, provider, model string) (sessionstore.RuntimeSelection, bool, error) {
-			out, e := modelExchange(ctx, client.Extension, modelRequest{Action: "subagent.select", ID: id, Selection: sessionstore.RuntimeSelection{Provider: provider, Model: model}})
-			if out.SubagentModel == nil {
-				return sessionstore.RuntimeSelection{}, false, e
-			}
-			return *out.SubagentModel, out.Pending, e
-		},
 		ModelCatalog: func(ctx context.Context) (modelcatalog.Catalog, error) {
 			out, err := modelExchange(ctx, client.Extension, modelRequest{Action: "model.catalog", ID: id})
 			if out.Catalog == nil {

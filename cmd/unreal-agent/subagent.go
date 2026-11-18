@@ -16,11 +16,15 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
+	"github.com/unreallabsai/unreal-agent/harness/host"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/mutation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
+	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 )
 
 // childTemplate is operator configuration. Model arguments contain only a
@@ -46,7 +50,7 @@ func runtimeProviders(identity agentrunner.RuntimeIdentity) (*provider.Registry,
 
 // withParentSubagents gives the Host's Sessions the templates. Children read
 // the same credential sources as the Host; defaultCredentialDirectory is the
-// launcher's store for OpenCode Go's key. subagentModelFile is /model-sub's
+// launcher's store for OpenCode Go's key. subagentModelFile is subagent model's
 // choice for built-in templates, empty for an operator's.
 func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]childTemplate, parentPolicy *permission.Policy, credentialDirectory, defaultCredentialDirectory, codexAuthFile, subagentModelFile string) (agentrunner.RuntimeConfig, map[string]subagent.Template, error) {
 	if len(configured) == 0 {
@@ -104,6 +108,9 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 		return c, nil, err
 	}
 	arguments := []string{"child", "--stdio"}
+	if c.BuiltinSubagents {
+		arguments = append(arguments, "--builtin-subagents")
+	}
 	arguments = append(arguments, apiKeyArguments(c.CredentialSources)...)
 	if credentialDirectory != "" {
 		credentialDirectory, err = filepath.Abs(credentialDirectory)
@@ -226,6 +233,7 @@ func runChild(ctx context.Context, args []string, diagnostics io.Writer) error {
 	flags := flag.NewFlagSet("unreal-agent child", flag.ContinueOnError)
 	flags.SetOutput(diagnostics)
 	stdio := flags.Bool("stdio", false, "serve one parent-bound child protocol connection")
+	builtin := flags.Bool("builtin-subagents", false, "validate role selections of built-in worker templates (internal)")
 	directory := flags.String("credential-directory", "", "explicit managed credential store, never credential material")
 	defaultDirectory := flags.String("default-credential-directory", "", "the launcher's store OpenCode Go's key is read from, when it exists; never created")
 	codexFile := flags.String("codex-auth-file", "", "explicit existing private Codex auth file path, never credential material")
@@ -245,7 +253,7 @@ func runChild(ctx context.Context, args []string, diagnostics io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return subagent.Serve(ctx, os.Stdin, os.Stdout, childFactory(credential.WithSources(resolver, sources, os.Getenv), *codexFile))
+	return subagent.Serve(ctx, os.Stdin, os.Stdout, childFactory(credential.WithSources(resolver, sources, os.Getenv), *codexFile, *builtin))
 }
 
 // childCredentials resolves a child's keys from the sources its Host passed.
@@ -278,14 +286,38 @@ func childCredentials(directory, defaultDirectory, codexFile string) (credential
 // (U17); a parent that stops ends it instead.
 const childApprovalTimeout = agentrunner.ChildApprovalTimeout
 
-func childFactory(resolver credential.Resolver, codexFile string) subagent.ChildFactory {
-	return agentrunner.NewChildFactory(agentrunner.RuntimeConfig{Credentials: resolver}, func(c subagent.ChildConfig, runtime *agentrunner.RuntimeConfig) error {
+func childFactory(resolver credential.Resolver, codexFile string, builtin ...bool) subagent.ChildFactory {
+	base := agentrunner.RuntimeConfig{Credentials: resolver}
+	if len(builtin) > 0 && builtin[0] {
+		base.ResolveChildRuntime = boundWorkerRuntime
+	}
+	return agentrunner.NewChildFactory(base, func(c subagent.ChildConfig, runtime *agentrunner.RuntimeConfig) error {
 		if codexFile != "" {
 			read := codexCatalogReader(codexFile, isDockerSandboxCodex(runtime.Identity.Provider.Auth), os.Getenv)
 			runtime.Catalogs = map[string]func(context.Context) (modelcatalog.Catalog, error){"openai-codex": func(ctx context.Context) (modelcatalog.Catalog, error) { return read(ctx, false) }}
 		}
 		return nil
 	})
+}
+
+// A lead's worker selections were recorded at its start. In particular, a
+// role assigned to Claude Code's Agent cannot become an Unreal child just
+// because it is invoked by a non-Claude lead.
+func boundWorkerRuntime(_ context.Context, _ *host.Session, _ string, template subagent.Template, requested *subagent.RuntimeRequest) (subagent.Template, error) {
+	if requested != nil {
+		return template, &subagent.RuntimeError{Code: "selection_unsupported"}
+	}
+	choice := sessionstore.SelectionFromConfiguration(template.Runtime)
+	if choice == nil {
+		return template, &subagent.RuntimeError{Code: "invalid_template"}
+	}
+	if buildfeatures.Disabled(choice.Provider) {
+		return template, disabledChildError()
+	}
+	if choice.Provider == claudeagent.ProviderID {
+		return template, &subagent.RuntimeError{Code: "provider_unavailable", Hint: claudeChildrenRefusal}
+	}
+	return template, nil
 }
 
 type closeFunc func() error

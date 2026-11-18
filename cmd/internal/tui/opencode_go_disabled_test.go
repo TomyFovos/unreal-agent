@@ -24,10 +24,6 @@ func TestDisabledOpenCodeGoSavedSelectionNotice(t *testing.T) {
 	if len(main.Options) != 0 || main.Kind != "provider" {
 		t.Fatal("disabled saved model remains in /model", main)
 	}
-	p := subagentProviderPicker([]modelcatalog.Provider{{ID: "openai-codex", Name: "Codex"}}, choice)
-	if !strings.Contains(p.Hint, "この配布物では") || !strings.Contains(p.Hint, "/model-sub") {
-		t.Fatal("missing saved child choice guidance", p.Hint)
-	}
 	if got := usertext.Failure("", buildfeatures.ErrOpenCodeGoDisabled.Error(), "opencode-go"); got != buildfeatures.OpenCodeGoDisabledMessage {
 		t.Fatal("failure guidance lost", got)
 	}

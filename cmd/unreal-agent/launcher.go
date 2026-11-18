@@ -35,12 +35,12 @@ type launchOptions struct {
 	// the OpenCode Go key. It is not part of the Host binding: the Host looks
 	// for the key on each discovery, so saving it needs no restart.
 	defaultCredentials string
-	// subagentModel is STATE/subagent-model.json, /model-sub's choice for
+	// subagentModel is STATE/subagent-model.json, subagent model's choice for
 	// every conversation. Like defaultCredentials it is not part of the
 	// Host binding.
 	subagentModel string
 	// sharedState overrides where defaultCredentials and subagentModel live so
-	// every folder reads one login and one /model-sub choice; empty keeps STATE.
+	// every folder reads one login and one subagent model choice; empty keeps STATE.
 	sharedState string
 }
 

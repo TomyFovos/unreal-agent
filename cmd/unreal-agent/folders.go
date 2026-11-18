@@ -32,7 +32,7 @@ import (
 
 // The folders command opens one workspace's conversation from every folder the
 // default configuration knows. Each folder keeps its own configuration and
-// state under the existing roots; the login and the /model-sub choice stay in
+// state under the existing roots; the login and the subagent model choice stay in
 // the default state directory, so one folder never needs its own login.
 
 const (
@@ -380,7 +380,7 @@ func (c foldersCommand) open(ctx context.Context, state folderState, name sessio
 // openFolder makes a folder usable and launches its conversation in process.
 // The default folder starts exactly as a plain unreal start does; another
 // folder names its own configuration and state and shares the default state
-// for the login and the /model-sub choice.
+// for the login and the subagent model choice.
 func (c foldersCommand) openFolder(ctx context.Context, state folderState, entry folderEntry, name session.ID) error {
 	arguments := []string{string(name)}
 	if entry.Folder != state.defaultFolder {

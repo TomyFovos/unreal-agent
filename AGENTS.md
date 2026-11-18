@@ -32,8 +32,8 @@ and by people working on this repository.
   not Claude Code's Monitor: it hands work to a child, ends its turn and resumes
   on the child's end notice. `wait` is only for results due within seconds,
   with at most `--timeout 60s`. Claude Code's Agent may finish work within the
-  turn when a Claude model is explicitly wanted, `/model-sub` is Claude, or no
-  Unreal children are available.
+  turn when a Claude model is explicitly wanted, the role is set to Claude with
+  `subagent model`, or no Unreal children are available.
 
 ## Build and test
 

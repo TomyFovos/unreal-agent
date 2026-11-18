@@ -464,14 +464,26 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 		return operation.StatusFailed, fmt.Errorf("child template changed")
 	}
 	if p.RuntimeOverride != nil {
-		var err error
-		allowed, err = overrideRuntime(allowed, *p.RuntimeOverride)
-		if err != nil {
-			return operation.StatusFailed, err
-		}
-		expected, _ = json.Marshal(allowed)
-		if !sameJSON(actual, expected) {
-			return operation.StatusFailed, fmt.Errorf("child template changed")
+		if p.RuntimeBound && m.config.ValidateTemplate != nil {
+			selection := sessionstore.SelectionFromConfiguration(p.Configuration.Runtime)
+			override := p.RuntimeOverride
+			if selection == nil || override.Model != "" && selection.Model != override.Model || override.Effort != "" && selection.Effort != override.Effort.Normalize() {
+				return operation.StatusFailed, fmt.Errorf("child template changed")
+			}
+			if err := m.config.ValidateTemplate(allowed, *p.Configuration); err != nil {
+				return operation.StatusFailed, err
+			}
+			allowed = *p.Configuration
+		} else {
+			var err error
+			allowed, err = overrideRuntime(allowed, *p.RuntimeOverride)
+			if err != nil {
+				return operation.StatusFailed, err
+			}
+			expected, _ = json.Marshal(allowed)
+			if !sameJSON(actual, expected) {
+				return operation.StatusFailed, fmt.Errorf("child template changed")
+			}
 		}
 	} else if p.RuntimeBound && m.config.ValidateTemplate != nil {
 		if err := m.config.ValidateTemplate(allowed, *p.Configuration); err != nil {

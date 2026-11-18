@@ -122,4 +122,4 @@ commit/push、shellによる編集、provider切替は禁止です。
 
 ## OpenCode Go の配布時設定
 
-`KIT.json` の `opencode_go_enabled` と `unreal-agent --version` で有効・無効を確認できます。有効版は `bash development.sh --opencode-go-api-key-file /absolute/go.key`（0600）、または `--opencode-go-api-key-env MY_GO_KEY` でキーを登録し、`/model` で明示選択します。無効版ではどちらも値を表示せず拒否します。無効版は `/model`・`/model-sub`・discovery・モデル一覧に OpenCode Go を出しません。古い設定や環境変数では戻せず、ソースからの再ビルドが必要です。保存済み Session は元の選択を保持し、`/model` でほかの接続を選ぶよう案内します。子も案内つきで失敗し、自動切替はしません。
+`KIT.json` の `opencode_go_enabled` と `unreal-agent --version` で有効・無効を確認できます。有効版は `bash development.sh --opencode-go-api-key-file /absolute/go.key`（0600）、または `--opencode-go-api-key-env MY_GO_KEY` でキーを登録し、`/model` で明示選択します。無効版ではどちらも値を表示せず拒否します。無効版は `/model`・discovery・モデル一覧に OpenCode Go を出しません。古い設定や環境変数では戻せず、ソースからの再ビルドが必要です。保存済み Session は元の選択を保持し、`/model` でほかの接続を選ぶよう案内します。子も案内つきで失敗し、自動切替はしません。

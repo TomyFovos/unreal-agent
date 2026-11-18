@@ -92,3 +92,17 @@ func TestRequestEffortResolvesUltraToHighestSupported(t *testing.T) {
 		}
 	}
 }
+
+// The lead default is accepted from Codex metadata without a model-name whitelist.
+func TestCodexCatalogAcceptsGPT62SolMax(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "models_cache.json")
+	data := []byte(`{"models":[{"slug":"gpt-6.2-sol","display_name":"GPT-6.2 Sol","visibility":"list","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"}]}]}`)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := ReadCodexCache(path)
+	model, err := catalog.FindSelection("gpt-6.2-sol")
+	if err != nil || !catalog.Available || model.ID != "gpt-6.2-sol" || !model.AllowsEffort(llm.ReasoningEffortMax) || model.RequestEffort(llm.ReasoningEffortMax) != llm.ReasoningEffortMax {
+		t.Fatalf("lead default rejected or changed: %+v, %v", model, err)
+	}
+}

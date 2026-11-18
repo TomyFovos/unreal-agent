@@ -57,7 +57,7 @@ Settings store only the file paths, never key values. Files without permissions 
    ```
 
 3. Check the printed connection summary.
-   Among ready subscriptions, a new installation starts with Claude when both are ready, or the ready subscription. API connections require explicit selection in `/model`. Claude uses GPT children when Codex is available, otherwise Claude Code's Agent (`haiku` / `sonnet`, or the Claude model chosen with `/model-sub`). Without a saved `/model-sub` choice, an OpenAI API parent uses its API connection for built-in GPT children; other parents retain Codex. An explicit `/model-sub` choice takes priority. Unavailable authentication never triggers a connection switch.
+   Among ready subscriptions, a new installation starts with Claude when both are ready, or the ready subscription. API connections require explicit selection in `/model`. Claude uses GPT children when Codex is available, otherwise Claude Code's Agent (`haiku` / `sonnet`, or the Claude model chosen with `unreal-agent subagent model`). Without a saved `unreal-agent subagent model` choice, an OpenAI API parent uses its API connection for built-in GPT children; other parents retain Codex. On the user’s instruction, the main agent uses `unreal-agent subagent model show/set` to read or change `lead`, `worker`, `collector`, or `all`; an explicit role setting takes priority. Unavailable authentication never triggers a connection switch.
 4. Navigate to your project directory and start a named Session:
 
    ```bash
@@ -100,7 +100,7 @@ unreal --where NAME     # print the folder(s) that have Session NAME
 
 (`unreal-agent folders ...` is the same subcommand without the wrapper.)
 
-The folder is the Git worktree root containing the current directory (the directory itself outside Git), with symlinks resolved. One Host runs per folder, with its own configuration `~/.config/unreal-agent/folders/<ID>/runtime.json` and state `~/.local/state/unreal-agent/folders/<ID>/` (`<ID>` is `r-` plus the first 16 hex characters of the SHA-256 of the folder path). The default folder — `Runtime.Workspace` in `~/.config/unreal-agent/runtime.json` — keeps that file and `~/.local/state/unreal-agent` and launches with no extra flags. The Claude login, the OpenCode Go API key and the `/model-sub` choice are shared by every folder; the Claude sandbox allows only that Host's socket, so the subagent CLI keeps working.
+The folder is the Git worktree root containing the current directory (the directory itself outside Git), with symlinks resolved. One Host runs per folder, with its own configuration `~/.config/unreal-agent/folders/<ID>/runtime.json` and state `~/.local/state/unreal-agent/folders/<ID>/` (`<ID>` is `r-` plus the first 16 hex characters of the SHA-256 of the folder path). The default folder — `Runtime.Workspace` in `~/.config/unreal-agent/runtime.json` — keeps that file and `~/.local/state/unreal-agent` and launches with no extra flags. The Claude login, the OpenCode Go API key and the `unreal-agent subagent model` choice are shared by every folder; the Claude sandbox allows only that Host's socket, so the subagent CLI keeps working.
 
 Roll back with an older revision: `make mac-install REV=<older commit>`.
 

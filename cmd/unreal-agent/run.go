@@ -71,7 +71,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		promptFile := flags.String("prompt-file", "", "exec: UTF-8 task input file")
 		sessionID := flags.String("session", "", "exec: new Session ID")
 		mode := flags.String("permission-mode", "full_access", "exec: permission mode selected by the operator")
-		subagentModelFile := flags.String("subagent-model-file", "", "the sub-agents' model chosen with /model-sub, shared by every Session and read at each child start (internal launcher option)")
+		subagentModelFile := flags.String("subagent-model-file", "", "the sub-agents' model chosen with subagent model, shared by every Session and read at each child start (internal launcher option)")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -97,7 +97,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		openCodeGo := usesOpenCodeGo(config)
 		// Built-in subagents are derived per Host, not part of a Session's
 		// recorded identity, so Sessions from before them still resume. Only
-		// they follow /model-sub; an operator's templates stay as configured.
+		// they follow subagent model; an operator's templates stay as configured.
 		builtinSubagents := false
 		subagentModelPath := ""
 		if len(config.Subagents) == 0 {
@@ -216,8 +216,11 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		if runtimeConfig.ClaudeSubagents, err = claudeSubagents(templates, *socket, subagentModelPath); err != nil {
 			return err
 		}
+		if subagentModelPath != "" {
+			runtimeConfig.ClaudeSubagents.Roles = subagentRoles(runtimeConfig, subagentModelPath, templates)
+		}
 		// Claude is told about the children while the provider they run on is
-		// available: Codex, or OpenCode Go when /model-sub chose it.
+		// available: Codex, or OpenCode Go when subagent model chose it.
 		runtimeConfig.ClaudeSubagents.Available = func(ctx context.Context) bool {
 			chosen, _ := readSubagentModel(subagentModelPath)
 			if chosen.Provider == "" && config.SubagentDefaults != nil {

@@ -18,7 +18,7 @@ type agentInput struct {
 
 // agentCallSubject is the progress subject for an Agent call: the model and
 // the task description, not the whole JSON input. chosen names the model
-// picked with /model-sub, used when the call itself names none.
+// picked with subagent model, used when the call itself names none.
 func agentCallSubject(input jsontext.Value, chosen func() string) string {
 	var in agentInput
 	_ = json.Unmarshal(input, &in)

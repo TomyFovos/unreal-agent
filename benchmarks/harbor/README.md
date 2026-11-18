@@ -142,7 +142,7 @@ substituting or omitting it.
 | `configuration` | `claude-gpt` (default), `gpt`, `claude` |
 | `main_model` | Overrides `-m`; otherwise `anthropic/opus` or `openai/gpt-6.1-sol` |
 | `main_effort` | `max`; accepts low, medium, high, xhigh, max |
-| `child_model`, `child_effort` | Mixed/GPT: implementation lead, default gpt-6.1-sol / max; workers use that model with their template efforts; collector keeps product default gpt-6-luna / medium |
+| `child_model`, `child_effort` | Mixed/GPT: implementation lead, default gpt-6.2-sol / max; workers use that model with their template efforts; collector keeps product default gpt-6-luna / medium |
 | `child_model`, `child_effort` in Claude-only | Optional native Agent model/effort, applied through Claude Code's hook; if omitted, the unchanged product prompt chooses haiku/sonnet |
 | `openai_key_file`, `anthropic_key_file` | Local regular 0600 key files; only the chosen configuration's keys are read |
 

@@ -88,7 +88,7 @@ func TestLegacyUltraRuntimeConfigurationAndChildTemplatesLoad(t *testing.T) {
 	}
 }
 
-// The user's structure: the lead runs gpt-6.1-sol at max and starts
+// The user's structure: the lead runs gpt-6.2-sol at max and starts
 // workers at low through max, which start nobody.
 func TestDefaultSubagentsLeadAtMaxWorkersUnchanged(t *testing.T) {
 	workspace := t.TempDir()
@@ -103,7 +103,7 @@ func TestDefaultSubagentsLeadAtMaxWorkersUnchanged(t *testing.T) {
 	if !ok || len(templates) != 2+len(workerEfforts) {
 		t.Fatal("templates", len(templates))
 	}
-	if lead.Runtime.Provider.Provider != "openai-codex" || lead.Runtime.Provider.Model.ID != "gpt-6.1-sol" || lead.Runtime.ReasoningEffort != llm.ReasoningEffortMax || !lead.Pinned || len(lead.Workers) != 1+len(workerEfforts) {
+	if lead.Runtime.Provider.Provider != "openai-codex" || lead.Runtime.Provider.Model.ID != "gpt-6.2-sol" || lead.Runtime.ReasoningEffort != llm.ReasoningEffortMax || !lead.Pinned || len(lead.Workers) != 1+len(workerEfforts) {
 		t.Fatalf("lead %+v", lead.Runtime)
 	}
 	// Low-difficulty tasks go to the collector on gpt-6-luna; it cannot start
@@ -111,7 +111,7 @@ func TestDefaultSubagentsLeadAtMaxWorkersUnchanged(t *testing.T) {
 	if c, ok := templates["collector"]; !ok || c.Runtime.Provider.Model.ID != "gpt-6-luna" || c.Runtime.ReasoningEffort != llm.ReasoningEffortMedium || len(c.Workers) != 0 || slices.Contains(c.Permissions.Tools, "SubagentStart") || lead.Workers["collector"].Runtime.Provider.Model.ID != "gpt-6-luna" {
 		t.Fatalf("collector %+v", c.Runtime)
 	}
-	for _, want := range []string{"collector template (gpt-6-luna)", "never to a gpt-6.1-sol worker", "nothing more"} {
+	for _, want := range []string{"collector template (gpt-6-luna)", "never to a gpt-6.2-sol worker", "nothing more"} {
 		if !strings.Contains(lead.Runtime.SystemPrompt, want) {
 			t.Fatalf("lead prompt lacks %q", want)
 		}

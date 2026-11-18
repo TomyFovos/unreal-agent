@@ -57,7 +57,7 @@ bash development.sh --openai-api-key-file /absolute/openai.key --anthropic-api-k
    ```
 
 3. インストール完了後に表示される接続状態を確認します。
-   新規導入時は利用可能なサブスクを優先し、両方使えれば Claude、片方ならそのサブスクで始まります。API 接続は `/model` で明示的に選びます。Claude は Codex が使えれば GPT の子、使えなければ Claude Code の Agent（`haiku` / `sonnet`、`/model-sub` で Claude を選んだ場合はそのモデル）を使います。`/model-sub` が未指定の場合、OpenAI API を統括に選ぶと組み込みの GPT の子も API を使い、他の統括では Codex を維持します。`/model-sub` での明示選択があればその指定を優先します。認証が使えなくても別接続へ切り替えません。
+   新規導入時は利用可能なサブスクを優先し、両方使えれば Claude、片方ならそのサブスクで始まります。API 接続は `/model` で明示的に選びます。Claude は Codex が使えれば GPT の子、使えなければ Claude Code の Agent（`haiku` / `sonnet`、`unreal-agent subagent model` で Claude を選んだ場合はそのモデル）を使います。`unreal-agent subagent model` が未指定の場合、OpenAI API を統括に選ぶと組み込みの GPT の子も API を使い、他の統括では Codex を維持します。メインエージェントが利用者の指示で `unreal-agent subagent model show/set` を使い、all または lead・worker・collector 別に設定・参照でき、明示した役割はその指定を優先します。worker の effort は全 worker に同じ値を選ぶこともできます。認証が使えなくても別接続へ切り替えません。
 4. 開発したいプロジェクトのディレクトリへ移動し、名前付きセッションを起動します。
 
    ```bash
@@ -100,7 +100,7 @@ unreal --where NAME     # Session NAME があるフォルダを表示する
 
 （`unreal-agent folders ...` がラッパー無しの同じサブコマンドです。）
 
-フォルダは、カレントディレクトリを含む Git worktree のルート（Git の外ならそのディレクトリ）で、シンボリックリンクは解決されます。フォルダごとに1つの Host が動き、設定 `~/.config/unreal-agent/folders/<ID>/runtime.json` と状態 `~/.local/state/unreal-agent/folders/<ID>/` を持ちます（`<ID>` は `r-` + フォルダパスの SHA-256 の先頭16桁の16進）。既定フォルダ（`~/.config/unreal-agent/runtime.json` の `Runtime.Workspace`）はそのファイルと `~/.local/state/unreal-agent` をそのまま使い、追加フラグ無しで起動します。Claude のログイン、OpenCode Go の API キー、`/model-sub` の選択は全フォルダで共有されます。Claude のサンドボックスはその Host の socket だけを許可するので、サブエージェント CLI も動きます。
+フォルダは、カレントディレクトリを含む Git worktree のルート（Git の外ならそのディレクトリ）で、シンボリックリンクは解決されます。フォルダごとに1つの Host が動き、設定 `~/.config/unreal-agent/folders/<ID>/runtime.json` と状態 `~/.local/state/unreal-agent/folders/<ID>/` を持ちます（`<ID>` は `r-` + フォルダパスの SHA-256 の先頭16桁の16進）。既定フォルダ（`~/.config/unreal-agent/runtime.json` の `Runtime.Workspace`）はそのファイルと `~/.local/state/unreal-agent` をそのまま使い、追加フラグ無しで起動します。Claude のログイン、OpenCode Go の API キー、`unreal-agent subagent model` の選択は全フォルダで共有されます。Claude のサンドボックスはその Host の socket だけを許可するので、サブエージェント CLI も動きます。
 
 以前のリビジョンに戻すには `make mac-install REV=<older commit>` を実行します。
 

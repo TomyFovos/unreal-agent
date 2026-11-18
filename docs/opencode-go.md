@@ -11,13 +11,13 @@ OpenCode のモデルを追加します。使えるのは、取り込み元が�
 
 ## 使い方
 
-`/model` で会話の相手（指揮者）を、`/model-sub` でサブエージェント（実装者と調査者の `lead`、
-`worker`、`collector`）を OpenCode Go に切り替えられます。`/model-sub` の選択肢は「OpenAI Codex」
-（既定）、「OpenCode Go」、「Claude」の 3 つです。OpenCode Go では取り込み元が実機で確かめた 24 個のモデルから選べ、
-「Claude」は `/model` に Claude が表示されているときに選べて、続けて `/model` と同じ Claude のモデルから
-選びます（動きは後述）。キーを保存しなければ、`/model` に OpenCode Go は表示されず、今までと同じです。
+`/model` で会話の相手（指揮者）を選びます。サブエージェントはメインエージェントに指示し、
+`unreal-agent subagent model` CLI で `lead`・`worker`・`collector` ごとに設定します。
+TUI に子モデル選択メニューはありません。役割とプロバイダの組み合わせは固定していません。
 
-キーの保存は接続先の登録だけで、OpenCode Go を自動選択しません。`/model` または `/model-sub` で明示的に選ぶか、初回の `UNREAL_HARNESS_LLM_PROVIDER=opencode-go` で選びます。保存キーのある Go だけが利用可能でも、初期接続の自動選択には含めません。
+キーの保存は接続先の登録だけで、OpenCode Go を自動選択しません。`/model` またはメインエージェント経由の
+CLI 設定で明示的に選ぶか、初回の `UNREAL_HARNESS_LLM_PROVIDER=opencode-go` で選びます。
+保存キーのある Go だけが利用可能でも、初期接続の自動選択には含めません。
 
 ### OpenCode 側の準備
 
@@ -68,53 +68,66 @@ Unreal はキーを探すたびにこの保存場所を見ます。
 
 ### サブエージェントのモデルを選ぶ
 
-`/model-sub` を実行し、「OpenCode Go」を選んでから、モデルの一覧から 1 つ選びます。一覧は `/model` と
-同じ 24 個で、先頭が Flash です。次に起動する子からそのモデルで動きます。動いている途中の子はそのままです。
-選んだ内容は、同じインストールの shared state を使うすべての会話に効きます（Mac のフォルダ間も共有します）。「OpenAI Codex」（表示名は `ChatGPT（サブスク）`）を選ぶと、サブスクの Codex 接続に固定します。
+メインエージェントに「lead は Codex の gpt-6.2-sol max、worker は OpenCode Go の DeepSeek V4.1 Flash max にして」
+と指示します。メインは自身の Session のシェルで次の CLI を使います。利用者が環境変数や設定ファイルを手で編集する必要はありません。
 
-`/model-sub` の保存ファイルがまだなければ、従来の既定動作を保ちます。親が OpenAI API を明示選択している場合、組み込みの GPT の子もその API 接続を使い、他の親は Codex を使います。「OpenAI Codex」を保存した後は親が API でもサブスク接続です。指定先が使えない場合は失敗し、親の API 接続へは切り替えません。明示的な `Subagents`・`SubagentDefaults` はこの共有設定の対象外です。
+```sh
+unreal-agent subagent model show
+unreal-agent subagent model set --role lead --provider openai-codex --model gpt-6.2-sol --effort max
+unreal-agent subagent model set --role worker --provider opencode-go --model deepseek-v4.1-flash --effort max
+unreal-agent subagent model show --role worker
+```
 
-OpenCode Go を選んでいる間は、`subagent start` の `--model` と `--effort`（テンプレートのプロバイダは
-そのままで、モデルと effort だけを変える指定）は使えません。そのまま通すと `/model-sub` の選択を
-通らず、Codex（または Host 起動時に選んでいたモデル）で動いてしまうためです。指定すると
-`override_unavailable` で断り、Claude への案内にもこの指定は出しません。子のモデルを変えるときは
-`/model-sub` で選び直します。
+| `--role` | 適用するテンプレート |
+| --- | --- |
+| `lead` | issue を担当する統括の子。組み込み既定は `gpt-6.2-sol` / max |
+| `worker` | `worker-low`〜`worker-max` のすべて |
+| `collector` | 収集担当。変更しなければ `gpt-6-luna` / medium |
+| `all` | 全役割の設定を置き換える |
 
-役割ごとの effort は選ぶ段階がなく、選んだモデルの一覧から決まります。`lead` と `worker-max` は一番高い
-effort、`worker-low` と `collector` は一番低い effort、他の worker は自分の effort（なければ既定の
-effort。既定が自分より低いときは、自分より低い中で一番高い effort。`qwen3.8-max` では `worker-high` が
-`medium`）です。一覧に effort がないモデルは、effort なしで動きます。DeepSeek V4.1 Flash では、次の表の
-とおりです。
+全役割を同じ設定にする場合も CLI を使います。
 
-| テンプレート | モデル | effort |
+```sh
+unreal-agent subagent model set --role all --provider opencode-go --model deepseek-v4.1-flash --effort max
+```
+
+`--provider` は登録済みで利用可能な接続先、`--model` はその接続先のカタログにあるモデルを指定します。
+`--effort` は省略可能で、明示する場合はモデルが対応する値だけを受け付けます。対応しない provider・model・effort は
+理由を返して失敗し、保存済み設定を変更しません。API キー接続も利用者が明示した場合だけ使い、別 provider への自動切替はしません。
+設定・参照は Host 経由で処理し、操作した Session に役割・provider・model・effort を記録します。
+
+選択は従来と同じ shared state の `subagent-model.json` に保存し、全 Session・フォルダで共有します。
+Host 再起動後も保持します。Version 1 の旧単一設定は全役割への選択として読み込み、役割別設定は Version 2 で保存します。
+変更しない役割は以前の一括設定を引き継ぎます。設定は次の子から有効で、実行中の子は記録済みの選択を維持します。
+lead 配下の worker・collector も lead 開始時に選択を記録します。
+明示的な `Subagents`・`SubagentDefaults` と、runtime を明示した `/children start` は共有設定の対象外です。
+
+保存済み設定がない役割では、親が OpenAI API を明示選択していればその API、他の親では Codex を使います。
+Codex を明示した役割は、API の親からでもサブスク接続を使います。
+`subagent start --model ID --effort LEVEL` の可否も役割ごとに判断し、Go / Claude の役割では
+`override_unavailable` を返します。変更には `subagent model set` を使います。
+Claude の委譲案内と可用性確認も役割ごとの選択を使い、使えない役割を別接続へ回しません。
+
+Go で effort を省略した場合、従来どおり lead / worker-max は最高、worker-low / collector は最低、
+他の worker は自分の effort（なければ既定。既定が自分より低ければ、自分より低い中で最高）を使います。
+effort がないモデルには指定を送りません。Flash では次のようになります。
+
+| テンプレート | effort 省略時 | worker に max を明示した場合 |
 | --- | --- | --- |
-| `lead`、`worker-max` | `deepseek-v4.1-flash` | `max` |
-| `worker-high`、`worker-xhigh`、`worker-medium` | `deepseek-v4.1-flash` | `high` |
-| `worker-low`、`collector` | `deepseek-v4.1-flash` | `low` |
+| `lead` | `max` | lead 自身の設定を維持 |
+| `worker-max` | `max` | `max` |
+| `worker-high`、`worker-xhigh`、`worker-medium` | `high` | `max` |
+| `worker-low` | `low` | `max` |
+| `collector` | `low` | collector 自身の設定を維持 |
 
-OpenCode Go を選んでいるとき、Claude が子を案内するのは、OpenCode Go が登録されキーが保存されている間です
-（Codex が利用できるかどうかは見ません）。モデル一覧は子の起動時に読みます。
+Claude を選んだ役割は Claude の親から Claude Code の Agent へそのモデルで委譲します。
+全役割が同じ Claude モデルなら `CLAUDE_CODE_SUBAGENT_MODEL` と `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`、
+混在時は全体を FORCE せず役割ごとの案内を使います。Agent の認証は親の明示済み Claude 接続です。
+Unreal の子として直接開始しようとすると、その役割だけ `provider_unavailable` を返します。
+実 CLI の Agent モデル反映はこの変更では live 試験していません。
 
-接続先の自動検出が有効（既定）なら、Codex にログインしていなくてもテンプレートは用意されているので、選んだ
-内容は次に起動する子から使われます。Codex を無効にした Host や自動検出を切った Host で、Host 起動時に
-OpenCode Go を選んでいなかったときだけ、選んだ内容は保存され、Host が次に起動したときから使えます。
-`/model-sub` はそう表示します。Host は Ctrl-D や `/detach` では止まらないので、作業がないときに
-`pkill -f 'unreal-agent serve'` で止めてから `unreal` を起動します。
-
-「Claude」を選ぶと、Claude Code の Agent がそのモデルでサブエージェントを動かし、Unreal の子は作りません。
-Unreal は Claude Code の起動環境に `CLAUDE_CODE_SUBAGENT_MODEL` と `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`
-を設定し、委譲の案内でも `haiku` / `sonnet` の代わりにそのモデル名を出します。FORCE を付けると、組み込みの
-Explore / Plan を含むすべての Agent のサブエージェントがそのモデルで動き、Agent ツールから呼び出しごとの
-`model` がなくなるので、Claude は別のモデルを指定できません（Claude Code 2.1.257 以降が必要です）。Claude
-Code の文書によると、fork と、サブエージェントで動く `model: inherit` の skill は Claude 自身のモデルのまま
-です。選択は Claude の次のターンから効き、動いている途中の子はそのままです。Claude を選んでいる間、OpenCode
-Go や Codex の親が組み込みテンプレートの子を起動しようとすると
-`provider_unavailable` で断り、`/model-sub` で OpenAI Codex か OpenCode Go を選ぶよう案内します。別の
-プロバイダへ切り替えることはありません。`subagent start` の `--model` と `--effort` は OpenCode Go のときと
-同じく `override_unavailable` で断ります。実機の CLI で、環境変数が Claude Code の Agent のサブエージェント
-に届くことと、そのツール呼び出しが TUI に表示されることは、この取り込みでは live 試験を行っていません。
-
-Agent の認証は親 Session の明示した Claude 接続を使い、子モデルの選択では接続を替えません。子のツール呼び出しは進捗にインデントして表示し、E3 の子 transcript の観測記録も維持します。実行する Operation は親の Agent 呼び出しで、観測した子の呼び出しを再実行しません。
+テンプレートのない Host では CLI が再起動後から有効と表示します。
+Codex 無効・自動検出なしの Host でも、Go の設定を保存すれば次の Host 起動時にテンプレートを用意します。
 
 ### キーの削除
 
@@ -289,4 +302,4 @@ OpenAI の名前で固定されています。OpenCode が枯渇を別のコー�
 
 既定は有効です。案件向けに禁止する場合は `make snapshot OPENCODE_GO_ENABLED=false` で作り、共通キットへ `--disable-opencode-go` を付けて再梱包してください。[ほかのビルド方法と記録](ja/distribution.md#opencode-go-を無効にした配布物)も参照してください。
 
-無効版は `/model`・`/model-sub`・discovery・モデル一覧・認証登録から接続全体を除外します。キーのファイル指定・環境変数指定も値を表示せず拒否します。環境変数・以前の設定・保存済みの選択では戻せず、ソースからの再ビルドが必要です。OpenCode Go を選んでいた Session はそのまま開いて `/model` でほかの接続を選ぶよう案内し、推論を拒否します。子の指定も案内つきで失敗し、自動切替は行いません。`KIT.json`・`SNAPSHOT.json` の `opencode_go_enabled` と各実行ファイルの `--version` で確認できます。
+無効版は `/model`・discovery・モデル一覧・認証登録から接続全体を除外します。キーのファイル指定・環境変数指定も値を表示せず拒否します。環境変数・以前の設定・保存済みの選択では戻せず、ソースからの再ビルドが必要です。OpenCode Go を選んでいた Session はそのまま開いて `/model` でほかの接続を選ぶよう案内し、推論を拒否します。子の指定も案内つきで失敗し、自動切替は行いません。`KIT.json`・`SNAPSHOT.json` の `opencode_go_enabled` と各実行ファイルの `--version` で確認できます。

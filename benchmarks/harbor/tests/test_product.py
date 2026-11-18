@@ -185,6 +185,10 @@ class ProductTests(unittest.TestCase):
                 UnrealAgent(bundle=temporary, logs_dir=root)._configuration,
                 "claude-gpt",
             )
+            self.assertEqual(
+                UnrealAgent(bundle=temporary, logs_dir=root)._child_model,
+                "gpt-6.2-sol",
+            )
             for kwargs in (
                 {"configuration": "unknown"},
                 {"child_effort": "extreme"},

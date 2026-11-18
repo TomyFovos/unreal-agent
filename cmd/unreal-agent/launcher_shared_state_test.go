@@ -16,7 +16,7 @@ func TestLauncherSharedStateDirectory(t *testing.T) {
 	state := filepath.Join(root, "state")
 	shared := filepath.Join(root, "shared")
 
-	// Without the flag the login and the /model-sub choice stay in STATE.
+	// Without the flag the login and the subagent model choice stay in STATE.
 	o, err := parseLaunchOptions([]string{"name", "--state-directory", state}, io.Discard, getenv)
 	if err != nil || o.defaultCredentials != filepath.Join(state, "credentials") || o.subagentModel != filepath.Join(state, "subagent-model.json") {
 		t.Fatal(o, err)

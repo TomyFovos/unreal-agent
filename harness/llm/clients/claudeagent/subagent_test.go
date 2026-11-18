@@ -20,6 +20,8 @@ func TestSubagentCommandAcceptsOnlyTheHostCommand(t *testing.T) {
 		cli + " subagent wait",
 		cli + " subagent wait child-start-0123 --timeout 5m",
 		cli + " subagent approve child-start-0123 call_abc allow",
+		cli + " subagent model show",
+		cli + " subagent model set --role worker --provider opencode-go --model deepseek-v4.1-flash --effort max",
 		cli + " subagent start --template lead <<'EOF'\nBuild the parser.\nUse $HOME and `backticks` freely; they stay text.\nEOF",
 		cli + " subagent send child-start-0123 <<\"END\"\nmore\nEND\n",
 		"'" + cli + "' subagent list",
@@ -85,7 +87,7 @@ func TestSubagentPromptNamesTheCommandAndRoles(t *testing.T) {
 	if strings.Contains(prompt, "ultra") {
 		t.Fatal("prompt advertises disabled effort", prompt)
 	}
-	for _, want := range []string{"run the project", "GPT does the work", "over-implementation", "collector template (gpt-6-luna)", "never to a gpt-6.1-sol worker", "/opt/unreal/bin/unreal subagent start --template lead <<'EOF'", "/opt/unreal/bin/unreal subagent wait HANDLE --timeout 60s", "end your turn; do not wait", "Monitor is unavailable", "Agent tool only when a Claude model is wanted", "You decide; children do the work", "writing documents and commits", "within tens of seconds", "at most --timeout 60s", "ignore versioned command paths", "【報告】", "【要確認】", "one-line title", "subagent approve HANDLE REQUEST allow|deny", "gpt-6.1-sol at max effort", "worker-low through worker-max", "lead, worker-high", "every permission mode, Read Only included"} {
+	for _, want := range []string{"run the project", "GPT does the work", "over-implementation", "collector template (gpt-6-luna)", "never to a gpt-6.2-sol worker", "/opt/unreal/bin/unreal subagent start --template lead <<'EOF'", "/opt/unreal/bin/unreal subagent wait HANDLE --timeout 60s", "end your turn; do not wait", "Monitor is unavailable", "Agent tool only when a Claude model is wanted", "You decide; children do the work", "writing documents and commits", "within tens of seconds", "at most --timeout 60s", "ignore versioned command paths", "【報告】", "【要確認】", "one-line title", "subagent approve HANDLE REQUEST allow|deny", "gpt-6.2-sol at max effort", "worker-low through worker-max", "lead, worker-high", "every permission mode, Read Only included"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt lacks %q", want)
 		}
@@ -95,7 +97,7 @@ func TestSubagentPromptNamesTheCommandAndRoles(t *testing.T) {
 	}
 }
 
-// The model chosen with /model-sub is named from the next turn on; without
+// The model chosen with subagent model is named from the next turn on; without
 // a choice the GPT prompt above is unchanged.
 func TestSubagentPromptNamesTheChosenModel(t *testing.T) {
 	cli := SubagentCLI{Binary: "/opt/unreal/bin/unreal", Socket: "/run/host.sock", Templates: []string{"lead"}}

@@ -140,7 +140,7 @@ unreal_run claude e2-claude-500 anthropic/opus --ak child_model=sonnet --ak chil
 | `configuration` | `claude-gpt`（既定）、`gpt`、`claude` |
 | `main_model` | `-m` より優先。両方省略時は `anthropic/opus` または `openai/gpt-6.1-sol` |
 | `main_effort` | 既定 `max`。low / medium / high / xhigh / max |
-| `child_model`, `child_effort` | 混成・GPT：実装 lead の指定。既定 gpt-6.1-sol / max。worker は同じモデルと各 template の強度を使い、collector は製品どおり gpt-6-luna / medium |
+| `child_model`, `child_effort` | 混成・GPT：実装 lead の指定。既定 gpt-6.2-sol / max。worker は同じモデルと各 template の強度を使い、collector は製品どおり gpt-6-luna / medium |
 | Claude 単独の `child_model`, `child_effort` | native Agent のモデル・強度を任意指定し、Claude Code の hook で適用。省略時は製品 prompt どおり haiku / sonnet を使い分ける |
 | `openai_key_file`, `anthropic_key_file` | ローカルの通常ファイル・0600。選択した構成に必要なキーだけを読む |
 

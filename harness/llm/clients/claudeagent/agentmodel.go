@@ -11,7 +11,7 @@ const claudeSubagentModelEnv = "CLAUDE_CODE_SUBAGENT_MODEL"
 // model; Claude Code reads it from 2.1.257.
 const claudeSubagentModelForceEnv = "CLAUDE_CODE_SUBAGENT_MODEL_FORCE"
 
-// agentModelEnv names the model chosen with /model-sub for Claude Code's
+// agentModelEnv names the model chosen with subagent model for Claude Code's
 // Agent sub-agents, and forces it on all of them. Without a choice, or while
 // Unreal's own children run, the environment is left exactly as it was.
 func agentModelEnv(env []string, s SubagentCLI) []string {
@@ -29,7 +29,7 @@ func agentModelEnv(env []string, s SubagentCLI) []string {
 const claudeAgentModelRule = `to the Agent tool with model set to "haiku" for the simplest and "sonnet" for moderate ones, and review`
 
 // claudeDelegationPromptFor is the delegation prompt for the model it runs:
-// with a model chosen with /model-sub the Agent runs that model, so the prompt
+// with a model chosen with subagent model the Agent runs that model, so the prompt
 // names it; otherwise upstream's text stays byte for byte.
 func claudeDelegationPromptFor(s SubagentCLI) string {
 	if s.AgentModel == nil {

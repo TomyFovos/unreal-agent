@@ -16,7 +16,7 @@ import (
 func TestSubagentCallsShowInTheProgressStream(t *testing.T) {
 	for _, tc := range []struct{ name, in, chosen string }{
 		{"the call's own model", "haiku", "sonnet"},
-		{"the model chosen with /model-sub", "", "opus"},
+		{"the model chosen with subagent model", "", "opus"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, "agent_progress", "CLAUDEAGENT_AGENT_MODEL="+tc.in)

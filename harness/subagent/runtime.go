@@ -40,7 +40,7 @@ type RuntimeResolver func(context.Context, *host.Session, string, Template, *Run
 
 // StartChild uses the same canonical SubagentStart Operation as model calls.
 // The stable input ID also gives operator starts their existing retry semantics.
-func StartChild(ctx context.Context, owner *host.Session, generation string, input inbox.ID, name, task string, templates map[string]Template, requested *RuntimeRequest, resolve RuntimeResolver) (host.Receipt, error) {
+func StartChild(ctx context.Context, owner *host.Session, generation string, input inbox.ID, name, task string, templates map[string]Template, requested *RuntimeRequest, resolve RuntimeResolver, bindOverrides ...bool) (host.Receipt, error) {
 	if owner == nil || generation != owner.Generation {
 		return host.Receipt{}, host.ErrStaleGeneration
 	}
@@ -83,6 +83,15 @@ func StartChild(ctx context.Context, owner *host.Session, generation string, inp
 	bound := false
 	if override != nil {
 		var e error
+		// Role selections bind the template and its nested workers first.
+		// Legacy callers keep overrides independent of provider discovery.
+		if len(bindOverrides) > 0 && bindOverrides[0] && resolve != nil {
+			configured, e = resolve(ctx, owner, name, configured, nil)
+			if e != nil {
+				return host.Receipt{}, e
+			}
+			bound = true
+		}
 		configured, e = overrideRuntime(configured, *override)
 		if e != nil {
 			return host.Receipt{}, e

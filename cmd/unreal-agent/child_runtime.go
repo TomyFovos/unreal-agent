@@ -74,13 +74,13 @@ func builtinGPTProvider(owner *host.Session) string {
 	return "openai-codex"
 }
 
-// claudeChildrenRefusal says what to do while /model-sub chose Claude: Claude's
+// claudeChildrenRefusal says what to do while subagent model chose Claude: Claude's
 // own Agent tool runs the sub-agents, so a built-in child start is refused.
-const claudeChildrenRefusal = "/model-sub で Claude を選んでいる間は子を起動できません。子を使うには /model-sub で OpenAI Codex か OpenCode Go を選んでください"
+const claudeChildrenRefusal = "subagent model で Claude を選んでいる間は子を起動できません。子を使うには subagent model で OpenAI Codex か OpenCode Go を選んでください"
 
 // childRuntimeResolver binds a child start to a registered backend. With
 // modelFile, a start of a built-in template that names no runtime runs the
-// sub-agents' model chosen with /model-sub, and so do a lead's workers;
+// sub-agents' model chosen with subagent model, and so do a lead's workers;
 // a choice that cannot run fails the start, nothing falls back to Codex.
 func childRuntimeResolver(c agentrunner.RuntimeConfig, modelFile string) subagent.RuntimeResolver {
 	return func(ctx context.Context, owner *host.Session, name string, template subagent.Template, requested *subagent.RuntimeRequest) (subagent.Template, error) {
@@ -89,21 +89,27 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig, modelFile string) subagen
 		fail := func(code string) (subagent.Template, error) { return template, &subagent.RuntimeError{Code: code} }
 		chosen := false
 		explicitCodex := false
+		var saved subagentModel
+		var roleChoice subagentModelChoice
 		if requested == nil && modelFile != "" && template.Default != nil {
 			m, e := readSubagentModel(modelFile)
 			if e != nil {
 				return fail("subagent_model_unreadable")
 			}
-			if buildfeatures.Disabled(m.Provider) {
+			saved, roleChoice = m, m.choice(name)
+			if buildfeatures.Disabled(roleChoice.Provider) {
 				return template, disabledChildError()
 			}
-			explicitCodex = m.Provider == "openai-codex"
-			if m.Provider == claudeagent.ProviderID {
+			explicitCodex = roleChoice.Provider == "openai-codex"
+			if roleChoice.Provider == claudeagent.ProviderID {
 				return template, &subagent.RuntimeError{Code: "provider_unavailable", Hint: claudeChildrenRefusal}
 			}
-			if m.Provider == opencodego.ProviderID {
+			if roleChoice.Provider == opencodego.ProviderID || roleChoice.Model != "" || roleChoice.Effort != "" {
 				// The effort is the role's on this model, bound below.
-				requested, chosen = &subagent.RuntimeRequest{Provider: m.Provider, Model: m.Model, Effort: template.Default.Effort}, true
+				requested, chosen = &subagent.RuntimeRequest{Provider: roleChoice.Provider, Model: roleChoice.Model, Effort: template.Default.Effort}, true
+				if requested.Model == "" {
+					requested.Model = template.Default.Model
+				}
 			} else if template.Default.Provider != "openai-codex" && !c.BuiltinSubagents {
 				return fail("provider_unavailable")
 			}
@@ -184,7 +190,14 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig, modelFile string) subagen
 			return fail("invalid_model")
 		}
 		if chosen {
-			choice.Effort = subagentEffort(name, model)
+			if choice.Provider == opencodego.ProviderID {
+				choice.Effort = subagentEffort(name, model)
+			} else if roleChoice.Effort == "" && !model.AllowsEffort(choice.Effort) {
+				choice.Effort = model.DefaultEffort
+			}
+			if roleChoice.Effort != "" {
+				choice.Effort = roleChoice.Effort
+			}
 		}
 		if !model.AllowsEffort(choice.Effort) {
 			return fail("unsupported_effort")
@@ -195,15 +208,66 @@ func childRuntimeResolver(c agentrunner.RuntimeConfig, modelFile string) subagen
 			return template, e
 		}
 		template.Runtime = raw
-		if chosen && len(template.Subagents) > 0 {
+		if (chosen || saved.Roles != nil) && len(template.Subagents) > 0 {
 			workers := make(map[string]subagent.Template, len(template.Subagents))
 			for worker, t := range template.Subagents {
-				if t.Runtime, e = boundChildRuntime(c, t.Runtime, backend, choice.Model, subagentEffort(worker, model), true, collector); e != nil {
+				workerChoice := saved.choice(worker)
+				id := workerChoice.Provider
+				if id == "" {
+					id = builtinGPTProvider(owner)
+				}
+				if buildfeatures.Disabled(id) {
+					return template, disabledChildError()
+				}
+				workerBackend, err := c.ProviderRuntime(id)
+				if err != nil {
+					return template, &subagent.RuntimeError{Code: "provider_unavailable", Hint: modelcatalog.AuthRequired.ProviderHint(id)}
+				}
+				var identity agentrunner.RuntimeIdentity
+				if json.Unmarshal(t.Runtime, &identity) != nil {
+					return fail("invalid_template")
+				}
+				workerModel, workerEffort := identity.Provider.Model.ID, identity.ReasoningEffort.Normalize()
+				if workerChoice.Model != "" {
+					workerModel = workerChoice.Model
+				}
+				if id == opencodego.ProviderID || workerChoice.Model != "" || workerChoice.Effort != "" {
+					catalog, err := c.Catalog(ctx, id)
+					if err != nil {
+						return template, &subagent.RuntimeError{Code: "provider_unavailable", Hint: modelcatalog.CatalogUnavailable.ProviderHint(id)}
+					}
+					m, err := catalog.FindSelection(workerModel)
+					if err != nil {
+						return fail("invalid_model")
+					}
+					if id == opencodego.ProviderID {
+						workerEffort = subagentEffort(worker, m)
+					} else if workerChoice.Effort == "" && !m.AllowsEffort(workerEffort) {
+						workerEffort = m.DefaultEffort
+					}
+					if workerChoice.Effort != "" {
+						workerEffort = workerChoice.Effort
+					}
+					if !m.AllowsEffort(workerEffort) {
+						return fail("unsupported_effort")
+					}
+				}
+				if t.Runtime, e = boundChildRuntime(c, t.Runtime, workerBackend, workerModel, workerEffort, false, ""); e != nil {
 					return template, e
 				}
 				workers[worker] = t
 			}
 			template.Subagents = workers
+			if saved.Roles != nil {
+				var collectorRuntime, leadRuntime agentrunner.RuntimeIdentity
+				if t, ok := workers["collector"]; ok && json.Unmarshal(t.Runtime, &collectorRuntime) == nil && json.Unmarshal(template.Runtime, &leadRuntime) == nil {
+					leadRuntime.SystemPrompt = subagentCollectorPrompt(leadRuntime.SystemPrompt, collectorRuntime)
+					template.Runtime, e = json.Marshal(leadRuntime)
+					if e != nil {
+						return template, e
+					}
+				}
+			}
 		}
 		return template, nil
 	}
@@ -259,13 +323,17 @@ func childTemplateValidator(c agentrunner.RuntimeConfig) func(subagent.Template,
 		}
 		// The lead's prompt names the collector's effort, recorded with it.
 		var collector llm.ReasoningEffort
+		var collectorRuntime agentrunner.RuntimeIdentity
 		if worker, ok := chosen.Subagents["collector"]; ok {
 			var identity agentrunner.RuntimeIdentity
 			if json.Unmarshal(worker.Runtime, &identity) == nil {
 				collector = identity.ReasoningEffort
+				collectorRuntime = identity
 			}
 		}
-		if validChildRuntime(c, base.Runtime, chosen.Runtime, collector) != nil {
+		var baseIdentity agentrunner.RuntimeIdentity
+		_ = json.Unmarshal(base.Runtime, &baseIdentity)
+		if validChildRuntime(c, base.Runtime, chosen.Runtime, collector, subagentCollectorPrompt(baseIdentity.SystemPrompt, collectorRuntime)) != nil {
 			return fail()
 		}
 		base.Runtime = chosen.Runtime
@@ -293,7 +361,7 @@ func childTemplateValidator(c agentrunner.RuntimeConfig) func(subagent.Template,
 
 // validChildRuntime reports whether recorded is base bound to a registered
 // backend, as the resolver binds it.
-func validChildRuntime(c agentrunner.RuntimeConfig, base, recorded jsontext.Value, collector llm.ReasoningEffort) error {
+func validChildRuntime(c agentrunner.RuntimeConfig, base, recorded jsontext.Value, collector llm.ReasoningEffort, prompts ...string) error {
 	mismatch := errors.New("child runtime mismatch")
 	var a, b agentrunner.RuntimeIdentity
 	if json.Unmarshal(base, &a) != nil || json.Unmarshal(recorded, &b) != nil {
@@ -319,13 +387,14 @@ func validChildRuntime(c agentrunner.RuntimeConfig, base, recorded jsontext.Valu
 		return mismatch
 	}
 	a.Provider = registered
+	a.Claude = backend.Claude
 	a.ReasoningEffort = b.ReasoningEffort
 	want := recorded.Clone()
 	if want.Canonicalize() != nil {
 		return mismatch
 	}
 	// The template's own prompt, or the built-in one for the sub-agents' model.
-	for _, prompt := range []string{a.SystemPrompt, subagentPromptFor(a.SystemPrompt, registered.Provider, registered.Model.ID, collector)} {
+	for _, prompt := range append([]string{a.SystemPrompt, subagentPromptFor(a.SystemPrompt, registered.Provider, registered.Model.ID, collector)}, prompts...) {
 		a.SystemPrompt = prompt
 		// The same factory normalization used at creation fills catalog display
 		// names and resolved operator defaults. It performs no auth/inference and

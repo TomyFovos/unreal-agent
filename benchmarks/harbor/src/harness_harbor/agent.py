@@ -77,7 +77,7 @@ class UnrealAgent(RunnerAgent):
             )
             self._child_effort = child_effort or ""
         else:
-            self._child_model = self._model_id(child_model or "gpt-6.1-sol", "openai")
+            self._child_model = self._model_id(child_model or "gpt-6.2-sol", "openai")
             self._child_effort = child_effort or "max"
         self.model_name = f"{prefix}/{self._model}"
         self._main_effort = main_effort

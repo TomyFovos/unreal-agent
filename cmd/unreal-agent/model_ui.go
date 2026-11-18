@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/harness/host"
@@ -35,6 +36,7 @@ type modelRequest struct {
 	Selection      sessionstore.RuntimeSelection
 	Refresh        bool                     `json:",omitzero"`
 	Provider       string                   `json:",omitzero"`
+	Role           string                   `json:",omitzero"`
 	InputID        inbox.ID                 `json:",omitzero"`
 	Template, Task string                   `json:",omitzero"`
 	ChildRuntime   *subagent.RuntimeRequest `json:",omitzero"`
@@ -47,10 +49,11 @@ type modelReply struct {
 	Hint         string                               `json:",omitzero"`
 	Receipt      *host.Receipt                        `json:",omitzero"`
 	Capabilities map[string]modelcatalog.Capabilities `json:",omitzero"`
-	// SubagentModel is /model-sub's choice; Pending means it applies once the
+	// SubagentModel is subagent model's choice; Pending means it applies once the
 	// Host starts again, because this one has no sub-agents.
-	SubagentModel *sessionstore.RuntimeSelection `json:",omitzero"`
-	Pending       bool                           `json:",omitzero"`
+	SubagentModel *sessionstore.RuntimeSelection           `json:",omitzero"`
+	SubagentRoles map[string]sessionstore.RuntimeSelection `json:",omitzero"`
+	Pending       bool                                     `json:",omitzero"`
 }
 type modelUI struct {
 	apiReads   map[string]func(context.Context, bool) (modelcatalog.Catalog, error)
@@ -68,7 +71,7 @@ type modelUI struct {
 
 	// openCodeGo reads the OpenCode Go model list when its key was stored.
 	openCodeGo *openCodeGoCatalog
-	// subagentModel is the file of /model-sub's choice; empty without the
+	// subagentModel is the file of subagent model's choice; empty without the
 	// launcher or with an operator's templates.
 	subagentModel string
 }
@@ -120,7 +123,9 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if peek.Action == "child.start" {
 				templates := h.templates
 				chosen, _ := readSubagentModel(h.subagentModel)
-				if h.runtime.BuiltinSubagents && q.ChildRuntime != nil && q.ChildRuntime.Provider == "" && chosen.Provider != opencodego.ProviderID && chosen.Provider != claudeagent.ProviderID {
+				roleChoice := chosen.choice(q.Template)
+				_, retry := s.OperationIntent(q.InputID)
+				if !retry && chosen.Roles == nil && h.runtime.BuiltinSubagents && q.ChildRuntime != nil && q.ChildRuntime.Provider == "" && roleChoice.Provider != opencodego.ProviderID && roleChoice.Provider != claudeagent.ProviderID {
 					templates = make(map[string]subagent.Template, len(h.templates))
 					for name, t := range h.templates {
 						templates[name] = t
@@ -128,12 +133,12 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					if t, ok := templates[q.Template]; ok {
 						var err error
 						id := builtinGPTProvider(s)
-						if chosen.Provider == "openai-codex" {
-							id = chosen.Provider
+						if roleChoice.Provider == "openai-codex" {
+							id = roleChoice.Provider
 						}
 						templates[q.Template], err = builtinGPTTemplate(h.runtime, t, id)
 						if err != nil {
-							out.Error = "provider_unavailable"
+							out.Error = err.Error()
 							h.writeReply(w, out)
 							return
 						}
@@ -146,9 +151,8 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// The resolver bounds the start by the Session's own capability;
 				// the gateway's read-only baseline would only narrow that, and the
 				// child then follows the Session's mode itself.
-				_, retry := s.OperationIntent(q.InputID)
 				var receipt host.Receipt
-				e := subagentOverrideRefusal(h.subagentModel, h.templates[q.Template], q.ChildRuntime, retry)
+				e := subagentOverrideRefusal(h.subagentModel, h.templates[q.Template], q.ChildRuntime, retry, q.Template)
 				if e == nil && !retry && q.ChildRuntime != nil && q.ChildRuntime.Provider == "" && claudeModel(q.ChildRuntime.Model) {
 					selected := sessionstore.SelectionFromConfiguration(templates[q.Template].Runtime)
 					if selected != nil && (selected.Provider == "openai-codex" || selected.Provider == "openai") {
@@ -156,7 +160,7 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if e == nil {
-					receipt, e = subagent.StartChild(r.Context(), s, q.Generation, q.InputID, q.Template, q.Task, templates, q.ChildRuntime, resolve)
+					receipt, e = subagent.StartChild(r.Context(), s, q.Generation, q.InputID, q.Template, q.Task, templates, q.ChildRuntime, resolve, chosen.Roles != nil && h.runtime.BuiltinSubagents)
 				}
 				if e != nil {
 					out.Error = "child_start_failed"
@@ -172,7 +176,7 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if peek.Action == "subagent.providers" || peek.Action == "subagent.select" {
-				h.subagentChoice(r.Context(), peek.Action == "subagent.select", q.Selection, &out)
+				h.subagentChoice(r.Context(), s, q, &out)
 				h.writeReply(w, out)
 				return
 			}
@@ -281,75 +285,124 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.writeReply(w, out)
 }
 
-// subagentChoice lists or saves the sub-agents' model for /model-sub:
-// Codex, the templates as built, an available OpenCode Go model, or a Claude
-// model for Claude Code's own Agent sub-agents.
-func (h modelUI) subagentChoice(ctx context.Context, save bool, selection sessionstore.RuntimeSelection, out *modelReply) {
+// subagentChoice reads or saves role settings through the owning Host/Session.
+func (h modelUI) subagentChoice(ctx context.Context, owner *host.Session, q modelRequest, out *modelReply) {
 	if h.subagentModel == "" {
 		out.Error = "subagent_model_unavailable"
 		return
 	}
-	providers := h.subagentProviders(ctx)
-	if !save {
-		m, err := readSubagentModel(h.subagentModel)
+	role := q.Role
+	if role == "" {
+		role = "all"
+	}
+	if role != "all" && !slices.Contains(subagentRoleGroups, role) {
+		out.Error, out.Hint = "invalid_role", "use lead, worker, collector or all"
+		return
+	}
+	if q.Generation != "" && q.Generation != owner.Generation {
+		out.Error = "stale_generation"
+		return
+	}
+	subagentModelMu.Lock()
+	defer subagentModelMu.Unlock()
+	chosen, err := readSubagentModel(h.subagentModel)
+	if err != nil {
+		out.Error = "subagent_model_unreadable"
+		return
+	}
+	save := q.Action == "subagent.select"
+	if save {
+		selection := q.Selection
+		if buildfeatures.Disabled(selection.Provider) {
+			out.Error, out.Hint = buildfeatures.OpenCodeGoDisabledCode, buildfeatures.OpenCodeGoChildDisabledMessage
+			return
+		}
+		if _, err := h.runtime.ProviderRuntime(selection.Provider); err != nil || h.runtime.CheckProvider(ctx, selection.Provider) != nil {
+			out.Error, out.Hint = "provider_unavailable", fmt.Sprintf("%s is not registered or available; %s", selection.Provider, modelcatalog.AuthRequired.ProviderHint(selection.Provider))
+			return
+		}
+		catalog, err := h.catalog(ctx, selection.Provider, false)
+		if err != nil || !catalog.Available {
+			out.Error, out.Hint = "provider_unavailable", modelcatalog.CatalogUnavailable.ProviderHint(selection.Provider)
+			return
+		}
+		model, err := catalog.FindSelection(selection.Model)
 		if err != nil {
-			out.Error = "subagent_model_unreadable"
+			out.Error, out.Hint = "invalid_model", fmt.Sprintf("model %q is not in %s's catalog", selection.Model, selection.Provider)
 			return
 		}
-		if m.Provider == "" {
-			m.Provider = "openai-codex"
-		}
-		out.Providers, out.SubagentModel = providers, &sessionstore.RuntimeSelection{Version: 1, Provider: m.Provider, Model: m.Model}
-		return
-	}
-	if buildfeatures.Disabled(selection.Provider) {
-		out.Error, out.Hint = buildfeatures.OpenCodeGoDisabledCode, buildfeatures.OpenCodeGoChildDisabledMessage
-		return
-	}
-	chosen := subagentModel{Version: 1, Provider: selection.Provider}
-	name := ""
-	switch selection.Provider {
-	case "openai-codex":
-	case opencodego.ProviderID, claudeagent.ProviderID:
-		available := slices.ContainsFunc(providers, func(p modelcatalog.Provider) bool { return p.ID == selection.Provider && p.Availability == "available" })
-		c, err := h.catalog(ctx, selection.Provider, false)
-		m, findErr := c.Find(selection.Model)
-		if !available || err != nil || findErr != nil {
-			out.Error = "selection_unavailable"
+		if selection.Effort != "" && !model.AllowsEffort(selection.Effort) {
+			out.Error, out.Hint = "unsupported_effort", fmt.Sprintf("model %q does not offer effort %q; offered: %v", selection.Model, selection.Effort, model.Efforts)
 			return
 		}
-		chosen.Model, name = m.ID, viewer.SafeText(m.Name)
-	default:
-		out.Error = "selection_unavailable"
-		return
+		choice := subagentModelChoice{Provider: selection.Provider, Model: selection.Model, Effort: selection.Effort}
+		out.SubagentModel = &sessionstore.RuntimeSelection{Version: 1, Provider: choice.Provider, Model: choice.Model, Name: viewer.SafeText(model.Name), Effort: choice.Effort}
+		if role == "all" {
+			legacy := subagentModel{Version: 1, Provider: choice.Provider, Model: choice.Model}
+			if choice.Effort == "" && legacy.valid() {
+				chosen = legacy
+			} else {
+				chosen = subagentModel{Version: 2, Roles: &subagentRoleModels{}}
+				for _, group := range subagentRoleGroups {
+					chosen.setRole(group, choice)
+				}
+			}
+		} else {
+			chosen.setRole(role, choice)
+		}
+		if err := writeSubagentModel(h.subagentModel, chosen); err != nil {
+			out.Error = "subagent_model_unwritable"
+			return
+		}
+		out.Pending = len(h.templates) == 0
 	}
-	if err := writeSubagentModel(h.subagentModel, chosen); err != nil {
-		out.Error = "subagent_model_unwritable"
-		return
+	out.Providers = h.subagentProviders(ctx)
+	if out.SubagentModel == nil {
+		current := chosen.choice("lead")
+		out.SubagentModel = &sessionstore.RuntimeSelection{Version: 1, Provider: current.Provider, Model: current.Model, Effort: current.Effort}
+		if out.SubagentModel.Provider == "" {
+			out.SubagentModel.Provider = "openai-codex"
+		}
 	}
-	out.SubagentModel = &sessionstore.RuntimeSelection{Version: 1, Provider: chosen.Provider, Model: chosen.Model, Name: name}
-	out.Pending = len(h.templates) == 0
+	out.SubagentRoles = make(map[string]sessionstore.RuntimeSelection)
+	for _, group := range subagentRoleGroups {
+		choice := chosen.choice(group)
+		if choice.Provider == "" {
+			choice.Provider = "openai-codex"
+		}
+		out.SubagentRoles[group] = sessionstore.RuntimeSelection{Version: 1, Provider: choice.Provider, Model: choice.Model, Effort: choice.Effort}
+		if role != "all" && role != group {
+			continue
+		}
+		kind := "subagent_model_show"
+		if save {
+			kind = "subagent_model_set"
+		}
+		if err := owner.RecordActivity(ctx, llm.ActivityRecord{Kind: kind, StartedAt: time.Now().UTC(), Template: group, Provider: choice.Provider, Model: choice.Model, Effort: string(choice.Effort)}); err != nil {
+			out.Error = "subagent_model_record_failed"
+			return
+		}
+	}
 }
 
-// subagentProviders are the providers /model-sub offers, OpenCode Go also
-// before its key is saved, then Claude when /model lists it.
+// subagentProviders includes registered API connections only as explicit choices.
 func (h modelUI) subagentProviders(ctx context.Context) []modelcatalog.Provider {
 	all := h.providers(ctx)
 	var out []modelcatalog.Provider
-	for _, id := range []string{"openai-codex", opencodego.ProviderID} {
+	for _, id := range []string{"openai-codex", opencodego.ProviderID, claudeagent.ProviderID} {
 		if buildfeatures.Disabled(id) {
 			continue
 		}
 		if i := slices.IndexFunc(all, func(p modelcatalog.Provider) bool { return p.ID == id }); i >= 0 {
 			out = append(out, all[i])
-		} else {
+		} else if id != claudeagent.ProviderID {
 			out = append(out, modelcatalog.Provider{ID: id, Name: modelcatalog.ProviderName(id), Availability: "unavailable", Reason: modelcatalog.AuthRequired})
 		}
 	}
-	// The Claude choice names Claude Code's Agent model, so it is offered only
-	// where /model lists Claude at all.
-	if i := slices.IndexFunc(all, func(p modelcatalog.Provider) bool { return p.ID == claudeagent.ProviderID }); i >= 0 {
-		out = append(out, all[i])
+	for _, p := range all {
+		if !slices.ContainsFunc(out, func(existing modelcatalog.Provider) bool { return existing.ID == p.ID }) {
+			out = append(out, p)
+		}
 	}
 	return out
 }

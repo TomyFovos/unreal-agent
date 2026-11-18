@@ -68,12 +68,26 @@ func defaultSubagents(config serveConfiguration, chosen subagentModel) map[strin
 	if !ok && (hasAPI || config.Launcher != nil && !config.Launcher.CodexDisabled && (config.Launcher.DiscoverProviders == nil || *config.Launcher.DiscoverProviders)) {
 		// Keep templates ready for a later login. Runtime resolution binds the
 		// authenticated route at child start (or the model chosen with
-		// /model-sub); Claude advertises them only while that route is available.
+		// subagent model); Claude advertises them only while that route is available.
 		route = provider.Selection{Version: 1, Provider: "openai-codex", Endpoint: openaicodex.BaseURL, Auth: credential.Reference{Provider: "openai-codex", Method: credential.OAuth, ID: "external-codex"}, MaxAttempts: openaicodex.DefaultMaxAttempts, Source: "built-in child template"}
 		ok = true
 	}
-	if !ok && chosen.Provider == opencodego.ProviderID {
-		route, ok = openCodeGoSelection(config, chosen.Model), true
+	if !ok {
+		for _, role := range subagentRoleGroups {
+			choice := chosen.choice(role)
+			if choice.Provider == opencodego.ProviderID {
+				route, ok = openCodeGoSelection(config, choice.Model), true
+			} else if choice.Provider != "" && choice.Provider != "claude" {
+				if config.Runtime.Provider.Provider == choice.Provider {
+					route, ok = config.Runtime.Provider, true
+				} else if backend, registered := config.Providers[choice.Provider]; registered {
+					route, ok = backend.Provider, true
+				}
+			}
+			if ok {
+				break
+			}
+		}
 	}
 	if !ok || config.PermissionModes == nil || !config.PermissionModes.Enabled || config.PermissionModes.Maximum == nil {
 		return nil
@@ -93,7 +107,7 @@ func defaultSubagents(config serveConfiguration, chosen subagentModel) map[strin
 	}
 	runtime := func(model string, effort llm.ReasoningEffort, prompt string) agentrunner.RuntimeIdentity {
 		selection := route
-		if selection.Provider == opencodego.ProviderID && chosen.Provider == opencodego.ProviderID {
+		if selection.Provider == opencodego.ProviderID && chosen.Provider == opencodego.ProviderID && chosen.Roles == nil {
 			// Each start binds the effort and the prompt to the chosen model
 			// (childRuntimeResolver).
 			model = chosen.Model

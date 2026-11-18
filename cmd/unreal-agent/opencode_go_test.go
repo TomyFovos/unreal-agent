@@ -264,7 +264,7 @@ func TestLauncherPassesDefaultCredentialStoreOutsideBinding(t *testing.T) {
 	}
 }
 
-// /model-sub's choice is STATE/subagent-model.json for every Host the
+// subagent model's choice is STATE/subagent-model.json for every Host the
 // launcher starts; like the default store it is outside the Host binding.
 func TestLauncherPassesSubagentModelFileOutsideBinding(t *testing.T) {
 	home := privateCLIDirectory(t)

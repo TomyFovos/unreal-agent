@@ -58,9 +58,6 @@ var commandCatalog = []commandCandidate{
 	{"/copy", "/copy", "choose conversation messages to copy to the clipboard", noArguments},
 	{"/copy all", "/copy all", "copy the full public conversation as Markdown to the clipboard", noArguments},
 	{"/copy last", "/copy last", "copy the latest public agent response to the clipboard", noArguments},
-	// After the existing entries, so their menu positions stay; typing
-	// /model lists it next to /model.
-	{"/model-sub", "/model-sub", "choose the sub-agents' provider and model for every conversation", noArguments},
 	{"/help", "/help", "show commands and keys", noArguments},
 }
 
