@@ -167,16 +167,16 @@ func TestHeadlessUnreportedChildCompletion(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					infos, err := store.ListSessions(t.Context())
+					infos := headlessSessionTree(t, sessions, "benchmark")
 					want := 2
 					if nested {
 						want = 3
 					}
-					if err != nil || len(infos) != want {
-						t.Fatal("session tree", len(infos), err)
+					if len(infos) != want {
+						t.Fatal("session tree", len(infos))
 					}
-					for _, info := range infos {
-						_, items, ops, err := store.ReadSnapshot(t.Context(), info.ID)
+					for _, id := range infos {
+						_, items, ops, err := store.ReadSnapshot(t.Context(), id)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -185,7 +185,7 @@ func TestHeadlessUnreportedChildCompletion(t *testing.T) {
 								t.Fatal("child not terminal failed", op.Status)
 							}
 						}
-						if info.ID == session.ID("benchmark") {
+						if id == session.ID("benchmark") {
 							ended := 0
 							for _, item := range items {
 								if input, ok := item.Data.(inbox.Input); ok && input.Kind == inbox.InputPeer {
@@ -200,7 +200,7 @@ func TestHeadlessUnreportedChildCompletion(t *testing.T) {
 							}
 							continue
 						}
-						view, err := subagent.ReadChild(t.Context(), sessions, info.ID, 0, 256)
+						view, err := subagent.ReadChild(t.Context(), sessions, id, 0, 256)
 						if err != nil || view.Finish == nil || view.Finish.Result.Status != "failed" || !strings.Contains(view.Finish.Result.Summary, "stop="+string(stop)) {
 							t.Fatalf("child result=%+v error=%v", view.Finish, err)
 						}
@@ -215,6 +215,7 @@ func TestHeadlessUnreportedChildCompletion(t *testing.T) {
 						}
 					}
 					assertNoStoredCredentials(t, sessions, "fake-selected-key", "fake-anthropic-headless")
+					assertNoStoredCredentials(t, sessions+"-archive", "fake-selected-key", "fake-anthropic-headless")
 				})
 			}
 		}

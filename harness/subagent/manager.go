@@ -16,7 +16,6 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
-	"github.com/unreallabsai/unreal-agent/harness/tool/observed"
 	"io/fs"
 	"log/slog"
 	"path/filepath"
@@ -320,19 +319,16 @@ func (m *Manager) CompletedInput(op operation.Operation) (*inbox.Input, error) {
 	if err != nil || p.Action != "start" {
 		return nil, nil
 	}
+	if m.parentSaw(op.ID) {
+		return nil, nil
+	}
 	m.mu.Lock()
 	end := m.restartEnds[op.ID]
 	m.mu.Unlock()
 	if end != nil {
-		if m.config.Owner.HasCommittedInput(inbox.ID("restarted:"+string(op.ID))) || m.config.Owner.HasCommittedInput(inbox.ID("ended:"+string(op.ID))) {
-			return nil, nil
-		}
 		return m.InterruptedInput(op)
 	}
-	if !p.Notify || m.config.Owner.HasCommittedInput(inbox.ID("restarted:"+string(op.ID))) {
-		return nil, nil
-	}
-	if m.parentSaw(op.ID) {
+	if !p.Notify {
 		return nil, nil
 	}
 	state, err := operation.DecodeRemoteJobState(op)
@@ -759,51 +755,8 @@ func finishStatus(h Handle) operation.Status {
 	return operation.StatusCompleted
 }
 
-// parentSaw reports whether the parent already read the child's end in a
-// recorded tool result: the subagent command's report names the handle and
-// its result.
+// parentSaw reads the owner's replayed canonical delivery projection. A child
+// end checkpoint alone is not evidence that the parent received its report.
 func (m *Manager) parentSaw(id operation.ID) bool {
-	view, err := m.config.Owner.Inspect(0, 1)
-	if err != nil {
-		return false
-	}
-	for _, op := range view.Operations {
-		if op.Status != operation.StatusCompleted {
-			continue
-		}
-		var report string
-		switch op.Type {
-		case operation.TypeValue:
-			value, err := operation.DecodeValue(op)
-			var result observed.Result
-			if err == nil && json.Unmarshal(value, &result) == nil && !result.IsError {
-				report = result.Content
-			}
-		case operation.TypeShell:
-			state, err := operation.DecodeShellState(op)
-			if err == nil && state.Result != nil && state.Result.ExitCode == 0 {
-				report = state.Result.Out
-			}
-		}
-		if sawFinalReport(report, id) {
-			return true
-		}
-	}
-	return false
-}
-
-// wait can report several children at once; a result for another child is not
-// evidence that this child's final report was read. show uses the same format.
-func sawFinalReport(report string, id operation.ID) bool {
-	matched := false
-	for _, line := range strings.Split(report, "\n") {
-		if strings.HasPrefix(line, "== ") {
-			words := strings.Fields(line)
-			matched = len(words) > 1 && words[1] == string(id)
-		}
-		if matched && strings.HasPrefix(line, "result: ") {
-			return true
-		}
-	}
-	return false
+	return m.config.Owner.HasChildReport(id)
 }

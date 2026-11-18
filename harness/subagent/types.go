@@ -4,8 +4,6 @@ package subagent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
@@ -16,6 +14,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/subagent/identity"
 	"io"
 	"path/filepath"
 )
@@ -114,8 +113,7 @@ type ChildLink struct {
 type ChildFactory func(context.Context, ChildConfig, ChildLink) (*host.Session, io.Closer, error)
 
 func ChildID(parent session.ID, id operation.ID) session.ID {
-	sum := sha256.Sum256([]byte("unreal-agent/subagent/v1\x00" + string(parent) + "\x00" + string(id)))
-	return session.ID("child-" + hex.EncodeToString(sum[:16]))
+	return identity.ChildID(parent, id)
 }
 func (p Plan) Validate() error {
 	if p.Version != 1 || p.ParentID == "" || len(p.Text) > 32768 {

@@ -9,19 +9,40 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"golang.org/x/sys/unix"
 	"os"
+	"path/filepath"
 	"time"
 )
 
 var ErrWriterOwned = errors.New("session already has an active writer")
 
 // AcquireWriter locks a stable sidecar inode, never the replaceable log inode.
-// The private state directory must be owned by the harness user. Never unlink
-// lock files: unlinking an active lock would permit a second writer.
+// The private state directory must be owned by the harness user. The archive
+// layout lock serializes relocation of this inode; it is never unlinked.
 func (s *Store) AcquireWriter(id session.ID) (*os.File, error) {
 	if err := validateSessionID(id); err != nil {
 		return nil, err
 	}
-	fd, err := unix.Open(s.sessionPath(id)+".lock", unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
+	layout, err := s.layoutLock(false)
+	if err != nil {
+		return nil, err
+	}
+	defer layout.Close()
+	return s.acquireWriter(id)
+}
+
+// Caller holds the layout lock. A pending move may already have relocated the
+// lock while the record is still live; choose the existing lock inode itself.
+func (s *Store) acquireWriter(id session.ID) (*os.File, error) {
+	path := s.sessionPath(id) + ".lock"
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		entry, err := s.ArchiveIndex(id)
+		if err == nil {
+			path = filepath.Join(s.archiveChildDirectory(entry), sessionFilename(id)+".lock")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+	}
+	fd, err := unix.Open(path, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("open writer lock: %w", err)
 	}

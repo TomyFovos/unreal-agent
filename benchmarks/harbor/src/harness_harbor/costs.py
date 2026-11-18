@@ -6,6 +6,7 @@ from pathlib import Path
 
 from harness_harbor.pricing import load_prices, price_path
 from harness_harbor.product import aggregate, load_session, usage_rows
+from harness_harbor.session_files import session_paths
 
 
 def recalculate(job: Path, *, prices=None):
@@ -13,8 +14,7 @@ def recalculate(job: Path, *, prices=None):
     trials, job_rows = [], []
     for directory in sorted(job.glob("*/agent/sessions")):
         loaded = {
-            path.name.removesuffix(".session.jsonl"): load_session(path)
-            for path in sorted(directory.glob("*.session.jsonl"))
+            sid: load_session(path) for sid, path in session_paths(directory).items()
         }
         children = {
             child["session_id"]

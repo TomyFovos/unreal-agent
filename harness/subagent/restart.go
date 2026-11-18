@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -25,6 +24,18 @@ func (m *Manager) RetainOperation(ctx context.Context, op operation.Operation) (
 	store, err := localfile.New(m.config.Directory)
 	if err != nil {
 		return false, err
+	}
+	// Settled children have no executor or pending parent delivery to recover.
+	// Restore uses their location index, never the archived transcript. History
+	// readers still open the untouched canonical record explicitly by ID.
+	if terminalStatus(op.Status) {
+		entry, err := store.ArchiveIndex(p.ChildID)
+		if err == nil && !entry.Pending && entry.ParentID == p.ParentID && entry.OperationID == op.ID {
+			return false, nil
+		}
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return false, err
+		}
 	}
 	lock, err := store.AcquireWriter(p.ChildID)
 	if errors.Is(err, localfile.ErrWriterOwned) {
@@ -82,7 +93,7 @@ func (m *Manager) watchRecovered(ctx context.Context, id operation.ID, p Plan, s
 	var previous os.FileInfo
 	var view ChildView
 	for {
-		info, err := os.Stat(filepath.Join(m.config.Directory, string(p.ChildID)+".session.jsonl"))
+		info, err := store.StatSession(p.ChildID)
 		if err != nil {
 			return operation.StatusFailed, err
 		}

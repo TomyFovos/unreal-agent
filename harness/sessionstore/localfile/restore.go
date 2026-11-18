@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"sync"
 
@@ -40,7 +39,7 @@ func (s *Store) OpenRestoreView(ctx context.Context, id session.ID) (view *Resto
 	if err = context.Cause(ctx); err != nil {
 		return nil, err
 	}
-	encoded, err := os.ReadFile(s.sessionPath(id))
+	encoded, err := s.readRecord(id)
 	if err != nil {
 		return nil, fmt.Errorf("read session %q: %w", id, err)
 	}

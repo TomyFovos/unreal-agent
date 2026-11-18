@@ -180,6 +180,14 @@ func (s *Session) HasCommittedInput(id inbox.ID) bool {
 	return s.submissions[id] != nil && s.submissions[id].committed
 }
 
+// HasChildReport checks canonical parent delivery, including legacy batches
+// whose input identity names another child. It never scans/clones the history.
+func (s *Session) HasChildReport(id operation.ID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.childReports.Has(id)
+}
+
 // CommitFinish commits a canonical report before a child can stop. The
 // invoking Finish operation is the only permitted unfinished operation.
 func (s *Session) CommitFinish(ctx context.Context, id operation.ID, result sessionstore.FinishResult) error {

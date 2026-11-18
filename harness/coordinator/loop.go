@@ -18,6 +18,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/primitives"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/subagent/reporting"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
 
@@ -53,6 +54,7 @@ type coordinator struct {
 	contextRetry       bool
 	forceCompaction    bool
 	recordedInputIDs   map[inbox.ID]bool
+	childReports       reporting.Index
 	idleRequest        llm.Request
 	idleOptions        llm.RequestOptions
 	idlePending        bool
@@ -144,6 +146,9 @@ func (current *coordinator) Run(ctx context.Context) error {
 	}
 	if err := current.restore(ctx); err != nil {
 		return err
+	}
+	if current.dependencies.AfterRestore != nil {
+		current.dependencies.AfterRestore()
 	}
 	if !current.usageRetryAt.IsZero() {
 		current.modelRetry = time.After(max(0, time.Until(current.usageRetryAt)))
@@ -1070,7 +1075,7 @@ func (current *coordinator) restore(ctx context.Context) error {
 			}
 		}
 		if !operationIsTerminal(value.Status) {
-			if notice := current.dependencies.InterruptedInput; notice != nil {
+			if notice := current.dependencies.InterruptedInput; notice != nil && !current.childReports.Has(value.ID) {
 				input, err := notice(value)
 				if err != nil {
 					return err
@@ -1221,6 +1226,7 @@ func toolCallRequiresTranslator(status sessionstore.ToolCallStatus) bool {
 func (current *coordinator) addItemToLocalState(
 	item sessionstore.Item,
 ) (sessionstore.Item, error) {
+	current.childReports.ObserveItem(item)
 	if b, ok := current.dependencies.ContextBuilder.(interface{ SetHistoryItem(sessionstore.Item) }); ok {
 		b.SetHistoryItem(item)
 	}
@@ -1558,6 +1564,7 @@ func (current *coordinator) addOperationToLocalState(
 	value operation.Operation,
 ) operation.Operation {
 	current.state.operations[value.ID] = value
+	current.childReports.ObserveOperation(value)
 	return current.state.operations[value.ID]
 }
 

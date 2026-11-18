@@ -115,7 +115,7 @@ class UnrealAgent(RunnerAgent):
             await self._upload_bytes(
                 environment, self._bundle.read_file(name), str(self._remote / name)
             )
-        for name in ("launch.py", "security.py"):
+        for name in ("launch.py", "security.py", "session_files.py"):
             await environment.upload_file(
                 Path(__file__).with_name(name), str(self._remote / name)
             )
@@ -127,7 +127,8 @@ class UnrealAgent(RunnerAgent):
             command=(
                 f"chmod 755 {self._remote}/unreal-agent && "
                 f"chmod 644 {self._remote}/launch.py "
-                f"{self._remote}/security.py {self._remote}/ca.pem"
+                f"{self._remote}/security.py {self._remote}/session_files.py "
+                f"{self._remote}/ca.pem"
             ),
         )
         if self._configuration != "gpt":

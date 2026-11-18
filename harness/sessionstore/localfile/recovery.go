@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json/v2"
 	"fmt"
-	"os"
 
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -24,7 +23,7 @@ func (s *Store) RecoveryOperations(ctx context.Context, id session.ID) ([]operat
 	if err := context.Cause(ctx); err != nil {
 		return nil, err
 	}
-	encoded, err := os.ReadFile(s.sessionPath(id))
+	encoded, err := s.readRecord(id)
 	if err != nil {
 		return nil, fmt.Errorf("read session %q: %w", id, err)
 	}

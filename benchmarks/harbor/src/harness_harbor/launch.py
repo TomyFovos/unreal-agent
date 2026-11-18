@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from security import Redactor, read_key
+from session_files import session_paths
 
 
 def main(request):
@@ -62,7 +63,7 @@ def main(request):
     finally:
         logs.mkdir(parents=True, exist_ok=True)
         (logs / "sessions").mkdir(exist_ok=True)
-        for source in sorted((state / "sessions").glob("*.session.jsonl")):
+        for source in session_paths(state / "sessions").values():
             # Export copies, not executable Session/replay state or provider auth.
             (logs / "sessions" / source.name).write_text(
                 redactor.jsonl(source.read_text())

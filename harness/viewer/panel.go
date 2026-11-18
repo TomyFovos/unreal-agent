@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/host"
+	"io/fs"
 	"strconv"
 	"strings"
 	"sync"
@@ -98,7 +99,7 @@ func (p *Panel) refreshTargets() []session.ID {
 		// The existing gateway's scoped reader authorizes direct children. A
 		// child snapshot can expose nested lineage, but we do not widen that
 		// authorization or guess an unobserved grandchild's activities.
-		if r.ParentID == p.parent && r.ID != selected && r.Finish == nil {
+		if r.ParentID == p.parent && r.ID != selected && r.Finish == nil && !terminal(r.ParentOperationStatus) {
 			candidates = append(candidates, r.ID)
 		}
 	}
@@ -114,6 +115,25 @@ func (p *Panel) refreshTargets() []session.ID {
 	p.topologyCursor = (cursor + count) % len(candidates)
 	p.mu.Unlock()
 	return targets
+}
+
+// PrepareAnalysis explicitly observes all direct children, including archived
+// ones. Passive topology lists use parent Operations; loading old transcripts
+// belongs to the user's analysis/history request, not every UI refresh.
+func (p *Panel) PrepareAnalysis(ctx context.Context) error {
+	if err := p.client.Refresh(ctx, p.parent); err != nil && !errors.Is(err, ErrWatching) {
+		return err
+	}
+	for _, row := range p.client.Model.Rows(time.Now()) {
+		if row.ParentID != p.parent {
+			continue
+		}
+		if err := p.client.Refresh(ctx, row.ID); err != nil && !errors.Is(err, ErrWatching) && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	p.notify()
+	return nil
 }
 
 func (p *Panel) refreshChildren() {

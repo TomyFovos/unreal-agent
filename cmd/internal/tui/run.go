@@ -68,6 +68,7 @@ type Config struct {
 	SelectSubagentModel func(ctx context.Context, provider, model string) (choice sessionstore.RuntimeSelection, pending bool, err error)
 	RuntimeCapabilities func(context.Context) (map[string]modelcatalog.Capabilities, error)
 	ExportAnalysis      func(context.Context, analysis.Report, string) (string, error)
+	PrepareAnalysis     func(context.Context) error
 	// Empty uses the standard private state export directory. No subprocess
 	// backend is used for public conversation exports.
 	ExportDirectory string
@@ -1237,6 +1238,9 @@ func Run(ctx context.Context, c Config) error {
 			case "/analyze":
 				start("loading full history for analysis", func(ctx context.Context) commandResult {
 					err := m.EnsureAnalysis(ctx, c.Client)
+					if err == nil && c.PrepareAnalysis != nil {
+						err = c.PrepareAnalysis(ctx)
+					}
 					return commandResult{picker: analyzePicker(""), err: err}
 				})
 			case "/detach":

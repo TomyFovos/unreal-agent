@@ -16,6 +16,9 @@ import (
 )
 
 type Dependencies struct {
+	// AfterRestore lets the owner start storage maintenance only after
+	// canonical recovery checkpoints have been reconciled.
+	AfterRestore   func()
 	RecordActivity func(context.Context, llm.ActivityRecord) error
 	// ModelWaiting publishes the usage-limit wait; zero clears it.
 	ModelWaiting func(context.Context, time.Time) error

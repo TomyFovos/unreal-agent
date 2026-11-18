@@ -294,7 +294,7 @@ func (store *Store) readState(
 	if err := context.Cause(ctx); err != nil {
 		return storedState{}, 0, err
 	}
-	encoded, err := os.ReadFile(store.sessionPath(id))
+	encoded, err := store.readRecord(id)
 	if err != nil {
 		return storedState{}, 0, fmt.Errorf("read session %q: %w", id, err)
 	}
@@ -334,6 +334,11 @@ func (store *Store) loadWriteState(
 }
 
 func (store *Store) publishInitialState(state storedState) error {
+	if _, err := store.ArchiveIndex(state.Snapshot.Session.ID); err == nil {
+		return fs.ErrExist
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
 	if err := store.invalidateRestoreView(state.Snapshot.Session.ID); err != nil {
 		return err
 	}
@@ -365,7 +370,12 @@ func (store *Store) append(
 		store.evictCachedWriteState(id)
 		return err
 	}
-	if err := appendFile(store.sessionPath(id), committedSize, encoded); err != nil {
+	path, err := store.ResolveSessionPath(id)
+	if err != nil {
+		store.evictCachedWriteState(id)
+		return err
+	}
+	if err := appendFile(path, committedSize, encoded); err != nil {
 		store.evictCachedWriteState(id)
 		return err
 	}

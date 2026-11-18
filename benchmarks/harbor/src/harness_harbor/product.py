@@ -9,6 +9,7 @@ from harbor.models.trajectories import Agent, Observation, ObservationResult
 from harbor.models.trajectories.subagent_trajectory_ref import SubagentTrajectoryRef
 
 from harness_harbor.pricing import estimate as estimate_offline
+from harness_harbor.session_files import session_paths
 from harness_harbor.trajectory import convert
 
 FIELDS = {
@@ -254,8 +255,7 @@ def sum_counts(values):
 
 def export_product(directory: Path, agent: Agent, session_id: str):
     sessions = {}
-    for path in sorted((directory / "sessions").glob("*.session.jsonl")):
-        sid = path.name.removesuffix(".session.jsonl")
+    for sid, path in session_paths(directory / "sessions").items():
         items, identity, children = load_session(path)
         child_agent = agent.model_copy(deep=True)
         provider = identity.get("Provider", {}).get("provider", "unknown")

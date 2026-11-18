@@ -29,6 +29,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
+	"github.com/unreallabsai/unreal-agent/harness/subagent/reporting"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
 
@@ -120,14 +121,15 @@ func (o Options) creationRecords() ([]sessionstore.HostRecord, error) {
 }
 
 type Host struct {
-	ctx        context.Context
-	cancel     context.CancelFunc
-	config     Config
-	mu         sync.Mutex
-	sessions   map[session.ID]*Session
-	closed     bool
-	reconciled bool
-	startedAt  time.Time
+	ctx         context.Context
+	cancel      context.CancelFunc
+	config      Config
+	mu          sync.Mutex
+	sessions    map[session.ID]*Session
+	closed      bool
+	reconciled  bool
+	startedAt   time.Time
+	maintenance *backgroundWork
 }
 type Receipt struct {
 	ID       inbox.ID
@@ -210,6 +212,9 @@ type Session struct {
 	historyWorkTurns      map[session.TurnID]bool
 	historyWorkReports    map[session.ID]bool
 	operations            map[operation.ID]operation.Operation
+	childReports          reporting.Index
+	archiveWake           chan struct{}
+	archivedChildren      map[operation.ID]bool
 	operationRevision     uint64
 	observationOperations map[operation.ID]observationOperation
 	submissions           map[inbox.ID]*submission
@@ -234,11 +239,15 @@ func New(ctx context.Context, c Config) (*Host, error) {
 	if c.Build == nil {
 		return nil, fmt.Errorf("host runtime factory is required")
 	}
-	if _, err := localfile.New(c.Directory); err != nil {
+	store, err := localfile.New(c.Directory)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.RecoverArchives(ctx); err != nil {
 		return nil, err
 	}
 	child, cancel := context.WithCancel(ctx)
-	return &Host{ctx: child, cancel: cancel, config: c, sessions: map[session.ID]*Session{}, startedAt: time.Now().UTC()}, nil
+	return &Host{ctx: child, cancel: cancel, config: c, sessions: map[session.ID]*Session{}, startedAt: time.Now().UTC(), maintenance: newBackgroundWork(child)}, nil
 }
 func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error) {
 	defer startupPhase(ctx, o.ID, "host.open")()
@@ -362,7 +371,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	}
 	s := &Session{ID: o.ID, Generation: uuid.New().String(), ctx: cctx, cancel: cancel, lock: lock, store: raw,
 		snapshot: restored.Snapshot, operations: map[operation.ID]operation.Operation{}, submissions: map[inbox.ID]*submission{},
-		subscribers: map[uint64]chan Event{}, done: make(chan struct{}), running: true}
+		subscribers: map[uint64]chan Event{}, done: make(chan struct{}), running: true, archiveWake: make(chan struct{}, 1)}
 	s.permissions = controller
 	defer func() {
 		if err != nil {
@@ -484,6 +493,10 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	}
 	pending := s.pendingStop()
 	dependencies := coordinator.Dependencies{SessionID: o.ID, Inbox: s.inbox, Restored: restored,
+		AfterRestore: func() {
+			s.background.start(s.archiveLoop)
+			s.wakeChildArchive()
+		},
 		CacheKey:           s.modelCacheKey(),
 		RecordActivity:     s.recordActivity,
 		ModelWaiting:       s.modelWaiting,
@@ -536,6 +549,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 			<-manager.Done()
 		}
 		runErr = errors.Join(runErr, s.cancelStoppedChildren(context.WithoutCancel(cctx), interrupted))
+		s.archiveChildren(context.WithoutCancel(cctx))
 		// No writer can be handed over until all canonical writes have stopped.
 		s.mu.Lock()
 		runErr = errors.Join(runErr, lock.Close())
@@ -581,6 +595,7 @@ func (h *Host) Close() error {
 		all = append(all, s)
 	}
 	h.mu.Unlock()
+	h.maintenance.close()
 	for _, s := range all {
 		<-s.done
 	}
@@ -696,8 +711,10 @@ type observationOperation struct{ public operation.Operation }
 
 func (s *Session) setOperation(op operation.Operation) {
 	s.operations[op.ID] = op
+	s.childReports.ObserveOperation(op)
 	s.operationRevision++
 	delete(s.observationOperations, op.ID)
+	s.wakeChildArchive()
 }
 
 // OperationRevision changes only with the canonical Operation projection. A
@@ -823,6 +840,7 @@ func (s *Session) rememberItem(item sessionstore.Item, notify bool) {
 // still detach caller-owned data in rememberItem before entering this method.
 func (s *Session) rememberOwnedItem(item sessionstore.Item, notify bool) {
 	s.items = append(s.items, item)
+	s.childReports.ObserveItem(item)
 	s.indexHistory()
 	if item.Kind == sessionstore.ItemTurn || item.Kind == sessionstore.ItemModelResponse {
 		s.progress = nil
@@ -907,6 +925,7 @@ func (s *Session) rememberOwnedItem(item sessionstore.Item, notify bool) {
 		}
 	}
 	if notify {
+		s.wakeChildArchive()
 		projected := ProjectHistoryItem(item)
 		s.broadcast(Event{Kind: "item", Item: &projected})
 	}

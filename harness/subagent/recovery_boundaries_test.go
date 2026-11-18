@@ -6,6 +6,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -196,6 +197,12 @@ func TestParentResumeDoesNotOpenUnconfiguredChild(t *testing.T) {
 		record, ok := r.Data.Item.Data.(sessionstore.HostRecord)
 		return ok && record.Kind == "configuration"
 	})
+	// Replay the pre-configuration crash in a fresh state. Rewinding only the
+	// transcript inside an already-settled archive leaves a false index from
+	// a different canonical future, which cannot occur in an actual crash.
+	parentLog := readLog(t, dir, owner.ID)
+	dir = t.TempDir()
+	restoreLog(t, dir, owner.ID, parentLog)
 	restoreLog(t, dir, childID, prefix)
 	store, _ := localfile.New(dir)
 	payload, _ := json.Marshal(inbox.PeerMessage{Version: 1, Sender: "parent", Target: string(childID), Handle: "start", Kind: "message", Text: "unbound history"})
@@ -228,7 +235,16 @@ func awaitBoundary(t *testing.T, check func() bool) {
 
 func readLog(t *testing.T, dir string, id session.ID) []byte {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(dir, string(id)+".session.jsonl"))
+	store, err := localfile.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := store.OpenRecord(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,6 +254,15 @@ func readLog(t *testing.T, dir string, id session.ID) []byte {
 func restoreLog(t *testing.T, dir string, id session.ID, data []byte) {
 	t.Helper()
 	path := filepath.Join(dir, string(id)+".session.jsonl")
+	store, err := localfile.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, err := store.ResolveSessionPath(id); err == nil {
+		path = resolved
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
 	if len(data) == 0 {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			t.Fatal(err)

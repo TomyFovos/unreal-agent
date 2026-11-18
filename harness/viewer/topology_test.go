@@ -138,3 +138,26 @@ func TestPanelTopologyRefreshObservesCanonicalFinishWithoutControls(t *testing.T
 		}
 	}
 }
+
+func TestEndedTopologyUsesParentMetadataAndAnalysisReadsHistoryOnDemand(t *testing.T) {
+	m := New(Options{DecodeChild: childDecoder, DecodeFinish: DecodeFinish})
+	parent := parentView(operation.StatusCompleted)
+	must(t, m.Replace("parent", parent))
+	r := &topologyReader{views: map[session.ID]host.View{
+		"parent": parent,
+		"child":  view("child", "", 0, input(1, "archived canonical history")),
+	}}
+	p := &Panel{client: NewClient(r, m, nil), parent: "parent", ctx: t.Context(), updates: make(chan struct{}, 1)}
+	p.SetTopologyVisible(true)
+	if len(p.refreshTargets()) != 0 {
+		t.Fatal("ended child list opened archived history")
+	}
+	rows := m.Rows(epoch)
+	if len(rows) != 2 || row(t, m, "child").ParentOperationStatus != operation.StatusCompleted {
+		t.Fatal("ended child disappeared from list", rows)
+	}
+	must(t, p.PrepareAnalysis(t.Context()))
+	if len(r.inspected) != 2 || r.inspected[0] != "parent" || r.inspected[1] != "child" || row(t, m, "child").Cursor != 1 {
+		t.Fatal("explicit analysis omitted archived child", r.inspected)
+	}
+}

@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"log/slog"
 
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
+	"github.com/unreallabsai/unreal-agent/harness/subagent/reporting"
 )
 
 func unfinishedChild(op operation.Operation) bool {
@@ -36,7 +38,7 @@ func (s *Session) cancelStoppedChildren(ctx context.Context, interrupted bool) e
 				continue
 			}
 		}
-		if interrupted && s.runtime.InterruptedInput != nil {
+		if interrupted && s.runtime.InterruptedInput != nil && !s.childReports.Has(op.ID) {
 			input, err := s.runtime.InterruptedInput(op)
 			if err == nil && input != nil && s.submissions[input.ID] == nil {
 				err = s.store.AppendInput(ctx, s.ID, *input)
@@ -68,6 +70,7 @@ func (h *Host) reconcileStoppedSessions(ctx context.Context, owner *Session) err
 	if err != nil {
 		return err
 	}
+	var parents []session.ID
 	for _, info := range sessions {
 		if info.ID == owner.ID {
 			continue // Coordinator restores this Session's operations and notices.
@@ -91,9 +94,37 @@ func (h *Host) reconcileStoppedSessions(ctx context.Context, owner *Session) err
 				}
 			}
 		}
+		if err == nil {
+			for _, op := range ops {
+				if op.Type == operation.TypeRemoteJob && op.ToolName == "SubagentStart" {
+					parents = append(parents, info.ID)
+					break
+				}
+			}
+		}
 		err = errors.Join(err, lock.Close())
 		if err != nil {
 			return err
+		}
+	}
+	// Reconcile the entire live set before moving anything from that snapshot.
+	for _, id := range parents {
+		lock, err := store.AcquireWriter(id)
+		if errors.Is(err, localfile.ErrWriterOwned) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		retry, archiveErr := archiveStoppedParent(ctx, store, id)
+		if archiveErr != nil {
+			slog.WarnContext(ctx, "archive stopped children", "session", id, "error", archiveErr)
+		}
+		if err := lock.Close(); err != nil {
+			return err
+		}
+		if retry {
+			h.retryStoppedArchive(id)
 		}
 	}
 	return nil
@@ -105,10 +136,15 @@ func reconcileStoppedChildren(ctx context.Context, store *localfile.Store, id se
 		return err
 	}
 	seen := map[inbox.ID]bool{}
+	var reports reporting.Index
 	for _, item := range items {
+		reports.ObserveItem(item)
 		if input, ok := item.Data.(inbox.Input); ok {
 			seen[input.ID] = true
 		}
+	}
+	for _, op := range ops {
+		reports.ObserveOperation(op)
 	}
 	for _, op := range ops {
 		if !unfinishedChild(op) {
@@ -123,7 +159,7 @@ func reconcileStoppedChildren(ctx context.Context, store *localfile.Store, id se
 				continue
 			}
 		}
-		if notice != nil {
+		if notice != nil && !reports.Has(op.ID) {
 			input, err := notice(op)
 			if err != nil {
 				return err

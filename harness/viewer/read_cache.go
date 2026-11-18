@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
 )
 
@@ -81,7 +81,11 @@ func (c *parentReadCache) inspect(ctx context.Context, owner *host.Session, pare
 	}
 	// id comes from the validated canonical Child plan above, not from an
 	// arbitrary path supplied by the gateway caller.
-	info, err := os.Stat(filepath.Join(directory, string(id)+".session.jsonl"))
+	store, err := localfile.New(directory)
+	if err != nil {
+		return host.View{}, err
+	}
+	info, err := store.StatSession(id)
 	if err != nil {
 		delete(c.children, id)
 		return host.View{}, err

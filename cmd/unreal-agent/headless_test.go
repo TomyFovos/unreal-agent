@@ -19,6 +19,9 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/session"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
+	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 	"github.com/unreallabsai/unreal-agent/internal/testclaude"
 )
@@ -104,10 +107,7 @@ func TestHeadlessHostRunsProductRuntimeAndChildren(t *testing.T) {
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("headless: %v %s", err, out)
 			}
-			sessions, err := filepath.Glob(filepath.Join(directory, "sessions", "*.session.jsonl"))
-			if err != nil || len(sessions) == 0 {
-				t.Fatal("missing canonical session", err)
-			}
+			sessions := headlessSessionTree(t, filepath.Join(directory, "sessions"), "benchmark")
 			if configuration == "claude-gpt" && (len(sessions) != 2 || calls.Load() != 1) {
 				t.Fatalf("product child did not finish: sessions=%d calls=%d", len(sessions), calls.Load())
 			}
@@ -118,6 +118,35 @@ func TestHeadlessHostRunsProductRuntimeAndChildren(t *testing.T) {
 				t.Fatal("GPT task incomplete")
 			}
 			assertNoStoredCredentials(t, filepath.Join(directory, "sessions"), "fake-selected-key", "fake-anthropic-headless")
+			if len(sessions) > 1 {
+				assertNoStoredCredentials(t, filepath.Join(directory, "sessions-archive"), "fake-selected-key", "fake-anthropic-headless")
+			}
 		})
 	}
+}
+
+// Enumerate the canonical tree through its parent plans, and resolve every
+// record through the Store. A live-only glob would silently drop settled data.
+func headlessSessionTree(t *testing.T, directory string, root session.ID) []session.ID {
+	t.Helper()
+	store, err := localfile.New(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := []session.ID{root}
+	seen := map[session.ID]bool{root: true}
+	for i := 0; i < len(ids); i++ {
+		_, _, ops, err := store.ReadSnapshot(t.Context(), ids[i])
+		if err != nil {
+			t.Fatal("missing canonical record in session tree", ids[i], err)
+		}
+		for _, op := range ops {
+			p, err := subagent.DecodePlan(op)
+			if err == nil && p.Action == "start" && !seen[p.ChildID] {
+				seen[p.ChildID] = true
+				ids = append(ids, p.ChildID)
+			}
+		}
+	}
+	return ids
 }

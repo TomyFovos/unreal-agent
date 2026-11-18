@@ -218,3 +218,17 @@ class CostTests(unittest.TestCase):
             self.assertEqual(saved["price_table"], str(prices))
             self.assertEqual(saved["trials"], report["trials"])
             self.assertEqual(before, {p: p.read_bytes() for p in directory.iterdir()})
+            # Offline recalculation must retain archived descendants exactly
+            # once, including a transaction between index write and record move.
+            archive = directory.with_name("sessions-archive")
+            for child, parent, kind in (
+                ("child", "main", "index"),
+                ("grandchild", "child", "pending"),
+            ):
+                target = archive / parent / child / f"{child}.session.jsonl"
+                target.parent.mkdir(parents=True)
+                (directory / target.name).rename(target)
+                index = archive / kind / f"{child}.json"
+                index.parent.mkdir(parents=True, exist_ok=True)
+                index.write_text(json.dumps({"child_id": child, "parent_id": parent}))
+            self.assertEqual(recalculate(job, prices=PRICES), report)
