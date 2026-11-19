@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/responsesapi"
@@ -125,12 +128,41 @@ func NewClient(config Config) (*Client, error) {
 		MaxStreamAttempts: streamAttempts,
 		AllowFast:         true,
 		Trace:             config.Trace,
+		ObserveHeaders:    observeSubscriptionUsage,
 	})
 	if err != nil {
 		_ = remote.Close()
 		return nil, err
 	}
 	return &Client{adapter: adapter, remote: remote, requestEffort: config.RequestEffort, supportsFast: config.SupportsFast}, nil
+}
+
+func observeSubscriptionUsage(ctx context.Context, model llm.Model, options llm.RequestOptions, headers http.Header) {
+	var snapshots []llm.SubscriptionUsage
+	for _, window := range []string{"primary", "secondary"} {
+		prefix := "x-codex-" + window + "-"
+		s := llm.SubscriptionUsage{Window: window}
+		if v, err := strconv.ParseFloat(headers.Get(prefix+"used-percent"), 64); err == nil && v >= 0 && !math.IsInf(v, 0) {
+			s.UsedPercent = &v
+		}
+		if v, err := strconv.ParseInt(headers.Get(prefix+"window-minutes"), 10, 64); err == nil && v > 0 {
+			s.WindowMinutes = &v
+		}
+		if v, err := strconv.ParseInt(headers.Get(prefix+"reset-at"), 10, 64); err == nil && v > 0 {
+			s.ResetsAt = time.Unix(v, 0).UTC()
+		}
+		if s.UsedPercent != nil || s.WindowMinutes != nil || !s.ResetsAt.IsZero() {
+			snapshots = append(snapshots, s)
+		}
+	}
+	if len(snapshots) != 0 {
+		if err := options.RecordActivity(context.WithoutCancel(ctx), llm.ActivityRecord{
+			Kind: llm.ActivitySubscriptionUsage, ID: options.Identity.TurnID, Provider: "openai-codex", Model: model.ID,
+			Effort: string(model.ReasoningEffort), Fast: &model.Fast, Subscription: snapshots,
+		}); err != nil {
+			slog.Warn("record Codex subscription usage", "error", err)
+		}
+	}
 }
 
 func (client *Client) Respond(ctx context.Context, request llm.Request, options llm.RequestOptions) (llm.Response, error) {

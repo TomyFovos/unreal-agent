@@ -64,3 +64,35 @@ func TestGenerationTimingExcludesToolAndApprovalWaits(t *testing.T) {
 		}
 	}
 }
+
+func TestToolWindowReadsLatestMainAssistantUsageAfterToolRecording(t *testing.T) {
+	var batchesRecorded int
+	inputs := make([]int64, 0, 2)
+	opt := llm.RequestOptions{
+		Tools: func(_ context.Context, _ llm.Response) ([]llm.ToolOutcome, error) {
+			batchesRecorded++
+			return nil, nil
+		},
+		AfterToolBatch: func(_ context.Context, inputTokens int64) (llm.ToolBatchContinuation, error) {
+			if batchesRecorded != len(inputs)+1 {
+				t.Fatalf("checked the window before recording tool batch %d", len(inputs)+1)
+			}
+			inputs = append(inputs, inputTokens)
+			return llm.ToolBatchContinuation{RotateWindow: inputTokens >= 200_000}, nil
+		},
+	}
+	round := newTurn(t.Context(), func() {}, opt, &writer{w: io.Discard}, observed.NewResults(), &approver{}, t.TempDir(), "session")
+	round.handle(frame{Type: "stream_event", Event: []byte(`{"type":"message_start","message":{"usage":{"input_tokens":10000}}}`)})
+	round.handle(frame{Type: "assistant", Message: []byte(`{"id":"main","usage":{"input_tokens":1000,"cache_read_input_tokens":198000,"cache_creation_input_tokens":1000}}`)})
+	parent := "agent"
+	round.handle(frame{Type: "assistant", ParentToolUseID: &parent, Message: []byte(`{"id":"child","usage":{"input_tokens":900000}}`)})
+	child := round.batch(hookInput{AgentID: "child", ToolCalls: []batchCall{{ToolName: "Read", ToolUseID: "child-read"}}})
+	main := round.batch(hookInput{ToolCalls: []batchCall{{ToolName: "Agent", ToolUseID: parent}}})
+	if len(inputs) != 2 || inputs[0] != 0 || inputs[1] != 200_000 {
+		t.Fatalf("tool boundary measurements = %v, want [0 200000]", inputs)
+	}
+	reason, _ := main["stopReason"].(string)
+	if _, stopped := child["continue"]; stopped || main["continue"] != false || reason == "" {
+		t.Fatalf("unexpected child and main hook replies: %v, %v", child, main)
+	}
+}

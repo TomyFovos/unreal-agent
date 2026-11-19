@@ -30,6 +30,7 @@ type Turn struct {
 	// References a canonical runtime selection; zero denotes creation identity.
 	RuntimeRevision  uint64            `json:",omitzero"`
 	ContextAdmission *ContextAdmission `json:",omitzero"`
+	ContextStrategy  string            `json:",omitzero"`
 	// A continuation remains inside the original model request. Its input
 	// watermark excludes queued inputs until a provider delivers them at a
 	// tool batch boundary. ExternalInputWatermark also preserves foreground vs
@@ -53,4 +54,5 @@ type ContextAdmission struct {
 	BudgetTokens, WindowTokens                                                    int64
 	RequestBytes                                                                  int64
 	Measurement, Estimator, WindowSource, HeaderFingerprint                       string
+	WindowBoundary                                                                record.Locator `json:",omitzero"` // first request in a rebuilt window
 }

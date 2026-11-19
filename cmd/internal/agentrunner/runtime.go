@@ -316,7 +316,7 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 		if policy.CheckProcess() == nil {
 			constraints.Process = "authorized-transport-or-process"
 		}
-		engine, e := contextbuilder.EnableCompaction(builder, c.Context, constraints)
+		engine, e := contextbuilder.EnableWindow(builder, c.Context, constraints)
 		if e != nil {
 			closeRuntime()
 			return host.Runtime{}, e
@@ -392,6 +392,7 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 				prompt += "\n" + contexttools.Guidance
 			}
 			builder.(interface{ SetRuntimeProvider(string) }).SetRuntimeProvider(choice.Provider)
+			builder.(interface{ SetWindowPrompt(llm.WindowPrompt) }).SetWindowPrompt(c.Providers.WindowPrompt(choice.Provider))
 			b := builder.(interface {
 				ConfigureRuntime(llm.Model, string, []llm.Tool, []tool.Skill, bool, bool)
 			})

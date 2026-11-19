@@ -35,14 +35,11 @@ func PublicItem(item llm.Item) (llm.Item, bool) {
 		v.Name = secretguard.Redact(v.Name)
 		data = v
 	case llm.ToolResult:
-		if item.Type != llm.ItemToolResult {
+		if item.Type != llm.ItemToolResult || !PublicToolResultKinds(v) {
 			return llm.Item{}, false
 		}
 		v.Output = append([]llm.ToolResultOutput(nil), v.Output...)
 		for i, o := range v.Output {
-			if o.Kind != llm.ToolResultText && o.Kind != llm.ToolResultImage {
-				return llm.Item{}, false
-			}
 			v.Output[i].Value = secretguard.Redact(o.Value)
 		}
 		data = v
@@ -50,6 +47,17 @@ func PublicItem(item llm.Item) (llm.Item, bool) {
 		return llm.Item{}, false
 	}
 	return llm.Item{Type: item.Type, Data: data}, true
+}
+
+// PublicToolResultKinds checks the types accepted by PublicItem. PublicItem
+// still applies the text guard when the receipt enters the projection.
+func PublicToolResultKinds(result llm.ToolResult) bool {
+	for _, output := range result.Output {
+		if output.Kind != llm.ToolResultText && output.Kind != llm.ToolResultImage {
+			return false
+		}
+	}
+	return true
 }
 
 const (

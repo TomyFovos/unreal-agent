@@ -103,6 +103,11 @@ Run `/analyze` in the TUI to inspect detailed Session diagnostics and token acco
 | **Context** | Context window size, average input tokens, pruned tool results, estimated token savings, prune boundaries, and Claude compaction events |
 | **Timeline** | Chronological event log and activity durations |
 | **Errors** | Recorded errors and redacted provider diagnostics |
+| **Layers** | Request and worker-model comparisons across the Session tree |
+| **Context metrics** | Three-layer and summary comparison, per-window cache and L1/L2/L3 measurements, child reviews, and user questions per work hour |
+| **Export** | Save the analysis views, including the context measurement tables, as JSON or Markdown |
+
+**Context metrics** includes archived descendants and labels values `measured`, `derived`, or `unknown`. [Three-layer context measurements](context-3layer.md#measuring)
 
 ### How Metrics Are Calculated
 

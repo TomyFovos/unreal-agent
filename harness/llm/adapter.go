@@ -21,7 +21,11 @@ type RequestOptions struct {
 	ConversationTokens map[string]int64
 	// RecordConversation appends a small observation without replacing history.
 	RecordConversation func(context.Context, ConversationRecord) error
-	RecordActivity     func(context.Context, ActivityRecord) error
+	// ConversationBindings are the current private conversation IDs restored
+	// from the owning Session, keyed by provider.
+	ConversationBindings      map[string]ConversationBinding
+	RecordConversationBinding func(context.Context, ConversationBinding) error
+	RecordActivity            func(context.Context, ActivityRecord) error
 	// StartBackground optionally starts work in the owning Session/Runtime.
 	// Its context outlives request/Idle cancellation. The owner cancels it and
 	// joins the work before closing the runtime; work must return on cancellation.
@@ -40,6 +44,15 @@ type RequestOptions struct {
 	// Steering supplies queued user and peer inputs in inbox order at a
 	// provider's tool-batch boundary. The response confirms their delivery.
 	Steering func(context.Context) ([]BatchInput, error)
+	// AfterToolBatch is the window-aware steering path. Input tokens are
+	// measured for the last main model call, or zero if unavailable. A
+	// rotation leaves queued inputs for the first request of the new window.
+	AfterToolBatch func(ctx context.Context, inputTokens int64) (ToolBatchContinuation, error)
+}
+
+type ToolBatchContinuation struct {
+	Inputs       []BatchInput
+	RotateWindow bool
 }
 
 type BatchInput struct {

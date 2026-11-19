@@ -29,6 +29,7 @@ type State struct {
 	Issues          Entries[Issue]      `json:"issues"`
 	RecentEvents    []RecentEvent       `json:"recent_events"`
 	Metrics         Metrics             `json:"metrics"`
+	LastHumanInput  uint64              `json:"last_human_input,omitzero"` // replay bookkeeping
 	Extra           jsontext.Value      `json:",embed"`
 }
 
@@ -62,6 +63,7 @@ type Evidence struct {
 type Processed struct {
 	Count   uint64                      `json:"count"`
 	Sources map[record.Locator]struct{} `json:"sources,omitempty"`
+	Locator record.Locator              `json:"locator,omitempty"`
 }
 
 type Entries[T any] struct {
@@ -212,6 +214,8 @@ type Child struct {
 	Accept              Acceptance       `json:"accept"`
 	Rework              uint64           `json:"rework"`
 	EndedBy             Ending           `json:"ended_by,omitempty"`
+	EndedAfter          uint64           `json:"ended_after,omitzero"`
+	ReportSeen          bool             `json:"report_seen,omitzero"`
 }
 
 type Children struct {
@@ -274,15 +278,19 @@ type Question struct {
 	Status    QuestionStatus `json:"status"`
 	Locator   record.Locator `json:"locator"`
 	Answer    record.Locator `json:"answer,omitempty"`
+	Marker    bool           `json:"marker,omitzero"`
 }
 
 type Artifact struct {
 	Evidence
-	Path       string         `json:"path"`
-	LastWriter string         `json:"last_writer"`
-	TS         time.Time      `json:"ts"`
-	Locator    record.Locator `json:"locator"`
-	Note       string         `json:"note,omitempty"`
+	Path         string         `json:"path"`
+	LastWriter   string         `json:"last_writer"`
+	TS           time.Time      `json:"ts"`
+	Locator      record.Locator `json:"locator"`
+	Note         string         `json:"note,omitempty"`
+	After        uint64         `json:"after,omitzero"`
+	SelfWrite    *position      `json:"self_write,omitzero"`
+	ChildWriters []string       `json:"child_writers,omitempty"`
 }
 
 type IssueStatus string
@@ -308,6 +316,7 @@ type RecentEvent struct {
 	Locator   record.Locator `json:"locator"`
 	Handle    string         `json:"handle,omitempty"`
 	RuleID    string         `json:"rule_id,omitempty"`
+	After     uint64         `json:"after,omitzero"`
 }
 
 type Usage struct {
@@ -340,4 +349,16 @@ type Metrics struct {
 	LastBoundary    *Boundary              `json:"last_boundary,omitempty"`
 	RawBoundaries   *BoundaryRecords       `json:"raw_boundaries,omitempty"`
 	Rebuilds        *uint64                `json:"rebuilds,omitempty"`
+}
+
+type PendingCounts struct {
+	UserQuestions, ChildQuestions, Approvals int
+}
+
+func (s State) PendingCounts() PendingCounts {
+	p := PendingCounts{UserQuestions: len(s.QuestionsToUser.Current), Approvals: len(s.Approvals.Current)}
+	for _, child := range s.Children.Current {
+		p.ChildQuestions += len(child.UnansweredQuestions)
+	}
+	return p
 }

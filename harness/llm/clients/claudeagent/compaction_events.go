@@ -57,7 +57,11 @@ func (c *compactEvents) handle(f frame) bool {
 			if reason == "" {
 				reason = "compaction failed"
 			}
-			c.record(llm.ConversationRecord{Error: reason, BeforeTokens: c.before, InputTokens: c.before, InputKnown: c.beforeKnown})
+			record := llm.ConversationRecord{Error: reason, BeforeTokens: c.before, InputTokens: c.before, InputKnown: c.beforeKnown}
+			if c.beforeKnown {
+				record.BeforeSource = "last-reported-input"
+			}
+			c.record(record)
 			slog.Warn("Claude Code automatic compaction failed", "session", c.turn.opt.Identity.SessionID, "error", reason)
 		}
 	}
@@ -67,12 +71,16 @@ func (c *compactEvents) handle(f frame) bool {
 	c.start()
 	meta := f.CompactMetadata
 	ended := c.turn.now().UTC()
-	record := llm.ConversationRecord{BeforeTokens: meta.PreTokens, Compacted: true, EndedAt: ended, StartedAt: c.started}
+	record := llm.ConversationRecord{Compacted: true, EndedAt: ended, StartedAt: c.started, DurationSource: "client_clock"}
+	if meta.PreTokens != nil {
+		record.BeforeTokens, record.BeforeSource = *meta.PreTokens, "provider-reported"
+	}
 	if meta.DurationMS > 0 {
 		record.StartedAt = ended.Add(-time.Duration(meta.DurationMS) * time.Millisecond)
+		record.DurationSource = "provider_api"
 	}
 	if meta.PostTokens != nil {
-		record.AfterTokens = *meta.PostTokens
+		record.AfterTokens, record.AfterKnown = *meta.PostTokens, true
 	}
 	c.record(record)
 	c.awaitingInput = true
@@ -81,6 +89,9 @@ func (c *compactEvents) handle(f frame) bool {
 
 func (c *compactEvents) record(record llm.ConversationRecord) {
 	record.Provider, record.Phase = ProviderID, "compact"
+	c.turn.mu.Lock()
+	record.Model = c.turn.model
+	c.turn.mu.Unlock()
 	if record.StartedAt.IsZero() {
 		record.StartedAt = c.started
 	}

@@ -63,6 +63,12 @@ func TestValidationErrorsAreBoundedBeforeResultTranslation(t *testing.T) {
 			if status.ErrorTruncated != test.truncated {
 				t.Fatalf("status error truncated = %t, want %t", status.ErrorTruncated, test.truncated)
 			}
+			if test.truncated {
+				original := string(status.OriginalError)
+				if preview, truncated := operation.BoundOutput(original, test.limit); !truncated || preview != status.Error {
+					t.Fatal("the canonical original does not reproduce the existing preview")
+				}
+			}
 			encoded, err := json.Marshal(status)
 			if err != nil {
 				t.Fatal(err)

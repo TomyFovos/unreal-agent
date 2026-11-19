@@ -81,7 +81,7 @@ func (s *Store) CreateWithHostRecords(ctx context.Context, id session.ID, record
 			return sessionstore.Snapshot{}, err
 		}
 		item := state.appendItem(sessionstore.ItemHostRecord, r, now)
-		if err := state.observeItem(itemRecord{Item: item}); err != nil {
+		if err := state.observeItem(itemRecord{Item: item}, nil); err != nil {
 			return sessionstore.Snapshot{}, err
 		}
 		state.Items = append(state.Items, item)
@@ -96,17 +96,22 @@ func (s *Store) CreateWithHostRecords(ctx context.Context, id session.ID, record
 }
 
 func (s *Store) AppendHostRecord(ctx context.Context, id session.ID, r sessionstore.HostRecord) error {
+	_, err := s.AppendHostRecordRecorded(ctx, id, r)
+	return err
+}
+
+func (s *Store) AppendHostRecordRecorded(ctx context.Context, id session.ID, r sessionstore.HostRecord) (sessionstore.Item, error) {
 	if err := r.Validate(); err != nil {
-		return err
+		return sessionstore.Item{}, err
 	}
 	head, size, err := s.loadWriteState(ctx, id)
 	if err != nil {
-		return err
+		return sessionstore.Item{}, err
 	}
 	item := head.appendItem(sessionstore.ItemHostRecord, r, time.Now().UTC())
 	if err = s.append(id, head, size, recordItem, itemRecord{Item: item}); err != nil {
-		return err
+		return sessionstore.Item{}, err
 	}
 	s.notifyObservers(id, item)
-	return nil
+	return item, nil
 }

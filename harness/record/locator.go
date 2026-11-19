@@ -18,10 +18,12 @@ const (
 	PeerMessage         Kind = "peer"
 	AssistantMessage    Kind = "message"
 	ToolCall            Kind = "call"
+	ToolError           Kind = "tool-error"
 	ChildReport         Kind = "finish"
 	OperationOutput     Kind = "output"
 	OperationCheckpoint Kind = "operation"
 	Artifact            Kind = "artifact"
+	ContextIndex        Kind = "context"
 )
 
 const (
@@ -71,10 +73,12 @@ func (a Address) Locator() Locator {
 		parts = append(parts, string(a.Kind), a.Operation, a.Stream)
 	case OperationCheckpoint:
 		parts = append(parts, string(a.Kind), a.Operation, strconv.FormatInt(a.Offset, 10))
+	case ContextIndex:
+		parts = append(parts, string(a.Kind), a.Section)
 	default:
 		parts = append(parts, strconv.FormatUint(a.Sequence, 10))
 		switch a.Kind {
-		case UserMessage, PeerMessage:
+		case UserMessage, PeerMessage, ToolError:
 			parts = append(parts, string(a.Kind))
 		case AssistantMessage, ToolCall:
 			parts = append(parts, string(a.Kind), strconv.Itoa(a.Part))
@@ -133,6 +137,11 @@ func (l Locator) Address() (Address, error) {
 			return Address{}, invalid
 		}
 		a.Kind, a.Operation, a.Offset = OperationCheckpoint, parts[2], offset
+	case ContextIndex:
+		if len(parts) != 3 {
+			return Address{}, invalid
+		}
+		a.Kind, a.Section = ContextIndex, parts[2]
 	default:
 		var err error
 		a.Sequence, err = strconv.ParseUint(parts[1], 10, 64)
@@ -143,7 +152,7 @@ func (l Locator) Address() (Address, error) {
 		if len(tail) != 0 {
 			a.Kind = Kind(tail[0])
 			switch a.Kind {
-			case UserMessage, PeerMessage:
+			case UserMessage, PeerMessage, ToolError:
 				if len(tail) != 1 {
 					return Address{}, invalid
 				}

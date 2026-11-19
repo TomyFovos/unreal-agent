@@ -107,6 +107,11 @@ TUI 内で `/analyze` を実行すると、セッションの稼働統計やト�
 | **Context** | コンテキスト上限、平均入力トークン、省略されたツール結果数、推定節約トークン、prune 境界、Claude の自動圧縮記録 |
 | **Timeline** | 記録されたイベントの時系列とアクティビティ計測値 |
 | **Errors** | 記録されたエラーと秘匿処理済みのプロバイダ診断情報 |
+| **Layers** | Session ツリー全体のリクエストと作業者モデル別の比較 |
+| **Context metrics** | 3層方式と要約方式の比較、窓ごとのキャッシュと L1/L2/L3、子のレビュー、作業時間あたりの質問数 |
+| **Export** | 文脈の計測表を含む分析結果を JSON または Markdown で保存 |
+
+**Context metrics** はアーカイブ済みの子を含み、値を `measured`、`derived`、`unknown` で表示します。 [3層の文脈の計測](context-3layer.md#measuring)
 
 ### 数値を読む際のポイント
 

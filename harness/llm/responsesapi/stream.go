@@ -22,7 +22,7 @@ import (
 
 // exchange returns the final HTTP status, the response or error body, and the
 // classified provider failure, if any.
-func (adapter *adapter) exchange(ctx context.Context, body []byte, cacheKey string) (int, []byte, *APIError, error) {
+func (adapter *adapter) exchange(ctx context.Context, body []byte, cacheKey string, observe func(http.Header)) (int, []byte, *APIError, error) {
 	events := make(chan primitives.PrimitiveEvent)
 	for attempt := 1; ; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -32,6 +32,9 @@ func (adapter *adapter) exchange(ctx context.Context, body []byte, cacheKey stri
 		ctx = context.WithValue(ctx, attemptKey{}, uint64(attempt))
 		request := adapter.remoteRequest(body, cacheKey)
 		result := adapter.exchangeAttempt(ctx, request, events)
+		if observe != nil && len(result.headers) > 0 {
+			observe(result.headers)
+		}
 		limit := adapter.maxAttempts
 		if result.status >= http.StatusOK && result.status < http.StatusMultipleChoices {
 			limit = adapter.maxStreamAttempts

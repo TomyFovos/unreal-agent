@@ -111,19 +111,24 @@ func TestContextCLIRoundTripInReadOnly(t *testing.T) {
 	run("state", "decide", "Use a typed reply", "--id", "choice", "--why", "Durable evidence", "--basis", string(source), "--rejected", `[{"alternative":"plain text","reason":"loses provenance"}]`)
 	run("state", "plan", "step", "--text", "Verify", "--owner", "self", "--position", "3", "--status", "doing", "--decision", "choice")
 	run("state", "rule", "add", rule, "--id", "spacing", "--source", string(source))
-	run("state", "question", "Which spacing?\nUse the original?", "--id", "question")
+	var question contextstate.Result
+	if err := json.Unmarshal([]byte(run("state", "question", "Which spacing?\nUse the original?", "--id", "question")), &question); err != nil ||
+		question.ID != "question" || question.Locator == "" {
+		t.Fatalf("missing note receipt: %+v %v", question, err)
+	}
 	response := user("answer", "Use the original spacing.")
 	var state contextstate.State
 	if err := json.Unmarshal([]byte(run("state", "show")), &state); err != nil {
 		t.Fatal(err)
 	}
-	decision, step, question := state.Decisions["choice"], state.Plan.Steps[0], state.QuestionsToUser.Current["question"]
+	decision, step := state.Decisions["choice"], state.Plan.Steps[0]
 	if decision.Reason != "Durable evidence" || decision.Locator == "" || !slices.Equal(decision.Basis, []record.Locator{source}) ||
 		len(decision.Rejected) != 1 || step.Position != 3 || step.Status != contextstate.PlanDoing ||
-		state.Rules["spacing"].Locator != source || question.FirstLine != "Which spacing?" || question.Locator == "" {
-		t.Fatalf("CLI state round trip lost a note: %+v %+v %+v", decision, step, question)
+		state.Rules["spacing"].Locator != source || len(state.QuestionsToUser.Current) != 0 ||
+		state.QuestionsToUser.Processed.Count != 1 || state.QuestionsToUser.Processed.Locator == "" {
+		t.Fatalf("CLI state round trip lost a note: %+v %+v %+v", decision, step, state.QuestionsToUser)
 	}
-	if raw := run("record", "show", string(question.Locator)); !strings.Contains(raw, "Use the original?") {
+	if raw := run("record", "show", string(question.Locator)); !strings.Contains(raw, "Which spacing?") || !strings.Contains(raw, "Use the original?") {
 		t.Fatal("manual question lost its full text")
 	}
 	run("state", "question", "answer", "question", "--source", string(response))
@@ -136,8 +141,12 @@ func TestContextCLIRoundTripInReadOnly(t *testing.T) {
 		len(after.QuestionsToUser.Current) != 0 || after.QuestionsToUser.Processed.Count != 1 || after.Waiting.Processed.Count != 1 {
 		t.Fatalf("processed plan or question not settled: %+v", after)
 	}
+	var evidence []record.Locator
+	if err := json.Unmarshal([]byte(run("record", "show", string(after.QuestionsToUser.Processed.Locator))), &evidence); err != nil {
+		t.Fatal(err)
+	}
 	for _, source := range []record.Locator{question.Locator, response} {
-		if _, ok := after.QuestionsToUser.Processed.Sources[source]; !ok {
+		if !slices.Contains(evidence, source) {
 			t.Fatal("answer link lost evidence", source)
 		}
 	}

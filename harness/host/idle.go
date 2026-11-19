@@ -40,7 +40,7 @@ func (a *progressAdapter) Idle(ctx context.Context, r llm.Request, o llm.Request
 	}
 	s.progressEpoch++
 	epoch, turn := s.progressEpoch, s.currentTurn()
-	o.ConversationTokens = s.conversationTokensLocked()
+	o.ConversationTokens, o.ConversationBindings = s.conversationStateLocked()
 	s.mu.Unlock()
 	o.RecordConversation = s.recordConversation
 	o.RecordActivity = s.recordActivity

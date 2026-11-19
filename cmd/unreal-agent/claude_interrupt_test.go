@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/tui"
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
@@ -35,6 +36,7 @@ func TestClaudeLargeContextDoesNotDelayTUIInput(t *testing.T) {
 	f := testclaude.New(t)
 	f.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentInputTokens: 250_000, AgentFinal: "first complete", CompactDelayMillis: 30_000})
 	cfg := claudeRouteConfiguration(t, f)
+	cfg.Context.WindowStrategy = contextengine.WindowSummary
 	c, _, _ := startInteractiveHost(t, cfg, "--normal-runtime")
 	v, err := c.Open(t.Context(), host.Create, "idle-interrupt")
 	if err != nil {

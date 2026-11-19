@@ -209,7 +209,7 @@ func (a *appendSummaryAdapter) Respond(_ context.Context, r llm.Request, _ llm.R
 }
 
 func TestResponsesCompactionPrunesThenSummarizesAndResumesPrefix(t *testing.T) {
-	h := newRepairHistory(t, contextengine.Config{})
+	h := newRepairHistory(t, contextengine.Config{WindowStrategy: contextengine.WindowSummary})
 	h.user("task", "Preserve this task")
 	if _, _, err := h.request("t1"); err != nil {
 		t.Fatal(err)

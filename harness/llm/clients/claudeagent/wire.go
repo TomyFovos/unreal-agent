@@ -6,6 +6,8 @@ import (
 	"io"
 	"strings"
 	"sync"
+
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 )
 
 // frame is one stream-json line from the claude CLI. Only the fields this
@@ -30,10 +32,16 @@ type frame struct {
 	CompactError    string `json:"compact_error"`
 	CompactMetadata *struct {
 		Trigger    string `json:"trigger"`
-		PreTokens  int64  `json:"pre_tokens"`
+		PreTokens  *int64 `json:"pre_tokens"`
 		PostTokens *int64 `json:"post_tokens"`
 		DurationMS int64  `json:"duration_ms"`
 	} `json:"compact_metadata"`
+	RateLimitInfo *struct {
+		Status      string   `json:"status"`
+		Window      string   `json:"rateLimitType"`
+		Utilization *float64 `json:"utilization"`
+		ResetsAt    int64    `json:"resetsAt"`
+	} `json:"rate_limit_info"`
 
 	// system/permission_denied
 	ToolName           string `json:"tool_name"`
@@ -63,12 +71,54 @@ type noResponseRetry struct {
 }
 
 type usage struct {
-	InputTokens              int64  `json:"input_tokens"`
-	CacheCreationInputTokens int64  `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int64  `json:"cache_read_input_tokens"`
-	OutputTokens             int64  `json:"output_tokens"`
-	ReasoningTokens          *int64 `json:"reasoning_tokens"`
-	ThinkingTokens           *int64 `json:"thinking_tokens"`
+	InputTokens                   int64  `json:"input_tokens"`
+	CacheCreationInputTokens      *int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens          *int64 `json:"cache_read_input_tokens"`
+	OutputTokens                  int64  `json:"output_tokens"`
+	ReasoningTokens               *int64 `json:"reasoning_tokens"`
+	ThinkingTokens                *int64 `json:"thinking_tokens"`
+	inputReported, outputReported bool
+}
+
+func (u *usage) UnmarshalJSON(data []byte) error {
+	type wireUsage usage
+	var v struct {
+		wireUsage
+		InputTokens  *int64 `json:"input_tokens"`
+		OutputTokens *int64 `json:"output_tokens"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	*u = usage(v.wireUsage)
+	if v.InputTokens != nil {
+		u.InputTokens, u.inputReported = *v.InputTokens, true
+	}
+	if v.OutputTokens != nil {
+		u.OutputTokens, u.outputReported = *v.OutputTokens, true
+	}
+	return nil
+}
+
+func (u *usage) requestUsage() *llm.RequestUsage {
+	if u == nil {
+		return &llm.RequestUsage{}
+	}
+	r := &llm.RequestUsage{Read: u.CacheReadInputTokens, Write: u.CacheCreationInputTokens}
+	if u.inputReported {
+		r.Uncached = &u.InputTokens
+		if r.Read != nil && r.Write != nil {
+			r.Input = new(u.inputTokens())
+		}
+	}
+	return r
+}
+
+func (u *usage) reportedOutput() *int64 {
+	if u != nil && u.outputReported {
+		return &u.OutputTokens
+	}
+	return nil
 }
 
 func (u usage) reasoningTokens() (int64, bool) {
@@ -82,7 +132,18 @@ func (u usage) reasoningTokens() (int64, bool) {
 }
 
 func (u usage) inputTokens() int64 {
-	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+	read, write := u.cacheTokens()
+	return u.InputTokens + read + write
+}
+
+func (u usage) cacheTokens() (read, write int64) {
+	if u.CacheReadInputTokens != nil {
+		read = *u.CacheReadInputTokens
+	}
+	if u.CacheCreationInputTokens != nil {
+		write = *u.CacheCreationInputTokens
+	}
+	return
 }
 
 type message struct {
@@ -138,6 +199,7 @@ type controlRequest struct {
 // hookInput is the JSON a host hook receives, as a settings hook would on stdin.
 type hookInput struct {
 	HookEventName  string         `json:"hook_event_name"`
+	AgentID        string         `json:"agent_id"`
 	Cwd            string         `json:"cwd"`
 	ToolName       string         `json:"tool_name"`
 	ToolInput      jsontext.Value `json:"tool_input"`

@@ -7,12 +7,44 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
 
 func fullTurnEstimate(b *builder) int64 {
 	return b.tokenEstimator().Request(llm.Request{Model: b.request.Model, Tools: b.request.Tools, Input: b.deriveItems()})
+}
+
+func TestIncrementalWindowEstimateMatchesRenderedPrompt(t *testing.T) {
+	f := newContextFixture(t, claudeagent.ProviderID, contextengine.Config{WindowStrategy: contextengine.WindowThreeLayer})
+	f.b.SetWindowPrompt(claudeagent.WindowPromptLine)
+	check := func() {
+		t.Helper()
+		full := claudeagent.WindowPrompt(f.b.deriveItems())
+		head := (contextengine.TokenEstimator{}).Request(llm.Request{Input: f.b.committedPrefix[:1], Tools: f.b.request.Tools})
+		if got, want := f.b.estimateRequest(), head+f.b.tokenEstimator().Text(full); got != want {
+			t.Fatalf("incremental=%d rendered=%d, prompt=%q", got, want, full)
+		}
+	}
+	check() // the empty renderer fallback
+	f.turn(t, "empty", "", "one")
+	check()
+	f.user(t, "mixed", " 日本語\r\n🙂 ")
+	f.item(t, sessionstore.ItemTurn, session.Turn{ID: "tool", Type: session.TurnRegular})
+	f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "tool", Response: llm.Response{Output: []llm.Item{
+		{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "test", Name: "Read", Arguments: `{"path":"資料.txt"}`}},
+	}}})
+	f.item(t, sessionstore.ItemToolCallStatus, sessionstore.ToolCallStatus{
+		TurnID: "tool", CallID: "test", Status: tool.CallStatus{Error: "空\nﬁle"},
+	})
+	check()
+	f.b.ApplyContext(sessionstore.ContextRecord{Kind: sessionstore.ContextWindowBoundary, Through: f.b.lastUnit,
+		Text: "L2: 状態", Window: &sessionstore.WindowBoundary{ToolOutputExcerptChars: f.b.excerptChars()}})
+	check()
+	f.turn(t, "another", "two!", "three")
+	check()
 }
 
 func TestIncrementalTurnEstimateMatchesFullTokenEstimateAcrossViewChanges(t *testing.T) {

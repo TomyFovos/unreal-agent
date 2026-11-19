@@ -81,7 +81,7 @@ func (c *parentReadCache) inspect(ctx context.Context, owner *host.Session, pare
 	}
 	// id comes from the validated canonical Child plan above, not from an
 	// arbitrary path supplied by the gateway caller.
-	child, err := c.loadChild(ctx, directory, id)
+	child, err := c.loadChild(ctx, directory, id, false)
 	if err != nil {
 		return host.View{}, err
 	}
@@ -90,6 +90,7 @@ func (c *parentReadCache) inspect(ctx context.Context, owner *host.Session, pare
 		return host.View{}, fmt.Errorf("child canonical configuration does not match parent")
 	}
 	view := child.View
+	view.ContextFacts = nil
 	items := view.History.Items
 	start := min(uint64(after), uint64(len(items)))
 	end := min(start+uint64(limit), uint64(len(items)))
@@ -104,7 +105,7 @@ func (c *parentReadCache) inspect(ctx context.Context, owner *host.Session, pare
 
 // Caller holds c.mu. Archive moves preserve the inode and do not invalidate
 // immutable snapshots; a resumed writer's append does invalidate them.
-func (c *parentReadCache) loadChild(ctx context.Context, directory string, id session.ID) (subagent.ChildView, error) {
+func (c *parentReadCache) loadChild(ctx context.Context, directory string, id session.ID, analysis bool) (subagent.ChildView, error) {
 	store, err := localfile.New(directory)
 	if err != nil {
 		return subagent.ChildView{}, err
@@ -115,8 +116,12 @@ func (c *parentReadCache) loadChild(ctx context.Context, directory string, id se
 		return subagent.ChildView{}, err
 	}
 	observed, ok := c.children[id]
-	if !ok || !os.SameFile(info, observed.info) || info.Size() != observed.info.Size() || !info.ModTime().Equal(observed.info.ModTime()) {
-		child, err := subagent.ReadChildSnapshot(ctx, directory, id)
+	if !ok || !os.SameFile(info, observed.info) || info.Size() != observed.info.Size() || !info.ModTime().Equal(observed.info.ModTime()) || analysis && observed.child.View.ContextFacts == nil {
+		read := subagent.ReadChildSnapshot
+		if analysis {
+			read = subagent.ReadAnalysisSnapshot
+		}
+		child, err := read(ctx, directory, id)
 		if err != nil {
 			delete(c.children, id)
 			return subagent.ChildView{}, err
@@ -130,5 +135,5 @@ func (c *parentReadCache) loadChild(ctx context.Context, directory string, id se
 func (c *parentReadCache) treeChild(ctx context.Context, directory string, id session.ID) (subagent.ChildView, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.loadChild(ctx, directory, id)
+	return c.loadChild(ctx, directory, id, true)
 }

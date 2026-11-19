@@ -13,23 +13,35 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/subagent/reporting"
 )
 
 // Context events derived from canonical facts commit with their source. Both
 // the live write head and replay run these transitions, so a crash cannot
 // leave a committed source without its L2 update.
 type contextFacts struct {
-	Parent       session.ID
-	ParentHandle string
-	Replies      map[operation.ID][]record.Locator  `json:",omitempty"`
-	Cancels      map[operation.ID]childCancellation `json:",omitempty"`
+	Parent          session.ID
+	ParentHandle    string
+	Replies         map[operation.ID][]record.Locator  `json:",omitempty"`
+	Cancels         map[operation.ID]childCancellation `json:",omitempty"`
+	Reports         reporting.Index                    `json:",omitzero"`
+	DeferredReports map[operation.ID]record.Locator    `json:",omitempty"`
+	PendingReports  map[operation.ID]reportOffer       `json:",omitempty"`
+	OfferedReports  map[operation.ID]record.Locator    `json:",omitempty"`
+	ReportTurn      session.TurnID                     `json:",omitempty"`
+}
+
+type reportOffer struct {
+	Source record.Locator
+	Peer   bool
 }
 
 type contextObserver struct {
-	head   *sessionHead
-	at     time.Time
-	source record.Locator
-	err    error
+	head    *sessionHead
+	at      time.Time
+	source  record.Locator
+	err     error
+	metrics *sessionstore.ContextFacts
 }
 
 func (o *contextObserver) add(kind contextstate.EventKind, key string, value any, sources ...record.Locator) {
@@ -40,6 +52,15 @@ func (o *contextObserver) add(kind contextstate.EventKind, key string, value any
 	ev, err := contextstate.NewEvent(id, kind, value, sources...)
 	if err == nil {
 		ev.Record = o.source
+		if o.metrics != nil {
+			if _, seen := o.head.ContextProjection.Applied[id]; !seen {
+				row := contextFactRow(o.metrics, o.head.itemSequence)
+				if row.Events == nil {
+					row.Events = make(map[contextstate.EventKind]int64)
+				}
+				row.Events[kind]++
+			}
+		}
 		err = o.head.ContextProjection.Apply(ev)
 	}
 	o.err = err
@@ -51,6 +72,7 @@ func (o *contextObserver) id() string                 { return string(o.head.Sna
 func (o *contextObserver) recent(kind, text, handle, rule string, sources ...record.Locator) {
 	o.add(contextstate.RecentObserved, kind+":"+handle+":"+rule, contextstate.RecentEvent{
 		TS: o.at, Kind: kind, FirstLine: firstContextLine(text), Locator: o.source, Handle: handle, RuleID: rule,
+		After: uint64(o.head.itemSequence),
 	}, sources...)
 }
 
@@ -67,7 +89,9 @@ func (o *contextObserver) wait(kind contextstate.WaitKind, id, handle, text stri
 
 func (o *contextObserver) artifact(path, writer string, source record.Locator) {
 	if path != "" {
-		o.add(contextstate.ArtifactChanged, path, contextstate.Artifact{Path: path, LastWriter: writer, TS: o.at, Locator: source}, source)
+		o.add(contextstate.ArtifactChanged, path, contextstate.Artifact{
+			Path: path, LastWriter: writer, TS: o.at, Locator: source, After: uint64(o.head.itemSequence),
+		}, source)
 	}
 }
 
@@ -79,27 +103,43 @@ func firstContextLine(text string) string {
 	return line
 }
 
-func (head *sessionHead) observeItem(r itemRecord) error {
+func (head *sessionHead) observeItem(r itemRecord, metrics *sessionstore.ContextFacts) error {
 	item := r.Item
-	o := contextObserver{head: head, at: item.RecordedAt, source: record.Item(string(head.Snapshot.Session.ID), uint64(item.Sequence))}
+	o := contextObserver{head: head, at: item.RecordedAt, source: record.Item(string(head.Snapshot.Session.ID), uint64(item.Sequence)), metrics: metrics}
 	switch v := item.Data.(type) {
 	case inbox.Input:
 		o.input(item.Sequence, v)
 	case session.Turn:
+		o.offerChildReports(v)
 		o.wait(contextstate.WaitParentFailure, "parent", "", "", time.Time{}, true)
 	case sessionstore.ModelResponse:
+		o.acknowledgeChildReports(v)
 		o.questions(item.Sequence, v)
 		if failure := v.Response.Failure; failure != nil && o.hasLiveChildOperation() {
 			o.wait(contextstate.WaitParentFailure, "parent", "", failure.Code, time.Time{}, false)
 		}
 	case sessionstore.HostRecord:
+		if metrics != nil && v.Context != nil && v.Context.IsBoundary() {
+			contextFactRow(metrics, item.Sequence).Pending = new(o.state().PendingCounts())
+		}
 		o.hostRecord(item.Sequence, v)
 	case sessionstore.ToolCallStatus:
+		v.Operations = r.Operations
+		item.Data = v
+		o.queueChildReports(head.ContextFacts.Reports.ObserveItem(item), false, false)
 		for _, op := range r.Operations {
 			o.operationIntent(op)
 		}
 	}
 	return o.err
+}
+
+func contextFactRow(metrics *sessionstore.ContextFacts, after sessionstore.Sequence) *sessionstore.ContextFactCounts {
+	if n := len(metrics.Rows); n > 0 && metrics.Rows[n-1].After == after {
+		return &metrics.Rows[n-1]
+	}
+	metrics.Rows = append(metrics.Rows, sessionstore.ContextFactCounts{After: after})
+	return &metrics.Rows[len(metrics.Rows)-1]
 }
 
 func (o *contextObserver) input(seq sessionstore.Sequence, v inbox.Input) {
@@ -118,7 +158,7 @@ func (o *contextObserver) input(seq sessionstore.Sequence, v inbox.Input) {
 		p, err := v.DecodePeerMessage()
 		if err == nil && p.Target == o.id() {
 			o.source = record.Input(o.id(), uint64(seq), record.PeerMessage)
-			o.childInput(v.ID, p)
+			o.childInput(v, p)
 		}
 	case inbox.InputControl:
 		msg, err := v.DecodeControlMessage()
@@ -160,7 +200,7 @@ func (o *contextObserver) questions(seq sessionstore.Sequence, v sessionstore.Mo
 			}
 			loc := record.Address{Session: o.id(), Sequence: uint64(seq), Kind: record.AssistantMessage, Part: part, Line: lineNumber}.Locator()
 			o.add(contextstate.QuestionChanged, string(loc), contextstate.Question{
-				ID: string(loc), TS: o.at, FirstLine: line, Status: contextstate.QuestionOpen, Locator: loc,
+				ID: string(loc), TS: o.at, FirstLine: line, Status: contextstate.QuestionOpen, Locator: loc, Marker: true,
 			})
 		}
 	}
@@ -196,7 +236,7 @@ func (o *contextObserver) hostRecord(seq sessionstore.Sequence, r sessionstore.H
 		o.reviewChild(*r.ChildReview)
 	case sessionstore.HostArtifact:
 		if r.Artifact != nil {
-			o.artifact(r.Artifact.Path, "self", r.Artifact.Locator(o.head.Snapshot.Session.ID, seq))
+			o.artifact(r.Artifact.Path, "", r.Artifact.Locator(o.head.Snapshot.Session.ID, seq))
 		}
 	case "finish":
 		loc := o.source
@@ -207,8 +247,19 @@ func (o *contextObserver) hostRecord(seq sessionstore.Sequence, r sessionstore.H
 			o.artifact(path, "self", loc)
 		}
 	case sessionstore.HostContext:
-		if r.Context != nil && r.Context.Kind == "summary" {
+		if r.Context == nil {
+			break
+		}
+		switch r.Context.Kind {
+		case "deferred_inputs":
+			o.projectDeferredReports()
+		case "summary":
 			o.add(contextstate.BoundaryObserved, "", contextstate.Boundary{TS: o.at, Locator: o.source})
+		case sessionstore.ContextWindowBoundary:
+			if window := r.Context.Window; window != nil {
+				tokens := uint64(max(0, window.AfterTokens))
+				o.add(contextstate.WindowRebuilt, "", contextstate.Boundary{TS: o.at, Locator: o.source, WindowTokens: &tokens})
+			}
 		}
 	}
 }

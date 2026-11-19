@@ -30,6 +30,29 @@ func idleProcessConfig(t *testing.T, fake *testclaude.Fixture) Config {
 	}}
 }
 
+func TestWindowDoesNotStartIdleCompactionWorker(t *testing.T) {
+	fake := testclaude.New(t)
+	fake.Set(t, testclaude.Config{AgentInputTokens: 250_000})
+	client, err := NewClient(idleProcessConfig(t, fake))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opt := llm.RequestOptions{
+		Identity:           llm.RequestIdentity{SessionID: "window-without-idle-worker"},
+		ConversationTokens: map[string]int64{ProviderID: 250_000},
+		Tools:              func(context.Context, llm.Response) ([]llm.ToolOutcome, error) { return nil, nil },
+		StartBackground: func(func(context.Context)) bool {
+			t.Fatal("a three-layer window started an idle compaction worker")
+			return false
+		},
+	}
+	req := llm.Request{Input: []llm.Item{user("hi")}, Window: &llm.ConversationWindow{}}
+	if _, err = client.Respond(t.Context(), req, opt); err != nil {
+		t.Fatal(err)
+	}
+	client.Idle(t.Context(), req, opt)
+}
+
 func TestIdleCompactionRespondDisarmsAcrossClients(t *testing.T) {
 	fake := testclaude.New(t)
 	fake.Set(t, testclaude.Config{AgentInputTokens: 250_000})

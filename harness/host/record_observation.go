@@ -25,7 +25,7 @@ func inputLocator(id session.ID, seq sessionstore.Sequence, kind inbox.InputKind
 func (s *Session) operationEvent(op operation.Operation, checkpoint record.Locator) Event {
 	handle := string(operationRecordHandle(op, ""))
 	refs := []record.Reference{{Locator: checkpoint, Operation: string(op.ID), Handle: handle}}
-	for _, stream := range operationRecordStreams(op) {
+	for _, stream := range operation.RecordStreams(op) {
 		refs = append(refs, record.Reference{Locator: record.Output(string(s.ID), string(op.ID), stream), Operation: string(op.ID), Handle: handle})
 	}
 	return Event{Kind: "operation", Operation: &op, Records: refs}

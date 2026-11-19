@@ -83,10 +83,11 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 	s.respondingLocked(1)
 	defer func() { s.mu.Lock(); s.respondingLocked(-1); s.mu.Unlock() }()
 	s.progress = &Progress{TurnID: turn, Epoch: epoch, Mode: "completed_response"}
-	o.ConversationTokens = s.conversationTokensLocked()
+	o.ConversationTokens, o.ConversationBindings = s.conversationStateLocked()
 	s.broadcast(Event{Kind: "progress", Progress: s.progress})
 	s.mu.Unlock()
 	o.RecordConversation = s.recordConversation
+	o.RecordConversationBinding = s.recordConversationBinding
 	o.RecordActivity = s.recordActivity
 	if s.background != nil {
 		o.StartBackground = s.background.start
@@ -131,15 +132,25 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 		}
 	}
 	prior := o.Progress
+	steeringDelivered := func(inputs []llm.BatchInput, err error) {
+		if err == nil && len(inputs) > 0 {
+			s.mu.Lock()
+			resumeProgress()
+			s.mu.Unlock()
+		}
+	}
 	if steering := o.Steering; steering != nil {
 		o.Steering = func(callCtx context.Context) ([]llm.BatchInput, error) {
 			inputs, err := steering(callCtx)
-			if err == nil && len(inputs) > 0 {
-				s.mu.Lock()
-				resumeProgress()
-				s.mu.Unlock()
-			}
+			steeringDelivered(inputs, err)
 			return inputs, err
+		}
+	}
+	if afterBatch := o.AfterToolBatch; afterBatch != nil {
+		o.AfterToolBatch = func(callCtx context.Context, inputTokens int64) (llm.ToolBatchContinuation, error) {
+			batch, err := afterBatch(callCtx, inputTokens)
+			steeringDelivered(batch.Inputs, err)
+			return batch, err
 		}
 	}
 	if tools := o.Tools; tools != nil {
@@ -220,7 +231,7 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 	response, err := a.next.Respond(ctx, r, o)
 	s.mu.Lock()
 	done = true
-	if err == nil && response.Failure == nil {
+	if err == nil && response.Failure == nil && response.Stop != llm.StopWindowBoundary {
 		response.Generation = statistics(response)
 	}
 	if s.progress != nil && s.progress.Epoch == epoch {

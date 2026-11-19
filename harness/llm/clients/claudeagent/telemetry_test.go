@@ -213,7 +213,8 @@ func TestNativeAgentTranscriptAndMessageUsageAreLinkedAndDeduplicated(t *testing
 		round.handle(f)
 	}
 	round.handle(messages[1])
-	round.recordTurnUsage(&frame{Usage: &usage{InputTokens: 13, CacheReadInputTokens: 4, OutputTokens: 7}})
+	read := int64(4)
+	round.recordTurnUsage(&frame{Usage: &usage{InputTokens: 13, CacheReadInputTokens: &read, OutputTokens: 7}})
 	totals := map[string]llm.Usage{}
 	for _, r := range activities {
 		if r.Kind == "provider_usage" {

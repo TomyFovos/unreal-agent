@@ -140,15 +140,17 @@ func liveChild(child contextstate.Child) bool {
 	return child.State == contextstate.ChildRunning || child.State == contextstate.ChildAsked || child.State == contextstate.ChildWaitingApproval
 }
 
-func (o *contextObserver) childInput(id inbox.ID, p inbox.PeerMessage) {
+func (o *contextObserver) childInput(input inbox.Input, p inbox.PeerMessage) {
 	if p.Sender != string(identity.ChildID(session.ID(p.Target), operation.ID(p.Handle))) {
 		return // The child's own tasks and parent replies are other Peer inputs.
 	}
 	switch p.Kind {
+	case "ended":
+		o.queueChildReports(o.head.ContextFacts.Reports.ObservePeer(p), true, input.Deferred)
 	case "progress", "ready":
 		o.recent("child_"+p.Kind, p.Text, p.Handle, "P1")
 	case "message":
-		if strings.HasPrefix(string(id), "approval:") {
+		if strings.HasPrefix(string(input.ID), "approval:") {
 			o.recent("approval_forwarded", "", p.Handle, "A3")
 			return
 		}
@@ -161,6 +163,70 @@ func (o *contextObserver) childInput(id inbox.ID, p inbox.PeerMessage) {
 			o.saveChild(child, childCancellation{})
 		}
 	}
+}
+
+func (o *contextObserver) queueChildReports(handles []operation.ID, peer, deferred bool) {
+	facts := &o.head.ContextFacts
+	for _, handle := range handles {
+		if deferred {
+			if facts.DeferredReports == nil {
+				facts.DeferredReports = make(map[operation.ID]record.Locator)
+			}
+			facts.DeferredReports[handle] = o.source
+			continue
+		}
+		if facts.PendingReports == nil {
+			facts.PendingReports = make(map[operation.ID]reportOffer)
+		}
+		facts.PendingReports[handle] = reportOffer{Source: o.source, Peer: peer}
+	}
+}
+
+func (o *contextObserver) projectDeferredReports() {
+	facts := &o.head.ContextFacts
+	for handle, source := range facts.DeferredReports {
+		if facts.PendingReports == nil {
+			facts.PendingReports = make(map[operation.ID]reportOffer)
+		}
+		facts.PendingReports[handle] = reportOffer{Source: source, Peer: true}
+	}
+	clear(facts.DeferredReports)
+}
+
+func (o *contextObserver) offerChildReports(turn session.Turn) {
+	facts := &o.head.ContextFacts
+	facts.ReportTurn = ""
+	if turn.Type != session.TurnRegular {
+		return
+	}
+	if turn.BatchInputs {
+		o.projectDeferredReports()
+	}
+	for handle, offer := range facts.PendingReports {
+		if turn.ToolContinuation != "" && !turn.BatchInputs && offer.Peer {
+			continue
+		}
+		if facts.OfferedReports == nil {
+			facts.OfferedReports = make(map[operation.ID]record.Locator)
+		}
+		facts.OfferedReports[handle] = offer.Source
+		delete(facts.PendingReports, handle)
+	}
+	if len(facts.OfferedReports) != 0 {
+		facts.ReportTurn = turn.ID
+	}
+}
+
+func (o *contextObserver) acknowledgeChildReports(response sessionstore.ModelResponse) {
+	facts := &o.head.ContextFacts
+	if response.TurnID != facts.ReportTurn || response.AdapterError || response.Response.Failure != nil {
+		return
+	}
+	for handle, source := range facts.OfferedReports {
+		o.add(contextstate.ChildReportSeen, string(handle), string(handle), source)
+	}
+	clear(facts.OfferedReports)
+	facts.ReportTurn = ""
 }
 
 func (o *contextObserver) operationIntent(op operation.Operation) {
@@ -294,6 +360,7 @@ func (o *contextObserver) childCheckpoint(op, previous operation.Operation, job 
 	cancel := o.head.ContextFacts.Cancels[op.ID]
 	delete(o.head.ContextFacts.Cancels, op.ID)
 	child.Ended, child.UnansweredQuestions = o.at, nil
+	child.EndedAfter = uint64(o.head.itemSequence)
 	child.Report = wire.FinishLocator
 	switch op.Status {
 	case operation.StatusCompleted:

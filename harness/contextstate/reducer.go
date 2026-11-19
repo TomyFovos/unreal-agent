@@ -14,9 +14,10 @@ import (
 // Projection includes replay bookkeeping outside the thirteen-slot State.
 // Checkpoints keep event identities so a retry across restore remains idempotent.
 type Projection struct {
-	State           State                     `json:"state"`
-	Applied         map[string]record.Locator `json:"applied,omitempty"`
-	SettledChildren map[string]ChildCount     `json:"settled_children,omitempty"`
+	State            State                     `json:"state"`
+	Applied          map[string]record.Locator `json:"applied,omitempty"`
+	SettledChildren  map[string]ChildCount     `json:"settled_children,omitempty"`
+	SettledArtifacts map[string]struct{}       `json:"settled_artifacts,omitempty"`
 }
 
 // Reduce calculates a detached next state. Apply implements the same transition
@@ -85,6 +86,14 @@ func (p *Projection) apply(e Event) error {
 		})
 	case ChildChanged:
 		return applyValue(e, func(v ChildUpdate) { p.updateChild(e, v) })
+	case ChildReportSeen:
+		return applyValue(e, func(handle string) {
+			if child, ok := s.Children.Current[handle]; ok {
+				child.ReportSeen = true
+				child.Evidence = e.evidence(child.Evidence)
+				s.Children.Current[handle] = child
+			}
+		})
 	case ApprovalChanged:
 		return applyValue(e, func(v ApprovalUpdate) {
 			if v.AlreadyClosed {
@@ -93,17 +102,25 @@ func (p *Projection) apply(e Event) error {
 				s.Waiting.Processed.addSources(evidence)
 				return
 			}
-			s.updateApproval(e, v.Approval)
+			s.updateApproval(e, v.Approval, p.endedChild(v.Handle))
 		})
 	case WaitChanged:
 		return applyValue(e, func(v WaitUpdate) {
 			v.Evidence = e.evidence(v.Evidence, v.Question)
+			handle := v.Handle
+			if handle == "" && v.Kind == WaitChildCompletion {
+				handle = v.ID
+			}
+			if !v.Resolved && p.endedChild(handle) {
+				s.Waiting.Processed.add(v.Evidence)
+				return
+			}
 			s.updateWait(v.Wait, v.Resolved)
 		})
 	case QuestionChanged:
 		return applyValue(e, func(v Question) { s.updateQuestion(e, v) })
 	case ArtifactChanged:
-		return applyValue(e, func(v Artifact) { s.updateArtifact(e, v) })
+		return applyValue(e, func(v Artifact) { p.updateArtifact(e, v) })
 	case IssueChanged:
 		return applyValue(e, func(v Issue) {
 			v.Evidence = e.evidence(v.Evidence, v.Locator)
@@ -128,13 +145,20 @@ func (p *Projection) apply(e Event) error {
 				v.LastBoundary.Evidence = e.evidence(v.LastBoundary.Evidence, v.LastBoundary.Locator)
 			}
 			s.Metrics = v
-			s.settleArtifacts()
+			p.settleArtifacts()
 		})
-	case BoundaryObserved:
+	case BoundaryObserved, WindowRebuilt:
 		return applyValue(e, func(v Boundary) {
 			v.Evidence = e.evidence(v.Evidence, v.Locator)
 			s.Metrics.LastBoundary = &v
-			s.settleArtifacts()
+			if e.Kind == WindowRebuilt {
+				count := uint64(1)
+				if s.Metrics.Rebuilds != nil {
+					count += *s.Metrics.Rebuilds
+				}
+				s.Metrics.Rebuilds = &count
+			}
+			p.settleArtifacts()
 		})
 	}
 	return nil
@@ -188,6 +212,9 @@ func updateCurrent[T any](c *Entries[T], key string, value T, done bool, evidenc
 }
 
 func (s *State) updateRequest(e Event, v Request) {
+	if v.Origin == HumanInput && v.Locator == e.Record {
+		s.LastHumanInput = max(s.LastHumanInput, itemSequence(v.Locator))
+	}
 	v.Evidence = e.evidence(v.Evidence, append(slices.Clone(v.Aliases), v.Locator, v.Original)...)
 	if v.Origin == HumanInput && v.Text != "" {
 		line, _, newline := strings.Cut(v.Text, "\n")
@@ -237,8 +264,19 @@ func (p *Projection) updateChild(e Event, update ChildUpdate) {
 	earlier := s.Children.Current[v.Handle]
 	done := v.Accept == AcceptAccepted || v.Accept == AcceptRejected || update.CancelRecorded ||
 		(v.State == ChildCancelled && (v.EndedBy == EndedByCoordinatorCancel || v.EndedBy == EndedByUserCancel))
-	if v.State == ChildFinished || v.State == ChildFailed || v.State == ChildCancelled {
-		s.finishWait(Wait{ID: v.Handle, Kind: WaitChildCompletion, Evidence: v.Evidence})
+	v.ReportSeen = v.ReportSeen || earlier.ReportSeen
+	if v.ended() {
+		for _, wait := range s.Waiting.Current {
+			if wait.Handle == v.Handle || wait.Kind == WaitChildCompletion && wait.ID == v.Handle {
+				wait.Evidence = v.Evidence
+				s.finishWait(wait)
+			}
+		}
+		for id, approval := range s.Approvals.Current {
+			if approval.Handle == v.Handle {
+				updateCurrent(&s.Approvals, id, approval, true, v.Evidence, approval.Evidence)
+			}
+		}
 	}
 	group := ChildCount{Template: v.Template, Model: v.Model, EndedBy: v.EndedBy}
 	if settled, ok := p.SettledChildren[v.Handle]; ok {
@@ -263,8 +301,13 @@ func (p *Projection) updateChild(e Event, update ChildUpdate) {
 		}
 		put(&p.SettledChildren, v.Handle, group)
 		s.Children.count(group, 1)
-		s.settleArtifacts()
+		p.settleArtifacts()
 	}
+}
+
+func (p *Projection) endedChild(handle string) bool {
+	_, settled := p.SettledChildren[handle]
+	return settled || p.State.Children.Current[handle].ended()
 }
 
 func (c *Children) count(group ChildCount, delta int) {
@@ -292,9 +335,12 @@ func (c *Children) count(group ChildCount, delta int) {
 	})
 }
 
-func (s *State) updateApproval(e Event, v Approval) {
+func (s *State) updateApproval(e Event, v Approval, ended bool) {
 	v.Evidence = e.evidence(v.Evidence, v.Locator)
-	done := v.Decision != ""
+	done := v.Decision != "" || ended
+	if earlier, ok := s.Approvals.Current[v.ID]; ok && !done {
+		s.Approvals.Processed.add(earlier.Evidence)
+	}
 	updateCurrent(&s.Approvals, v.ID, v, done, v.Evidence, s.Approvals.Current[v.ID].Evidence)
 	s.updateWait(Wait{ID: v.ID, Kind: WaitApproval, TS: v.TS, Handle: v.Handle, Evidence: v.Evidence}, done)
 }
@@ -315,7 +361,11 @@ func (s *State) updateWait(v Wait, done bool) {
 	if done {
 		s.finishWait(v)
 	} else {
-		put(&s.Waiting.Current, waitKey(v), v)
+		key := waitKey(v)
+		if earlier, ok := s.Waiting.Current[key]; ok {
+			s.Waiting.Processed.add(earlier.Evidence)
+		}
+		put(&s.Waiting.Current, key, v)
 	}
 }
 
@@ -326,27 +376,60 @@ func (s *State) finishWait(v Wait) {
 	}
 }
 
-func (s *State) activeArtifact(v Artifact) bool {
-	if v.LastWriter == "self" {
-		return s.Metrics.LastBoundary == nil || !v.TS.Before(s.Metrics.LastBoundary.TS)
-	}
-	_, current := s.Children.Current[v.LastWriter]
-	return current
-}
-
-func (s *State) updateArtifact(e Event, v Artifact) {
+func (p *Projection) updateArtifact(e Event, v Artifact) {
+	s := &p.State
 	v.Evidence = e.evidence(v.Evidence, v.Locator)
-	if earlier, exists := s.Artifacts.Current[v.Path]; exists && earlier.Locator != v.Locator {
-		s.Artifacts.Processed.add(earlier.Evidence)
-		delete(s.Artifacts.Current, v.Path)
+	if earlier, exists := s.Artifacts.Current[v.Path]; exists {
+		v.SelfWrite, v.ChildWriters = earlier.SelfWrite, earlier.ChildWriters
+		s.Artifacts.Processed.addSources(earlier.Evidence)
+		if v.Note == "" {
+			v.Note = earlier.Note
+		}
+		if v.LastWriter == "" {
+			// A file capture adds evidence for a path without writing it.
+			earlier.Evidence = e.evidence(earlier.Evidence, v.Locator)
+			earlier.Note = v.Note
+			s.Artifacts.Current[v.Path] = earlier
+			return
+		}
 	}
-	updateCurrent(&s.Artifacts, v.Path, v, !s.activeArtifact(v), v.Evidence, s.Artifacts.Current[v.Path].Evidence)
+	if v.LastWriter == "self" {
+		v.SelfWrite = &position{After: v.After, TS: v.TS}
+	} else if _, current := s.Children.Current[v.LastWriter]; current && !slices.Contains(v.ChildWriters, v.LastWriter) {
+		v.ChildWriters = append(v.ChildWriters, v.LastWriter)
+	}
+	if !s.activeArtifact(v) {
+		p.settleArtifact(v)
+		return
+	}
+	if _, settled := p.SettledArtifacts[v.Path]; settled {
+		delete(p.SettledArtifacts, v.Path)
+		s.Artifacts.Processed.Count--
+	}
+	put(&s.Artifacts.Current, v.Path, v)
 }
 
-func (s *State) settleArtifacts() {
+func (p *Projection) settleArtifact(v Artifact) {
+	c := &p.State.Artifacts
+	delete(c.Current, v.Path)
+	if _, settled := p.SettledArtifacts[v.Path]; !settled {
+		c.Processed.Count++
+		put(&p.SettledArtifacts, v.Path, struct{}{})
+	}
+	c.Processed.addSources(v.Evidence)
+}
+
+func (p *Projection) settleArtifacts() {
+	s := &p.State
 	for path, v := range s.Artifacts.Current {
 		if !s.activeArtifact(v) {
-			updateCurrent(&s.Artifacts, path, v, true, v.Evidence, Evidence{})
+			p.settleArtifact(v)
+			continue
 		}
+		v.ChildWriters = slices.DeleteFunc(slices.Clone(v.ChildWriters), func(handle string) bool {
+			_, current := s.Children.Current[handle]
+			return !current
+		})
+		s.Artifacts.Current[path] = v
 	}
 }

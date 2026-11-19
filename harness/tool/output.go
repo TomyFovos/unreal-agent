@@ -13,8 +13,12 @@ func ErrorStatus(message string, limit int) CallStatus {
 	if limit <= 0 {
 		limit = operation.DefaultMaxOutputLength
 	}
-	message, truncated := operation.BoundOutput(message, limit)
-	return CallStatus{Error: message, ErrorTruncated: truncated}
+	preview, truncated := operation.BoundOutput(message, limit)
+	status := CallStatus{Error: preview, ErrorTruncated: truncated}
+	if truncated {
+		status.OriginalError = []byte(message)
+	}
+	return status
 }
 
 func ParseMaxOutputLength(encoded jsontext.Value) (int, error) {

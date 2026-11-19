@@ -73,6 +73,8 @@ type Descriptor struct {
 	FullToolBatch bool
 	// IdleMaintenance opts this provider into owner-scheduled idle work.
 	IdleMaintenance bool
+	// WindowPrompt opts a private conversation into the shared context window.
+	WindowPrompt llm.WindowPrompt
 	// CatalogModels lets a Session switch to any model in the provider's live
 	// catalog, and resolves the selected effort through that catalog.
 	CatalogModels bool
@@ -206,6 +208,10 @@ func (r *Registry) Resolve(s Selection) (Selection, error) {
 }
 func (r *Registry) CatalogModels(id string) bool {
 	return r.entries[id].CatalogModels
+}
+
+func (r *Registry) WindowPrompt(id string) llm.WindowPrompt {
+	return r.entries[id].WindowPrompt
 }
 
 func (r *Registry) RequiresResolver(s Selection) bool {

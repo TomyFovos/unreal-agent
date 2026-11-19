@@ -22,44 +22,6 @@ func operationRecordHandle(op operation.Operation, fallback operation.ID) operat
 	return fallback
 }
 
-func operationRecordStreams(op operation.Operation) []string {
-	if !terminal(op.Status) {
-		return nil
-	}
-	switch op.Type {
-	case operation.TypeShell:
-		state, err := operation.DecodeShellState(op)
-		if err == nil {
-			var streams []string
-			if state.OutPath != "" {
-				streams = append(streams, record.Stdout)
-			}
-			if state.ErrPath != "" {
-				streams = append(streams, record.Stderr)
-			}
-			if state.TerminalError != "" {
-				streams = append(streams, record.Error)
-			}
-			return streams
-		}
-	case operation.TypeRemoteJob:
-		state, err := operation.DecodeRemoteJobState(op)
-		if err == nil {
-			streams := []string{record.State}
-			if state.TerminalResult != "" {
-				streams = append(streams, record.Result)
-			}
-			if state.TerminalError != "" {
-				streams = append(streams, record.Error)
-			}
-			return streams
-		}
-	case operation.TypeValue:
-		return []string{record.Result}
-	}
-	return []string{record.State}
-}
-
 func (s *Session) operationRecordContent(ctx context.Context, owner session.ID, op operation.Operation, stream string) (recordContent, error) {
 	if stream == record.State {
 		return memoryRecord(op.State), nil

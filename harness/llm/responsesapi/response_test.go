@@ -2,10 +2,28 @@ package responsesapi
 
 import (
 	"encoding/json/v2"
+	"slices"
 	"testing"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 )
+
+func TestPublicHistoryCacheCounterPresence(t *testing.T) {
+	for _, tc := range []struct {
+		details string
+		unknown []llm.UsageField
+	}{
+		{`{}`, []llm.UsageField{llm.UsageCachedInput, llm.UsageCacheWriteInput}},
+		{`{"cached_tokens":0}`, []llm.UsageField{llm.UsageCacheWriteInput}},
+		{`{"cached_tokens":0,"cache_write_tokens":7}`, nil},
+	} {
+		usage := llm.Usage{Raw: []byte(`{"input_tokens_details":` + tc.details + `}`)}
+		markUnreportedCacheCounters(&usage)
+		if !slices.Equal(usage.Unknown, tc.unknown) {
+			t.Errorf("cache field availability for %s = %v, want %v", tc.details, usage.Unknown, tc.unknown)
+		}
+	}
+}
 
 func TestResponseConvertsWebSearchResponse(t *testing.T) {
 	response, err := decodeResponse([]byte(`{

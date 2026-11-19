@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	restoreCheckpointVersion  = 4
+	restoreCheckpointVersion  = 5
 	restoreCheckpointInterval = 1024
 )
 
@@ -64,7 +64,8 @@ type restoreIndex struct {
 	prefix         hash.Hash
 	savedSize      int64
 	appends        int
-	scanOperations *[]int64 // populated only on explicit record reads
+	scanOperations *[]int64                   // populated only on explicit record reads
+	contextFacts   *sessionstore.ContextFacts // populated only on analysis reads
 }
 
 func (i *restoreIndex) addItem(offset int64, sequence sessionstore.Sequence, operationCount int) {

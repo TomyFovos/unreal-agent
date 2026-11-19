@@ -11,6 +11,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/internal/secretguard"
 )
@@ -20,16 +21,25 @@ type receiptInfo struct {
 	operations        []operation.ID
 	captures, changed []string
 	failed            bool
+	streams           []record.Address
+	directError       bool
+	preview, bounded  bool
 }
 
 func toolReceiptInfo(status sessionstore.ToolCallStatus) receiptInfo {
 	info := receiptInfo{failed: status.Status.Error != "" || status.Status.Denial != nil}
+	info.directError = status.Status.Error != "" && (!status.Status.ErrorTruncated || len(status.Status.OriginalError) > 0)
+	info.preview = status.Status.ErrorTruncated
 	info.operations = slices.Clone(status.Status.WaitingFor)
 	for _, op := range status.Operations {
 		info.operations = append(info.operations, op.ID)
+		for _, stream := range operation.RecordStreams(op) {
+			info.streams = append(info.streams, record.Address{Kind: record.OperationOutput, Operation: string(op.ID), Stream: stream})
+		}
 		info.failed = info.failed || op.Status == operation.StatusFailed || op.Status == operation.StatusCanceled || op.Denial != nil
 		if op.Type == operation.TypeShell {
 			if state, err := operation.DecodeShellState(op); err == nil {
+				info.preview = info.preview || state.OutTruncated || state.ErrTruncated || state.ErrorTruncated
 				for _, path := range []string{state.OutPath, state.ErrPath} {
 					if path != "" {
 						info.captures = append(info.captures, secretguard.Redact(path))
@@ -45,6 +55,7 @@ func toolReceiptInfo(status sessionstore.ToolCallStatus) receiptInfo {
 		if err != nil {
 			continue
 		}
+		info.preview = info.preview || state.ResultTruncated || state.ErrorTruncated
 		// Native edits and structural edits already record the files actually
 		// changed, including successful targets of a partially failed mutation.
 		var result struct {

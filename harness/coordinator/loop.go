@@ -18,6 +18,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/primitives"
+	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/subagent/reporting"
@@ -50,9 +51,11 @@ type coordinator struct {
 	waitingForChildren bool
 	turnExternals      int
 	modelOrigin        session.TurnID
+	modelWindow        record.Locator
+	windowContinuation bool // a persisted tool boundary still awaiting a response
 	modelRevision      uint64
 	modelInputs        int
-	deferredContext    []sessionstore.Item
+	deferredContext    []deferredInput
 	contextRetry       bool
 	forceCompaction    bool
 	recordedInputIDs   map[inbox.ID]bool
@@ -248,7 +251,8 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 	}
 	// Startup uses the same event boundary as later turns: queued controls and
 	// receipts must be applied before deciding whether to make the first call.
-	current.state.callModel = current.state.callModel || toolCallStatusesRequireModelResponse(statuses)
+	current.state.callModel = current.state.callModel || toolCallStatusesRequireModelResponse(statuses) ||
+		current.windowContinuation && current.failedModel == nil
 	callModel, err := current.processEvents(ctx)
 	if err != nil {
 		return err
@@ -543,6 +547,10 @@ func (current *coordinator) processOperations(ctx context.Context, updates []ope
 
 func (current *coordinator) processModelResponse(ctx context.Context, modelResponse modelResponseResult) error {
 	current.interruptModel()
+	if modelResponse.err == nil && modelResponse.response.Stop == llm.StopWindowBoundary && current.windowContinuation {
+		current.state.callModel = true
+		return nil
+	}
 	if modelResponse.err != nil {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -736,8 +744,10 @@ func (current *coordinator) waitingForOwnToolBatch() bool {
 // Ready notices and progress updates never wake an idle parent.
 func quietPeer(input inbox.Input) bool {
 	peer, err := input.DecodePeerMessage()
-	return err == nil && (peer.Kind == "ready" || peer.Kind == "progress")
+	return err == nil && quietPeerKind(peer.Kind)
 }
+
+func quietPeerKind(kind string) bool { return kind == "ready" || kind == "progress" }
 
 func (current *coordinator) hasPendingOperations() bool {
 	for _, value := range current.state.operations {
@@ -854,6 +864,12 @@ func (current *coordinator) requestModelResponse(
 		Type:            session.TurnRegular,
 		RuntimeRevision: runtimeRevision,
 	}
+	if b, ok := current.dependencies.ContextBuilder.(interface{ ContextStrategy() string }); ok {
+		turn.ContextStrategy = b.ContextStrategy()
+		if turn.ContextStrategy == "" {
+			turn.ContextStrategy = "unknown"
+		}
+	}
 
 	if d := built.Report.Context; d != nil {
 		turn.ContextAdmission = &session.ContextAdmission{
@@ -862,6 +878,9 @@ func (current *coordinator) requestModelResponse(
 			BudgetTokens: d.Budget.Input, WindowTokens: d.Budget.Window,
 			RequestBytes: d.RequestBytes, Measurement: d.Measurement,
 			Estimator: d.Estimator, WindowSource: d.Budget.WindowSource, HeaderFingerprint: d.HeaderFingerprint,
+		}
+		if b, ok := current.dependencies.ContextBuilder.(interface{ FirstWindowRequest() record.Locator }); ok {
+			turn.ContextAdmission.WindowBoundary = b.FirstWindowRequest()
 		}
 	}
 	item, err := current.addItemToLocalState(sessionstore.Item{
@@ -877,11 +896,11 @@ func (current *coordinator) requestModelResponse(
 
 	requestContext, cancel := context.WithCancel(ctx)
 	current.cancelModel = cancel
-	// A turn no new user input started runs in the background (agents'
-	// messages); the user's next input takes over from it.
-	current.backgroundTurn = current.state.externalInputs == current.turnExternals
-	current.turnExternals = current.state.externalInputs
 	current.modelOrigin, current.modelRevision, current.modelInputs = turn.ID, turn.RuntimeRevision, current.state.currentTurnInputs
+	current.modelWindow = ""
+	if turn.ContextAdmission != nil {
+		current.modelWindow = turn.ContextAdmission.WindowBoundary
+	}
 	current.state.callModel = false
 	current.idlePending = false
 	current.idleRequest = built.Request
@@ -890,13 +909,17 @@ func (current *coordinator) requestModelResponse(
 		Identity: llm.RequestIdentity{SessionID: string(current.dependencies.SessionID), TurnID: string(turn.ID), RuntimeRevision: turn.RuntimeRevision},
 	}
 	go func() {
-		response, err := current.dependencies.LLM.Respond(requestContext, built.Request, llm.RequestOptions{
+		options := llm.RequestOptions{
 			CacheKey:   current.cacheKey(),
 			Identity:   llm.RequestIdentity{SessionID: string(current.dependencies.SessionID), TurnID: string(turn.ID), RuntimeRevision: turn.RuntimeRevision},
 			Tools:      current.toolRendezvous(requestContext, turn.ID),
 			BeginTools: current.beginToolRendezvous(requestContext, turn.ID),
 			Steering:   current.steeringRendezvous(requestContext, turn.ID),
-		})
+		}
+		if built.Request.Window != nil {
+			options.AfterToolBatch = current.toolBatchRendezvous(requestContext, turn.ID)
+		}
+		response, err := current.dependencies.LLM.Respond(requestContext, built.Request, options)
 		select {
 		case results <- modelResponseResult{
 			turnID:   turn.ID,
@@ -917,13 +940,23 @@ func (current *coordinator) cacheKey() string {
 }
 
 func (current *coordinator) persistContext(ctx context.Context, r sessionstore.ContextRecord) error {
+	record := sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostContext, Context: &r}
+	if store, ok := current.dependencies.Sessions.(interface {
+		AppendHostRecordRecorded(context.Context, session.ID, sessionstore.HostRecord) (sessionstore.Item, error)
+	}); ok {
+		item, err := store.AppendHostRecordRecorded(ctx, current.dependencies.SessionID, record)
+		if err != nil {
+			return err
+		}
+		_, err = current.addItemToLocalState(item)
+		return err
+	}
 	store, ok := current.dependencies.Sessions.(interface {
 		AppendHostRecord(context.Context, session.ID, sessionstore.HostRecord) error
 	})
 	if !ok {
 		return fmt.Errorf("session store cannot persist context records")
 	}
-	record := sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostContext, Context: &r}
 	if err := store.AppendHostRecord(ctx, current.dependencies.SessionID, record); err != nil {
 		return err
 	}
@@ -1070,9 +1103,38 @@ func (current *coordinator) handleModelResponse(
 }
 
 func (current *coordinator) recordModelResponse(ctx context.Context, response sessionstore.ModelResponse) error {
+	if current.usesThreeLayerContext() {
+		output := make([]llm.Item, 0, len(response.Response.Output))
+		for _, item := range response.Response.Output {
+			if item.Type != llm.ItemReasoning {
+				output = append(output, item)
+			}
+		}
+		response.Response.Output = output
+	}
+	if current.modelWindow != "" && (response.TurnID == current.modelOrigin || response.TurnID == current.state.currentTurnID) {
+		usage := response.Response.Usage
+		reported := llm.ReportedTokens(usage).InputKnown || len(usage.Raw) > 0 && string(usage.Raw) != "null"
+		if first := response.Response.FirstRequestUsage; first != nil {
+			usage, reported = *first, true
+		}
+		cache := sessionstore.WindowCache{Boundary: current.modelWindow}
+		cache.ReadKnown = (reported || usage.CachedInputTokens > 0) && usage.CachedInputTokens >= 0 && !slices.Contains(usage.Unknown, llm.UsageCachedInput)
+		cache.WriteKnown = (reported || usage.CacheWriteInputTokens > 0) && usage.CacheWriteInputTokens >= 0 && !slices.Contains(usage.Unknown, llm.UsageCacheWriteInput)
+		if cache.ReadKnown {
+			cache.Read = usage.CachedInputTokens
+		}
+		if cache.WriteKnown {
+			cache.Write = usage.CacheWriteInputTokens
+		}
+		response.WindowCache = cache
+	}
 	item := sessionstore.Item{Kind: sessionstore.ItemModelResponse, Data: response}
 	if err := current.storeItemInSessionStore(ctx, item); err != nil {
 		return err
+	}
+	if response.WindowCache.Boundary != "" {
+		current.modelWindow = ""
 	}
 	_, err := current.addItemToLocalState(item)
 	return err
@@ -1315,9 +1377,6 @@ func (current *coordinator) restoreItem(item sessionstore.Item) error {
 	}
 	_, err := current.addItemToLocalState(item)
 	if err == nil {
-		if turn, ok := item.Data.(session.Turn); ok && turn.Type == session.TurnRegular && turn.ToolContinuation == "" {
-			current.turnExternals = current.state.externalInputs
-		}
 		if turn, ok := item.Data.(session.Turn); ok && turn.ToolContinuation != "" && turn.ExternalInputWatermark > 0 {
 			current.turnExternals = turn.ExternalInputWatermark
 		}
@@ -1332,18 +1391,31 @@ func toolCallRequiresTranslator(status sessionstore.ToolCallStatus) bool {
 	return status.Status.Error == "" || len(status.Status.WaitingFor) != 0 || len(status.Operations) != 0
 }
 
-func (current *coordinator) addPeerInput(input inbox.Input) error {
+func (current *coordinator) projectPeerInput(input inbox.Input, peer inbox.PeerMessage, batch bool) (string, error) {
+	if b, ok := current.dependencies.ContextBuilder.(interface {
+		ProjectPeerMessage(inbox.PeerMessage) (string, error)
+	}); ok {
+		return b.ProjectPeerMessage(peer)
+	}
+	if batch {
+		b, ok := current.dependencies.ContextBuilder.(interface {
+			ProjectPeerInput(inbox.Input) (string, error)
+		})
+		if !ok {
+			return "", errors.New("context builder cannot project peer input through the tool bridge")
+		}
+		return b.ProjectPeerInput(input)
+	}
 	b, ok := current.dependencies.ContextBuilder.(interface{ AddPeerInput(inbox.Input) error })
 	if !ok {
-		return errors.New("context builder does not support peer provenance")
+		return "", errors.New("context builder does not support peer provenance")
 	}
-	return b.AddPeerInput(input)
+	return "", b.AddPeerInput(input)
 }
 
 func (current *coordinator) addItemToLocalState(
 	item sessionstore.Item,
 ) (sessionstore.Item, error) {
-	current.childReports.ObserveItem(item)
 	if b, ok := current.dependencies.ContextBuilder.(interface{ SetHistoryItem(sessionstore.Item) }); ok {
 		b.SetHistoryItem(item)
 	}
@@ -1362,6 +1434,10 @@ func (current *coordinator) addItemToLocalState(
 				ApplyContext(sessionstore.ContextRecord)
 			}); ok {
 				b.ApplyContext(*r.Context)
+			}
+			if (r.Context.Kind == sessionstore.ContextWindowBoundary || r.Context.Kind == sessionstore.ContextWindowFallback) && r.Context.Window != nil &&
+				slices.Contains(r.Context.Window.Causes, sessionstore.WindowCauseMidTurn) {
+				current.windowContinuation = true
 			}
 		}
 		if b, ok := current.dependencies.ContextBuilder.(interface{ SetHistoryRuntime(string, string) }); ok {
@@ -1395,6 +1471,7 @@ func (current *coordinator) addItemToLocalState(
 		}
 		// FIXME: Forks leave inherited calls without results and retain pending-input accounting.
 		clear(current.state.toolCalls)
+		current.windowContinuation = false
 		clear(current.state.operations)
 		clear(current.pendingCancels)
 		current.clearToolGrace()
@@ -1408,11 +1485,20 @@ func (current *coordinator) addItemToLocalState(
 				item.Data,
 			)
 		}
-		if err := input.Validate(); err != nil {
+		var peer inbox.PeerMessage
+		var err error
+		// Decode the complete peer payload once for delivery, scheduling and
+		// context projection. Other input kinds use their ordinary validation.
+		if input.Kind == inbox.InputPeer && input.ID != "" {
+			peer, err = input.DecodePeerMessage()
+		} else {
+			err = input.Validate()
+		}
+		if err != nil {
 			return sessionstore.Item{}, fmt.Errorf("invalid input: %w", err)
 		}
 		if input.Deferred && (input.Kind == inbox.InputExternal || input.Kind == inbox.InputPeer) {
-			current.deferredContext = append(current.deferredContext, item)
+			current.deferredContext = append(current.deferredContext, deferredInput{Item: item, peer: peer})
 		}
 		if input.Kind == inbox.InputExternal {
 			if !input.Deferred {
@@ -1428,14 +1514,15 @@ func (current *coordinator) addItemToLocalState(
 			current.state.externalInputs++
 		}
 		if input.Kind == inbox.InputPeer {
+			current.childReports.ObservePeer(peer)
 			if !input.Deferred {
-				if err := current.addPeerInput(input); err != nil {
+				if _, err := current.projectPeerInput(input, peer, false); err != nil {
 					return sessionstore.Item{}, err
 				}
 			}
 			current.state.availableInputs++
 			current.state.peerInputs++
-			if quietPeer(input) {
+			if quietPeerKind(peer.Kind) {
 				current.state.quietInputs++
 			}
 		}
@@ -1492,6 +1579,12 @@ func (current *coordinator) addItemToLocalState(
 		current.state.currentTurnInputs = current.state.availableInputs
 		if turn.Type == session.TurnRegular && turn.ToolContinuation == "" {
 			current.state.turnPeerInputs, current.state.turnQuietInputs = current.state.peerInputs, current.state.quietInputs
+			// Peer-initiated work yields to new user input. A fresh Claude
+			// conversation continues the previous turn's scheduling priority.
+			if !current.windowContinuation || current.state.externalInputs != current.turnExternals {
+				current.backgroundTurn = current.state.externalInputs == current.turnExternals
+			}
+			current.turnExternals = current.state.externalInputs
 		}
 
 		if turn.ToolContinuation != "" {
@@ -1528,6 +1621,7 @@ func (current *coordinator) addItemToLocalState(
 			return item, nil
 		}
 		if response.TurnID == current.state.currentTurnID {
+			current.windowContinuation = false
 			current.failedModel = nil
 			current.state.deliveredInputs = current.state.currentTurnInputs
 			current.state.peerInputs -= current.state.turnPeerInputs
@@ -1547,9 +1641,10 @@ func (current *coordinator) addItemToLocalState(
 			)
 		}
 
+		current.childReports.ObserveItem(item)
 		for _, value := range status.Operations {
-			current.addOperationToLocalState(value)
-
+			// ObserveItem has already indexed these operation snapshots.
+			current.state.operations[value.ID] = value
 		}
 		current.addToolCallOperationsToLocalState(status)
 		if err := current.addToolResultToLocalState(status); err != nil {
@@ -1692,6 +1787,11 @@ func (current *coordinator) addToolResultToLocalState(
 		current.finishToolCall(status.TurnID, status.CallID)
 	}
 	return nil
+}
+
+func (current *coordinator) usesThreeLayerContext() bool {
+	b, ok := current.dependencies.ContextBuilder.(interface{ UsesThreeLayerContext() bool })
+	return ok && b.UsesThreeLayerContext()
 }
 
 func (current *coordinator) addOperationToLocalState(

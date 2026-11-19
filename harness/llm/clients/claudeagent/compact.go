@@ -10,7 +10,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 )
 
-const DefaultCompactThresholdTokens int64 = 200_000
+const DefaultCompactThresholdTokens = llm.DefaultCompactThresholdTokens
 
 // Claude Code 2.1.311 starts auto compaction about 33,000 tokens below the
 // --autocompact argument: at 100,000, measured pre_tokens were 63,886/65,057.
@@ -24,19 +24,26 @@ func autoCompactTokens(threshold int64) int64 {
 const compactPrompt = "/compact Preserve the goal, decisions made, questions asked of the user and anything awaiting their reply, active child handles and their roles, files being changed, and the next actions to take."
 
 type compaction struct {
-	before int64
-	after  *int64
-	usage  *llm.Usage
+	before       int64
+	beforeSource string
+	after        *int64
+	output       *int64
+	durationMS   int64
+	usage        *llm.Usage
 }
 
 func (c *compaction) handle(f frame) {
 	if f.Type == "result" && f.Usage != nil {
 		u := reportedUsage(*f.Usage)
 		c.usage = &u
+		c.output = f.Usage.reportedOutput()
 	}
 	if f.Type == "system" && f.Subtype == "compact_boundary" && f.CompactMetadata != nil {
-		c.before = f.CompactMetadata.PreTokens
+		if before := f.CompactMetadata.PreTokens; before != nil {
+			c.before, c.beforeSource = *before, "provider-reported"
+		}
 		c.after = f.CompactMetadata.PostTokens
+		c.durationMS = f.CompactMetadata.DurationMS
 	}
 }
 
@@ -98,6 +105,9 @@ func (c *Client) lockConversation(ctx context.Context, session string) (func(), 
 // Idle only arms cache maintenance. Token-threshold compaction belongs to
 // Claude Code, including busy sessions that receive reports without idling.
 func (c *Client) Idle(ctx context.Context, request llm.Request, opt llm.RequestOptions) {
+	if request.Window != nil {
+		return
+	}
 	c.scheduleIdleCompaction(ctx, opt, func(ctx context.Context, session string, before int64) {
 		c.compact(ctx, request, opt, session, before)
 	})
@@ -117,8 +127,16 @@ func (c *Client) compact(ctx context.Context, request llm.Request, opt llm.Reque
 		defer opt.Progress(llm.Progress{Attempt: 1, Reset: true})
 	}
 	state := &compaction{before: before}
+	if before > 0 {
+		state.beforeSource = "last-reported-input"
+	}
 	_, err := c.run(ctx, request, opt, session, true, compactPrompt, state)
-	record := llm.ConversationRecord{Provider: ProviderID, BeforeTokens: state.before, Phase: "compact", StartedAt: started, EndedAt: time.Now().UTC(), Usage: state.usage}
+	record := llm.ConversationRecord{Provider: ProviderID, Model: request.Model.ID, BeforeTokens: state.before, BeforeSource: state.beforeSource,
+		Phase: "compact", StartedAt: started, EndedAt: time.Now().UTC(), Usage: state.usage, SummaryOutputTokens: state.output, DurationSource: "client_clock"}
+	if state.durationMS > 0 {
+		record.StartedAt = record.EndedAt.Add(-time.Duration(state.durationMS) * time.Millisecond)
+		record.DurationSource = "provider_api"
+	}
 	if err != nil && ctx.Err() != nil {
 		record.InputTokens, record.InputKnown, record.Interrupted = before, true, true
 		record.InterruptReason = context.Cause(ctx).Error()
@@ -129,7 +147,7 @@ func (c *Client) compact(ctx context.Context, request llm.Request, opt llm.Reque
 	} else {
 		record.Compacted = true
 		if state.after != nil {
-			record.AfterTokens = *state.after
+			record.AfterTokens, record.AfterKnown = *state.after, true
 		}
 	}
 	c.recordConversation(context.WithoutCancel(ctx), opt, session, record)

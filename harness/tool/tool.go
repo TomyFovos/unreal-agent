@@ -15,6 +15,7 @@ type CallStatus struct {
 	Denial         *permission.Error `json:",omitzero"`
 	Error          string
 	ErrorTruncated bool           `json:",omitzero"`
+	OriginalError  []byte         `json:",omitzero"`
 	WaitingFor     []operation.ID `json:",omitzero"`
 }
 

@@ -70,6 +70,11 @@ func (w *serializedStore) AppendHostRecord(ctx context.Context, id session.ID, r
 	defer w.mu.Unlock()
 	return w.store.AppendHostRecord(ctx, id, r)
 }
+func (w *serializedStore) AppendHostRecordRecorded(ctx context.Context, id session.ID, r sessionstore.HostRecord) (sessionstore.Item, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.store.AppendHostRecordRecorded(ctx, id, r)
+}
 func (w *serializedStore) AppendToolCallStatus(ctx context.Context, id session.ID, s sessionstore.ToolCallStatus) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()

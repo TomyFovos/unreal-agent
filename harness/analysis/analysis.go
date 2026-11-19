@@ -68,6 +68,7 @@ type Errors struct {
 }
 type Report struct {
 	Tree                *TreeReport              `json:",omitzero"`
+	ContextMeasurements *ContextMeasurements     `json:",omitzero"`
 	Routing             []RoutingCount           `json:",omitzero"`
 	Activities          []llm.ActivityRecord     `json:",omitzero"`
 	Redactions          []RedactionTotals        `json:",omitzero"`
@@ -116,17 +117,19 @@ type RedactionTotals struct {
 // independent of json/v2's deliberately unspecified default duration format.
 func (r Report) MarshalJSON() ([]byte, error) {
 	type plain Report
-	return json.Marshal(plain(r), jsonv1.FormatDurationAsNano(true))
+	return json.Marshal(plain(r), jsonv1.FormatDurationAsNano(true), json.Deterministic(true))
 }
 
 type call struct {
 	name       string
 	id         string
+	turn       session.TurnID
 	start, end time.Time
 	status     *sessionstore.ToolCallStatus
 }
 type Accumulator struct {
 	metrics             *sessionMetrics
+	context             contextReplay
 	activities          []llm.ActivityRecord
 	compactions         []llm.ConversationRecord
 	inputTokens         int64
@@ -154,7 +157,7 @@ type Accumulator struct {
 
 func New(id session.ID) *Accumulator {
 	return &Accumulator{
-		metrics: newSessionMetrics(id), id: id, turnIndex: map[session.TurnID]int{},
+		metrics: newSessionMetrics(id), context: newContextReplay(id), id: id, turnIndex: map[session.TurnID]int{},
 		calls: map[string]*call{}, operations: map[operation.ID]operation.Operation{},
 		routingInputs: routingCounts{}, deliveredReports: map[operation.ID]bool{},
 	}
@@ -300,7 +303,7 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 		for _, out := range v.Response.Output {
 			if tc, ok := out.Data.(llm.ToolCall); ok {
 				key := string(v.TurnID) + "\x00" + tc.CallID
-				a.calls[key] = &call{name: viewer.SafeText(tc.Name), id: tc.CallID, start: item.RecordedAt}
+				a.calls[key] = &call{name: viewer.SafeText(tc.Name), id: tc.CallID, turn: v.TurnID, start: item.RecordedAt}
 				a.addEvent(Event{At: item.RecordedAt, Kind: "tool call", Name: viewer.SafeText(tc.Name)})
 			}
 		}
@@ -331,6 +334,7 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 		a.addEvent(e)
 	}
 	a.metrics.apply(item, a.active)
+	a.context.apply(item, a.active, a.metrics)
 }
 
 func (a *Accumulator) observeInputTokens(usage llm.Usage) {

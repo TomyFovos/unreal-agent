@@ -17,6 +17,7 @@ const (
 	PlanChanged      EventKind = "plan"
 	DecisionRecorded EventKind = "decision"
 	ChildChanged     EventKind = "child"
+	ChildReportSeen  EventKind = "child_report_seen"
 	ApprovalChanged  EventKind = "approval"
 	WaitChanged      EventKind = "wait"
 	QuestionChanged  EventKind = "question_to_user"
@@ -26,6 +27,7 @@ const (
 	RecentObserved   EventKind = "recent_event"
 	MetricsChanged   EventKind = "metrics"
 	BoundaryObserved EventKind = "boundary"
+	WindowRebuilt    EventKind = "window_rebuilt"
 )
 
 // Event is the canonical, versioned update envelope. Unknown versions or

@@ -6,9 +6,9 @@ Unreal Agent では、ディスク上の正規セッション履歴（Canonical 
 
 ---
 
-## 1. Codex のコンテキスト管理
+## 1. Responses のコンテキスト管理
 
-Codex（`openai-codex`）では、[コンテキストビルダー](../../harness/contextbuilder/compaction.go)が記録順に入力アイテムを構築します。
+Responses 系の既定は3層ウィンドウです。区切りごとに system と現在の状態の写しを先頭に固定します。以下は `Context.WindowStrategy` に `summary` を指定する比較用の経路です。[3層の文脈と設定](context-3layer.md#responses-のウィンドウを再構築する)
 
 - **プレフィックスの安定維持（キャッシュ最適化）:** prune / compact 境界やモデル変更がない限り、前回の入力の末尾に差分だけを追加します。プロンプトの先頭部分を毎回再構築・並べ替えしないため、プロンプトキャッシュが最大限維持されます。
 - **モデル変更時の境界記録:** 同じプロバイダ・モデルを使い続ける間は暗号化された推論トークンやアイテム ID を再利用します。プロバイダやモデルを切り替えた場合は境界を記録し、それ以前の履歴を汎用表現に変換します。
@@ -47,23 +47,20 @@ Codex（`openai-codex`）では、[コンテキストビルダー](../../harness
 
 | キー | 既定値 | 意味 |
 | --- | --- | --- |
-| `FallbackWindow` | `786432` | カタログのウィンドウが不明な場合の代替値 |
+| `FallbackWindow` | `272000` | カタログのウィンドウが不明な場合の代替値 |
 | `ResponseReserve` | `4096` | 応答予約量、および最大出力不明時のしきい値計算用の代替値 |
 | `ToolResultKeepTokens` | `15000` | 古いツール結果を省略候補にする前に保護する、直近ツール結果のトークン予算 |
 | `ToolResultMinPruneTokens` | `15000` | 新しい `prune` 境界を記録するために必要な最小推定節約トークン数 |
-
-Claude 経路の設定は `Claude.CompactThresholdTokens`（既定 `200000`）で、`Context` と Session identity の外に置きます。旧 `Context.ClaudeCompactThresholdTokens` も読み込めます。新しい経路設定が非ゼロなら、そちらを優先します。
 
 ---
 
 ## 2. Claude の会話圧縮 (Compaction)
 
-Claude ルートでは Claude Code 自身が会話を管理しているため、Unreal が `claude` CLI を通じて自動圧縮を制御します。
+Claude Code のサブスク経路の既定は共通の3層ウィンドウです。初回は W、その後は W の増分で、リクエスト間やツールバッチ終了時に切り替えます。入力予算を超えた場合も切り替えます。切り替えで新しい会話を作り、後続ターンは同じ会話 ID で再開します。 [Claude Code のウィンドウと設定](context-3layer.md#claude-code-のウィンドウを再構築する)
 
-- **アイドル時のバックグラウンド圧縮（既定: 200,000 トークン超）:** 1つのターンとすべてのツール実行が完了した時点で、直近のコンテキスト量が `Claude.CompactThresholdTokens` を超えていれば、バックグラウンドで同じ Claude Code 会話に対して `/compact` を実行します。
-  - 圧縮中に新しいユーザー入力やサブエージェントからの通知が届いた場合は、即座にバックグラウンド圧縮を中断して次のターンを開始します（圧縮は次回アイドル時に再試行されます）。
-- **ターン開始前のブロッキング圧縮（しきい値の2倍＝400,000 トークン超）:** コンテキスト量がしきい値の2倍を超えた場合のみ、次のターンを開始する前に圧縮完了を待ちます。
-- **フッターのコンテキスト表示:** ツールループ全体の合算ではなく、最新の `message_start` の入力トークン数（`input + cache_read + cache_creation`）を表示します。
+`Context.WindowStrategy` に `summary` を指定すると、`Claude.CompactThresholdTokens`（既定 `200000`）を基に CLI の `--autocompact` を設定します。経路設定が非ゼロなら旧 `Context.ClaudeCompactThresholdTokens` より優先します。直近の入力が120,000トークンを超えた会話では、50分間の待機後に Unreal がバックグラウンドで `/compact` を実行します。
+
+TUI のフッターにはキャッシュ read・write を含む最新の `message_start` の入力実測を表示します。
 
 ---
 

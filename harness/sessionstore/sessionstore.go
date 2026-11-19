@@ -9,6 +9,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
@@ -52,7 +53,18 @@ type ModelResponse struct {
 	TurnID   session.TurnID
 	Response llm.Response
 	// AdapterError records observed output returned alongside a terminal error.
-	AdapterError bool `json:",omitzero"`
+	AdapterError bool        `json:",omitzero"`
+	WindowCache  WindowCache `json:",omitzero"`
+}
+
+// WindowCache reports cache usage from the first Turn in a rebuilt window.
+// The known flags distinguish reported zeroes from missing counters.
+type WindowCache struct {
+	Boundary   record.Locator
+	Read       int64 `json:",omitzero"`
+	Write      int64 `json:",omitzero"`
+	ReadKnown  bool  `json:",omitzero"`
+	WriteKnown bool  `json:",omitzero"`
 }
 
 // HistoricalOperation is inspection-only evidence projected from canonical

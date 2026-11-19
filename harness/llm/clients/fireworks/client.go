@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -94,6 +95,20 @@ func (client *Client) Respond(ctx context.Context, request llm.Request, options 
 	}
 	if usage.CompletionTokensDetails != nil && usage.CompletionTokensDetails.ReasoningTokens != nil {
 		response.Usage.ReasoningTokens = *usage.CompletionTokensDetails.ReasoningTokens
+	}
+	if request.PublicHistory {
+		response.Usage.Unknown = slices.DeleteFunc(response.Usage.Unknown, func(field llm.UsageField) bool {
+			switch field {
+			case llm.UsageInput:
+				return usage.PromptTokens != nil
+			case llm.UsageOutput:
+				return usage.CompletionTokens != nil
+			case llm.UsageCachedInput:
+				return usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens != nil
+			default:
+				return false
+			}
+		})
 	}
 	return response, nil
 }

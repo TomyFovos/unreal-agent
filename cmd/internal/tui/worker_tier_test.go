@@ -77,6 +77,40 @@ func TestWorkerTierTUIReadsArchivedGrandchildrenWithoutResuming(t *testing.T) {
 			t.Fatal("missing layer output", want, lines)
 		}
 	}
+	context := report.Tree.ContextMeasurements
+	if context == nil || context.Partial || len(context.Sessions) != 8 {
+		t.Fatal("context analysis lost archived coverage")
+	}
+	var archived, summaryTotal, rejected, machineChild bool
+	for _, s := range context.Sessions {
+		if s.Session == f.Workers["qwen-archived"] {
+			for _, g := range s.Groups {
+				if n := g.Numbers["within_input"]; g.Strategy == "summary" && g.Model == "qwen3.8-flash" && n.Value != nil && *n.Value == 2000 && n.Source == "measured" {
+					archived = true
+				}
+			}
+		}
+		if s.Session == f.Lead {
+			for _, g := range s.Groups {
+				if n := g.Numbers["machine_child"]; n.Value != nil && *n.Value == 11 && n.Source == "derived" {
+					machineChild = true
+				}
+			}
+		}
+	}
+	for _, g := range context.Totals.Groups {
+		if n := g.Numbers["within_input"]; g.Strategy == "summary" && g.Model == "qwen3.8-flash" && n.Value != nil && *n.Value == 2500 {
+			summaryTotal = true
+		}
+	}
+	for _, g := range context.Totals.Reviews {
+		if n := g.Numbers["rejected_percent"]; g.Strategy == "three-layer" && g.Model == "deepseek-v4.1-flash" && n.Value != nil && *n.Value == 50 {
+			rejected = true
+		}
+	}
+	if !archived || !summaryTotal || !rejected || !machineChild {
+		t.Fatalf("missing measurements: archived=%v summary total=%v rejection=%v machine=%v", archived, summaryTotal, rejected, machineChild)
+	}
 	for _, id := range f.Workers {
 		if _, err := h.Attach(id); err == nil {
 			t.Fatal("analysis resumed a grandchild", id)

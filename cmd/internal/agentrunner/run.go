@@ -32,6 +32,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 	"github.com/unreallabsai/unreal-agent/harness/tool/bash"
+	"github.com/unreallabsai/unreal-agent/harness/tool/contexttools"
 	"github.com/unreallabsai/unreal-agent/harness/tool/viewimage"
 	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 )
@@ -436,35 +437,55 @@ func Run(
 	if err != nil {
 		return err
 	}
-	definitions := registry.StaticDefinitions()
-	modelTools := make([]llm.Tool, 0, len(definitions))
-	for _, definition := range definitions {
-		modelTools = append(modelTools, definition.Tool)
-	}
-	systemPrompt, modelTools = resolvedProfile.Compose(systemPrompt, modelTools)
-	builder.SetSystemPrompt(systemPrompt)
-	for _, definition := range modelTools {
-		builder.AddTool(definition)
-	}
-
 	currentHost, err := host.New(runContext, host.Config{Directory: storeDirectory, Build: func(sessionContext context.Context, id session.ID) (host.Runtime, error) {
 		constraints := contextengine.Constraints{ToolPolicy: "enforced-by-Unreal", Filesystem: "enforced-by-Unreal", Network: "enforced-by-Unreal", Process: "enforced-by-Unreal"}
-		engine, e := contextbuilder.EnableCompaction(builder, config.Context, constraints)
+		enableContext := contextbuilder.EnableCompaction
+		if selected.Descriptor != nil {
+			enableContext = contextbuilder.EnableWindow
+		}
+		engine, e := enableContext(builder, config.Context, constraints)
 		if e != nil {
 			return host.Runtime{}, e
 		}
 		builder.(interface{ SetRuntimeProvider(string) }).SetRuntimeProvider(resolvedProvider.Provider)
+		if selected.Descriptor != nil {
+			builder.(interface{ SetWindowPrompt(llm.WindowPrompt) }).SetWindowPrompt(selected.Descriptor.WindowPrompt)
+		}
 		builder.(interface {
 			SetContextRuntime(sessionstore.RuntimeSelection, bool)
 		}).SetContextRuntime(sessionstore.RuntimeSelection{Version: 1, Provider: resolvedProvider.Provider, Model: model, Effort: reasoningEffort(parsed.ThinkingLevel)}, true)
+		runtimeRegistry := registry
+		jobs := configuredTools.RemoteJobs
+		var handler *contexttools.Handler
+		if selected.Descriptor != nil && builder.(interface{ UsesThreeLayerContext() bool }).UsesThreeLayerContext() {
+			owner, _ := host.SessionFromContext(sessionContext)
+			runtimeRegistry, e = tool.WithExtensions(registry, contexttools.Extensions(parsed.DisallowedTools))
+			if e != nil {
+				return host.Runtime{}, e
+			}
+			handler = contexttools.NewHandler(sessionContext, owner)
+			jobs = append(jobs, handler)
+		}
+		var modelTools []llm.Tool
+		for _, definition := range runtimeRegistry.StaticDefinitions() {
+			modelTools = append(modelTools, definition.Tool)
+		}
+		prompt, modelTools := resolvedProfile.Compose(systemPrompt, modelTools)
+		builder.SetSystemPrompt(prompt)
+		for _, definition := range modelTools {
+			builder.AddTool(definition)
+		}
 		closeRuntime := func() error {
 			var err error
+			if handler != nil {
+				err = handler.Close()
+			}
 			if configuredTools.Close != nil {
-				err = configuredTools.Close()
+				err = errors.Join(err, configuredTools.Close())
 			}
 			return err
 		}
-		return host.Runtime{RetainOperation: configuredTools.RetainOperation, InterruptedInput: configuredTools.InterruptedInput, CompletedInput: configuredTools.CompletedInput, ContextEngine: engine, Builder: builder, LLM: client, Tools: registry, Close: closeRuntime, Operations: operation.NewLocalOperationManager(sessionContext, configuredTools.RemoteJobs...)}, nil
+		return host.Runtime{RetainOperation: configuredTools.RetainOperation, InterruptedInput: configuredTools.InterruptedInput, CompletedInput: configuredTools.CompletedInput, ContextEngine: engine, Builder: builder, LLM: client, Tools: runtimeRegistry, Close: closeRuntime, Operations: operation.NewLocalOperationManager(sessionContext, jobs...)}, nil
 	}})
 	if err != nil {
 		return err

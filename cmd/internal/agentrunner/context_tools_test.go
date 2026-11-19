@@ -219,7 +219,8 @@ func TestResponsesContextToolsRoundTripInReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	encoded, err := json.Marshal(replay)
+	replay.Session.ID = string(s.ID)
+	encoded, err := json.Marshal(replay.Render(0))
 	if err != nil || !bytes.Equal(encoded, wanted) {
 		t.Fatal("native StateShow differs from replayed bytes", err)
 	}

@@ -11,9 +11,9 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 )
 
-func (head *sessionHead) applyOperationRecord(r operationRecord, offset int64) error {
+func (head *sessionHead) applyOperationRecord(r operationRecord, offset int64, metrics *sessionstore.ContextFacts) error {
 	op := r.Operation
-	o := contextObserver{head: head, at: r.RecordedAt}
+	o := contextObserver{head: head, at: r.RecordedAt, metrics: metrics}
 	o.source = record.Address{Kind: record.OperationCheckpoint, Session: o.id(), Operation: string(op.ID), Offset: offset}.Locator()
 	previous := o.lookupOperation(op.ID)
 	if err := head.saveOperation(op); err != nil {
@@ -30,6 +30,7 @@ func (o *contextObserver) operation(op, previous operation.Operation) {
 		if plan, ok := decodeChildPlan(job); ok {
 			o.childOperation(op, previous, job, plan)
 			if plan.Action == "start" {
+				o.queueChildReports(o.head.ContextFacts.Reports.ObserveOperation(op), false, false)
 				return // The child-completion wait uses the handle.
 			}
 		}

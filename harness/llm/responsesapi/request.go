@@ -28,13 +28,15 @@ func requestBody(request llm.Request, promptCacheKey string, extensions map[stri
 		return nil, fmt.Errorf("encode model: %w", err)
 	}
 	store := false
-	include := []openaiapi.IncludeEnum{openaiapi.ReasoningEncryptedContent}
 	params := openaiapi.CreateResponse{
-		Model:   &model,
-		Store:   &store,
-		Stream:  new(true),
-		Include: &include,
-		Input:   &input,
+		Model:  &model,
+		Store:  &store,
+		Stream: new(true),
+		Input:  &input,
+	}
+	if !request.PublicHistory {
+		include := []openaiapi.IncludeEnum{openaiapi.ReasoningEncryptedContent}
+		params.Include = &include
 	}
 	if request.Model.Fast {
 		params.ServiceTier = new(openaiapi.ServiceTier("priority"))
@@ -51,10 +53,9 @@ func requestBody(request llm.Request, promptCacheKey string, extensions map[stri
 			return nil, fmt.Errorf("unsupported reasoning effort %q", request.Model.ReasoningEffort)
 		}
 		effort := openaiapi.ReasoningEffort(request.Model.ReasoningEffort.Normalize())
-		summary := openaiapi.ReasoningSummaryAuto
-		params.Reasoning = &openaiapi.Reasoning{
-			Effort:  &effort,
-			Summary: &summary,
+		params.Reasoning = &openaiapi.Reasoning{Effort: &effort}
+		if !request.PublicHistory {
+			params.Reasoning.Summary = new(openaiapi.ReasoningSummaryAuto)
 		}
 	}
 	if len(tools) != 0 {

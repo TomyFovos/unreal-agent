@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -21,6 +22,65 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
+
+func TestRecordCommandsMeasurePreviousWindowEvidence(t *testing.T) {
+	ctx, dir := t.Context(), t.TempDir()
+	store, old, loc := seedWindowHistory(t, dir)
+	previous := []record.Locator{loc}
+	checkHostRestore(t, store.AppendHostRecord(ctx, "window", sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostContext,
+		Context: &sessionstore.ContextRecord{Kind: sessionstore.ContextWindowBoundary, Window: &sessionstore.WindowBoundary{
+			Tail: &sessionstore.WindowTail{Previous: &previous},
+		}},
+	}))
+	h := newTestHost(t, dir)
+	defer h.Close()
+	s, err := h.Resume(ctx, Options{ID: "window", Policy: permission.Unrestricted()})
+	checkHostRestore(t, err)
+	command := func(action contextstate.Action, args any) (contextstate.Result, error) {
+		raw, err := json.Marshal(args)
+		checkHostRestore(t, err)
+		return s.ContextCommand(ctx, "", "context-read", contextstate.Command{Action: action, Args: raw})
+	}
+	a, err := loc.Address()
+	checkHostRestore(t, err)
+	a.Range = &record.ByteRange{Start: 0, End: 8}
+	page, err := command(contextstate.ShowRecord, contextstate.RecordSelection{Locator: a.Locator()})
+	checkHostRestore(t, err)
+	if got := string(page.Page.Bytes); got != old[:8] {
+		t.Fatal("record show changed the selected evidence", got)
+	}
+	results, err := command(contextstate.FindRecord, contextstate.RecordSearch{Kind: record.UserMessage, Text: oldWindowInput})
+	checkHostRestore(t, err)
+	if len(results.Matches) != 1 || results.Matches[0].Locator != loc {
+		t.Fatal("record find returned the wrong evidence", results.Matches)
+	}
+	if _, err := command(contextstate.ShowRecord, contextstate.RecordSelection{Locator: record.Item("window", 10000)}); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("record show failure changed", err)
+	}
+	v, err := s.Inspect(0, 64)
+	checkHostRestore(t, err)
+	var reads []*sessionstore.RecordRead
+	for _, item := range v.History.Items {
+		if h, ok := item.Data.(sessionstore.HostRecord); ok && h.Context != nil && h.Context.RecordRead != nil {
+			reads = append(reads, h.Context.RecordRead)
+		}
+	}
+	if len(reads) != 3 {
+		t.Fatalf("got %d record command observations", len(reads))
+	}
+	for i, want := range []struct {
+		action string
+		bytes  int64
+	}{{"show", 8}, {"find", int64(len(oldWindowInput))}} {
+		r := reads[i]
+		if r.Action != want.action || r.Bytes == nil || *r.Bytes != want.bytes || r.PreviousTailHits == nil || *r.PreviousTailHits != 1 {
+			t.Fatalf("%s observation did not preserve sizes or window membership: %+v", want.action, r)
+		}
+	}
+	if reads[2].Bytes != nil || reads[2].PreviousTailHits != nil || reads[1].After != reads[0].After+1 {
+		t.Fatalf("failed read invented a value, or reads lost their start cursor: %+v", reads)
+	}
+}
 
 func TestRecordShowAndFindAcrossCheckpointAndArchive(t *testing.T) {
 	ctx := t.Context()

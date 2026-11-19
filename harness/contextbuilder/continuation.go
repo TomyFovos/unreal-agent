@@ -18,8 +18,31 @@ type continuationCall struct {
 	terminal, received bool
 }
 type continuationGroup struct {
-	calls           map[string]*continuationCall
-	chain, portable bool
+	calls    map[string]*continuationCall
+	pending  int
+	portable bool
+}
+
+type continuationReceipt struct {
+	id, group string
+	call      *continuationCall
+}
+
+func (b *builder) trackContinuationReceipt(group, callID, id string, running bool) {
+	g := b.continuations[group]
+	if g == nil {
+		return
+	}
+	call := g.calls[callID]
+	if call == nil {
+		return
+	}
+	if call.terminal && call.received {
+		g.pending++
+		b.unsettledGroups[group] = g
+	}
+	call.receipt, call.terminal, call.received = id, !running, false
+	b.unreadReceipts = append(b.unreadReceipts, continuationReceipt{id, group, call})
 }
 
 func (b *builder) acknowledgeContinuation(response llm.Response) {
@@ -34,34 +57,36 @@ func (b *builder) acknowledgeContinuation(response llm.Response) {
 	if !ok {
 		return
 	}
-	for _, group := range b.continuations {
-		closed := true
-		for _, call := range group.calls {
-			if call.receipt != "" && call.receipt <= bound {
-				call.received = true
-			}
-			closed = closed && call.terminal && call.received
+	b.deliveredThrough = max(b.deliveredThrough, bound)
+	// Receipt IDs increase in projection order. A response can acknowledge
+	// only the receipts visible at its Turn, and a newer update supersedes an
+	// older one. Process each receipt once even during full history replay.
+	acknowledged := 0
+	for _, receipt := range b.unreadReceipts {
+		if receipt.id > bound {
+			break
 		}
-		if closed {
-			// A successfully consumed, terminal dependency becomes bounded past
-			// history even if this response starts another independent tool call.
-			// Unfinished or unreceived updates remain mandatory across that boundary.
-			group.chain = false
+		acknowledged++
+		call := receipt.call
+		if call.receipt == receipt.id {
+			call.received = true
+			if call.terminal {
+				group := b.continuations[receipt.group]
+				group.pending--
+				if group.pending == 0 {
+					delete(b.unsettledGroups, receipt.group)
+				}
+			}
 		}
 	}
+	clear(b.unreadReceipts[:acknowledged])
+	b.unreadReceipts = b.unreadReceipts[acknowledged:]
 	delete(b.turnBounds, record.TurnID)
 }
 
 func (b *builder) requiredContinuations() (map[string]bool, error) {
-	result := map[string]bool{}
-	for key, group := range b.continuations {
-		required := group.chain
-		for _, call := range group.calls {
-			required = required || !call.terminal || !call.received
-		}
-		if !required {
-			continue
-		}
+	result := make(map[string]bool, len(b.unsettledGroups))
+	for key, group := range b.unsettledGroups {
 		for _, call := range group.calls {
 			if call.receipt == "" {
 				return nil, &contextengine.Error{Code: "continuation_receipt_missing"}

@@ -6,9 +6,9 @@ Unreal Agent never deletes or mutates your canonical Session history. Instead, i
 
 ---
 
-## 1. Codex Context Management
+## 1. Responses Context Management
 
-For Codex (`openai-codex`), the [context builder](../harness/contextbuilder/compaction.go) constructs model input deterministically from canonical history:
+Responses providers use the three-layer window by default. The fixed prefix contains the system instructions and a copy of the current state at each rebuild. The remainder of this section describes the comparison strategy selected by `Context.WindowStrategy: "summary"`. [Three-layer context and settings](context-3layer.md#rebuild-the-responses-request-window)
 
 - **Append-only prefix stability:** Between prune/compaction boundaries and model changes, new items are appended in recorded order without reordering or reconstructing earlier items, maximizing prompt cache hits.
 - **Provider/model boundaries:** While staying on the same provider and model, encrypted reasoning tokens and item IDs are reused. Switching models records a boundary and converts earlier history into a portable representation.
@@ -49,23 +49,20 @@ Configured under the top-level `Context` key ([`harness/contextengine/types.go`]
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `FallbackWindow` | `786432` | Fallback window when catalog metadata is unavailable |
+| `FallbackWindow` | `272000` | Fallback window when catalog metadata is unavailable |
 | `ResponseReserve` | `4096` | Response reserve and fallback maximum output for threshold calculation |
 | `ToolResultKeepTokens` | `15000` | Token budget reserved for recent tool outputs before older outputs become prune candidates |
 | `ToolResultMinPruneTokens` | `15000` | Minimum estimated token savings required before writing a new `prune` boundary |
-
-Claude's route setting is `Claude.CompactThresholdTokens` (default `200000`), outside `Context` and Session identity. Existing `Context.ClaudeCompactThresholdTokens` values still load; a nonzero route setting takes precedence.
 
 ---
 
 ## 2. Claude Conversation Compaction
 
-Because Claude Code manages its own conversation state, Unreal coordinates compaction through the `claude` CLI:
+The Claude Code subscription route defaults to the shared three-layer window. Unreal can rebuild between requests or after a tool batch. The first size-based rebuild occurs at W, and subsequent ones occur after W of growth. Input budget overflow can trigger an earlier rebuild. Each rebuild starts a fresh conversation that later turns resume by ID. [Claude Code window and settings](context-3layer.md#rebuild-the-claude-code-window)
 
-- **Background idle compaction (default: >200,000 tokens):** When a turn and all of its tool calls finish, Unreal checks the latest context size. If it exceeds `Claude.CompactThresholdTokens`, Unreal starts a background `/compact` on the same Claude Code conversation with preservation guidance.
-  - If you send a new message or a child agent reports back while idle compaction is running, Unreal immediately interrupts the background compaction and runs your turn without delay.
-- **Blocking compaction (>2× threshold, i.e., >400,000 tokens):** Only when context exceeds twice the threshold does Unreal run compaction before starting the next turn.
-- **Context measurement:** The TUI footer displays the latest `message_start` input tokens (`input + cache_read + cache_creation`), rather than summing every step of an internal tool loop.
+With `Context.WindowStrategy: "summary"`, Claude Code uses `--autocompact` with a window derived from `Claude.CompactThresholdTokens` (default `200000`). A nonzero route setting takes precedence over the legacy `Context.ClaudeCompactThresholdTokens` key. Unreal schedules a background `/compact` in the current conversation after 50 minutes of idle time when the latest input exceeds 120,000 tokens.
+
+The TUI footer uses the latest `message_start` input measurement, including cache reads and writes.
 
 ---
 

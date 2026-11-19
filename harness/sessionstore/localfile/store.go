@@ -107,6 +107,12 @@ func (store *Store) ReadSnapshot(ctx context.Context, id session.ID) (sessionsto
 	return state.Snapshot, state.Items, state.Operations, nil
 }
 
+func (store *Store) ReadAnalysisSnapshot(ctx context.Context, id session.ID) (sessionstore.Snapshot, []sessionstore.Item, []operation.Operation, *sessionstore.ContextFacts, error) {
+	facts := &sessionstore.ContextFacts{}
+	state, _, err := store.readStateIndexed(ctx, id, &restoreIndex{contextFacts: facts})
+	return state.Snapshot, state.Items, state.Operations, facts, err
+}
+
 func (store *Store) Items(
 	ctx context.Context,
 	id session.ID,
@@ -306,6 +312,10 @@ func (store *Store) readState(
 	ctx context.Context,
 	id session.ID,
 ) (storedState, int64, error) {
+	return store.readStateIndexed(ctx, id, nil)
+}
+
+func (store *Store) readStateIndexed(ctx context.Context, id session.ID, index *restoreIndex) (storedState, int64, error) {
 	if err := validateSessionID(id); err != nil {
 		return storedState{}, 0, err
 	}
@@ -316,7 +326,7 @@ func (store *Store) readState(
 	if err != nil {
 		return storedState{}, 0, fmt.Errorf("read session %q: %w", id, err)
 	}
-	state, committedSize, err := decodeLog(encoded)
+	state, committedSize, err := replayLog(encoded, storedState{}, 0, index)
 	if err != nil {
 		return storedState{}, 0, fmt.Errorf("read session %q: %w", id, err)
 	}
@@ -382,9 +392,9 @@ func (store *Store) append(
 	var projectErr error
 	switch r := value.(type) {
 	case itemRecord:
-		projectErr = head.observeItem(r)
+		projectErr = head.observeItem(r, nil)
 	case operationRecord:
-		projectErr = head.applyOperationRecord(r, committedSize)
+		projectErr = head.applyOperationRecord(r, committedSize, nil)
 	}
 	if projectErr != nil {
 		store.evictCachedWriteState(id)

@@ -17,6 +17,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/subagent/identity"
+	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
 
 func TestContextMachineFactsReplay(t *testing.T) {
@@ -238,6 +239,131 @@ func TestContextMachineTerminalAndWriteFacts(t *testing.T) {
 	for _, loc := range []record.Locator{open, write} {
 		if _, ok := current.Waiting.Processed.Sources[loc]; !ok {
 			t.Fatal("resolved operation wait lost evidence", loc)
+		}
+	}
+}
+
+func TestContextChildReportRequiresOfferedInputAndResponse(t *testing.T) {
+	ctx := t.Context()
+	store, id, _ := newRestoreFixture(t)
+	var previous session.TurnID
+	turn := func(key string) {
+		t.Helper()
+		next := session.TurnID(key)
+		mustCheckpoint(t, store.AppendTurn(ctx, id, session.Turn{ID: next, PreviousTurnID: previous, Type: session.TurnRegular}))
+		previous = next
+	}
+	respond := func() {
+		t.Helper()
+		mustCheckpoint(t, store.AppendModelResponse(ctx, id, sessionstore.ModelResponse{TurnID: previous, Response: llm.Response{Stop: llm.StopComplete}}))
+	}
+	end := func(handle operation.ID) {
+		t.Helper()
+		op, job := contextJob(t, store, id, handle, "SubagentStart", "subagent", childPlan{Action: "start", ParentID: string(id), Template: "fixture"})
+		job.Handle = mustContextJSON(t, childHandle{Version: 1, Finish: &sessionstore.FinishRecord{
+			Version: 1, OperationID: "finish", Result: sessionstore.FinishResult{Status: "completed", Summary: "fixture", ChangedFiles: []string{string(handle) + ".go"}},
+		}})
+		step, err := operation.UpdateRemoteJob(op, job, operation.StatusCompleted)
+		mustCheckpoint(t, err)
+		mustCheckpoint(t, store.SaveOperation(ctx, id, *step.Operation))
+	}
+	peer := func(handle operation.ID, deferred bool) {
+		t.Helper()
+		body := mustContextJSON(t, inbox.PeerMessage{Version: 1, Sender: string(identity.ChildID(id, handle)), Target: string(id),
+			Handle: string(handle), Kind: "ended", ReportIncluded: true, Text: "done"})
+		mustCheckpoint(t, store.AppendInput(ctx, id, inbox.Input{ID: inbox.ID("ended:" + handle), Kind: inbox.InputPeer, Payload: body, Deferred: deferred}))
+	}
+	state := func() contextstate.State {
+		t.Helper()
+		s, err := store.ContextState(ctx, id)
+		mustCheckpoint(t, err)
+		s.Session.ID = string(id)
+		return s
+	}
+	checkCurrent := func(s contextstate.State, want ...string) {
+		t.Helper()
+		if len(s.Children.Current) != len(want) || len(s.Artifacts.Current) != len(want) {
+			t.Fatalf("children=%v artifacts=%v want %v", s.Children.Current, s.Artifacts.Current, want)
+		}
+		for _, handle := range want {
+			if s.Children.Current[handle].Handle != handle || s.Artifacts.Current[handle+".go"].LastWriter != handle {
+				t.Fatalf("missing child %s or its artifact", handle)
+			}
+		}
+	}
+	end("notified")
+	end("deferred")
+	end("reported-by-tool")
+	turn("before-notices")
+	peer("notified", false)
+	peer("deferred", true)
+	respond()
+	checkCurrent(state().Render(0), "notified", "deferred", "reported-by-tool")
+
+	// The next turn offers the ordinary peer message. A terminal tool receipt
+	// is recorded during that turn, so the following turn offers that result.
+	turn("offers-peer")
+	checkpointWriteHead(t, store, id)
+	respond()
+	checkCurrent(state().Render(0), "deferred", "reported-by-tool")
+	value, err := operation.NewValueSpec([]byte(`{"tool":"Bash","content":"== reported-by-tool fixture completed"}`))
+	mustCheckpoint(t, err)
+	rcpt := operation.Operation{ID: "tool-result", ToolName: "claude_code", Type: value.Type, Version: value.Version, State: value.State, Status: operation.StatusCompleted}
+	mustCheckpoint(t, store.AppendToolCallStatus(ctx, id, sessionstore.ToolCallStatus{
+		TurnID: previous, CallID: "read-report", Status: tool.CallStatus{WaitingFor: []operation.ID{rcpt.ID}}, Operations: []operation.Operation{rcpt},
+	}))
+	mustCheckpoint(t, store.AppendHostRecord(ctx, id, sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostContext,
+		Context: &sessionstore.ContextRecord{Kind: "deferred_inputs"}}))
+	turn("offers-receipt-and-deferred")
+	checkCurrent(state().Render(0), "deferred", "reported-by-tool")
+	respond()
+	mustCheckpoint(t, store.AppendInput(ctx, id, inbox.Input{ID: "next-human", Kind: inbox.InputExternal, Payload: []byte(`"current work"`)}))
+	end("active-pending")
+	peer("active-pending", false)
+	turn("sees-active-child")
+	respond()
+	end("just-ended")
+	want := state().Render(0)
+	checkCurrent(want, "active-pending", "just-ended")
+	if want.Children.Processed.Count != 3 || want.Artifacts.Processed.Count != 3 {
+		t.Fatalf("processed counts = %d children, %d artifacts", want.Children.Processed.Count, want.Artifacts.Processed.Count)
+	}
+	log, err := store.ReadRecordLog(ctx, id)
+	mustCheckpoint(t, err)
+	children, err := log.ContextIndex("children")
+	mustCheckpoint(t, err)
+	var entries []struct {
+		Handle, Status string
+		Locator        record.Locator
+	}
+	mustCheckpoint(t, json.Unmarshal(children, &entries))
+	if len(entries) != 5 || entries[0].Handle != "notified" || entries[0].Status != "completed" {
+		t.Fatalf("L3 index lost the processed child: %+v", entries)
+	}
+	addr, err := entries[0].Locator.Address()
+	mustCheckpoint(t, err)
+	if _, err := log.RawOperation(operation.ID(addr.Operation), addr.Offset); err != nil {
+		t.Fatal("L3 index does not reference a canonical operation", err)
+	}
+
+	for _, checkpointed := range []bool{false, true} {
+		reopened, err := New(store.directory)
+		mustCheckpoint(t, err)
+		if checkpointed {
+			view, err := reopened.OpenCheckpointedRestoreView(ctx, id)
+			mustCheckpoint(t, err)
+			defer view.Close()
+			if view.index.savedSize == 0 {
+				t.Fatal("fixture did not restore from the checkpoint before the response")
+			}
+			_, _, err = view.Take(ctx, id)
+			mustCheckpoint(t, err)
+		}
+		raw, err := reopened.ContextState(ctx, id)
+		mustCheckpoint(t, err)
+		raw.Session.ID = string(id)
+		if !bytes.Equal(mustContextJSON(t, raw.Render(0)), mustContextJSON(t, want)) {
+			t.Fatalf("rendered L2 changed after restore (checkpointed=%v)", checkpointed)
 		}
 	}
 }

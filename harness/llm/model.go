@@ -4,6 +4,9 @@ import "encoding/json/jsontext"
 
 type Role string
 
+// DefaultCompactThresholdTokens is the initial input size for rebuilding a conversation.
+const DefaultCompactThresholdTokens int64 = 200_000
+
 const (
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
@@ -137,6 +140,17 @@ type Request struct {
 	Model Model
 	Input []Item
 	Tools []Tool
+	// PublicHistory uses a history of public messages and tool receipts.
+	PublicHistory bool `json:"-"`
+	// Window identifies a three-layer projection for an adapter that resumes
+	// private conversations. DeliveredItems is the prefix already acknowledged
+	// by that conversation, including any copied state.
+	Window *ConversationWindow `json:"-"`
+}
+
+type ConversationWindow struct {
+	Boundary       string
+	DeliveredItems int
 }
 
 type StopReason string
@@ -145,6 +159,9 @@ const (
 	StopComplete        StopReason = "complete"
 	StopMaxOutputTokens StopReason = "max_output_tokens"
 	StopRefused         StopReason = "refused"
+	// StopWindowBoundary hands a completed tool batch back to the Coordinator
+	// so it can start the next request without recording an extra model reply.
+	StopWindowBoundary StopReason = "window_boundary"
 )
 
 // IsOutputLimit recognizes provider stop and finish reasons for exhausted output.
@@ -166,6 +183,9 @@ type Response struct {
 	Usage      Usage
 	Failure    *Failure
 	Generation *GenerationStatistics `json:",omitzero"`
+	// FirstRequestUsage isolates the first model call when one adapter
+	// invocation can make several calls. The Host records its window cache.
+	FirstRequestUsage *Usage `json:"-"`
 }
 
 // InputTokens includes CachedInputTokens and CacheWriteInputTokens.

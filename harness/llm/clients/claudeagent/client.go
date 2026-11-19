@@ -43,7 +43,7 @@ const maxLine = 64 << 20
 type Config struct {
 	apiKey    credential.Secret // request-time only, supplied by NewAPIClient
 	apiSource credential.Source // re-read before a deferred process starts
-	// CompactThresholdTokens defaults to 200,000 for CLI automatic compaction.
+	// CompactThresholdTokens defaults to 200,000 for the CLI summary strategy.
 	CompactThresholdTokens int64               `json:"-"` // injected from route settings; not immutable runtime identity
 	Binary                 string              // absolute path of the claude CLI
 	AgentModel             string              `json:",omitzero"`
@@ -168,18 +168,25 @@ func (e *Error) Unwrap() error {
 	return nil
 }
 
+func (e *Error) ContextOverflow() bool { return e.Code == "context_length_exceeded" }
+
 // Respond runs one Claude Code turn. Each turn is its own process that resumes
-// the Session's Claude Code conversation.
+// the Session's private conversation or starts the next window's conversation.
 func (c *Client) Respond(ctx context.Context, request llm.Request, opt llm.RequestOptions) (llm.Response, error) {
-	session := sessionUUID(c.config.Namespace, opt.Identity.SessionID)
-	if idle := c.idleCompactionState(session, opt); idle != nil {
-		idle.beginTurn()
-		defer idle.endTurn()
+	base := sessionUUID(c.config.Namespace, opt.Identity.SessionID)
+	if c.providerID() != ProviderID {
+		request.Window = nil
+	}
+	if request.Window == nil {
+		if idle := c.idleCompactionState(base, opt); idle != nil {
+			idle.beginTurn()
+			defer idle.endTurn()
+		}
 	}
 	if opt.Tools == nil {
 		return llm.Response{}, &Error{Code: "tool_rendezvous_required"}
 	}
-	unlock, err := c.lockConversation(ctx, session)
+	unlock, err := c.lockConversation(ctx, base)
 	if err != nil {
 		return llm.Response{}, err
 	}
@@ -189,7 +196,16 @@ func (c *Client) Respond(ctx context.Context, request llm.Request, opt llm.Reque
 			return llm.Response{}, err
 		}
 	}
-	plan := planPrompt(request.Input)
+	var plan promptPlan
+	var session string
+	if request.Window != nil {
+		session, plan, err = c.planWindow(ctx, request, opt, base)
+		if err != nil {
+			return llm.Response{}, err
+		}
+	} else {
+		session, plan = c.conversationID(base, opt), planPrompt(request.Input)
+	}
 	resume, prompt := plan.resume, plan.prompt
 	if err := ctx.Err(); err != nil {
 		return llm.Response{}, err
@@ -260,8 +276,14 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	args = append(args, "--tools", launchTools(subagents))
 	env = launchEnv(env, subagents)
 	env = agentModelEnv(env, subagents)
-	args = append(args, "--autocompact", strconv.FormatInt(autoCompactTokens(c.config.CompactThresholdTokens), 10))
-	if settings := launchSettings(c.config.Directory, env, subagents); settings != "" {
+	windowed := request.Window != nil
+	if windowed {
+		env = append(env, disableAutoCompactEnv+"=1")
+	} else {
+		opt.AfterToolBatch = nil
+		args = append(args, "--autocompact", strconv.FormatInt(autoCompactTokens(c.config.CompactThresholdTokens), 10))
+	}
+	if settings := launchSettings(c.config.Directory, env, subagents, windowed); settings != "" {
 		args = append(args, "--settings", settings)
 	}
 	if resume {
@@ -275,7 +297,11 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	if request.Model.ReasoningEffort.Valid() {
 		args = append(args, "--effort", string(request.Model.ReasoningEffort.Normalize()))
 	}
-	args = append(args, "--append-system-prompt", appendedPrompt(modeLabel(permission.ControllerFromContext(ctx)), subagents))
+	systemPrompt := appendedPrompt(modeLabel(permission.ControllerFromContext(ctx)), subagents)
+	if windowed {
+		systemPrompt += "\n\nUse recorded tool calls and results as conversation history. Continue the user's work from the next unfinished step."
+	}
+	args = append(args, "--append-system-prompt", systemPrompt)
 
 	// The process outlives ctx briefly: an interrupted turn first asks Claude
 	// Code to stop, which also ends the command it runs.
@@ -305,6 +331,8 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	out := &writer{w: stdin}
 	t := newTurn(ctx, cancel, opt, out, c.config.Results, &c.approver, c.config.Directory, session)
 	t.startup.process = started
+	t.measureFirstRequest = windowed
+	t.compacting = compact != nil
 	t.subagents, t.environ = subagents, cmd.Env
 	streams, stopStreams := t.observeStreams(c.activityInterval)
 	t.streams = streams
@@ -372,6 +400,9 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		if len(line) > 0 {
 			var f frame
 			if json.Unmarshal(line, &f) == nil {
+				if c.providerID() == ProviderID && f.Type == "rate_limit_event" && f.RateLimitInfo != nil {
+					t.recordSubscriptionUsage(f, request.Model)
+				}
 				streams.observe(f)
 				if compact != nil {
 					t.recordStartup(f)
@@ -451,10 +482,19 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		if needsLogin(message) {
 			return llm.Response{}, &Error{Code: "external_reauth_required", Message: clip(loginHint(message), 2000)}
 		}
+		if windowed && strings.HasPrefix(message, "Prompt is too long") {
+			return llm.Response{}, &Error{Code: "context_length_exceeded", Message: clip(message, 2000)}
+		}
 		return llm.Response{}, &Error{Code: "turn_failed", Message: clip(message, 2000)}
 	}
 	if compact != nil {
 		return llm.Response{}, nil
+	}
+	t.mu.Lock()
+	windowStopped := t.windowStopped
+	t.mu.Unlock()
+	if windowStopped {
+		return llm.Response{Stop: llm.StopWindowBoundary}, nil
 	}
 	return t.finish(result), nil
 }

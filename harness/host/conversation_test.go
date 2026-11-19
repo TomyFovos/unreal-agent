@@ -83,16 +83,19 @@ func TestConversationTokensUseExplicitMeasurementOverStepTotals(t *testing.T) {
 	s := progressSession()
 	s.items = append(s.items, sessionstore.Item{Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostRuntimeApplied, Selection: &sessionstore.RuntimeSelection{Provider: "claude"}}},
 		sessionstore.Item{Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{Response: llm.Response{Usage: llm.Usage{InputTokens: 500_000}}}})
-	if got := s.conversationTokensLocked()["claude"]; got != 500_000 {
+	tokens, _ := s.conversationStateLocked()
+	if got := tokens["claude"]; got != 500_000 {
 		t.Fatal("legacy usage not available", got)
 	}
 	s.items = append(s.items, sessionstore.Item{Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostContext, Context: &sessionstore.ContextRecord{Kind: "provider_conversation", Conversation: &llm.ConversationRecord{Provider: "claude", InputKnown: true, InputTokens: 12_000}}}},
 		sessionstore.Item{Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{Response: llm.Response{Usage: llm.Usage{InputTokens: 999_000}}}})
-	if got := s.conversationTokensLocked()["claude"]; got != 12_000 {
+	tokens, _ = s.conversationStateLocked()
+	if got := tokens["claude"]; got != 12_000 {
 		t.Fatal("step totals overrode context", got)
 	}
 	s.items = append(s.items, sessionstore.Item{Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostContext, Context: &sessionstore.ContextRecord{Conversation: &llm.ConversationRecord{Provider: "claude", Compacted: true, AfterTokens: 1000}}}})
-	if _, ok := s.conversationTokensLocked()["claude"]; ok {
+	tokens, _ = s.conversationStateLocked()
+	if _, ok := tokens["claude"]; ok {
 		t.Fatal("summary size must not become actual model input")
 	}
 }

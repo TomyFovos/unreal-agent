@@ -9,10 +9,12 @@ import (
 // socket. Claude Code's sandbox blocks that socket, so the subagent command it
 // runs would fail with "gateway: disconnected"; --settings overrides only the
 // keys it sets, and allowUnixSockets merges with the sockets the user's
-// settings already allow, so the user's sandbox stays on.
-func launchSettings(directory string, env []string, subagents SubagentCLI) string {
+// settings already allow, so the user's sandbox stays on. The per-launch env
+// also takes precedence over env entries in personal and project settings.
+func launchSettings(directory string, env []string, subagents SubagentCLI, windowed bool) string {
 	upstream := ancestorInstructionSettings(directory, env)
-	if !sessionCommandAvailable(subagents) {
+	socket := sessionCommandAvailable(subagents)
+	if !socket && !windowed {
 		return upstream
 	}
 	// Upstream's keys are its own: decode the object generically and add the
@@ -24,7 +26,12 @@ func launchSettings(directory string, env []string, subagents SubagentCLI) strin
 	if settings == nil {
 		settings = map[string]any{}
 	}
-	settings["sandbox"] = map[string]any{"network": map[string]any{"allowUnixSockets": []string{subagents.Socket}}}
+	if socket {
+		settings["sandbox"] = map[string]any{"network": map[string]any{"allowUnixSockets": []string{subagents.Socket}}}
+	}
+	if windowed {
+		settings["env"] = map[string]string{disableAutoCompactEnv: "1"}
+	}
 	data, _ := json.Marshal(settings)
 	return string(data)
 }

@@ -99,6 +99,8 @@ func (m *Model) Analysis(now time.Time, rows []viewer.Row) analysis.Report {
 	r := m.analysis.Snapshot(now, m.state.Connected, strings.Contains(m.state.Status, "resync"), rows, m.state.Operations)
 	if m.analysisTree != nil {
 		r.Tree = m.analysisTree.Snapshot(m.analysis)
+	} else {
+		r.ContextMeasurements = m.analysis.ContextReport(!r.Partial)
 	}
 	if r.Selection != nil {
 		if c, ok := m.capabilities[r.Selection.Provider]; ok {

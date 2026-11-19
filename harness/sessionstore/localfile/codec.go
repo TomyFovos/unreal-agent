@@ -256,6 +256,10 @@ func replayLog(encoded []byte, value storedState, start int64, index *restoreInd
 
 	replayedItems := len(value.Items)
 	value.Items = slices.Grow(value.Items, itemCount-replayedItems)
+	var metrics *sessionstore.ContextFacts
+	if index != nil {
+		metrics = index.contextFacts
+	}
 	for recordIndex, record := range records {
 		switch record.Type {
 		case recordItem:
@@ -274,7 +278,7 @@ func replayLog(encoded []byte, value storedState, start int64, index *restoreInd
 			if err := replayItem(&value, record.Item); err != nil {
 				return storedState{}, 0, fmt.Errorf("apply item %d: %w", itemIndex, err)
 			}
-			if err := value.observeItem(record.Item); err != nil {
+			if err := value.observeItem(record.Item, metrics); err != nil {
 				return storedState{}, 0, fmt.Errorf("observe item %d: %w", itemIndex, err)
 			}
 			if index != nil {
@@ -287,7 +291,7 @@ func replayLog(encoded []byte, value storedState, start int64, index *restoreInd
 					recordIndex+2,
 				)
 			}
-			if err := value.applyOperationRecord(record.Operation, record.offset); err != nil {
+			if err := value.applyOperationRecord(record.Operation, record.offset, metrics); err != nil {
 				return storedState{}, 0, fmt.Errorf("apply operation record: %w", err)
 			}
 			if index != nil {
@@ -297,6 +301,9 @@ func replayLog(encoded []byte, value storedState, start int64, index *restoreInd
 				}
 			}
 		}
+	}
+	if metrics != nil {
+		metrics.Through = value.itemSequence
 	}
 	return value, committedSize, nil
 }

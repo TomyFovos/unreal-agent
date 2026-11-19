@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/host"
+	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
@@ -47,6 +48,16 @@ func ReadChild(ctx context.Context, directory string, id session.ID, after sessi
 // viewer may reuse it while the log's identity, size and modification time are
 // unchanged. It never acquires writer ownership or infers runtime liveness.
 func ReadChildSnapshot(ctx context.Context, directory string, id session.ID) (ChildView, error) {
+	return readChildSnapshot(ctx, directory, id, false)
+}
+
+// ReadAnalysisSnapshot also observes machine-made L2 facts during the same
+// committed replay. It can read the selected root as well as descendants.
+func ReadAnalysisSnapshot(ctx context.Context, directory string, id session.ID) (ChildView, error) {
+	return readChildSnapshot(ctx, directory, id, true)
+}
+
+func readChildSnapshot(ctx context.Context, directory string, id session.ID, analysis bool) (ChildView, error) {
 	if _, err := os.Stat(directory); err != nil {
 		return ChildView{}, err
 	}
@@ -54,12 +65,20 @@ func ReadChildSnapshot(ctx context.Context, directory string, id session.ID) (Ch
 	if err != nil {
 		return ChildView{}, err
 	}
-	snapshot, items, ops, err := store.ReadSnapshot(ctx, id)
+	var snapshot sessionstore.Snapshot
+	var items []sessionstore.Item
+	var ops []operation.Operation
+	var facts *sessionstore.ContextFacts
+	if analysis {
+		snapshot, items, ops, facts, err = store.ReadAnalysisSnapshot(ctx, id)
+	} else {
+		snapshot, items, ops, err = store.ReadSnapshot(ctx, id)
+	}
 	if err != nil {
 		return ChildView{}, err
 	}
 	page := sessionstore.Page{Items: items, NextAfter: sessionstore.Sequence(len(items))}
-	result := ChildView{View: host.View{Session: snapshot, History: host.ProjectHistoryPage(page), Operations: ops}, LastRecordedAt: snapshot.Session.CreatedAt}
+	result := ChildView{View: host.View{Session: snapshot, History: host.ProjectHistoryPage(page), Operations: ops, ContextFacts: facts}, LastRecordedAt: snapshot.Session.CreatedAt}
 	var finishSequence sessionstore.Sequence
 	for _, item := range items {
 		if item.RecordedAt.After(result.LastRecordedAt) {

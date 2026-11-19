@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
@@ -28,6 +31,7 @@ type RecordLog struct {
 	index       restoreIndex
 	positions   map[operation.ID]int
 	checkpoints []int64
+	context     contextstate.State
 }
 
 func (s *Store) ReadRecordLog(ctx context.Context, id session.ID) (*RecordLog, error) {
@@ -48,7 +52,74 @@ func (s *Store) ReadRecordLog(ctx context.Context, id session.ID) (*RecordLog, e
 		return nil, fmt.Errorf("record log session identity mismatch")
 	}
 	return &RecordLog{ID: id, Items: state.Items, Operations: state.Operations,
-		encoded: encoded[:size], index: index, positions: state.operationPositions, checkpoints: checkpoints}, nil
+		encoded: encoded[:size], index: index, positions: state.operationPositions, checkpoints: checkpoints,
+		context: state.ContextProjection.State}, nil
+}
+
+// ContextIndex links a compact L2 count to canonical sources in this log.
+func (l *RecordLog) ContextIndex(slot string) ([]byte, error) {
+	if slot == "children" {
+		type child struct {
+			Handle  operation.ID
+			Status  operation.Status
+			Locator record.Locator
+			Report  record.Locator `json:",omitempty"`
+		}
+		children := []child{}
+		for i, op := range l.Operations {
+			if op.ToolName != "SubagentStart" {
+				continue
+			}
+			job, err := operation.DecodeRemoteJobState(op)
+			if err != nil {
+				continue
+			}
+			plan, ok := decodeChildPlan(job)
+			if !ok || plan.Action != "start" || plan.ParentID != string(l.ID) {
+				continue
+			}
+			loc := l.index.operations[i]
+			source := record.Item(string(l.ID), uint64(loc.Sequence))
+			if loc.Sequence == 0 {
+				source = record.Address{Session: string(l.ID), Kind: record.OperationCheckpoint, Operation: string(op.ID), Offset: loc.Offset}.Locator()
+			}
+			var handle childHandle
+			_ = json.Unmarshal(job.Handle, &handle)
+			if handle.FinishLocator == "" && handle.Finish != nil {
+				handle.FinishLocator = source
+			}
+			children = append(children, child{Handle: op.ID, Status: op.Status, Locator: source, Report: handle.FinishLocator})
+		}
+		return json.Marshal(children)
+	}
+	processed := l.context.ProcessedSlots()[slot]
+	if processed == nil {
+		return nil, fs.ErrNotExist
+	}
+	sources := make(map[record.Locator]struct{})
+	maps.Copy(sources, processed.Sources)
+	// These slots also settle entries at render time using the active request.
+	// Their L3 indexes include the sources of the detached render's candidates.
+	add := func(e contextstate.Evidence) {
+		for _, loc := range e.Sources {
+			sources[loc] = struct{}{}
+		}
+	}
+	switch slot {
+	case "artifacts":
+		for _, v := range l.context.Artifacts.Current {
+			add(v.Evidence)
+		}
+	case "waiting":
+		for _, v := range l.context.Waiting.Current {
+			add(v.Evidence)
+		}
+	case "questions_to_user":
+		for _, v := range l.context.QuestionsToUser.Current {
+			add(v.Evidence)
+		}
+	}
+	return json.Marshal(slices.Sorted(maps.Keys(sources)))
 }
 
 func (l *RecordLog) RawItem(seq sessionstore.Sequence) []byte {

@@ -24,9 +24,42 @@ type derivedEstimate struct {
 	through     string
 	tokens      int64
 	prefix      int64
+	window      windowPromptSize
+	windowHead  windowPromptSize
 	prefixValid bool
 	header      [32]byte
 	epoch       *estimateEpoch
+}
+
+// Window lines join into one prompt, so rounding any line separately would
+// change the whole-prompt estimate. Measure each line once and round the sum.
+type windowPromptSize struct {
+	text  contextengine.TextSize
+	lines int64
+}
+
+func (s *windowPromptSize) add(other windowPromptSize) {
+	s.text.ASCII += other.text.ASCII
+	s.text.Other += other.text.Other
+	s.lines += other.lines
+}
+
+func (s windowPromptSize) tokens() int64 {
+	if s.lines == 0 {
+		return contextengine.MeasureText(llm.EmptyWindowPrompt).Tokens()
+	}
+	s.text.ASCII += (s.lines - 1) * int64(len(llm.WindowPromptSeparator))
+	return s.text.Tokens()
+}
+
+func (b *builder) measureWindowPrompt(items []llm.Item) windowPromptSize {
+	var size windowPromptSize
+	for _, item := range items {
+		if line, ok := b.windowPrompt(item); ok {
+			size.add(windowPromptSize{text: contextengine.MeasureText(line), lines: 1})
+		}
+	}
+	return size
 }
 
 func (b *builder) tokenEstimator() contextengine.TokenEstimator {
@@ -38,33 +71,49 @@ func (b *builder) tokenEstimator() contextengine.TokenEstimator {
 // derived representations. Header edits invalidate only the prefix.
 func (b *builder) estimateRequest() int64 {
 	e := b.tokenEstimator()
+	windowPrompt := b.UsesThreeLayerContext() && b.windowPrompt != nil
 	if b.estimate.epoch == nil {
 		b.estimate.epoch = &estimateEpoch{}
 	}
-	for _, u := range b.engine.UnitsAfter(b.estimate.through) {
+	for _, u := range b.projectionUnitsAfter(b.estimate.through) {
 		b.estimate.through = u.ID
-		if u.ID <= b.viewThrough && !b.retained[u.ID] || u.Class == contextengine.Omit {
+		if !b.includesUnit(u) {
 			continue
 		}
-		b.estimate.tokens += e.Items(b.deriveUnit(u))
+		items := b.deriveUnit(u)
+		if windowPrompt {
+			b.estimate.window.add(b.measureWindowPrompt(items))
+		} else {
+			b.estimate.tokens += e.Items(items)
+		}
 	}
 	if !b.estimate.prefixValid {
-		instructions, _ := contextengine.PublicItem(b.committedPrefix[0])
-		input := append([]llm.Item{instructions}, b.summary...)
-		b.estimate.prefix = e.Request(llm.Request{Tools: b.request.Tools, Input: input})
+		input := b.contextPrefix()
+		if windowPrompt {
+			b.estimate.windowHead = b.measureWindowPrompt(input)
+			b.estimate.prefix = b.windowHeaderTokens(input[0])
+		} else {
+			b.estimate.prefix = e.Request(llm.Request{Tools: b.request.Tools, Input: input})
+		}
 		data, err := json.Marshal(struct {
-			Provider string
-			Revision uint64
-			Model    llm.Model
-			Tools    []llm.Tool
-			Input    []llm.Item
-		}{b.provider, b.contextRuntime.Revision, b.request.Model, b.request.Tools, input}, json.Deterministic(true))
+			Provider      string
+			Revision      uint64
+			Model         llm.Model
+			Tools         []llm.Tool
+			Input         []llm.Item
+			PublicHistory bool `json:",omitzero"`
+		}{b.provider, b.contextRuntime.Revision, b.request.Model, b.request.Tools, input, b.UsesThreeLayerContext()}, json.Deterministic(true))
 		if err != nil {
 			// Do not match a measured prefix whose header cannot be encoded.
 			b.estimate.epoch = &estimateEpoch{}
 		}
 		b.estimate.header = sha256.Sum256(data)
 		b.estimate.prefixValid = true
+	}
+	if windowPrompt {
+		size := b.estimate.windowHead
+		size.add(b.estimate.window)
+		return b.estimate.prefix + size.tokens()
 	}
 	if e.Claude() {
 		return e.Request(llm.Request{Input: b.deriveItems()})

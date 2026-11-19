@@ -78,14 +78,10 @@ func redact(text string, patterns ...*regexp.Regexp) string {
 
 // Every alternative in pattern contains at least one of these literal words.
 // Searching them first avoids running the regexp machine over large ordinary
-// messages. Non-ASCII text retains the original Unicode case-fold behavior.
+// messages. Unicode lowercase covers Kelvin sign (K). Long s is the other
+// non-ASCII simple fold into the ASCII alphabet used by the pattern.
 func credentialCandidate(text string) bool {
-	for i := range len(text) {
-		if text[i] >= 0x80 {
-			return true
-		}
-	}
-	lower := strings.ToLower(text)
+	lower := strings.ReplaceAll(strings.ToLower(text), "ſ", "s")
 	for _, marker := range []string{"token", "key", "authorization", "secret", "password", "bearer", "sk-", "eyj"} {
 		if strings.Contains(lower, marker) {
 			return true

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -57,7 +58,14 @@ func writeWorkerTierTree(tb testing.TB, directory string, legacyRuntime bool) Wo
 		record(log, second, sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostActivity, Activity: &a})
 	}
 	response := func(log *settledLog, second int, model string, input, output, cached int64, duration int64, source string) {
-		itemAt(log, second-1, sessionstore.ItemTurn, session.Turn{ID: "turn", Type: session.TurnRegular})
+		turn := session.Turn{ID: "turn", Type: session.TurnRegular}
+		if !legacyRuntime {
+			turn.ContextStrategy = contextengine.WindowThreeLayer
+			if model == "qwen3.8-flash" {
+				turn.ContextStrategy = contextengine.WindowSummary
+			}
+		}
+		itemAt(log, second-1, sessionstore.ItemTurn, turn)
 		r := llm.Response{Model: model, Usage: llm.Usage{InputTokens: input, OutputTokens: output, CachedInputTokens: cached, AuthMethod: "api_key", Raw: []byte(`{}`)}}
 		if duration > 0 {
 			r.Generation = &llm.GenerationStatistics{Model: model, Tokens: llm.ReportedTokens(r.Usage), DurationMicros: duration * 1e6, Source: source}

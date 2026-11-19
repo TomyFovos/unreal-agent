@@ -3,10 +3,12 @@ package sessionstore
 import (
 	"encoding/json/jsontext"
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
+	"github.com/unreallabsai/unreal-agent/harness/record"
 	"time"
 )
 
@@ -138,22 +140,90 @@ func (r HostRecord) Validate() error {
 
 const HostContext = "context"
 const HostActivity = "activity"
+const (
+	ContextWindowStart         = "window_start"
+	ContextWindowBoundary      = "window_boundary"
+	ContextWindowFallback      = "window_fallback"
+	ContextConversationBinding = "provider_conversation_binding"
+	WindowCauseMidTurn         = "mid_turn"
+	WindowFallbackL2OverBudget = "l2_over_budget"
+)
 
 // ContextRecord logs a model view change; original evidence is never replaced.
 // Unit IDs are deterministic insertion identities reconstructed by canonical replay.
 type ContextRecord struct {
-	Conversation    *llm.ConversationRecord `json:",omitzero"`
-	Header          string                  `json:",omitzero"`
-	Usage           *llm.Usage              `json:",omitzero"`
-	Kind            string
-	UnitID          string              `json:",omitzero"`
-	Projections     []ContextProjection `json:",omitzero"`
-	Retained        []string            `json:",omitzero"` // mandatory units retained across a summary boundary
-	PrunedTokens    int64               `json:",omitzero"` // estimated net input tokens removed at this boundary
-	From, Through   string              `json:",omitzero"`
-	Items           []llm.Item          `json:",omitzero"`
-	Text            string              `json:",omitzero"`
-	Provider, Model string              `json:",omitzero"`
+	Window              *WindowBoundary           `json:",omitzero"`
+	Generation          *llm.GenerationStatistics `json:",omitzero"` // Unreal summary generation
+	RecordRead          *RecordRead               `json:",omitzero"`
+	Conversation        *llm.ConversationRecord   `json:",omitzero"`
+	ConversationBinding *llm.ConversationBinding  `json:",omitzero"`
+	Header              string                    `json:",omitzero"`
+	Usage               *llm.Usage                `json:",omitzero"`
+	Kind                string
+	UnitID              string              `json:",omitzero"`
+	Projections         []ContextProjection `json:",omitzero"`
+	Retained            []string            `json:",omitzero"` // mandatory units retained across a summary boundary
+	PrunedTokens        int64               `json:",omitzero"` // estimated net input tokens removed at this boundary
+	From, Through       string              `json:",omitzero"`
+	Items               []llm.Item          `json:",omitzero"`
+	Text                string              `json:",omitzero"`
+	Provider, Model     string              `json:",omitzero"`
+}
+
+// WindowBoundary measures a committed rebuild. The projection is in Text,
+// Through and Retained. The first request refers to this record in its Turn.
+type WindowBoundary struct {
+	Causes                 []string `json:",omitzero"`
+	BeforeTokens           int64
+	AfterTokens            int64
+	BeforeMeasurement      string
+	Estimator              string
+	ThresholdTokens        int64
+	HeaderTokens           *int64 `json:",omitzero"` // separate system instructions and tool schemas
+	MinimumExceedsTarget   bool   `json:",omitzero"` // even the required projection misses W or the input budget
+	L2Tokens               int64
+	L2TargetTokens         int64
+	RecentEvents           int
+	RecentEventLimit       *int `json:",omitzero"`
+	CacheRewarmMinutes     int  `json:",omitzero"`
+	ToolOutputExcerptChars int
+	SnapshotSequence       Sequence    `json:",omitzero"`
+	Tail                   *WindowTail `json:",omitzero"`
+	Fallback               string      `json:",omitzero"`
+	InputBudgetTokens      int64       `json:",omitzero"`
+}
+
+// WindowTail describes the new raw projection and indexes addressable evidence
+// in the old one. The index contains locators only, never the evidence bodies.
+type WindowTail struct {
+	Tokens, Items int64
+	Previous      *[]record.Locator `json:",omitzero"`
+}
+
+// RecordRead counts evidence returned by an explicit record command. After
+// identifies the history prefix at call start, even if the read spans a rebuild.
+type RecordRead struct {
+	Action           string
+	After            Sequence
+	Bytes            *int64 `json:",omitzero"`
+	PreviousTailHits *int64 `json:",omitzero"`
+}
+
+// ContextFacts is the metadata-only output of an analysis replay. Operation
+// checkpoints are anchored after the preceding history item.
+type ContextFacts struct {
+	Through Sequence
+	Rows    []ContextFactCounts
+}
+
+type ContextFactCounts struct {
+	After   Sequence
+	Events  map[contextstate.EventKind]int64 `json:",omitzero"`
+	Pending *contextstate.PendingCounts      `json:",omitzero"`
+}
+
+func (r ContextRecord) IsBoundary() bool {
+	return r.Kind == ContextWindowBoundary || r.Kind == "summary" || r.Conversation != nil && r.Conversation.Compacted
 }
 
 // ContextProjection lets one prune boundary replace multiple result bodies.

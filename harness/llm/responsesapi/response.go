@@ -214,6 +214,22 @@ func responseUsage(source *openaiapi.ResponseUsage) llm.Usage {
 	}
 }
 
+func markUnreportedCacheCounters(usage *llm.Usage) {
+	var raw struct {
+		Details struct {
+			Read  *int64 `json:"cached_tokens"`
+			Write *int64 `json:"cache_write_tokens"`
+		} `json:"input_tokens_details"`
+	}
+	_ = json.Unmarshal(usage.Raw, &raw)
+	if raw.Details.Read == nil {
+		usage.Unknown = append(usage.Unknown, llm.UsageCachedInput)
+	}
+	if raw.Details.Write == nil {
+		usage.Unknown = append(usage.Unknown, llm.UsageCacheWriteInput)
+	}
+}
+
 func dereference[T ~string](value *T) string {
 	if value == nil {
 		return ""

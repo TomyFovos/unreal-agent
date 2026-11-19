@@ -42,23 +42,28 @@ type turn struct {
 	subagents SubagentCLI
 	environ   []string
 
-	mu       sync.Mutex
-	model    string
-	text     []llm.Item                 // main-agent text not yet recorded
-	refused  map[string]bool            // shell calls Claude Code itself refused
-	denied   map[string]bool            // calls Unreal itself denied
-	reported map[string]observed.Result // tool results the model read
-	seq      int
-	failure  error
+	mu               sync.Mutex
+	model            string
+	text             []llm.Item                 // main-agent text not yet recorded
+	refused          map[string]bool            // shell calls Claude Code itself refused
+	denied           map[string]bool            // calls Unreal itself denied
+	reported         map[string]observed.Result // tool results the model read
+	seq              int
+	failure          error
+	batchInputTokens int64 // latest main-call input, independent of total turn usage
+	windowStopped    bool  // Unreal answered a tool batch with continue:false
 	// The model steps since the last recorded response: their usage and the
 	// time spent streaming them, so TPS never counts tool or approval waits.
-	steps         stepStats
-	stepStart     time.Time
-	stepUsage     usage
-	usageReported bool
-	messages      map[string]message
-	toolStarts    map[string]time.Time
-	nativeTools   map[string]nativeToolActivity
+	steps               stepStats
+	measureFirstRequest bool
+	compacting          bool
+	firstRequest        *llm.Usage
+	stepStart           time.Time
+	stepUsage           usage
+	usageReported       bool
+	messages            map[string]message
+	toolStarts          map[string]time.Time
+	nativeTools         map[string]nativeToolActivity
 	// mark is when the next model request can start: Claude Code ready, the
 	// previous step done, or a tool batch answered. A step's time runs from
 	// there, so it includes the wait for the first token as Codex's does.
@@ -84,6 +89,35 @@ type stepStats struct {
 
 func newTurn(ctx context.Context, cancel context.CancelFunc, opt llm.RequestOptions, out *writer, results *observed.Results, a *approver, directory, session string) *turn {
 	return &turn{ctx: ctx, cancel: cancel, opt: opt, out: out, results: results, approver: a, directory: directory, session: session, refused: map[string]bool{}, denied: map[string]bool{}, reported: map[string]observed.Result{}, toolStarts: map[string]time.Time{}, now: time.Now}
+}
+
+func (t *turn) recordSubscriptionUsage(f frame, model llm.Model) {
+	info := f.RateLimitInfo
+	u := llm.SubscriptionUsage{}
+	switch info.Window {
+	case "five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "overage":
+		u.Window = info.Window
+	}
+	switch info.Status {
+	case "allowed", "allowed_warning", "rejected":
+		u.Status = info.Status
+	}
+	if info.Utilization != nil && *info.Utilization >= 0 {
+		u.UsedPercent = new(100 * *info.Utilization)
+	}
+	if info.ResetsAt > 0 {
+		u.ResetsAt = time.Unix(info.ResetsAt, 0).UTC()
+	}
+	if u.Status != "" || u.UsedPercent != nil || !u.ResetsAt.IsZero() {
+		t.mu.Lock()
+		actual := t.model
+		t.mu.Unlock()
+		if actual == "" {
+			actual = model.ID
+		}
+		t.recordActivity(llm.ActivityRecord{Kind: llm.ActivitySubscriptionUsage, Provider: ProviderID,
+			ID: t.opt.Identity.TurnID, Model: actual, Effort: string(model.ReasoningEffort), Subscription: []llm.SubscriptionUsage{u}})
+	}
 }
 
 // handle acts on one frame. It returns the result frame when the turn ends.
@@ -120,13 +154,16 @@ func (t *turn) handle(f frame) *frame {
 			}
 		case "message_start":
 			t.mu.Lock()
+			t.captureFirstRequest(event.Message.Usage)
 			t.stepStart, t.stepUsage = t.mark, usage{}
+			t.batchInputTokens = 0
 			if t.stepStart.IsZero() {
 				t.stepStart = t.now()
 			}
 			if u := event.Message.Usage; u != nil {
 				t.stepUsage = *u
 				t.steps.contextTokens, t.steps.contextKnown = u.inputTokens(), true
+				t.batchInputTokens = t.steps.contextTokens
 			}
 			t.mu.Unlock()
 		case "message_delta":
@@ -145,10 +182,11 @@ func (t *turn) handle(f frame) *frame {
 			t.mu.Lock()
 			if !t.stepStart.IsZero() {
 				u := t.stepUsage
+				read, write := u.cacheTokens()
 				t.steps.known = true
-				t.steps.input += u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
-				t.steps.cached += u.CacheReadInputTokens
-				t.steps.cacheWrite += u.CacheCreationInputTokens
+				t.steps.input += u.InputTokens + read + write
+				t.steps.cached += read
+				t.steps.cacheWrite += write
 				t.steps.output += u.OutputTokens
 				if reasoning, known := u.reasoningTokens(); known {
 					t.steps.reasoning += reasoning
@@ -171,6 +209,14 @@ func (t *turn) handle(f frame) *frame {
 		}
 		m := incoming.message
 		t.mu.Lock()
+		if f.ParentToolUseID == nil {
+			t.captureFirstRequest(m.Usage)
+			if m.Usage != nil {
+				if inputTokens := m.Usage.inputTokens(); inputTokens > 0 {
+					t.batchInputTokens = inputTokens
+				}
+			}
+		}
 		limited := llm.IsOutputLimit(incoming.StopReason)
 		if m.ID != "" && m.Usage != nil {
 			if t.messages == nil {
@@ -323,17 +369,33 @@ func (t *turn) hook(id, callback string, in hookInput) {
 func (t *turn) batch(in hookInput) (answer map[string]any) {
 	t.record.Lock()
 	defer t.record.Unlock()
+	var recordedInputTokens int64
 	// Even an empty batch can carry inbox inputs. Preserve any U22 result in
 	// the same additionalContext and acknowledge input only through the Host.
 	defer func() {
-		if t.opt.Steering == nil || t.ctx.Err() != nil {
+		if t.ctx.Err() != nil {
 			return
 		}
-		inputs, err := t.opt.Steering(t.ctx)
+		var batch llm.ToolBatchContinuation
+		var err error
+		if t.opt.AfterToolBatch != nil {
+			batch, err = t.opt.AfterToolBatch(t.ctx, recordedInputTokens)
+		} else if t.opt.Steering != nil {
+			batch.Inputs, err = t.opt.Steering(t.ctx)
+		}
 		if err != nil {
 			t.fail(err)
 			return
 		}
+		if batch.RotateWindow {
+			t.mu.Lock()
+			t.windowStopped = true
+			t.mu.Unlock()
+			// The top-level fields stop the agentic loop before the next call.
+			answer = map[string]any{"continue": false, "stopReason": "Unreal Agent is continuing in a fresh context window."}
+			return
+		}
+		inputs := batch.Inputs
 		if len(inputs) == 0 {
 			return
 		}
@@ -382,6 +444,10 @@ func (t *turn) batch(in hookInput) (answer map[string]any) {
 	t.mu.Lock()
 	output, model := t.takeOutput(), t.model
 	steps := t.takeSteps()
+	var inputTokens int64
+	if in.AgentID == "" {
+		inputTokens, t.batchInputTokens = t.batchInputTokens, 0
+	}
 	t.mu.Unlock()
 	type handed struct{ id, command string }
 	var executed []handed
@@ -430,8 +496,9 @@ func (t *turn) batch(in hookInput) (answer map[string]any) {
 	usage, generation := steps.report(model)
 	t.mu.Lock()
 	t.usageReported = true
+	first := t.firstRequestUsage()
 	t.mu.Unlock()
-	outcomes, err := t.opt.Tools(t.ctx, llm.Response{ID: uuid.New().String(), Model: model, Stop: llm.StopComplete, Output: output, Usage: usage, Generation: generation})
+	outcomes, err := t.opt.Tools(t.ctx, llm.Response{ID: uuid.New().String(), Model: model, Stop: llm.StopComplete, Output: output, Usage: usage, Generation: generation, FirstRequestUsage: first})
 	t.mu.Lock()
 	t.mark = t.now() // tool runs and approvals are never generation time
 	t.mu.Unlock()
@@ -440,6 +507,7 @@ func (t *turn) batch(in hookInput) (answer map[string]any) {
 		t.fail(fmt.Errorf("record Claude Code tool calls: %w", err))
 		return map[string]any{}
 	}
+	recordedInputTokens = inputTokens
 	byID := map[string]llm.ToolOutcome{}
 	for _, outcome := range outcomes {
 		byID[outcome.Result.CallID] = outcome
@@ -506,7 +574,7 @@ func (t *turn) finish(result *frame) llm.Response {
 	if len(output) == 0 && strings.TrimSpace(result.Result) != "" {
 		output = []llm.Item{{ProviderID: itemPrefix + uuid.New().String(), Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: result.Result}}}
 	}
-	response := llm.Response{ID: uuid.New().String(), Model: t.model, Stop: llm.StopComplete, Output: output}
+	response := llm.Response{ID: uuid.New().String(), Model: t.model, Stop: llm.StopComplete, Output: output, FirstRequestUsage: t.firstRequestUsage()}
 	response.Usage, response.Generation = t.takeSteps().report(t.model)
 	if !t.usageReported && result.Usage != nil {
 		// A result may carry usage even if the CLI omitted stream events.
@@ -565,11 +633,36 @@ func unknownUsage() llm.Usage {
 }
 
 func reportedUsage(u usage) llm.Usage {
-	r := llm.Usage{InputTokens: u.inputTokens(), CachedInputTokens: u.CacheReadInputTokens, CacheWriteInputTokens: u.CacheCreationInputTokens, OutputTokens: u.OutputTokens}
+	read, write := u.cacheTokens()
+	r := llm.Usage{InputTokens: u.InputTokens + read + write, CachedInputTokens: read, CacheWriteInputTokens: write, OutputTokens: u.OutputTokens}
 	if reasoning, known := u.reasoningTokens(); known {
 		r.ReasoningTokens = reasoning
 	} else {
 		r.Unknown = []llm.UsageField{llm.UsageReasoning}
 	}
 	return r
+}
+
+// captureFirstRequest runs under t.mu on the first main model call, before
+// any following tool round or native child can contribute usage.
+func (t *turn) captureFirstRequest(raw *usage) {
+	if !t.measureFirstRequest || t.firstRequest != nil {
+		return
+	}
+	u := unknownUsage()
+	if raw != nil {
+		u = reportedUsage(*raw)
+		if raw.CacheReadInputTokens == nil {
+			u.Unknown = append(u.Unknown, llm.UsageCachedInput)
+		}
+		if raw.CacheCreationInputTokens == nil {
+			u.Unknown = append(u.Unknown, llm.UsageCacheWriteInput)
+		}
+	}
+	t.firstRequest = &u
+}
+
+func (t *turn) firstRequestUsage() *llm.Usage {
+	t.captureFirstRequest(nil)
+	return t.firstRequest
 }

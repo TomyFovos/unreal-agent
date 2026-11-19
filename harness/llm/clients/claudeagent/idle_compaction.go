@@ -82,12 +82,13 @@ func (c *Client) scheduleIdleCompaction(ctx context.Context, opt llm.RequestOpti
 	if ctx.Err() != nil || opt.StartBackground == nil {
 		return
 	}
-	session := sessionUUID(c.config.Namespace, opt.Identity.SessionID)
+	base := sessionUUID(c.config.Namespace, opt.Identity.SessionID)
+	session := c.conversationID(base, opt)
 	before := c.lastContextTokens(session, opt)
 	if before <= idleCompactMinimumTokens {
 		return
 	}
-	s := c.idleCompactionState(session, opt)
+	s := c.idleCompactionState(base, opt)
 	if s == nil {
 		return
 	}

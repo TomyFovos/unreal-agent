@@ -20,6 +20,7 @@ type Engine struct {
 	mu         sync.Mutex
 	units      map[string]Unit
 	order      []string
+	omitted    int
 	sources    map[string][]string
 	deferred   map[string]HistoryRef
 	state      State
@@ -82,6 +83,7 @@ func (e *Engine) add(u Unit, source string, omitGroup bool) (string, bool, *llm.
 	if !eligible {
 		u.Class = Omit
 		u.Item = llm.Item{}
+		e.omitted++
 		if omitGroup {
 			u.Group = ""
 		}
@@ -108,6 +110,9 @@ func (e *Engine) Omit(id string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if u, ok := e.units[id]; ok {
+		if u.Class != Omit {
+			e.omitted++
+		}
 		u.Class, u.Item, u.Group = Omit, llm.Item{}, ""
 		e.units[id] = u
 	}
@@ -204,6 +209,12 @@ func (e *Engine) State() State {
 
 func (e *Engine) Units() []Unit {
 	return e.UnitsAfter("")
+}
+
+func (e *Engine) UnitCounts() (total, omitted int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.order), e.omitted
 }
 
 // UnitsAfter returns the ordered suffix without copying the preceding units.

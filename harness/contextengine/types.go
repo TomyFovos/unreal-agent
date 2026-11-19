@@ -140,7 +140,15 @@ type Config struct {
 	RetrievalLimit, CheckpointThreshold                           int    `json:",omitzero"`
 	LargeToolTokens                                               int64  `json:",omitzero"`
 	ToolResultKeepTokens, ToolResultMinPruneTokens                int64  `json:",omitzero"`
+	WindowStrategy                                                string `json:",omitzero"`
+	WindowThresholdTokens, L2TargetTokens                         int64  `json:",omitzero"`
+	RecentEventCount, ToolOutputExcerptChars, CacheRewarmMinutes  int    `json:",omitzero"`
 }
+
+const (
+	WindowThreeLayer = "three-layer"
+	WindowSummary    = "summary"
+)
 
 func (c Config) Resolve() (Config, error) {
 	if c.Version == 0 {
@@ -151,6 +159,18 @@ func (c Config) Resolve() (Config, error) {
 	}
 	if c.Version != Version || c.Mode != "bounded" && c.Mode != "legacy" {
 		return c, &Error{"unsupported_strategy"}
+	}
+	if c.WindowStrategy != "" && c.WindowStrategy != WindowThreeLayer && c.WindowStrategy != WindowSummary {
+		return c, &Error{"unsupported_window_strategy"}
+	}
+	if c.WindowThresholdTokens < 0 || c.L2TargetTokens < 0 || c.RecentEventCount < 0 || c.ToolOutputExcerptChars < 0 || c.CacheRewarmMinutes < 0 {
+		return c, &Error{"invalid_configuration"}
+	}
+	if c.WindowThresholdTokens == 0 {
+		c.WindowThresholdTokens = llm.DefaultCompactThresholdTokens
+	}
+	if c.L2TargetTokens == 0 {
+		c.L2TargetTokens = 5000
 	}
 	if c.FallbackWindow < 0 || c.InputBudget < 0 || c.ResponseReserve < 0 || c.ProtocolReserve < 0 || c.RecentReserve < 0 || c.RetrievalReserve < 0 || c.RetrievalLimit < 0 || c.CheckpointThreshold < 0 || c.LargeToolTokens < 0 || c.ToolResultKeepTokens < 0 || c.ToolResultMinPruneTokens < 0 {
 		return c, &Error{"invalid_configuration"}

@@ -28,19 +28,25 @@ func (e TokenEstimator) Profile() string {
 	}
 }
 
-func (e TokenEstimator) Text(text string) int64 {
-	var ascii, other int64
-	for len(text) > 0 {
-		r, n := utf8.DecodeRuneInString(text)
-		text = text[n:]
+// TextSize is additive before the ASCII token count is rounded. Use it for
+// prompt fragments joined into one string.
+type TextSize struct{ ASCII, Other int64 }
+
+func MeasureText(text string) TextSize {
+	var size TextSize
+	for _, r := range text {
 		if r < utf8.RuneSelf {
-			ascii++
+			size.ASCII++
 		} else {
-			other++
+			size.Other++
 		}
 	}
-	return (ascii+3)/4 + other
+	return size
 }
+
+func (s TextSize) Tokens() int64 { return (s.ASCII+3)/4 + s.Other }
+
+func (e TokenEstimator) Text(text string) int64 { return MeasureText(text).Tokens() }
 
 func (e TokenEstimator) Items(items []llm.Item) int64 {
 	var tokens int64

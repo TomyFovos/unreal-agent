@@ -150,6 +150,9 @@ func (s *Session) walkRecordLogs(ctx context.Context, target session.ID, visit f
 
 func (s *Session) recordContent(ctx context.Context, log recordLog, a record.Address) (recordContent, error) {
 	switch a.Kind {
+	case record.ContextIndex:
+		raw, err := log.ContextIndex(a.Section)
+		return memoryRecord(raw), err
 	case record.OperationCheckpoint:
 		raw, err := log.RawOperation(operation.ID(a.Operation), a.Offset)
 		return memoryRecord(raw), err
@@ -198,6 +201,10 @@ func (s *Session) recordContent(ctx context.Context, log recordLog, a record.Add
 					return modelPart(raw, a.Part)
 				}
 			}
+		}
+	case record.ToolError:
+		if r, ok := item.Data.(sessionstore.ToolCallStatus); ok && r.Status.Error != "" {
+			return originalOutput(r.Status.Error, r.Status.OriginalError, r.Status.ErrorTruncated)
 		}
 	case record.ChildReport:
 		if r, ok := item.Data.(sessionstore.HostRecord); ok && r.Kind == "finish" && a.Handle == string(log.handle) {
@@ -346,7 +353,7 @@ func (s *Session) RecordFind(ctx context.Context, query record.Query) ([]record.
 		}
 		if query.Kind == "" || query.Kind == record.OperationOutput {
 			for i, op := range log.Operations {
-				streams := operationRecordStreams(op)
+				streams := operation.RecordStreams(op)
 				if len(streams) == 0 {
 					continue
 				}
@@ -433,6 +440,10 @@ func findRecordItem(log recordLog, query record.Query, item sessionstore.Item, m
 			if query.Handle == handle {
 				break
 			}
+		}
+		if v.Status.Error != "" && (!v.Status.ErrorTruncated || len(v.Status.OriginalError) > 0) {
+			a.Kind = record.ToolError
+			parts = append(parts, a)
 		}
 	case sessionstore.HostRecord:
 		metadata = v.Kind

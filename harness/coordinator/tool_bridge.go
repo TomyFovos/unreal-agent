@@ -21,7 +21,7 @@ import (
 type bridgeReply struct {
 	outcomes []llm.ToolOutcome
 	err      error
-	inputs   []llm.BatchInput
+	batch    llm.ToolBatchContinuation
 }
 type bridgeRequest struct {
 	ctx                context.Context
@@ -31,31 +31,63 @@ type bridgeRequest struct {
 	begin              bool
 	waitingForChildren bool
 	steering           bool
+	inputTokens        int64
 }
 
 func (current *coordinator) steeringRendezvous(ctx context.Context, origin session.TurnID) func(context.Context) ([]llm.BatchInput, error) {
+	afterBatch := current.toolBatchRendezvous(ctx, origin)
 	return func(callCtx context.Context) ([]llm.BatchInput, error) {
-		request := bridgeRequest{ctx: callCtx, origin: origin, reply: make(chan bridgeReply, 1), steering: true}
+		batch, err := afterBatch(callCtx, 0)
+		return batch.Inputs, err
+	}
+}
+
+func (current *coordinator) toolBatchRendezvous(ctx context.Context, origin session.TurnID) func(context.Context, int64) (llm.ToolBatchContinuation, error) {
+	return func(callCtx context.Context, inputTokens int64) (llm.ToolBatchContinuation, error) {
+		request := bridgeRequest{ctx: callCtx, origin: origin, reply: make(chan bridgeReply, 1), steering: true, inputTokens: inputTokens}
 		select {
 		case current.bridgeRequests <- request:
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return llm.ToolBatchContinuation{}, ctx.Err()
 		case <-callCtx.Done():
-			return nil, callCtx.Err()
+			return llm.ToolBatchContinuation{}, callCtx.Err()
 		}
 		select {
 		case reply := <-request.reply:
-			return reply.inputs, reply.err
+			return reply.batch, reply.err
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return llm.ToolBatchContinuation{}, ctx.Err()
 		case <-callCtx.Done():
-			return nil, callCtx.Err()
+			return llm.ToolBatchContinuation{}, callCtx.Err()
 		}
 	}
 }
 
 // The next model response acknowledges the watermark of this continuation.
 func (current *coordinator) deliverSteering(ctx context.Context, request bridgeRequest) error {
+	if b, ok := current.dependencies.ContextBuilder.(interface {
+		PrepareToolWindow(context.Context, func(sessionstore.ContextRecord) error, int64, func() error) (bool, error)
+	}); ok && request.inputTokens > 0 {
+		rotated, err := b.PrepareToolWindow(ctx, func(r sessionstore.ContextRecord) error {
+			return current.persistContext(ctx, r)
+		}, request.inputTokens, func() error {
+			if len(current.deferredContext) == 0 {
+				return nil
+			}
+			// Include these inputs in the fresh window's size without delivering
+			// them to the private conversation about to stop.
+			return current.persistContext(ctx, sessionstore.ContextRecord{Kind: "deferred_inputs"})
+		})
+		if err != nil {
+			return err
+		}
+		if rotated {
+			// Pending inbox inputs go to the fresh request. The old conversation
+			// will stop before it can read any additional context.
+			request.reply <- bridgeReply{batch: llm.ToolBatchContinuation{RotateWindow: true}}
+			return nil
+		}
+	}
 	queued := len(current.deferredContext)
 	inputs, records, err := current.projectDeferredContext(true)
 	if err != nil {
@@ -68,7 +100,7 @@ func (current *coordinator) deliverSteering(ctx context.Context, request bridgeR
 			return err
 		}
 	}
-	request.reply <- bridgeReply{inputs: inputs}
+	request.reply <- bridgeReply{batch: llm.ToolBatchContinuation{Inputs: inputs}}
 	return nil
 }
 
@@ -113,13 +145,19 @@ type bridgeRound struct {
 	results map[string]llm.ToolOutcome
 }
 
+type deferredInput struct {
+	sessionstore.Item
+	peer inbox.PeerMessage
+}
+
 // Project in inbox order at a tool-batch or regular request boundary. A ready
 // notice contributes to scheduling only and has no model-visible text.
 func (current *coordinator) projectDeferredContext(batch bool) ([]llm.BatchInput, []record.Locator, error) {
 	var inputs []llm.BatchInput
 	var records []record.Locator
 	var peers, quiet int
-	for _, item := range current.deferredContext {
+	for _, queued := range current.deferredContext {
+		item := queued.Item
 		if b, ok := current.dependencies.ContextBuilder.(interface{ SetHistoryItem(sessionstore.Item) }); ok {
 			b.SetHistoryItem(item)
 		}
@@ -130,28 +168,19 @@ func (current *coordinator) projectDeferredContext(batch bool) ([]llm.BatchInput
 			}
 		}
 		if input.Kind == inbox.InputPeer {
-			if !batch {
-				if err := current.addPeerInput(input); err != nil {
-					return nil, nil, err
-				}
-				continue
-			}
-			b, ok := current.dependencies.ContextBuilder.(interface {
-				ProjectPeerInput(inbox.Input) (string, error)
-			})
-			if !ok {
-				return nil, nil, errors.New("context builder cannot project peer input through the tool bridge")
-			}
-			text, err := b.ProjectPeerInput(input)
+			text, err := current.projectPeerInput(input, queued.peer, batch)
 			if err != nil {
 				return nil, nil, err
+			}
+			if !batch {
+				continue
 			}
 			if text != "" {
 				inputs = append(inputs, llm.BatchInput{Text: secretguard.Redact(text), Peer: true})
 				retain(record.PeerMessage)
 			}
 			peers++
-			if quietPeer(input) {
+			if quietPeerKind(queued.peer.Kind) {
 				quiet++
 			}
 			continue

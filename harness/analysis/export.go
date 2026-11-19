@@ -16,6 +16,10 @@ func Encode(r Report, format string) ([]byte, error) {
 		b.WriteString("# Session analysis\n\nMetadata and statistics only. JSON durations use nanoseconds.\n\n")
 		for _, view := range Views[:len(Views)-1] {
 			b.WriteString("## " + view + "\n\n")
+			if view == "Context metrics" {
+				writeContextMarkdown(&b, contextMeasurements(r))
+				continue
+			}
 			for _, line := range Lines(r, view, true) {
 				b.WriteString("- " + markdownText(line) + "\n")
 			}

@@ -160,17 +160,31 @@ func agent(dir string, args []string, c configuration) {
 		}
 		return
 	}
+	if c.AgentAutoCompact && os.Getenv("DISABLE_AUTO_COMPACT") != "1" {
+		_ = out.Encode(map[string]any{"type": "system", "subtype": "compact_boundary", "compact_metadata": map[string]any{
+			"trigger": "auto", "pre_tokens": 190_000, "post_tokens": 10_000,
+		}})
+	}
+	emitUsage := func(usage any) {
+		_ = out.Encode(map[string]any{"type": "stream_event", "event": map[string]any{"type": "message_start", "message": map[string]any{"usage": usage}}})
+		_ = out.Encode(map[string]any{"type": "stream_event", "event": map[string]any{"type": "message_stop"}})
+	}
 	cwd, _ := os.Getwd()
 	var notes []string
 	for i, step := range steps {
-		if c.AgentStepInputTokens > 0 {
-			_ = out.Encode(map[string]any{"type": "stream_event", "event": map[string]any{"type": "message_start", "message": map[string]any{"usage": map[string]any{"input_tokens": c.AgentStepInputTokens}}}})
-			_ = out.Encode(map[string]any{"type": "stream_event", "event": map[string]any{"type": "message_stop"}})
+		var stepUsage any
+		if i < len(c.AgentUsage) {
+			stepUsage = c.AgentUsage[i]
+		} else if c.AgentStepInputTokens > 0 {
+			stepUsage = map[string]any{"input_tokens": c.AgentStepInputTokens}
+		}
+		if stepUsage != nil {
+			emitUsage(stepUsage)
 		}
 		id := fmt.Sprintf("toolu_fake_%d", i+1)
 		var input map[string]any
 		_ = json.Unmarshal(step.Input, &input)
-		_ = out.Encode(map[string]any{"type": "assistant", "parent_tool_use_id": nil, "message": map[string]any{"id": fmt.Sprintf("msg_fake_%d", i+1), "content": []any{map[string]any{"type": "tool_use", "id": id, "name": step.Tool, "input": input}}}})
+		_ = out.Encode(map[string]any{"type": "assistant", "parent_tool_use_id": nil, "message": map[string]any{"id": fmt.Sprintf("msg_fake_%d", i+1), "usage": stepUsage, "content": []any{map[string]any{"type": "tool_use", "id": id, "name": step.Tool, "input": input}}}})
 		content, isError := "", false
 		switch {
 		case step.Refused:
@@ -210,6 +224,12 @@ func agent(dir string, args []string, c configuration) {
 				_, _ = log.Write(append(data, '\n'))
 				_ = log.Close()
 			}
+			if keepGoing, ok := answer["continue"].(bool); ok && !keepGoing {
+				_ = out.Encode(map[string]any{"type": "result", "subtype": "success", "is_error": false, "result": "", "stop_reason": "tool_use"})
+				for next() != nil {
+				}
+				return
+			}
 		}
 	}
 	final := c.AgentFinal
@@ -219,7 +239,14 @@ func agent(dir string, args []string, c configuration) {
 	if len(notes) > 0 {
 		final += "\n" + strings.Join(notes, "\n")
 	}
-	_ = out.Encode(map[string]any{"type": "assistant", "parent_tool_use_id": nil, "message": map[string]any{"id": "msg_fake_final", "content": []any{map[string]any{"type": "text", "text": final}}}})
+	if len(steps) < len(c.AgentUsage) {
+		emitUsage(c.AgentUsage[len(steps)])
+	}
+	content := []any{map[string]any{"type": "text", "text": final}}
+	if c.AgentAutoCompact {
+		content = append(content, map[string]any{"type": "thinking", "thinking": "fixture private thinking", "signature": "fixture private signature"})
+	}
+	_ = out.Encode(map[string]any{"type": "assistant", "parent_tool_use_id": nil, "message": map[string]any{"id": "msg_fake_final", "content": content}})
 	inputTokens := c.AgentInputTokens
 	if inputTokens == 0 {
 		inputTokens = 10

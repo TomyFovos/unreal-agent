@@ -79,15 +79,16 @@ type WorkerSummary struct {
 }
 
 type TreeReport struct {
-	Version    int
-	ObservedAt time.Time
-	Partial    bool
-	PriceTable string
-	Layers     []LayerModel
-	Workers    []WorkerSummary
-	Sessions   []SessionMetric
-	Tasks      []TaskMetric
-	Routing    []RoutingCount `json:",omitzero"`
+	Version             int
+	ObservedAt          time.Time
+	Partial             bool
+	PriceTable          string
+	Layers              []LayerModel
+	Workers             []WorkerSummary
+	Sessions            []SessionMetric
+	Tasks               []TaskMetric
+	Routing             []RoutingCount       `json:",omitzero"`
+	ContextMeasurements *ContextMeasurements `json:",omitzero"`
 }
 
 type treeNode struct {
@@ -99,6 +100,7 @@ type treeNode struct {
 	selection       *sessionstore.RuntimeSelection
 	status          operation.Status
 	observed        bool
+	facts           *sessionstore.ContextFacts
 }
 type Tree struct {
 	nodes      []*treeNode
@@ -129,6 +131,7 @@ func ReadTree(ctx context.Context, root session.ID, inspect InspectFunc) (*Tree,
 				break
 			}
 			latest = v
+			start := after
 			n.acc.Created(v.Session.Session.CreatedAt)
 			for _, item := range v.History.Items {
 				if item.Sequence != after+1 {
@@ -144,6 +147,15 @@ func ReadTree(ctx context.Context, root session.ID, inspect InspectFunc) (*Tree,
 			if v.History.NextAfter != after || v.History.More && len(v.History.Items) == 0 {
 				readErr = viewer.ErrInvalidPage
 				break
+			}
+			if facts := v.ContextFacts; facts != nil && facts.Through == after {
+				if start == 0 {
+					n.facts = &sessionstore.ContextFacts{}
+				}
+				if n.facts != nil && n.facts.Through == start {
+					n.facts.Through = after
+					n.facts.Rows = append(n.facts.Rows, facts.Rows...)
+				}
 			}
 			if !v.History.More {
 				n.observed = true
@@ -305,6 +317,7 @@ func (t *Tree) Snapshot(root *Accumulator) *TreeReport {
 	r.buildTasks()
 	r.aggregate()
 	r.Routing = routing.sorted()
+	r.ContextMeasurements = t.contextReport(root, r.Sessions)
 	return r
 }
 

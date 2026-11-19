@@ -132,6 +132,10 @@ func TestStreamActivityFakeCLI(t *testing.T) {
 					if id != "turn-stream/stream/1" || activity.Model != "stream-model" || activity.StartedAt.IsZero() || !activity.EndedAt.IsZero() || observation.InputTokens == nil || *observation.InputTokens != 115 {
 						t.Fatal(activity)
 					}
+					u := activity.RequestUsage
+					if u == nil || u.Input == nil || *u.Input != 115 || u.Uncached == nil || *u.Uncached != 100 || u.Read == nil || *u.Read != 10 || u.Write == nil || *u.Write != 5 {
+						t.Fatal("missing individual request cache counters", u)
+					}
 				case "progress", "message_stop":
 					if activity.ID != id || observation.DeltaCount == nil || *observation.DeltaCount <= previousCount || observation.LastDeltaAt.IsZero() || observation.LastDeltaAt.Before(activity.StartedAt) || observation.LastDeltaAt.After(activity.EndedAt) || observation.ThinkingTokensEstimate == nil || observation.TextTokensEstimate == nil {
 						t.Fatal("missing or stale stream counters", activity)
@@ -141,6 +145,9 @@ func TestStreamActivityFakeCLI(t *testing.T) {
 						stops++
 						if observation.StopReason != "end_turn" || observation.OutputTokens == nil || *observation.OutputTokens != 20 || observation.ReasoningTokens == nil || *observation.ReasoningTokens != 7 {
 							t.Fatal("completion usage or stop reason missing", activity)
+						}
+						if u := activity.RequestUsage; u == nil || u.Output == nil || *u.Output != 20 {
+							t.Fatal("missing reported request output", u)
 						}
 						pairs := (*observation.DeltaCount - 1) / 2
 						if *observation.DeltaCount != pairs*2+1 || *observation.ThinkingTokensEstimate != (pairs*6+3)/4 || *observation.TextTokensEstimate != pairs {

@@ -5,14 +5,17 @@ import (
 	"context"
 	"encoding/json/v2"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/record"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/subagent/identity"
 )
@@ -29,14 +32,23 @@ func (s *Session) ContextCommand(ctx context.Context, generation string, inputID
 			return result, err
 		}
 		state, err := s.ContextState(ctx)
-		result.State = &state
+		if err == nil {
+			state.Session.ID = string(s.ID)
+			result.State = new(state.Render(0))
+		}
 		return result, err
 	case contextstate.ShowRecord:
 		var args contextstate.RecordSelection
 		if err := decode(&args); err != nil {
 			return result, err
 		}
+		read, previous := s.beginRecordRead("show")
 		page, err := s.RecordShow(ctx, args.Locator, args.PageBytes)
+		if err == nil {
+			read.Bytes = new(int64(len(page.Bytes)))
+			read.PreviousTailHits = previous.hits([]record.Locator{args.Locator})
+		}
+		s.recordRead(ctx, read)
 		result.Page = &page
 		return result, err
 	case contextstate.FindRecord:
@@ -44,7 +56,19 @@ func (s *Session) ContextCommand(ctx context.Context, generation string, inputID
 		if err := decode(&args); err != nil {
 			return result, err
 		}
+		read, previous := s.beginRecordRead("find")
 		matches, err := s.RecordFind(ctx, record.Query(args))
+		if err == nil {
+			var bytes int64
+			locators := make([]record.Locator, 0, len(matches))
+			for _, match := range matches {
+				bytes += int64(len(match.Excerpt))
+				locators = append(locators, match.Locator)
+			}
+			read.Bytes = &bytes
+			read.PreviousTailHits = previous.hits(locators)
+		}
+		s.recordRead(ctx, read)
 		result.Matches = matches
 		return result, err
 	}
@@ -146,6 +170,76 @@ func (s *Session) ContextCommand(ctx context.Context, generation string, inputID
 		return s.answerContextQuestion(ctx, inputID, args)
 	default:
 		return result, fmt.Errorf("unknown context command %q", cmd.Action)
+	}
+}
+
+type previousTail struct{ locators *[]record.Locator }
+
+func (s *Session) beginRecordRead(action string) (sessionstore.RecordRead, previousTail) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	read := sessionstore.RecordRead{Action: action, After: sessionstore.Sequence(len(s.items))}
+	for i := len(s.items) - 1; i >= 0; i-- {
+		switch v := s.items[i].Data.(type) {
+		case sessionstore.Fork:
+			return read, previousTail{}
+		case session.Turn:
+			if v.ContextStrategy != "" && v.ContextStrategy != contextengine.WindowThreeLayer {
+				return read, previousTail{}
+			}
+		case sessionstore.HostRecord:
+			if c := v.Context; c != nil {
+				switch c.Kind {
+				case sessionstore.ContextWindowStart, sessionstore.ContextWindowFallback, "summary", "header":
+					return read, previousTail{}
+				case sessionstore.ContextWindowBoundary:
+					if c.Window != nil && c.Window.Tail != nil {
+						return read, previousTail{c.Window.Tail.Previous}
+					}
+					return read, previousTail{}
+				case "provider_conversation":
+					if c.Conversation != nil && c.Conversation.Compacted {
+						return read, previousTail{}
+					}
+				}
+			}
+		}
+	}
+	return read, previousTail{}
+}
+
+func (p previousTail) hits(locators []record.Locator) *int64 {
+	if p.locators == nil {
+		return nil
+	}
+	remaining := make(map[record.Locator]bool, len(*p.locators))
+	for _, loc := range *p.locators {
+		remaining[loc] = true
+	}
+	var hits int64
+	for _, loc := range locators {
+		if a, err := loc.Address(); err == nil {
+			a.Line, a.Range = 0, nil
+			base := a.Locator()
+			if remaining[base] {
+				hits++
+				delete(remaining, base)
+			}
+		}
+	}
+	return &hits
+}
+
+func (s *Session) recordRead(ctx context.Context, read sessionstore.RecordRead) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.running {
+		return
+	}
+	r := sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostContext,
+		Context: &sessionstore.ContextRecord{Kind: "record_read", RecordRead: &read}}
+	if err := s.store.AppendHostRecord(context.WithoutCancel(ctx), s.ID, r); err != nil {
+		slog.Warn("record evidence read measurement", "action", read.Action)
 	}
 }
 

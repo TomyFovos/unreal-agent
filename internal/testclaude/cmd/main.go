@@ -32,6 +32,8 @@ type configuration struct {
 	AgentFinal                                                          string
 	AgentOnce                                                           bool
 	AgentInputTokens, AgentStepInputTokens                              int64
+	AgentUsage                                                          []jsontext.Value
+	AgentAutoCompact                                                    bool
 	CompactPreTokens, CompactPostTokens                                 int64
 	CompactFailure                                                      string
 	CompactCrash, CompactUnknownAfter                                   bool

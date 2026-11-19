@@ -16,88 +16,102 @@ import (
 // checkpoint or a child's Finish alone does not establish parent delivery.
 // Callers serialize access with their existing Session/event-loop ownership.
 type Index struct {
-	delivered map[operation.ID]bool
-	finishes  map[operation.ID]string
-	tails     map[operation.ID][]string
+	Delivered map[operation.ID]bool     `json:",omitempty"`
+	Finishes  map[operation.ID]string   `json:",omitempty"`
+	Tails     map[operation.ID][]string `json:",omitempty"`
 }
 
-func (d *Index) Has(id operation.ID) bool { return d.delivered[id] }
+func (d *Index) Has(id operation.ID) bool { return d.Delivered[id] }
 
-func (d *Index) mark(id operation.ID) {
-	if d.delivered == nil {
-		d.delivered = make(map[operation.ID]bool)
+func (d *Index) mark(ids []operation.ID, id operation.ID) []operation.ID {
+	if d.Has(id) {
+		return ids
 	}
-	d.delivered[id] = true
-	delete(d.finishes, id)
-	delete(d.tails, id)
+	if d.Delivered == nil {
+		d.Delivered = make(map[operation.ID]bool)
+	}
+	d.Delivered[id] = true
+	delete(d.Finishes, id)
+	delete(d.Tails, id)
+	return append(ids, id)
 }
 
 func terminal(status operation.Status) bool {
 	return status == operation.StatusCompleted || status == operation.StatusFailed || status == operation.StatusCanceled
 }
 
-func (d *Index) ObserveItem(item sessionstore.Item) {
+// The observation methods return handles whose first delivery was found here.
+func (d *Index) ObserveItem(item sessionstore.Item) []operation.ID {
+	var delivered []operation.ID
 	switch value := item.Data.(type) {
 	case inbox.Input:
-		peer, err := value.DecodePeerMessage()
-		if err != nil || peer.Kind != "ended" {
-			return
-		}
-		d.mark(operation.ID(peer.Handle))
-		if peer.ReportIncluded {
-			return
-		}
-		// Before 16c78d4 one ended input could contain several reports. Its
-		// ID, Sender and Handle identified only the first child. Match each
-		// additional report's exact header AND footer, not handle mentions.
-		var id operation.ID
-		for line := range strings.SplitSeq(peer.Text, "\n") {
-			if rest, ok := strings.CutPrefix(line, "Child "); ok {
-				if handle, status, ok := strings.Cut(rest, " ended: "); ok && terminal(operation.Status(status)) {
-					id = operation.ID(handle)
-				}
-			}
-			if id != "" && line == "(Full report: subagent show "+string(id)+")" {
-				d.mark(id)
-				id = ""
+		if value.Kind == inbox.InputPeer {
+			if peer, err := value.DecodePeerMessage(); err == nil {
+				return d.ObservePeer(peer)
 			}
 		}
 	case sessionstore.ToolCallStatus:
 		for _, op := range value.Operations {
-			if _, ok := startState(op); ok && terminal(op.Status) {
-				d.mark(op.ID) // the parent's terminal tool receipt, not SaveOperation
+			if terminal(op.Status) {
+				if _, ok := startState(op); ok {
+					delivered = d.mark(delivered, op.ID) // the parent's terminal tool receipt, not SaveOperation
+					continue
+				}
 			}
-			d.ObserveOperation(op)
+			delivered = append(delivered, d.ObserveOperation(op)...)
 		}
 	}
+	return delivered
+}
+
+// ObservePeer indexes a decoded, validated peer message.
+func (d *Index) ObservePeer(peer inbox.PeerMessage) []operation.ID {
+	if peer.Kind != "ended" {
+		return nil
+	}
+	delivered := d.mark(nil, operation.ID(peer.Handle))
+	if peer.ReportIncluded {
+		return delivered
+	}
+	// Before 16c78d4 one ended input could contain several reports. Its
+	// ID, Sender and Handle identified only the first child. Match each
+	// additional report's exact header and footer.
+	var id operation.ID
+	for line := range strings.SplitSeq(peer.Text, "\n") {
+		if rest, ok := strings.CutPrefix(line, "Child "); ok {
+			if handle, status, ok := strings.Cut(rest, " ended: "); ok && terminal(operation.Status(status)) {
+				id = operation.ID(handle)
+			}
+		}
+		if id != "" && line == "(Full report: subagent show "+string(id)+")" {
+			delivered = d.mark(delivered, id)
+			id = ""
+		}
+	}
+	return delivered
 }
 
 func startState(op operation.Operation) (operation.RemoteJobState, bool) {
+	if op.Type != operation.TypeRemoteJob {
+		return operation.RemoteJobState{}, false
+	}
 	state, err := operation.DecodeRemoteJobState(op)
 	var plan struct{ Action string }
 	ok := err == nil && state.Plan.Type == "subagent" && json.Unmarshal(state.Plan.Data, &plan) == nil && plan.Action == "start"
 	return state, ok
 }
 
-func (d *Index) ObserveOperation(op operation.Operation) {
-	if state, ok := startState(op); ok && terminal(op.Status) && !d.Has(op.ID) {
-		var handle struct{ Finish *sessionstore.FinishRecord }
-		if json.Unmarshal(state.Handle, &handle) == nil && handle.Finish != nil {
-			tail := finishTail(handle.Finish.Result)
-			for _, candidate := range d.tails[op.ID] {
-				if candidate == tail {
-					d.mark(op.ID)
-					return
-				}
-			}
-			if d.finishes == nil {
-				d.finishes = make(map[operation.ID]string)
-			}
-			d.finishes[op.ID] = tail
+func (d *Index) ObserveOperation(op operation.Operation) []operation.ID {
+	if !terminal(op.Status) {
+		return nil
+	}
+	if !d.Has(op.ID) {
+		if state, ok := startState(op); ok {
+			return d.observeFinish(op.ID, state)
 		}
 	}
 	if op.Status != operation.StatusCompleted {
-		return
+		return nil
 	}
 	var report string
 	switch op.Type {
@@ -113,13 +127,17 @@ func (d *Index) ObserveOperation(op operation.Operation) {
 			report = state.Result.Out
 		}
 	}
+	if report == "" {
+		return nil
+	}
+	var delivered []operation.ID
 	// CLI show/wait headings carry the end status, including canceled children
 	// without Finish. Running reports and listings are not end delivery.
 	for line := range strings.SplitSeq(report, "\n") {
 		if strings.HasPrefix(line, "== ") {
 			words := strings.Fields(line)
 			if len(words) >= 4 && terminal(operation.Status(words[len(words)-1])) {
-				d.mark(operation.ID(words[1]))
+				delivered = d.mark(delivered, operation.ID(words[1]))
 			}
 		}
 	}
@@ -141,15 +159,34 @@ func (d *Index) ObserveOperation(op operation.Operation) {
 			continue
 		}
 		tail = strings.TrimSpace("changed files:" + tail)
-		if expected, ok := d.finishes[id]; ok && tail == expected {
-			d.mark(id)
+		if expected, ok := d.Finishes[id]; ok && tail == expected {
+			delivered = d.mark(delivered, id)
 		} else {
-			if d.tails == nil {
-				d.tails = make(map[operation.ID][]string)
+			if d.Tails == nil {
+				d.Tails = make(map[operation.ID][]string)
 			}
-			d.tails[id] = append(d.tails[id], tail)
+			d.Tails[id] = append(d.Tails[id], tail)
 		}
 	}
+	return delivered
+}
+
+func (d *Index) observeFinish(id operation.ID, state operation.RemoteJobState) []operation.ID {
+	var handle struct{ Finish *sessionstore.FinishRecord }
+	if json.Unmarshal(state.Handle, &handle) != nil || handle.Finish == nil {
+		return nil
+	}
+	tail := finishTail(handle.Finish.Result)
+	for _, candidate := range d.Tails[id] {
+		if candidate == tail {
+			return d.mark(nil, id)
+		}
+	}
+	if d.Finishes == nil {
+		d.Finishes = make(map[operation.ID]string)
+	}
+	d.Finishes[id] = tail
+	return nil
 }
 
 // This is the existing subagent show/wait footer format, including empty lists.

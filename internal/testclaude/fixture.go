@@ -35,6 +35,8 @@ type Config struct {
 	// turns (for example a child's message waking the Session) just answer.
 	AgentOnce                              bool
 	AgentInputTokens, AgentStepInputTokens int64
+	AgentUsage                             []jsontext.Value // per-call message_start usage, including the final call
+	AgentAutoCompact                       bool             // emit an automatic boundary unless disabled
 	CompactPreTokens, CompactPostTokens    int64
 	CompactFailure                         string
 	CompactCrash, CompactUnknownAfter      bool

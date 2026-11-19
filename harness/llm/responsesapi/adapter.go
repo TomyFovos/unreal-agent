@@ -76,7 +76,8 @@ type Config struct {
 	// an exhausted subscription allowance, before the shared retry policy
 	// reads it. It receives the HTTP response headers and may return the
 	// failure unchanged. Nil keeps the shared classification.
-	ClassifyError func(failure *APIError, headers http.Header) *APIError
+	ClassifyError  func(failure *APIError, headers http.Header) *APIError
+	ObserveHeaders func(context.Context, llm.Model, llm.RequestOptions, http.Header)
 }
 
 type adapter struct {
@@ -90,6 +91,7 @@ type adapter struct {
 	allowFast         bool
 	extensions        map[string]jsontext.Value
 	classifyError     func(*APIError, http.Header) *APIError
+	observeHeaders    func(context.Context, llm.Model, llm.RequestOptions, http.Header)
 }
 
 var _ llm.Adapter = (*adapter)(nil)
@@ -126,6 +128,7 @@ func NewAdapter(remote *primitives.RemoteClient, config Config) (llm.Adapter, er
 		allowFast:         config.AllowFast,
 		extensions:        config.Extensions,
 		classifyError:     config.ClassifyError,
+		observeHeaders:    config.ObserveHeaders,
 	}, nil
 }
 
@@ -144,7 +147,11 @@ func (adapter *adapter) Respond(ctx context.Context, request llm.Request, option
 		return llm.Response{}, diagnosed(err, FailureDiagnostic{Stage: "request_build"})
 	}
 	ctx = context.WithValue(ctx, progressKey{}, options.Progress)
-	statusCode, responseBody, failure, err := adapter.exchange(ctx, body, key)
+	var observe func(http.Header)
+	if adapter.observeHeaders != nil && options.RecordActivity != nil {
+		observe = func(headers http.Header) { adapter.observeHeaders(ctx, request.Model, options, headers) }
+	}
+	statusCode, responseBody, failure, err := adapter.exchange(ctx, body, key, observe)
 	if err != nil {
 		return llm.Response{}, err
 	}
@@ -163,6 +170,9 @@ func (adapter *adapter) Respond(ctx context.Context, request llm.Request, option
 		}
 	}
 	response, err := decodeResponse(responseBody)
+	if err == nil && request.PublicHistory {
+		markUnreportedCacheCounters(&response.Usage)
+	}
 	return response, diagnosed(err, FailureDiagnostic{Stage: "response_decode", Status: statusCode, Reason: "invalid_response"})
 }
 

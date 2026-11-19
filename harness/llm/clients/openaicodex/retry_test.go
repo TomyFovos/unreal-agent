@@ -15,6 +15,42 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 )
 
+func TestCodexRecordsSubscriptionHeadersSeparatelyFromUsage(t *testing.T) {
+	transport := sandboxTestTransport(func(*http.Request) (*http.Response, error) {
+		header := make(http.Header)
+		header.Set("Content-Type", "text/event-stream")
+		header.Set("X-Codex-Primary-Used-Percent", "0")
+		header.Set("X-Codex-Primary-Window-Minutes", "300")
+		header.Set("X-Codex-Secondary-Reset-At", "1800000000")
+		header.Set("X-Codex-Secondary-Used-Percent", "not a number")
+		body := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"served\",\"status\":\"completed\",\"output\":[]}}\n\n"
+		return &http.Response{StatusCode: 200, Header: header, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})
+	client, err := NewClient(Config{AccessToken: "synthetic-token", AccountID: "synthetic-account", HTTPClient: &http.Client{Transport: transport}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	var observations []llm.ActivityRecord
+	response, err := client.Respond(t.Context(), llm.Request{Model: llm.Model{ID: "fixture"}}, llm.RequestOptions{
+		Identity: llm.RequestIdentity{TurnID: "fixture-turn"}, RecordActivity: func(_ context.Context, a llm.ActivityRecord) error {
+			observations = append(observations, a)
+			return nil
+		},
+	})
+	if err != nil || response.ID != "served" || len(observations) != 1 {
+		t.Fatal(response.ID, err, observations)
+	}
+	a := observations[0]
+	if a.Kind != llm.ActivitySubscriptionUsage || a.ID != "fixture-turn" || a.Usage != nil || len(a.Subscription) != 2 {
+		t.Fatal("invalid subscription observation", a)
+	}
+	p, s := a.Subscription[0], a.Subscription[1]
+	if p.UsedPercent == nil || *p.UsedPercent != 0 || p.WindowMinutes == nil || *p.WindowMinutes != 300 || s.UsedPercent != nil || s.WindowMinutes != nil || s.ResetsAt.Unix() != 1800000000 {
+		t.Fatal("missing subscription field was reported as zero or known zero was lost", a.Subscription)
+	}
+}
+
 func TestCodexRetryableFailureThenSuccess(t *testing.T) {
 	for _, failure := range []string{"transport", "503", "429", "stream"} {
 		t.Run(failure, func(t *testing.T) {

@@ -161,7 +161,7 @@ func (m *sessionMetrics) apply(item host.HistoryItem, active *sessionstore.Runti
 		if a := v.Activity; a != nil {
 			// A child's own request activity can identify its transport. Starts
 			// of its descendants describe those children, never this Session.
-			if a.Kind != "child_start" && a.Provider != "" {
+			if a.Kind != "child_start" && a.Kind != llm.ActivitySubscriptionUsage && a.Provider != "" {
 				m.responseRuntime = *a
 			}
 			if a.Kind == "host_start" && m.finish == "" {

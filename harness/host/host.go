@@ -20,6 +20,7 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
 	"github.com/unreallabsai/unreal-agent/harness/contextengine"
+	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/coordinator"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -158,6 +159,7 @@ type View struct {
 	HistoryState    *HistoryState    `json:",omitzero"`
 	Permissions     permission.ModeSnapshot
 	Context         *contextengine.Diagnostics `json:",omitzero"`
+	ContextFacts    *sessionstore.ContextFacts `json:",omitzero"` // populated by the explicit analysis reader
 	Progress        *Progress                  `json:",omitzero"`
 	Session         sessionstore.Snapshot
 	Generation      string
@@ -455,6 +457,11 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	}
 	if s.runtime.Builder == nil || s.runtime.LLM == nil || s.runtime.Tools == nil || s.runtime.Operations == nil {
 		return nil, fmt.Errorf("incomplete session runtime")
+	}
+	if b, ok := s.runtime.Builder.(interface {
+		SetWindowSource(session.ID, func(context.Context) (contextstate.State, sessionstore.Sequence, error))
+	}); ok {
+		b.SetWindowSource(o.ID, s.windowContextState)
 	}
 	if recordErr := s.recordActivity(ctx, hostStartRecord(h.startedAt)); recordErr != nil {
 		slog.Warn("record Host startup", "error", recordErr)
