@@ -55,7 +55,7 @@ New installations start with Claude when both providers are available, or the av
 | --- | --- |
 | [Contributing](CONTRIBUTING.md) | Build prerequisites, test workflow, `make prepush`, and architectural invariants |
 | [Architecture](docs/architecture.md) | Host/Session ownership, Operation execution pipeline, provider routing, and native launcher flags |
-| [Context & Instructions](docs/context.md) | Codex context projection, tool-result pruning, summarization, Claude compaction, and `AGENTS.md` |
+| [Context & Instructions](docs/context.md) | Three-layer context, evidence locators, and `AGENTS.md` |
 | [Tools & File Mutation](docs/tools.md) | Native file tools, Tree-sitter AST search/edit, and atomic file mutation guarantees |
 | [Distribution](docs/distribution.md) | Building snapshots and common kits, GoReleaser setup, CI/Release workflows, and release verification |
 | [TUI Design Specification](docs/design/UNREAL_AGENT_TUI_DESIGN.md) | Complete visual, layout, responsive, and state specification for the terminal UI |

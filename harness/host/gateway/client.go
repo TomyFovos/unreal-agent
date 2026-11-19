@@ -123,6 +123,30 @@ func (c *Client) Inspect(ctx context.Context, id session.ID, after sessionstore.
 	return *f.View, nil
 }
 
+func (c *Client) ObservePages(ctx context.Context, id session.ID, recent int, consume func(host.View) error) error {
+	response, scanner, err := c.connect(ctx, "observation", request{ID: id, Limit: recent})
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	for {
+		f, err := next(scanner)
+		if err != nil {
+			var gatewayErr *Error
+			if errors.As(err, &gatewayErr) && gatewayErr.Code == "unknown_method" {
+				return errors.ErrUnsupported
+			}
+			return err
+		}
+		if f.View == nil {
+			return errors.New("gateway: missing observation page")
+		}
+		if err := consume(*f.View); err != nil || !f.View.History.More {
+			return err
+		}
+	}
+}
+
 // InspectBefore reads a predecessor window without moving a subscription cursor.
 func (c *Client) InspectBefore(ctx context.Context, id session.ID, before sessionstore.Sequence, limit int) (host.View, error) {
 	f, err := c.call(ctx, "history-before", request{ID: id, Before: before, Limit: limit})

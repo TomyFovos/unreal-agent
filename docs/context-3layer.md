@@ -1,6 +1,6 @@
 # Three-layer context
 
-The provider-neutral Host API provides raw evidence (L3) and the current state (L2). The three-layer design is tracked in [Issue #41](https://github.com/TomyFovos/unreal-agent/issues/41).
+All providers and agent roles use a conversation window (L1), a copy of current state (L2), and locators for original evidence (L3). The three-layer design is tracked in [Issue #41](https://github.com/TomyFovos/unreal-agent/issues/41).
 
 ## Read canonical evidence
 
@@ -39,26 +39,27 @@ The log preserves unknown event versions and kinds for a future reader. The redu
 
 The first rebuild can occur as soon as the complete input reaches W, including the first request after upgrading a long-running Session. Each rebuild fixes the system instructions, tool schemas, and a copy of L2 with evidence locators. The raw tail starts at the last human message when that fits. When it exceeds the rebuild target, the Host advances the cut to the newest boundary that preserves undelivered inputs, the in-flight turn, and whole tool call and receipt groups. The L2 copy keeps the active human request in `requests.current`, including its original whitespace and line endings. The L1 head gives the locator range for earlier conversation in L3, where `record show` and `record find` can retrieve it.
 
-The rebuilt input targets fewer than W tokens. If the required minimum exceeds W and fits the input budget, the boundary records its size and keeps the full required projection. If the system instructions, tool schemas, L2, and required tail together exceed the input budget, the request uses the configured provider's existing `summary` path. The `window_fallback` record gives the reason `l2_over_budget`, the input budget, and the sizes of the required parts. The next request can rebuild the three-layer window. Responses history carries public messages and matched tool receipts. Thinking and new model summaries stay out of the three-layer log.
+The rebuilt input targets fewer than W tokens. If the required minimum exceeds W and fits the input budget, the boundary records its size and keeps the full required projection. When the system instructions, tools, L2, and required tail exceed the input budget, Unreal reduces the character allowance for long tool outputs and messages in the required tail. It keeps head and tail excerpts with L3 locators. If the allowance reaches zero, shortened items retain their omission marker and locator. L2 and typed images keep their contents. If the smallest projection still exceeds the budget, the request fails before inference with the budget and the token counts for the header, L2, required tail, and smallest tail.
 
-After a rebuild, an estimated W tokens of growth triggers the next size-based rebuild. An input budget overflow, provider overflow, or header change can trigger one sooner. Within a window, new entries append in recorded order. Large text tool results display a head and tail excerpt with locators for the original streams or receipt. Native image results retain their typed bodies. For a large source, `RecordShow` can return a byte range or page that fits the configured excerpt size.
+After a rebuild, an estimated W tokens of growth triggers the next size-based rebuild. An input budget overflow or a header change can trigger one sooner. A provider overflow immediately rebuilds the window and retries the request once. Within a window, new entries append in recorded order. Large text tool results display a head and tail excerpt with locators for the original streams or receipt. Native image results retain their typed bodies. For a large source, `RecordShow` can return a byte range or page that fits the configured excerpt size.
 
-The `window_boundary` record stores the causes, snapshot sequence, retained range, before and after input token counts, and whether the required minimum exceeded the target. The counts identify the estimator and whether the prior input used measured prefix usage. The first following Turn links to that boundary, and its response records cache read and write counts when reported. Reopening from a restore checkpoint reuses the recorded L2 copy and tail rules.
+The `window_boundary` record stores the causes, snapshot sequence, retained range, before and after input token counts, and whether the required minimum exceeded the target. The counts identify the estimator and whether the prior input used measured prefix usage. The first following Turn links to that boundary, and its response records cache read and write counts when reported. A fitted boundary records `Fit: excerpted`, the input budget, original required input and tail sizes, the fitted character allowance and the last unit it covers. Reopening from a restore checkpoint reuses the recorded L2 copy, tail and excerpt rules.
 
 These keys are under `Context` in `runtime.json`.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `WindowStrategy` | `three-layer` on Responses and the Claude Code subscription route | Set `summary` to use the summary strategy. |
 | `WindowThresholdTokens` | `200000` | W for the first rebuild, the size target for rebuilt input, and the growth threshold after a rebuild. |
 | `L2TargetTokens` | `5000` | The target recorded alongside the actual copy size. All current state remains eligible above this target. |
 | `RecentEventCount` | `0` | Use events since the previous boundary. At the first boundary, use events since the start of the active human request. A positive value selects the latest N for the copy. The full event history remains available. |
 | `ToolOutputExcerptChars` | `0` | Use the existing tool display allowance. A positive value sets the combined head and tail size in Unicode characters for each text part. |
 | `CacheRewarmMinutes` | `0` | Optional interval recorded for the PR7 cache comparison. Runtime requests remain driven by normal Session activity. |
 
+Existing `runtime.json` files can still contain `Context.WindowStrategy`. Unreal ignores that key and logs one deprecation line when loading the file. The old Claude compaction thresholds are also accepted for compatibility.
+
 ## Rebuild the Claude Code window
 
-The subscription route uses the same boundary conditions and tail selection. At a boundary, Unreal starts `claude -p` with a fresh `--session-id`. The CLI receives Unreal's usual appended system prompt and the new window's L2 copy and public L1 tail. Signed thinking remains in the old Claude transcript on disk.
+The subscription and explicitly selected API-key routes use the same boundary conditions and tail selection. At a boundary, Unreal starts `claude -p` with a fresh `--session-id`. The CLI receives Unreal's usual appended system prompt and the new window's L2 copy and public L1 tail. Signed thinking remains in the old Claude transcript on disk.
 
 The `provider_conversation_binding` record links the Unreal Session and window boundary to Claude Code's conversation ID. Between boundaries and after Host restart, `--resume` uses that ID and sends the new input. Unreal owns children, approval requests, unanswered questions and usage-limit waits.
 
@@ -66,9 +67,7 @@ At each main `PostToolBatch`, Unreal waits for approvals and records terminal to
 
 Admission estimates the rendered window text and the request's system and tool header. Subsequent turns can use the last reported model call's full input size with the estimated change in text. The first request's cache record uses the first main model call's counters, even if the CLI makes more model calls in the same turn.
 
-For the three-layer strategy, Unreal sets `DISABLE_AUTO_COMPACT=1` for each launch, including in its per-launch `--settings`. Claude Code 2.1.x uses this variable to disable context-limit and idle auto-compaction in the CLI. Unreal's idle `/compact` is also disabled in this strategy. The `summary` strategy uses the CLI's `--autocompact` window and Unreal's idle maintenance. [Environment variables](https://code.claude.com/docs/en/env-vars) · [CLI reference](https://code.claude.com/docs/en/cli-reference)
-
-The Claude Code `opus` alias resolves to Opus 5.5, which defaults to a 1M-token model context. Unreal defaults to rebuilding at 200K. Claude Code's `/context` displays usage and distinguishes the CLI's compaction window from the model limit. With automatic compaction disabled, exceeding the model limit ends the headless turn with `Prompt is too long`. [Claude Code model configuration](https://code.claude.com/docs/en/model-config#extended-context) · [Claude Code error reference](https://code.claude.com/docs/en/errors#prompt-is-too-long)
+Each Claude Code turn sets `DISABLE_AUTO_COMPACT=1` and `DISABLE_COMPACT=1` in the environment and launch settings. A `Prompt is too long` error from the CLI triggers the same one-retry window rebuild. [Claude Code environment variables](https://code.claude.com/docs/en/env-vars)
 
 ## Record coordinator decisions
 
@@ -90,14 +89,14 @@ Both state review commands and `subagent review HANDLE accept|reject [--reason T
 
 ## Measuring
 
-Open `/analyze` → **Context metrics** for each Session and the full Session tree, including archived descendants. Rows group by context strategy (`three-layer` or `summary`) and provider, model, effort, and Fast mode. **Export** includes the same measurements in JSON and Markdown. A recorded counter or setting is `measured`, a calculation or estimate is `derived`, and unavailable data is `unknown`. JSON uses a `null` value with source `unknown` for unavailable measurements. A known total can also show how many observations were missing.
+Open `/analyze` → **Context metrics** for each Session and the full Session tree, including archived descendants. Rows group by context strategy (`three-layer` or `historical summary`) and provider, model, effort, and Fast mode. **Export** includes the same measurements in JSON and Markdown. A recorded counter or setting is `measured`, a calculation or estimate is `derived`, and unavailable data is `unknown`. JSON uses a `null` value with source `unknown` for unavailable measurements. A known total can also show how many observations were missing.
 
 | Measurement | What to compare |
 | --- | --- |
 | Boundaries | Counts by `threshold`, `over_budget`, `header_change`, `mid_turn`, and provider overflow. One rebuild may have several causes. Each rebuild shows the input before and after, system and tool header tokens, L2 copy and target tokens, rendered L1 tail tokens and items, W, and whether the required minimum exceeded its target. The report also gives the recent-event and excerpt settings, wall time, and observed requests between consecutive boundaries. Rollups average the known sizes and intervals. |
-| Fallbacks | Each `fallback: l2_over_budget` shows the attempted required input, system and tool header, L2 copy and target, required L1 tail, and input budget. |
+| Excerpt fits | Each fitted boundary shows the input budget, required input and tail before fitting, final input and tail sizes, and the chosen allowance. |
 | Cache | The first request after each boundary and later requests have their own read, write, and uncached-input counters. Claude Code's main requests come from individual streams. The hit ratio divides the sum of cache-read tokens by the sum of total input for requests reporting both. The list-price equivalent uses the versioned price table and itemises uncached input, reads, writes, and output. |
-| Summary comparison | CLI and Unreal compaction events show their outcome, recorded before/after sizes, summary output and generation time. Unreal's before size is the provider-reported summary request input, including the summarization instruction. The first post-compaction request input and the CLI's `post_tokens` are individual observations. |
+| Historical summary | Past CLI and Unreal compactions show their recorded outcome, input sizes, output usage and timing. Old fallback records retain their size breakdown. Session replay keeps the original log readable and rebuilds a three-layer window when it next uses a historical context. |
 | L3 | Per-window `record show` and `record find` calls and evidence bytes. Show counts page bytes and find counts excerpt bytes. The previous-tail re-read rate uses calls with a recorded membership check. A call counts once when any returned locator refers to the previous raw L1 projection. Byte and line selections refer to the same underlying evidence. |
 | L2 | Recorded state decisions, plans, rules, acceptances, rejections, and question notes. Machine events are counted by kind using canonical replay. Boundary rows show unanswered user and child questions and pending approvals from the copied state or the state at compaction. |
 | Child reviews | Grouped by the strategy at delegation and the child's model, with the child's strategy shown where known. The rejection-rate denominator is normally ended children with an explicit final accept or reject. Normally ended children without a review have their own count. |

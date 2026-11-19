@@ -61,12 +61,7 @@ Mac のランチャーは同じ保存先を使い、同じ環境の全ワーク�
 あるモデルは続けて effort も選びます（一覧に effort がないモデルは、その段階が出ません）。選んだモデルは
 次のターンから効き、話している相手（指揮者）が替わります。実装者（サブエージェント）は変わりません。
 
-長い会話を Claude から OpenCode Go のモデルへ替えたとき、会話が新しいモデルの文脈のしきい値を超えていると、
-最初に、新しいモデルが会話全体を読んで要約を書く要求が 1 回出ます（切り替えのたびではありません。
-`harness/contextbuilder/compaction.go` の `PrepareContext` と `harness/contextengine/types.go` の
-`Threshold`）。新しいプロバイダにはこの会話のキャッシュがないので、この 1 回はキャッシュが効きません。
-2026-11-06 の実測では、Claude の会話を `deepseek-v4-pro` に替えたとき、その 1 回が入力 465,564 トークン、
-キャッシュ 0（TUI の「キャッシュ」は 0%）、所要は約 1 分 40 秒で、`allowance` は 1.25、`list_cost` は 0.31 でした。
+会話を Claude から OpenCode Go へ切り替えると、Unreal は L2 の写しと L1 の末尾から新しいウィンドウを組み立てます。次のモデルにはこのウィンドウからの通常のリクエストを送ります。 [3層の文脈](ja/context-3layer.md)
 
 ### サブエージェントのモデルを選ぶ
 
@@ -160,13 +155,11 @@ Codex 無効・自動検出なしの Host でも、Go の設定を保存すれ�
 
 - 接続先は `https://opencode.ai/inference/go/openai/v1/responses`。`/inference/go/` 配下だけを許可し、
   従量課金の `/inference/openai/...`（OpenCode Zen）は拒否します。リダイレクトも拒否します。
-- 本文は既存の `responsesapi` が組み立てます（`store: false`、`stream: true`、
-  `include: ["reasoning.encrypted_content"]`、`reasoning.summary: "auto"`）。
+- 本文は `responsesapi` が組み立てます（`store: false`、`stream: true`）。履歴は公開メッセージとツール結果で構成します。
 - ヘッダーは、API キーを Authorization ヘッダーで送る形、`Content-Type`、`User-Agent: unreal-agent`、
   `x-opencode-session` です。`prompt_cache_key` は送りません（受け付けるかが未確認のため）。
-- `x-opencode-session` には、Session ごとのキャッシュキーの SHA-256 を入れます。要約を作る要求も含めて
-  すべての要求に付き、このヘッダーのない要求は 400 で断られます。
-- 文脈管理は追記型にします。追記型でないとキャッシュが外れ、Go の利用枠を急速に使います。
+- `x-opencode-session` には、Session ごとのキャッシュキーの SHA-256 を入れます。すべての要求に付き、このヘッダーのない要求は 400 で断られます。
+- 3層ウィンドウの区切りの間は追記し、キャッシュのプレフィックスを維持します。
 - `ultra` は `max` として送ります。
 
 ### モデル一覧と登録
@@ -310,7 +303,7 @@ OpenAI の名前で固定されています。OpenCode が枯渇を別のコー�
 - 未確認: GLM-5.3 のキャッシュが 8 回とも 10〜50 のままだった理由（GLM-5.2 は約 2.3k まで増えた）
 - 確認済み: 実際の TUI で、同じ会話を `deepseek-v4-pro`、`kimi-k2.7-code`、Claude の順に切り替えても、
   前の内容を引き継げた（2026-11-06）
-- 一部確認: Claude の会話を `deepseek-v4-pro` に替える向きは、新しいモデルが会話を読んで要約を書くところ
+- 旧要約方式での計測: Claude の会話を `deepseek-v4-pro` に替える向きは、新しいモデルが会話を読んで要約を書くところ
   までと、その要約の内容が正しいところまで（2026-11-06、Claude が確認）。その要約から答えるかは未確認
   （返事の前にターンを止めた）
 

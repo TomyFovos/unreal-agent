@@ -90,6 +90,7 @@ func FuzzRunLogMatchesExecution(f *testing.F) {
 			var allLogged []sessionstore.Item
 			var previousLog []byte
 			interrupted := make(map[operation.ID]operation.Operation)
+			undispatched := make(map[string]bool)
 			logDirectory := filepath.Join(workspace, "logs")
 			for run := range 3 {
 				ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
@@ -133,8 +134,7 @@ func FuzzRunLogMatchesExecution(f *testing.F) {
 				// This execution/codec fuzzer intentionally accepts 128 KiB inputs.
 				// This is a log/codec oracle, not a budget-overflow oracle: a failed
 				// response can leave several full unreceived groups mandatory. Size
-				// its fake window for the bounded input, repeated public text/private
-				// summaries and receipts, including JSON escaping. The original 256
+				// its fake window for the bounded input, repeated public text and receipts, including JSON escaping. The original 256
 				// KiB fixture could not hold its 70 KiB failure/resume seed intact.
 				// Real defaults and dedicated true-overflow tests remain unchanged.
 				configured := testConfig(client)
@@ -213,7 +213,7 @@ func FuzzRunLogMatchesExecution(f *testing.F) {
 				allLogged = append(allLogged, delta...)
 				history = nextHistory
 				settled := run > 0 || mode == 0
-				assertExecutionLog(t, allLogged, returned, requests, text, skillContent, validCalls, interrupted, run+1, settled)
+				assertExecutionLog(t, allLogged, returned, requests, text, skillContent, validCalls, interrupted, undispatched, run+1, settled)
 				resumed, err := store.Resume(t.Context(), id)
 				if err != nil {
 					t.Fatal(err)
@@ -221,10 +221,21 @@ func FuzzRunLogMatchesExecution(f *testing.F) {
 				if settled && len(resumed.Operations) != 0 {
 					t.Fatalf("settled run has unfinished operations: %v", resumed.Operations)
 				}
-				// Since a681abb, restoration cancels abandoned operations instead
-				// of replaying them. Only operations still unfinished at this
-				// failed-run boundary may acquire an unknown-result receipt.
+				// Restore cancels abandoned Operations and closes calls that
+				// were recorded before dispatch. Collect both from the failed run.
 				if !settled {
+					for _, item := range history {
+						switch value := item.Data.(type) {
+						case sessionstore.ModelResponse:
+							for _, output := range value.Response.Output {
+								if call, ok := output.Data.(llm.ToolCall); ok {
+									undispatched[call.CallID] = true
+								}
+							}
+						case sessionstore.ToolCallStatus:
+							delete(undispatched, value.CallID)
+						}
+					}
 					for _, value := range resumed.Operations {
 						switch value.Status {
 						case operation.StatusReady, operation.StatusAwaiting, operation.StatusCanceling:
@@ -242,7 +253,7 @@ func FuzzRunLogMatchesExecution(f *testing.F) {
 
 const fuzzInterruptedOperationResult = "中断されたため結果は不明。必要なら状態を確かめてから続けること"
 
-func assertExecutionLog(t *testing.T, items []sessionstore.Item, returned []llm.Response, requests int, text, skillContent string, validCalls map[string]bool, interrupted map[operation.ID]operation.Operation, runs int, settled bool) {
+func assertExecutionLog(t *testing.T, items []sessionstore.Item, returned []llm.Response, requests int, text, skillContent string, validCalls map[string]bool, interrupted map[operation.ID]operation.Operation, undispatched map[string]bool, runs int, settled bool) {
 	t.Helper()
 	var responses []llm.Response
 	var turns []session.Turn
@@ -314,6 +325,14 @@ func assertExecutionLog(t *testing.T, items []sessionstore.Item, returned []llm.
 			if turnID, exists := calls[value.CallID]; !exists || value.TurnID != turnID {
 				t.Fatalf("tool status preceded its call or changed turn: %#v", value)
 			}
+			if undispatched[value.CallID] {
+				if _, exists := statuses[value.CallID]; exists || value.Status.Error != fuzzInterruptedOperationResult ||
+					len(value.Operations) != 0 || len(value.Status.WaitingFor) != 0 {
+					t.Fatalf("undispatched call received an invalid recovery receipt: %#v", value)
+				}
+				statuses[value.CallID] = value
+				continue
+			}
 			if !validCalls[value.CallID] {
 				if value.Status.Error == "" || len(value.Operations) != 0 || len(value.Status.WaitingFor) != 0 {
 					t.Fatalf("invalid call was not recorded as an error: %#v", value)
@@ -371,8 +390,19 @@ func assertExecutionLog(t *testing.T, items []sessionstore.Item, returned []llm.
 	if len(turns) != requests {
 		t.Fatalf("logged turns = %d, actual model requests = %d", len(turns), requests)
 	}
-	if !reflect.DeepEqual(responses, returned) {
-		t.Fatalf("logged responses differ from completed model responses (including usage):\ngot  %s\nwant %s", logJSON(t, responses), logJSON(t, returned))
+	var wantResponses []llm.Response
+	for _, response := range returned {
+		public := make([]llm.Item, 0, len(response.Output))
+		for _, item := range response.Output {
+			if item.Type != llm.ItemReasoning {
+				public = append(public, item)
+			}
+		}
+		response.Output = public
+		wantResponses = append(wantResponses, response)
+	}
+	if !reflect.DeepEqual(responses, wantResponses) {
+		t.Fatalf("logged responses differ from public model responses (including usage):\ngot  %s\nwant %s", logJSON(t, responses), logJSON(t, wantResponses))
 	}
 	if settled {
 		for callID := range calls {
@@ -380,7 +410,7 @@ func assertExecutionLog(t *testing.T, items []sessionstore.Item, returned []llm.
 			if !exists {
 				t.Fatalf("settled execution lost the result for call %q", callID)
 			}
-			if validCalls[callID] {
+			if validCalls[callID] && !undispatched[callID] {
 				wantStatus, wantError := operation.StatusCompleted, ""
 				if _, abandoned := interrupted[status.Operations[0].ID]; abandoned {
 					wantStatus, wantError = operation.StatusCanceled, fuzzInterruptedOperationResult

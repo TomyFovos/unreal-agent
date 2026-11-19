@@ -17,11 +17,13 @@ import (
 // sent by that transport; compatible API clients share the Responses profile.
 type TokenEstimator struct{ Provider string }
 
-func (e TokenEstimator) Claude() bool { return e.Provider == "claude" || e.Provider == "claude-code" }
+func (e TokenEstimator) Claude() bool {
+	return e.Provider == "claude" || e.Provider == "claude-code" || e.Provider == "claude-api"
+}
 
 func (e TokenEstimator) Profile() string {
 	switch e.Provider {
-	case "claude", "claude-code":
+	case "claude", "claude-code", "claude-api":
 		return "claudeagent-content"
 	default:
 		return "responsesapi-content:" + e.Provider

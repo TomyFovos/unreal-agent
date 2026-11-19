@@ -1,0 +1,67 @@
+package tui
+
+import (
+	"time"
+
+	"github.com/unreallabsai/unreal-agent/harness/viewer"
+)
+
+// nextRender schedules the next visible clock change. Input, resize and
+// canonical updates can always wake the loop independently of this deadline.
+func nextRender(s Snapshot, u UIState, view ViewMode) time.Time {
+	deadline := u.Notification.Until
+	consider := func(next time.Time) {
+		if next.After(u.Now) && (deadline.IsZero() || next.Before(deadline)) {
+			deadline = next
+		}
+	}
+	if u.cache != nil {
+		u.index = u.cache.index
+	}
+	working := s.Connected && s.Running && s.Failure == "" && (mainBusy(s) || workingChildren(s, u) != 0)
+	usageWait := s.Progress != nil && s.Progress.Mode == "usage_limit_wait"
+	if u.Busy || !s.Connected || working && !usageWait {
+		interval := time.Second
+		if !u.Theme.Still {
+			interval = 120 * time.Millisecond
+		}
+		consider(u.Now.Truncate(interval).Add(interval))
+		return deadline
+	}
+
+	for _, row := range u.Viewer.Rows {
+		if row.Elapsed.Known && !row.CreatedAt.IsZero() && row.Runtime == viewer.RuntimeRunning && row.Finish == nil && row.End == nil {
+			age := u.Now.Sub(row.CreatedAt)
+			step := time.Minute
+			if age < time.Minute || analysisShowsElapsed(u.Sheet) {
+				step = time.Second
+			}
+			boundary := row.CreatedAt.Add(age.Truncate(step) + step)
+			if boundary.Nanosecond() != 0 {
+				boundary = boundary.Truncate(time.Second).Add(time.Second)
+			}
+			consider(boundary)
+		}
+		if view == ViewChat {
+			continue
+		}
+		// Activity moves across the same rolling minute buckets as the cards.
+		// Coalesce nearby boundaries at the display's one-second resolution.
+		bucket := func(at time.Time) {
+			age := u.Now.Sub(at)
+			if !at.IsZero() && age >= 0 && age <= 10*time.Minute {
+				boundary := at.Add(age.Truncate(time.Minute) + time.Minute)
+				consider(boundary.Truncate(time.Second).Add(time.Second))
+			}
+		}
+		bucket(row.CreatedAt)
+		for _, at := range row.RecentActivity {
+			bucket(at)
+		}
+	}
+	return deadline
+}
+
+func analysisShowsElapsed(sheet *Sheet) bool {
+	return sheet != nil && (sheet.Analysis == "Overview" || sheet.Analysis == "Agents")
+}

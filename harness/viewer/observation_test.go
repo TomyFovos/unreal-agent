@@ -5,14 +5,101 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
+	"github.com/unreallabsai/unreal-agent/harness/subagent"
 )
+
+type countingParentReader struct {
+	ParentReader
+	observations, subscriptions, inspections int
+}
+
+func (r *countingParentReader) ObservePages(ctx context.Context, id session.ID, recent int, consume func(host.View) error) error {
+	r.observations++
+	return r.ParentReader.ObservePages(ctx, id, recent, consume)
+}
+
+func (r *countingParentReader) Inspect(ctx context.Context, id session.ID, after sessionstore.Sequence, size int) (host.View, error) {
+	r.inspections++
+	return r.ParentReader.Inspect(ctx, id, after, size)
+}
+
+func (r *countingParentReader) Subscribe(ctx context.Context, id session.ID, after sessionstore.Sequence, size, capacity int) (host.Subscription, error) {
+	r.subscriptions++
+	return r.ParentReader.Subscribe(ctx, id, after, size, capacity)
+}
+
+func TestIdlePanelsKeepHostSubscriptionAndApplyWorkerEvent(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		dir := t.TempDir()
+		h := viewerOwner(t, dir)
+		ctx := t.Context()
+		s, err := h.Create(ctx, host.Options{ID: "idle", Policy: permission.Unrestricted()})
+		must(t, err)
+		readers := make([]*countingParentReader, 2)
+		panels := make([]*Panel, len(readers))
+		for i := range readers {
+			r := &countingParentReader{ParentReader: ParentReader{Host: h, ParentID: s.ID, Directory: dir}}
+			readers[i] = r
+			panel := NewPanel(ctx, s.ID, NewClient(r, New(SubagentOptions()), nil))
+			panel.SetTopologyVisible(true)
+			defer panel.Close()
+			panels[i] = panel
+			<-panel.Updates()
+		}
+		synctest.Wait()
+		revision := s.ObservationVersion()
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+		if s.ObservationVersion() != revision {
+			t.Fatal("idle observation changed the canonical revision")
+		}
+		for i, r := range readers {
+			if r.observations != 1 || r.subscriptions != 1 || r.inspections != 0 {
+				t.Fatalf("idle viewer %d made additional Host reads: %+v", i, r)
+			}
+			select {
+			case <-panels[i].Updates():
+				t.Fatal("idle viewer notified its frontend")
+			default:
+			}
+			// The main Session subscription is enough to see a newly committed
+			// worker, even without enabling a child transcript read.
+			panels[i].SetTopologyVisible(false)
+		}
+		at := time.Now()
+		_, err = s.SubmitOperation(ctx, s.Generation, "start", "worker", "SubagentStart", startSpec(t, s.ID, dir))
+		must(t, err)
+		synctest.Wait()
+		if !time.Now().Equal(at) {
+			t.Fatal("canonical worker event needed a clock tick")
+		}
+		for i, p := range panels {
+			select {
+			case <-p.Updates():
+			default:
+				t.Fatal("worker event did not immediately notify viewer", i)
+			}
+			got := row(t, p.client.Model, subagent.ChildID(s.ID, "worker"))
+			if got.ParentOperationStatus != operation.StatusReady || got.ParentID != s.ID {
+				t.Fatal("canonical worker change missed", got)
+			}
+			if r := readers[i]; r.observations != 1 || r.subscriptions != 1 || r.inspections != 0 {
+				t.Fatalf("worker event replayed the Host projection: %+v", r)
+			}
+		}
+	})
+}
 
 type observationCursorReader struct {
 	cursorReader

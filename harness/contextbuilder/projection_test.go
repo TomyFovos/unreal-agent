@@ -11,6 +11,8 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
+	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 )
@@ -24,16 +26,24 @@ type contextFixture struct {
 func newContextFixture(t testing.TB, provider string, config contextengine.Config) *contextFixture {
 	t.Helper()
 	b := NewBuilder().(*builder)
-	if _, err := EnableCompaction(b, config, contextengine.Constraints{ToolPolicy: "deny", Filesystem: "enforced-by-Unreal", Network: "enforced-by-Unreal", Process: "denied"}); err != nil {
+	if _, err := EnableWindow(b, config, contextengine.Constraints{ToolPolicy: "deny", Filesystem: "enforced-by-Unreal", Network: "enforced-by-Unreal", Process: "denied"}); err != nil {
 		t.Fatal(err)
 	}
 	b.SetRuntimeProvider(provider)
+	if (contextengine.TokenEstimator{Provider: provider}).Claude() {
+		b.SetWindowPrompt(claudeagent.WindowPromptLine)
+	}
 	b.ConfigureRuntime(llm.Model{ID: "synthetic-model", ReasoningEffort: "medium"}, "required runtime instructions", nil, nil, provider == "claude-code", true)
 	b.SetContextRuntime(sessionstore.RuntimeSelection{Version: 1, Provider: provider, Model: "synthetic-model", Effort: "medium"}, provider != "claude-code")
 	return &contextFixture{b: b}
 }
 func (f *contextFixture) item(t testing.TB, kind sessionstore.ItemKind, data any) {
 	t.Helper()
+	if turn, ok := data.(session.Turn); ok && f.b.engine != nil && turn.Type == session.TurnRegular && turn.ContextAdmission == nil {
+		turn.ContextStrategy = contextengine.WindowThreeLayer
+		turn.ContextAdmission = &session.ContextAdmission{HeaderFingerprint: f.b.admissionFingerprint(f.b.requestEstimate().header)}
+		data = turn
+	}
 	f.sequence++
 	item := sessionstore.Item{Sequence: f.sequence, RecordedAt: time.Unix(int64(f.sequence), 0).UTC(), Kind: kind, Data: data}
 	f.b.SetHistoryItem(item)
@@ -77,7 +87,7 @@ func requestText(r Result) string {
 	return b.String()
 }
 
-func TestCompactionProviderSwitchNativeToolsAndPrivateReasoning(t *testing.T) {
+func TestPublicProjectionProviderSwitchNativeToolsAndPrivateReasoning(t *testing.T) {
 	t.Parallel()
 	f := newContextFixture(t, "openai-codex", contextengine.Config{InputBudget: 12000})
 	f.b.AddTool(llm.Tool{Name: "read", Type: llm.ToolFunction})
@@ -103,7 +113,7 @@ func TestCompactionProviderSwitchNativeToolsAndPrivateReasoning(t *testing.T) {
 			private++
 		}
 	}
-	if calls != 1 || results != 1 || private != 1 || len(before.Request.Tools) != 1 {
+	if calls != 1 || results != 1 || private != 0 || len(before.Request.Tools) != 1 {
 		t.Fatalf("native loop lost: calls=%d results=%d private=%d", calls, results, private)
 	}
 	pkg, _ := json.Marshal(before.Package)
@@ -111,6 +121,7 @@ func TestCompactionProviderSwitchNativeToolsAndPrivateReasoning(t *testing.T) {
 		t.Fatal("private replay entered index/package")
 	}
 	f.b.SetRuntimeProvider("claude-code")
+	f.b.SetWindowPrompt(claudeagent.WindowPromptLine)
 	f.b.ConfigureRuntime(llm.Model{ID: "sonnet", ReasoningEffort: "high"}, "text only", nil, nil, true, true)
 	f.b.SetContextRuntime(sessionstore.RuntimeSelection{Version: 1, Provider: "claude-code", Model: "sonnet", Effort: "high", Revision: 2, ContextWindow: 9000}, false)
 	claude, err := f.b.Build()
@@ -126,6 +137,7 @@ func TestCompactionProviderSwitchNativeToolsAndPrivateReasoning(t *testing.T) {
 		t.Fatal("switch identity/capability/budget failed")
 	}
 	f.b.SetRuntimeProvider("openai-codex")
+	f.b.SetWindowPrompt(nil)
 	f.b.ConfigureRuntime(llm.Model{ID: "gpt"}, "tools again", []llm.Tool{{Name: "read"}}, nil, false, true)
 	f.b.SetContextRuntime(sessionstore.RuntimeSelection{Version: 1, Provider: "openai-codex", Model: "gpt", Effort: "medium", Revision: 3}, true)
 	restored, err := f.b.Build()
@@ -137,7 +149,7 @@ func TestCompactionProviderSwitchNativeToolsAndPrivateReasoning(t *testing.T) {
 	}
 }
 
-func TestCompactionSecretExclusionsDeterminismAndReplay(t *testing.T) {
+func TestPublicProjectionSecretExclusionsDeterminismAndReplay(t *testing.T) {
 	t.Parallel()
 	f := newContextFixture(t, "claude-code", contextengine.Config{InputBudget: 6500})
 	f.turn(t, "safe", "original safe task", "safe response")
@@ -188,7 +200,7 @@ func TestCompactionSecretExclusionsDeterminismAndReplay(t *testing.T) {
 	}
 }
 
-func TestCompactionSecretSourceBlocksUnlabelledReceipt(t *testing.T) {
+func TestPublicProjectionSecretSourceBlocksUnlabelledReceipt(t *testing.T) {
 	t.Parallel()
 	f := newContextFixture(t, "openai-codex", contextengine.Config{})
 	f.turn(t, "old", "public task", "public answer")
@@ -218,7 +230,7 @@ func TestCompactionSecretSourceBlocksUnlabelledReceipt(t *testing.T) {
 	}
 }
 
-func TestCompactionNativeImageIntactOrExplicitBudgetError(t *testing.T) {
+func TestPublicProjectionNativeImageIntactOrExplicitBudgetError(t *testing.T) {
 	t.Parallel()
 	for _, size := range []int{32, 10000} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
@@ -249,4 +261,62 @@ func TestCompactionNativeImageIntactOrExplicitBudgetError(t *testing.T) {
 			}
 		})
 	}
+}
+
+func fixtureCall(id, name, arguments string) llm.Item {
+	return llm.Item{Type: llm.ItemToolCall, ProviderID: "fc-" + id, Data: llm.ToolCall{CallID: id, Name: name, Arguments: arguments}}
+}
+
+func appendFixtureRecord(t testing.TB, f *contextFixture, kind sessionstore.ItemKind, data any) {
+	t.Helper()
+	status, receipt := data.(sessionstore.ToolCallStatus)
+	record, contextRecord := data.(sessionstore.HostRecord)
+	if !receipt && !contextRecord {
+		f.item(t, kind, data)
+		return
+	}
+	f.sequence++
+	item := sessionstore.Item{Sequence: f.sequence, Kind: kind, Data: data}
+	f.b.SetHistoryItem(item)
+	if receipt {
+		state, err := operation.DecodeShellState(status.Operations[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		running := status.Operations[0].Status == operation.StatusAwaiting
+		text := "running"
+		if state.Result != nil {
+			text = state.Result.Out
+		}
+		f.b.AddTypedToolResult(llm.ToolResult{CallID: status.CallID, State: llm.ToolResultSucceeded, Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: text}}}, running)
+	} else if record.Context != nil {
+		f.b.ApplyContext(*record.Context)
+	}
+	f.b.ObserveHistory(item)
+	f.history = append(f.history, item)
+}
+
+func fixtureReceipt(t testing.TB, f *contextFixture, id, text string, running bool) {
+	t.Helper()
+	state := operation.ShellState{Input: operation.ShellInput{Shell: "/bin/bash", Command: "cat source.go", Directory: "/workspace"}, BaseDirectory: "/captures", OutPath: "/captures/" + id + "/out", ErrPath: "/captures/" + id + "/err", Result: &operation.ShellResult{Out: text}}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := operation.Operation{ID: operation.ID("op-" + id), Type: operation.TypeShell, Version: operation.VersionShell, Status: operation.StatusCompleted, MaxOutputLength: 40000, State: raw}
+	if running {
+		op.Status = operation.StatusAwaiting
+	}
+	status := sessionstore.ToolCallStatus{TurnID: session.TurnID(id), CallID: id, Operations: []operation.Operation{op}}
+	status.Status.WaitingFor = []operation.ID{op.ID}
+	appendFixtureRecord(t, f, sessionstore.ItemToolCallStatus, status)
+}
+
+func fixtureExchange(t testing.TB, f *contextFixture, id, name, args, output string) {
+	t.Helper()
+	f.item(t, sessionstore.ItemTurn, session.Turn{ID: session.TurnID(id), Type: session.TurnRegular})
+	f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: session.TurnID(id), Response: llm.Response{Output: []llm.Item{fixtureCall(id, name, args)}}})
+	fixtureReceipt(t, f, id, output, false)
+	f.item(t, sessionstore.ItemTurn, session.Turn{ID: session.TurnID(id + "-ack"), Type: session.TurnRegular})
+	f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: session.TurnID(id + "-ack"), Response: llm.Response{}})
 }

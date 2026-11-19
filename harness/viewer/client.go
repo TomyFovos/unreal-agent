@@ -88,6 +88,38 @@ func (c *Client) pages(ctx context.Context, id session.ID, v host.View) error {
 	return nil
 }
 
+func (c *Client) seedPagedObservation(ctx context.Context, id session.ID) (host.View, bool, error) {
+	if reader, ok := c.Reader.(PagedObservationReader); ok {
+		var last host.View
+		received := false
+		err := reader.ObservePages(ctx, id, c.Model.options.RecentLimit, func(v host.View) error {
+			if !received {
+				received = true
+				if err := c.Model.Replace(id, v); err != nil {
+					return err
+				}
+			} else {
+				if !last.History.More {
+					return ErrInvalidPage
+				}
+				if err := c.Model.AppendPage(id, last.History.NextAfter, v); err != nil {
+					return err
+				}
+			}
+			v.History.Items = nil
+			last = v
+			return nil
+		})
+		if received || !errors.Is(err, ErrUnavailable) {
+			if err == nil && (!received || last.History.More) {
+				err = ErrInvalidPage
+			}
+			return last, true, err
+		}
+	}
+	return host.View{}, false, nil
+}
+
 func (c *Client) observe(ctx context.Context, id session.ID) (host.View, bool, error) {
 	reader, ok := c.Reader.(ObservationReader)
 	if !ok {
@@ -120,7 +152,12 @@ func (c *Client) Refresh(ctx context.Context, id session.ID) error {
 	c.Model.mu.Unlock()
 	inspect := func() (host.View, error) {
 		if after == 0 {
-			if v, used, err := c.observe(ctx, id); used {
+			if v, used, err := c.seedPagedObservation(ctx, id); used {
+				if err != nil {
+					return host.View{}, err
+				}
+				after, generation = v.History.NextAfter, v.Generation
+			} else if v, used, err := c.observe(ctx, id); used {
 				return v, err
 			}
 		}
@@ -212,12 +249,15 @@ func (c *Client) Watch(ctx context.Context, id session.ID, changed func(Notice))
 		version := c.Model.Version()
 		subscribe := func() (host.Subscription, error) {
 			if after == 0 {
-				v, used, err := c.observe(ctx, id)
+				v, used, err := c.seedPagedObservation(ctx, id)
+				if !used {
+					v, used, err = c.observe(ctx, id)
+					if used && err == nil {
+						err = c.Model.Replace(id, v)
+					}
+				}
 				if used {
 					if err != nil {
-						return host.Subscription{}, err
-					}
-					if err = c.Model.Replace(id, v); err != nil {
 						return host.Subscription{}, err
 					}
 					after, generation = v.History.NextAfter, v.Generation
@@ -292,6 +332,7 @@ func (c *Client) consume(ctx context.Context, id session.ID, sub host.Subscripti
 			if !ok {
 				return ErrResync
 			}
+			version := c.Model.Version()
 			err := c.Model.Apply(id, event)
 			if errors.Is(err, ErrStale) {
 				continue
@@ -299,7 +340,9 @@ func (c *Client) consume(ctx context.Context, id session.ID, sub host.Subscripti
 			if err != nil {
 				return err
 			}
-			notify(nil)
+			if c.Model.Version() != version {
+				notify(nil)
+			}
 			if event.Kind == "stopped" {
 				return nil
 			}

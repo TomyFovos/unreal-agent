@@ -80,7 +80,7 @@ func TestPeerFormatBoundaryPreservesCachedPrefixAndReplays(t *testing.T) {
 	if boundary == nil {
 		t.Fatal("missing durable format boundary")
 	}
-	epochApply(t, f, sessionstore.ItemHostRecord, sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostContext, Context: boundary})
+	appendFixtureRecord(t, f, sessionstore.ItemHostRecord, sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostContext, Context: boundary})
 	f.item(t, sessionstore.ItemInput, peerFormatInput(t, "new", "new-handle", "new result"))
 	after, err := f.b.Build()
 	if err != nil {
@@ -95,7 +95,7 @@ func TestPeerFormatBoundaryPreservesCachedPrefixAndReplays(t *testing.T) {
 	replay := newContextFixture(t, "openai-codex", contextengine.Config{})
 	replay.b.BeginHistoryReplay()
 	for _, item := range f.history {
-		epochApply(t, replay, item.Kind, item.Data)
+		appendFixtureRecord(t, replay, item.Kind, item.Data)
 	}
 	resumed, err := replay.b.Build()
 	if err != nil || !reflect.DeepEqual(after.Request, resumed.Request) || !reflect.DeepEqual(after.Package.IncludedUnitIDs, resumed.Package.IncludedUnitIDs) {

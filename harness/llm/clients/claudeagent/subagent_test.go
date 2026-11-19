@@ -15,7 +15,7 @@ import (
 func TestContextCLIUsesLiteralHostPathInReadOnly(t *testing.T) {
 	const cli = "/opt/unreal/bin/unreal"
 	config := SubagentCLI{ContextCommand: cli, Socket: "/run/host.sock"}
-	if got := launchSettings(t.TempDir(), nil, config, false); !strings.Contains(got, config.Socket) {
+	if got := launchSettings(t.TempDir(), nil, config); !strings.Contains(got, config.Socket) {
 		t.Fatal("state and record CLI did not get its Host socket", got)
 	}
 	prompt := subagentPrompt(config)

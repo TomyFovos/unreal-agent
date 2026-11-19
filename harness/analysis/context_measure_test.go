@@ -82,10 +82,10 @@ func TestContextMeasurementsWindowFallback(t *testing.T) {
 		HeaderTokens: new(int64(8_000)), L2Tokens: 190_000, L2TargetTokens: 5_000,
 		Tail: &sessionstore.WindowTail{Tokens: 5_000}, AfterTokens: 203_000, InputBudgetTokens: 200_000,
 	}})
-	f.turn(2, "summary", contextengine.WindowSummary)
+	f.turn(2, "summary", "summary")
 	r := (&Tree{nodes: []*treeNode{{acc: f.Accumulator, observed: true}}}).Snapshot(nil).ContextMeasurements
 	fallbacks := r.Sessions[0].Fallbacks
-	if len(fallbacks) != 1 || fallbacks[0].Reason != sessionstore.WindowFallbackL2OverBudget || fallbacks[0].Strategy != contextengine.WindowSummary {
+	if len(fallbacks) != 1 || fallbacks[0].Reason != sessionstore.WindowFallbackL2OverBudget || fallbacks[0].Strategy != historicalSummaryStrategy {
 		t.Fatalf("fallback observation = %+v", fallbacks)
 	}
 	n := fallbacks[0].Numbers
@@ -95,8 +95,34 @@ func TestContextMeasurementsWindowFallback(t *testing.T) {
 	measuredNumber(t, n, "tail_tokens", 5_000, "derived", 0)
 	measuredNumber(t, n, "input_budget_tokens", 200_000, "measured", 0)
 	lines := strings.Join(contextLines(r), "\n")
-	if !strings.Contains(lines, "fallback: l2_over_budget") || !strings.Contains(lines, "203000 tokens") {
+	if !strings.Contains(lines, "Historical fallback: l2_over_budget") || !strings.Contains(lines, "203000 tokens") {
 		t.Fatal("fallback reason and sizes are missing from /analyze")
+	}
+}
+
+func TestContextMeasurementsExcerptedFit(t *testing.T) {
+	f := &measurementFixture{Accumulator: New("main")}
+	f.add(0, sessionstore.HostRecord{Kind: sessionstore.HostRuntimeApplied, Selection: &sessionstore.RuntimeSelection{
+		Provider: "openai-codex", Model: "fixture",
+	}})
+	f.contextRecord(1, sessionstore.ContextRecord{Kind: sessionstore.ContextWindowBoundary, Provider: "openai-codex", Model: "fixture", Window: &sessionstore.WindowBoundary{
+		Fit: sessionstore.WindowFitExcerpted, FitExcerptChars: new(120), InputBudgetTokens: 4_000,
+		RequiredInputTokens: 10_000, RequiredTailTokens: 9_000, Estimator: "fixture", AfterTokens: 3_999,
+		HeaderTokens: new(int64(400)), L2Tokens: 600, Tail: &sessionstore.WindowTail{Tokens: 2_999, Items: 2},
+	}})
+	f.turn(2, "fitted", contextengine.WindowThreeLayer)
+	r := f.ContextReport(true)
+	if groups := r.Sessions[0].Groups; len(groups) != 1 || groups[0].Strategy != contextengine.WindowThreeLayer {
+		t.Fatal("first rebuild created a second strategy group", groups)
+	}
+	n := reportGroup(t, r.Sessions[0].Windows[0].Groups, contextengine.WindowThreeLayer, "fixture", "unknown")
+	measuredNumber(t, n, "fit_excerpted", 1, "measured", 0)
+	measuredNumber(t, n, "fit_excerpt_chars", 120, "measured", 0)
+	measuredNumber(t, n, "fit_required_input", 10_000, "derived", 0)
+	measuredNumber(t, n, "fit_required_tail", 9_000, "derived", 0)
+	measuredNumber(t, n, "fit_input_budget", 4_000, "measured", 0)
+	if !strings.Contains(strings.Join(contextLines(r), "\n"), "Fit: excerpted") {
+		t.Fatal("/analyze omitted the fitted boundary")
 	}
 }
 
@@ -244,11 +270,11 @@ func TestContextMeasurementsWindowsAndExport(t *testing.T) {
 	}
 }
 
-func TestSummaryContextUsesCLIRequestsAndReportedCompactions(t *testing.T) {
+func TestHistoricalSummaryShowsOldCLIAndUnrealCompactions(t *testing.T) {
 	f := &measurementFixture{Accumulator: New("summary")}
-	const strategy = contextengine.WindowSummary
+	const strategy = historicalSummaryStrategy
 	f.add(1, sessionstore.HostRecord{Kind: "configuration", Configuration: []byte(`{"Provider":{"provider":"claude-code","model":{"id":"fixture-opus"}},"ReasoningEffort":"max"}`)})
-	f.turn(5, "cli", strategy)
+	f.turn(5, "cli", "summary")
 	stream := func(second int, id, model, scope string, usage *llm.RequestUsage) {
 		raw, err := json.Marshal(map[string]string{"event": "message_start", "parent_tool_use_id": scope})
 		if err != nil {
@@ -272,13 +298,22 @@ func TestSummaryContextUsesCLIRequestsAndReportedCompactions(t *testing.T) {
 	summary := llm.Usage{InputTokens: 15000, OutputTokens: 500}
 	f.contextRecord(14, sessionstore.ContextRecord{Kind: "summary", Provider: "opencode-go", Model: "qwen3.8-flash", Usage: &summary,
 		Generation: &llm.GenerationStatistics{Source: "client_clock", Tokens: llm.ReportedTokens(summary), DurationMicros: 1500000}})
-	f.turn(15, "post-summary", strategy)
+	f.turn(15, "post-summary", "summary")
 	f.respond(18, "post-summary", "opencode-go", "qwen3.8-flash", "Done.", llm.Usage{InputTokens: 700})
 	s := f.ContextReport(true).Sessions[0]
 	if len(s.Compactions) != 2 {
 		t.Fatal("missing CLI/Unreal compactions", s.Compactions)
 	}
+	lines := strings.Join(contextLines(f.ContextReport(true)), "\n")
+	for _, label := range []string{"Historical CLI compaction", "Historical Unreal compaction", historicalSummaryStrategy} {
+		if !strings.Contains(lines, label) {
+			t.Fatalf("/analyze is missing the historical label %q", label)
+		}
+	}
 	cli := s.Compactions[0]
+	if cli.Strategy != historicalSummaryStrategy || s.Compactions[1].Strategy != historicalSummaryStrategy {
+		t.Fatal("old compactions were reported as an active strategy")
+	}
 	measuredNumber(t, cli.Numbers, "before_tokens", 200000, "measured", 0)
 	measuredNumber(t, cli.Numbers, "cli_post_tokens", 0, "measured", 0)
 	measuredNumber(t, cli.Numbers, "post_request_input_tokens", 100, "measured", 0)

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"strings"
 	"unicode"
 	"uuid"
 
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -79,6 +81,11 @@ func (current *coordinator) deliverSteering(ctx context.Context, request bridgeR
 			return current.persistContext(ctx, sessionstore.ContextRecord{Kind: "deferred_inputs"})
 		})
 		if err != nil {
+			if contextengine.IsBudgetError(err) {
+				request.reply <- bridgeReply{err: err}
+				current.interruptModel()
+				return current.failModelTurn(ctx, "", fmt.Errorf("rebuild context after tool batch: %w", err))
+			}
 			return err
 		}
 		if rotated {

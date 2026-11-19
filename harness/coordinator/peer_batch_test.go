@@ -13,6 +13,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/claudeprompt"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
@@ -29,6 +30,7 @@ func TestClaudeReadsPeerAtToolBatchBoundary(t *testing.T) {
 				restoreTestRun(t, run, store)
 				run.current.dependencies.ContextBuilder = appendOnlyTestBuilder(t)
 				run.current.dependencies.ContextBuilder.(interface{ SetRuntimeProvider(string) }).SetRuntimeProvider("claude")
+				run.current.dependencies.ContextBuilder.(interface{ SetWindowPrompt(llm.WindowPrompt) }).SetWindowPrompt(claudeagent.WindowPromptLine)
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
 				go func() { run.done <- run.run(ctx) }()
@@ -97,7 +99,9 @@ func TestClaudeReadsPeerAtToolBatchBoundary(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					wantEstimate := (contextengine.TokenEstimator{Provider: "claude"}).Request(built.Request)
+					estimator := contextengine.TokenEstimator{}
+					wantEstimate := estimator.Item(built.Request.Input[0]) + estimator.Tools(built.Request.Tools) +
+						estimator.Text(claudeagent.WindowPrompt(built.Request.Input))
 					if built.Report.Context.EstimatedInputTokens != wantEstimate {
 						t.Fatalf("Claude batch estimate = %d, want %d", built.Report.Context.EstimatedInputTokens, wantEstimate)
 					}
@@ -115,9 +119,10 @@ func TestClaudeReadsPeerAtToolBatchBoundary(t *testing.T) {
 						t.Fatal("mid-turn inputs caused a duplicate call", run.current.pendingInputs())
 					}
 					run.input(t, externalEvent(t, 2, "next-live", "continue the review"))
-					live := claudeprompt.Plan(run.calls[1].request.Input)
-					if strings.Contains(live.New, "Which file should I edit?") || strings.Contains(live.New, "worker finished the patch") {
-						t.Fatalf("new Claude turn repeated delivered peers: %s", live.New)
+					live := run.calls[1].request
+					newInput := claudeagent.WindowPrompt(live.Input[live.Window.DeliveredItems:])
+					if strings.Contains(newInput, "Which file should I edit?") || strings.Contains(newInput, "worker finished the patch") {
+						t.Fatalf("new Claude turn repeated delivered peers: %s", newInput)
 					}
 					run.respond(t, 1, textResponse("reviewed"))
 				} else {
@@ -158,6 +163,7 @@ func TestClaudeReadsPeerAtToolBatchBoundary(t *testing.T) {
 				resumed := newToolGraceTestRun(t)
 				resumed.current.dependencies.ContextBuilder = appendOnlyTestBuilder(t)
 				resumed.current.dependencies.ContextBuilder.(interface{ SetRuntimeProvider(string) }).SetRuntimeProvider("claude")
+				resumed.current.dependencies.ContextBuilder.(interface{ SetWindowPrompt(llm.WindowPrompt) }).SetWindowPrompt(claudeagent.WindowPromptLine)
 				restoreTestRun(t, resumed, store)
 				resumed.start(t)
 				wantNew := 1
@@ -172,10 +178,12 @@ func TestClaudeReadsPeerAtToolBatchBoundary(t *testing.T) {
 				if resumed.modelCallCount() != 1 {
 					t.Fatal("restored work did not start exactly one request")
 				}
-				plan := claudeprompt.Plan(resumed.calls[0].request.Input)
+				projection := resumed.calls[0].request
+				full := claudeagent.WindowPrompt(projection.Input)
+				newInput := claudeagent.WindowPrompt(projection.Input[projection.Window.DeliveredItems:])
 				for _, text := range []string{"Which file should I edit?", "keep the review narrow", "checked two tests", "worker finished the patch"} {
-					if strings.Count(plan.New, text) != wantNew || strings.Count(plan.Full, text) != 1 || strings.Contains(plan.Full, "ready duplicate handle") {
-						t.Fatalf("restored %q at %s: %+v", text, stage, plan)
+					if strings.Count(newInput, text) != wantNew || strings.Count(full, text) != 1 || strings.Contains(full, "ready duplicate handle") {
+						t.Fatalf("restored %q at %s: %s", text, stage, newInput)
 					}
 				}
 				resumed.respond(t, 0, textResponse("reviewed"))

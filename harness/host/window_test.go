@@ -46,7 +46,7 @@ func seedWindowHistory(t *testing.T, dir string) (*localfile.Store, string, reco
 	old := oldWindowInput + strings.Repeat(" Previous work.", 1300)
 	seq, err := store.AppendInputRecorded(ctx, "window", input("old", old))
 	checkHostRestore(t, err)
-	checkHostRestore(t, store.AppendTurn(ctx, "window", session.Turn{ID: "old", Type: session.TurnRegular}))
+	checkHostRestore(t, store.AppendTurn(ctx, "window", session.Turn{ID: "old", Type: session.TurnRegular, ContextStrategy: contextengine.WindowThreeLayer}))
 	checkHostRestore(t, store.AppendModelResponse(ctx, "window", sessionstore.ModelResponse{
 		TurnID: "old", Response: llm.Response{Stop: llm.StopComplete, Output: []llm.Item{
 			{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: windowQuestion}},

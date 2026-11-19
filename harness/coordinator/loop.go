@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json/v2"
@@ -11,7 +12,6 @@ import (
 	"time"
 	"uuid"
 
-	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
 	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -57,7 +57,6 @@ type coordinator struct {
 	modelInputs        int
 	deferredContext    []deferredInput
 	contextRetry       bool
-	forceCompaction    bool
 	recordedInputIDs   map[inbox.ID]bool
 	childReports       reporting.Index
 	idleRequest        llm.Request
@@ -269,7 +268,7 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 			return ctx.Err()
 		}
 	} else if callModel {
-		if err := current.requestModelResponse(modelContext, modelResponses); err != nil {
+		if err := current.requestModelResponse(modelContext, modelResponses, false); err != nil {
 			return err
 		}
 	}
@@ -332,19 +331,21 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 				continue
 			}
 			received.turnID = current.state.currentTurnID
-			if !current.contextRetry && llm.IsContextOverflow(received.err, received.response) {
-				if b, ok := current.dependencies.ContextBuilder.(interface{ UsesAppendOnlyContext() bool }); ok && b.UsesAppendOnlyContext() {
+			if llm.IsContextOverflow(received.err, received.response) {
+				if !current.contextRetry && current.usesThreeLayerContext() {
 					if err := current.drainInbox(ctx); err != nil {
 						return err
 					}
-					if current.held() || current.stop.request.Mode == inbox.StopHard {
+					if current.held() || current.stop.request.Mode == inbox.StopHard || current.cancelModel == nil {
 						break
 					}
-					current.contextRetry, current.forceCompaction = true, true
-					if err := current.requestModelResponse(modelContext, modelResponses); err != nil {
+					if err := current.requestModelResponse(modelContext, modelResponses, true); err != nil {
 						return err
 					}
 					continue
+				}
+				if received.err == nil {
+					received.err = errors.New("provider context window exceeded")
 				}
 			}
 			current.contextRetry = false
@@ -371,7 +372,7 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 			return nil
 		}
 		if callModel {
-			err = current.requestModelResponse(modelContext, modelResponses)
+			err = current.requestModelResponse(modelContext, modelResponses, false)
 			if err != nil {
 				return err
 			}
@@ -578,7 +579,7 @@ func (current *coordinator) processModelResponse(ctx context.Context, modelRespo
 			}
 		}
 		var retryable interface{ RetryableModelFailure() bool }
-		if current.dependencies.RetryModelFailures && errors.As(modelResponse.err, &retryable) && retryable.RetryableModelFailure() {
+		if current.dependencies.RetryModelFailures && !llm.IsContextOverflow(modelResponse.err, modelResponse.response) && errors.As(modelResponse.err, &retryable) && retryable.RetryableModelFailure() {
 			if record := current.dependencies.RecordActivity; record != nil {
 				if err := record(ctx, llm.ActivityRecord{Kind: "model_retry", ID: string(modelResponse.turnID), StartedAt: time.Now().UTC(), Reason: modelResponse.err.Error()}); err != nil {
 					slog.Warn("record model retry", "error", err)
@@ -786,6 +787,7 @@ func (current *coordinator) cancelOperations(ctx context.Context) error {
 func (current *coordinator) requestModelResponse(
 	ctx context.Context,
 	results chan<- modelResponseResult,
+	providerOverflow bool,
 ) error {
 	if current.idleDone != nil {
 		return nil
@@ -803,9 +805,6 @@ func (current *coordinator) requestModelResponse(
 		return nil
 	}
 	boundary := current.state.selectionBoundary && current.cancelModel == nil && len(current.state.toolCalls) == 0 && !current.hasPendingOperations()
-	if !current.forceCompaction {
-		current.contextRetry = false
-	}
 	current.interruptModel()
 	var runtimeRevision uint64
 	if current.dependencies.BeforeTurn != nil {
@@ -822,27 +821,18 @@ func (current *coordinator) requestModelResponse(
 		}
 	}
 	if b, ok := current.dependencies.ContextBuilder.(interface {
-		PrepareContext(context.Context, llm.Adapter, llm.RequestOptions, func(sessionstore.ContextRecord) error, bool) error
+		PrepareContext(context.Context, func(sessionstore.ContextRecord) error, bool) error
 	}); ok {
 		persist := func(r sessionstore.ContextRecord) error {
 			return current.persistContext(ctx, r)
 		}
-		if err := b.PrepareContext(ctx, current.dependencies.LLM, llm.RequestOptions{CacheKey: current.cacheKey()}, persist, current.forceCompaction); err != nil {
-			var limited llm.UsageLimitFailure
-			if errors.As(err, &limited) {
-				if _, reached := limited.UsageLimitReset(); reached {
-					return current.processModelResponse(ctx, modelResponseResult{turnID: current.state.currentTurnID, err: err})
-				}
-			}
+		if err := b.PrepareContext(ctx, persist, providerOverflow); err != nil {
 			cause := fmt.Errorf("prepare context: %w", err)
-			var summary *contextbuilder.SummaryModelError
-			if errors.As(err, &summary) || contextengine.IsBudgetError(err) {
-				current.forceCompaction = false
+			if contextengine.IsBudgetError(err) {
 				return current.failModelTurn(ctx, "", cause)
 			}
 			return cause
 		}
-		current.forceCompaction = false
 	}
 	built, err := current.dependencies.ContextBuilder.Build()
 	if recordErr := current.recordContextRedactions(ctx); recordErr != nil {
@@ -896,6 +886,7 @@ func (current *coordinator) requestModelResponse(
 
 	requestContext, cancel := context.WithCancel(ctx)
 	current.cancelModel = cancel
+	current.contextRetry = providerOverflow
 	current.modelOrigin, current.modelRevision, current.modelInputs = turn.ID, turn.RuntimeRevision, current.state.currentTurnInputs
 	current.modelWindow = ""
 	if turn.ContextAdmission != nil {
@@ -1205,7 +1196,7 @@ func (current *coordinator) restore(ctx context.Context) error {
 	}
 	// A native call whose owner ended before recording any result has a fixed
 	// unknown receipt. Resume does not execute that abandoned call again.
-	if b, ok := current.dependencies.ContextBuilder.(interface{ UsesAppendOnlyContext() bool }); ok && b.UsesAppendOnlyContext() {
+	if current.usesThreeLayerContext() {
 		for key, call := range current.state.toolCalls {
 			if call.status != nil {
 				continue
@@ -1310,6 +1301,7 @@ func (current *coordinator) loadHistory(ctx context.Context) (result error) {
 		history = view
 	}
 	after := sessionstore.BeforeFirst
+	var peer replayedPeerInput
 	for {
 		page, err := history.Items(
 			ctx,
@@ -1324,7 +1316,7 @@ func (current *coordinator) loadHistory(ctx context.Context) (result error) {
 			if item.Sequence != after+1 {
 				return llm.ErrToolRecoveryRequired
 			}
-			if err := current.restoreItem(item); err != nil {
+			if err := current.restoreItem(item, &peer); err != nil {
 				return fmt.Errorf("load session item %d: %w", item.Sequence, err)
 			}
 			after = item.Sequence
@@ -1350,7 +1342,13 @@ func (current *coordinator) loadHistory(ctx context.Context) (result error) {
 	}
 }
 
-func (current *coordinator) restoreItem(item sessionstore.Item) error {
+// Replay can encounter the same canonical peer payload in distinct inputs.
+type replayedPeerInput struct {
+	payload []byte
+	message inbox.PeerMessage
+}
+
+func (current *coordinator) restoreItem(item sessionstore.Item, previousPeer *replayedPeerInput) error {
 	if item.Kind == sessionstore.ItemContextEvent {
 		// The Session store replays L2. These items have no model projection.
 		return nil
@@ -1375,12 +1373,26 @@ func (current *coordinator) restoreItem(item sessionstore.Item) error {
 			}
 		}
 	}
-	_, err := current.addItemToLocalState(item)
+	var decodedPeer *inbox.PeerMessage
+	if input, ok := item.Data.(inbox.Input); ok && item.Kind == sessionstore.ItemInput && input.Kind == inbox.InputPeer && input.ID != "" {
+		if previousPeer.payload == nil || !bytes.Equal(input.Payload, previousPeer.payload) {
+			peer, err := input.DecodePeerMessage()
+			if err != nil {
+				return fmt.Errorf("invalid input: %w", err)
+			}
+			*previousPeer = replayedPeerInput{payload: bytes.Clone(input.Payload), message: peer}
+		}
+		decodedPeer = &previousPeer.message
+	}
+	_, err := current.applyItem(item, decodedPeer)
 	if err == nil {
 		if turn, ok := item.Data.(session.Turn); ok && turn.ToolContinuation != "" && turn.ExternalInputWatermark > 0 {
 			current.turnExternals = turn.ExternalInputWatermark
 		}
-		if b, ok := current.dependencies.ContextBuilder.(interface{ ObserveHistory(sessionstore.Item) }); ok {
+		switch b := current.dependencies.ContextBuilder.(type) {
+		case interface{ ObserveReplayedHistory(sessionstore.Item) }:
+			b.ObserveReplayedHistory(item)
+		case interface{ ObserveHistory(sessionstore.Item) }:
 			b.ObserveHistory(item)
 		}
 	}
@@ -1416,6 +1428,10 @@ func (current *coordinator) projectPeerInput(input inbox.Input, peer inbox.PeerM
 func (current *coordinator) addItemToLocalState(
 	item sessionstore.Item,
 ) (sessionstore.Item, error) {
+	return current.applyItem(item, nil)
+}
+
+func (current *coordinator) applyItem(item sessionstore.Item, decodedPeer *inbox.PeerMessage) (sessionstore.Item, error) {
 	if b, ok := current.dependencies.ContextBuilder.(interface{ SetHistoryItem(sessionstore.Item) }); ok {
 		b.SetHistoryItem(item)
 	}
@@ -1489,7 +1505,9 @@ func (current *coordinator) addItemToLocalState(
 		var err error
 		// Decode the complete peer payload once for delivery, scheduling and
 		// context projection. Other input kinds use their ordinary validation.
-		if input.Kind == inbox.InputPeer && input.ID != "" {
+		if decodedPeer != nil {
+			peer = *decodedPeer
+		} else if input.Kind == inbox.InputPeer && input.ID != "" {
 			peer, err = input.DecodePeerMessage()
 		} else {
 			err = input.Validate()

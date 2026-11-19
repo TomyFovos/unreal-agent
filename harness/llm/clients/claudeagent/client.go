@@ -15,10 +15,10 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,17 +41,15 @@ const maxLine = 64 << 20
 
 // Config names the CLI. The Session's runtime fills in the rest per Session.
 type Config struct {
-	apiKey    credential.Secret // request-time only, supplied by NewAPIClient
-	apiSource credential.Source // re-read before a deferred process starts
-	// CompactThresholdTokens defaults to 200,000 for the CLI summary strategy.
-	CompactThresholdTokens int64               `json:"-"` // injected from route settings; not immutable runtime identity
-	Binary                 string              // absolute path of the claude CLI
-	AgentModel             string              `json:",omitzero"`
-	AgentEffort            llm.ReasoningEffort `json:",omitzero"`
-	Directory              string              `json:"-"` // the workspace; Claude Code's working directory
-	Results                *observed.Results   `json:"-"`
-	Environ                func() []string     `json:"-"` // nil means os.Environ
-	Subagents              SubagentCLI         `json:"-"`
+	apiKey      credential.Secret   // request-time only, supplied by NewAPIClient
+	apiSource   credential.Source   // re-read before a deferred process starts
+	Binary      string              // absolute path of the claude CLI
+	AgentModel  string              `json:",omitzero"`
+	AgentEffort llm.ReasoningEffort `json:",omitzero"`
+	Directory   string              `json:"-"` // the workspace; Claude Code's working directory
+	Results     *observed.Results   `json:"-"`
+	Environ     func() []string     `json:"-"` // nil means os.Environ
+	Subagents   SubagentCLI         `json:"-"`
 	// Namespace is the Host's Session store. Two instances can each have a
 	// Session of the same name; each needs its own Claude Code conversation.
 	Namespace string `json:"-"`
@@ -107,8 +105,6 @@ const (
 type Client struct {
 	config           Config
 	approver         approver
-	mu               sync.Mutex
-	contextTokens    map[string]int64
 	activityInterval time.Duration
 }
 
@@ -139,10 +135,7 @@ func NewClient(config Config) (*Client, error) {
 	if !filepath.IsAbs(config.Subagents.Binary) || !filepath.IsAbs(config.Subagents.Socket) {
 		config.Subagents = SubagentCLI{AgentModel: config.Subagents.AgentModel, Roles: config.Subagents.Roles, SettingsCommand: config.Subagents.SettingsCommand, ContextCommand: config.Subagents.ContextCommand, Socket: config.Subagents.Socket}
 	}
-	if config.CompactThresholdTokens <= 0 {
-		config.CompactThresholdTokens = DefaultCompactThresholdTokens
-	}
-	return &Client{config: config, approver: approver{cli: subagentCommandPath(config.Subagents), contextCLI: config.Subagents.ContextCommand, agentModel: config.AgentModel, agentEffort: config.AgentEffort}, contextTokens: map[string]int64{}, activityInterval: streamActivityInterval}, nil
+	return &Client{config: config, approver: approver{cli: subagentCommandPath(config.Subagents), contextCLI: config.Subagents.ContextCommand, agentModel: config.AgentModel, agentEffort: config.AgentEffort}, activityInterval: streamActivityInterval}, nil
 }
 
 func (c *Client) Close() error { return nil }
@@ -174,15 +167,6 @@ func (e *Error) ContextOverflow() bool { return e.Code == "context_length_exceed
 // the Session's private conversation or starts the next window's conversation.
 func (c *Client) Respond(ctx context.Context, request llm.Request, opt llm.RequestOptions) (llm.Response, error) {
 	base := sessionUUID(c.config.Namespace, opt.Identity.SessionID)
-	if c.providerID() != ProviderID {
-		request.Window = nil
-	}
-	if request.Window == nil {
-		if idle := c.idleCompactionState(base, opt); idle != nil {
-			idle.beginTurn()
-			defer idle.endTurn()
-		}
-	}
 	if opt.Tools == nil {
 		return llm.Response{}, &Error{Code: "tool_rendezvous_required"}
 	}
@@ -211,7 +195,7 @@ func (c *Client) Respond(ctx context.Context, request llm.Request, opt llm.Reque
 		return llm.Response{}, err
 	}
 	for attempt := 0; ; attempt++ {
-		response, err := c.run(ctx, request, opt, session, resume, prompt, nil)
+		response, err := c.run(ctx, request, opt, session, resume, prompt)
 		var started *startError
 		if attempt > 0 || !errors.As(err, &started) {
 			return response, err
@@ -237,7 +221,7 @@ type startError struct {
 
 func (e *startError) Error() string { return "Claude Code: " + e.message }
 
-func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOptions, session string, resume bool, prompt string, compact *compaction) (llm.Response, error) {
+func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOptions, session string, resume bool, prompt string) (llm.Response, error) {
 	if err := ctx.Err(); err != nil {
 		return llm.Response{}, err
 	}
@@ -277,15 +261,10 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	env = launchEnv(env, subagents)
 	env = agentModelEnv(env, subagents)
 	windowed := request.Window != nil
-	if windowed {
-		env = append(env, disableAutoCompactEnv+"=1")
-	} else {
+	if !windowed {
 		opt.AfterToolBatch = nil
-		args = append(args, "--autocompact", strconv.FormatInt(autoCompactTokens(c.config.CompactThresholdTokens), 10))
 	}
-	if settings := launchSettings(c.config.Directory, env, subagents, windowed); settings != "" {
-		args = append(args, "--settings", settings)
-	}
+	args = append(args, "--settings", launchSettings(c.config.Directory, env, subagents))
 	if resume {
 		args = append(args, "--resume", session)
 	} else {
@@ -332,21 +311,11 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	t := newTurn(ctx, cancel, opt, out, c.config.Results, &c.approver, c.config.Directory, session)
 	t.startup.process = started
 	t.measureFirstRequest = windowed
-	t.compacting = compact != nil
-	t.subagents, t.environ = subagents, cmd.Env
+	t.subagents = subagents
 	streams, stopStreams := t.observeStreams(c.activityInterval)
 	t.streams = streams
 	defer stopStreams()
-	compacts := &compactEvents{client: c, turn: t}
-	defer compacts.finish()
 	stopInterrupt := context.AfterFunc(ctx, func() {
-		if compact != nil {
-			// Do not let an interrupted summary be saved during graceful
-			// shutdown. Reap this process before the next resume can start.
-			killGroup(cmd)
-			cancel()
-			return
-		}
 		_ = out.send(map[string]any{"type": "control_request", "request_id": "unreal-interrupt", "request": map[string]any{"subtype": "interrupt"}})
 		time.AfterFunc(3*time.Second, cancel)
 	})
@@ -377,9 +346,6 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	hooks := map[string]any{
 		"PreToolUse":    []any{map[string]any{"matcher": gateMatcher, "hookCallbackIds": []string{gateHook}}},
 		"PostToolBatch": []any{map[string]any{"hookCallbackIds": []string{batchHook}, "timeout": batchHookSeconds}},
-		"SessionStart":  []any{map[string]any{"matcher": "compact", "hookCallbackIds": []string{compactStartHook}}},
-		"PreCompact":    []any{map[string]any{"hookCallbackIds": []string{preCompactHook}}},
-		"PostCompact":   []any{map[string]any{"hookCallbackIds": []string{postCompactHook}}},
 	}
 	if err = out.send(map[string]any{"type": "control_request", "request_id": "unreal-init", "request": map[string]any{"subtype": "initialize", "hooks": hooks}}); err == nil {
 		err = out.send(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": prompt}, "parent_tool_use_id": nil, "session_id": ""})
@@ -404,35 +370,14 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 					t.recordSubscriptionUsage(f, request.Model)
 				}
 				streams.observe(f)
-				if compact != nil {
-					t.recordStartup(f)
-					compact.handle(f)
-					if f.Type == "result" {
-						result = &f
-					} else if f.Type == "control_request" {
-						t.handle(f)
+				if f.Type == "stream_event" && f.ParentToolUseID == nil {
+					var event streamEvent
+					if json.Unmarshal(f.Event, &event) == nil && event.Type == "message_start" && event.Message.Usage != nil {
+						value := event.Message.Usage.inputTokens()
+						lastInput = &value
 					}
-				} else {
-					if compacts.handle(f) {
-						// A pre-compaction call no longer describes this conversation.
-						lastInput = nil
-						t.mu.Lock()
-						t.steps.contextKnown = false
-						t.mu.Unlock()
-					}
-					if f.Type == "stream_event" && f.ParentToolUseID == nil {
-						var event streamEvent
-						if json.Unmarshal(f.Event, &event) == nil && event.Type == "message_start" && event.Message.Usage != nil {
-							value := event.Message.Usage.inputTokens()
-							lastInput = &value
-							if compacts.awaitingInput {
-								c.recordConversation(ctx, opt, session, llm.ConversationRecord{Provider: ProviderID, InputTokens: value, InputKnown: true})
-								compacts.awaitingInput = false
-							}
-						}
-					}
-					result = t.handle(f)
 				}
+				result = t.handle(f)
 			}
 		}
 		if readErr != nil {
@@ -449,16 +394,17 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		finishProcess()
 		return llm.Response{}, startFailure(stderr.String(), &Error{Code: "subprocess_failure", Message: lastLine(stderr.String())})
 	}
-	if compact == nil {
-		t.recordTurnUsage(result)
-		// The result's usage sums every model call of the turn; the last
-		// message_start is the current context. Use the sum only without one.
-		if lastInput == nil && result.Usage != nil && !compacts.awaitingInput {
-			value := result.Usage.inputTokens()
-			lastInput = &value
-		}
-		if lastInput != nil {
-			c.recordConversation(ctx, opt, session, llm.ConversationRecord{Provider: ProviderID, InputTokens: *lastInput, InputKnown: true})
+	t.recordTurnUsage(result)
+	// The result's usage sums every model call. The last message_start
+	// reports the current context size.
+	if lastInput == nil && result.Usage != nil {
+		value := result.Usage.inputTokens()
+		lastInput = &value
+	}
+	if lastInput != nil && opt.RecordConversation != nil {
+		record := llm.ConversationRecord{Provider: c.providerID(), InputTokens: *lastInput, InputKnown: true}
+		if err := opt.RecordConversation(ctx, record); err != nil {
+			slog.Warn("record Claude Code conversation context", "session", opt.Identity.SessionID, "error", err)
 		}
 	}
 	if result.IsError || result.Subtype != "success" || llm.IsOutputLimit(result.StopReason) {
@@ -467,7 +413,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 			message = strings.Join(result.Errors, "; ")
 		}
 		message, limited := streams.outputLimitFailure(result, message)
-		if limited && compact == nil {
+		if limited {
 			failure := &Error{Code: "turn_failed", Message: clip(message, 2000)}
 			// The result may repeat the CLI's error rather than model output.
 			result.Result = ""
@@ -482,13 +428,10 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		if needsLogin(message) {
 			return llm.Response{}, &Error{Code: "external_reauth_required", Message: clip(loginHint(message), 2000)}
 		}
-		if windowed && strings.HasPrefix(message, "Prompt is too long") {
+		if strings.HasPrefix(message, "Prompt is too long") {
 			return llm.Response{}, &Error{Code: "context_length_exceeded", Message: clip(message, 2000)}
 		}
 		return llm.Response{}, &Error{Code: "turn_failed", Message: clip(message, 2000)}
-	}
-	if compact != nil {
-		return llm.Response{}, nil
 	}
 	t.mu.Lock()
 	windowStopped := t.windowStopped
@@ -548,6 +491,7 @@ func environment(env []string) []string {
 		"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true,
 		"CLAUDECODE": true, "CLAUDE_PID": true, "CLAUDE_EFFORT": true,
 		"CLAUDE_CODE_DISABLE_BUNDLED_SKILLS": true,
+		disableAutoCompactEnv:                true, disableCompactEnv: true,
 	}
 	var out []string
 	for _, kv := range env {
@@ -588,8 +532,8 @@ func sessionUUID(namespace, session string) string {
 
 // tail keeps the end of the CLI's stderr for failure messages.
 type tail struct {
-	secret string
 	mu     sync.Mutex
+	secret string
 	buf    []byte
 }
 

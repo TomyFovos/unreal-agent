@@ -85,7 +85,7 @@ func TestWorkerTierTUIReadsArchivedGrandchildrenWithoutResuming(t *testing.T) {
 	for _, s := range context.Sessions {
 		if s.Session == f.Workers["qwen-archived"] {
 			for _, g := range s.Groups {
-				if n := g.Numbers["within_input"]; g.Strategy == "summary" && g.Model == "qwen3.8-flash" && n.Value != nil && *n.Value == 2000 && n.Source == "measured" {
+				if n := g.Numbers["within_input"]; g.Strategy == "historical summary" && g.Model == "qwen3.8-flash" && n.Value != nil && *n.Value == 2000 && n.Source == "measured" {
 					archived = true
 				}
 			}
@@ -99,7 +99,7 @@ func TestWorkerTierTUIReadsArchivedGrandchildrenWithoutResuming(t *testing.T) {
 		}
 	}
 	for _, g := range context.Totals.Groups {
-		if n := g.Numbers["within_input"]; g.Strategy == "summary" && g.Model == "qwen3.8-flash" && n.Value != nil && *n.Value == 2500 {
+		if n := g.Numbers["within_input"]; g.Strategy == "historical summary" && g.Model == "qwen3.8-flash" && n.Value != nil && *n.Value == 2500 {
 			summaryTotal = true
 		}
 	}

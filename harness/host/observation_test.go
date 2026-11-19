@@ -3,6 +3,7 @@ package host
 import (
 	"bytes"
 	"encoding/json/v2"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,10 +15,69 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 )
 
+func TestObservePagesKeepsFixedCursorAndLeavesOperationsForSubscribe(t *testing.T) {
+	items := make([]sessionstore.Item, 2050)
+	for i := range items {
+		items[i] = sessionstore.Item{Sequence: sessionstore.Sequence(i + 1), Kind: sessionstore.ItemInput,
+			Data: input(fmt.Sprint(i), strings.Repeat("long text ", 100))}
+	}
+	op := operation.Operation{ID: "work", Status: operation.StatusCompleted, State: []byte("{}")}
+	s := &Session{
+		ID: "s", Generation: "generation", revision: 7, items: items,
+		snapshot:   sessionstore.Snapshot{Session: session.Session{ID: "s"}},
+		operations: map[operation.ID]operation.Operation{op.ID: op},
+	}
+	pages, cursor := 0, sessionstore.BeforeFirst
+	err := s.ObservePages(t.Context(), 2, func(v View) error {
+		pages++
+		if len(v.Operations) != 0 || v.Generation != s.Generation || v.Revision != 7 ||
+			v.History.More != (pages < 3) || len(v.History.Items) > 1024 {
+			t.Fatal("observation did not keep the original prefix or included Operations", pages)
+		}
+		if pages == 1 {
+			if !s.mu.TryLock() {
+				t.Fatal("stream retained the Session lock while sending")
+			}
+			s.items = append(s.items, sessionstore.Item{Sequence: 2051, Kind: sessionstore.ItemInput, Data: input("during", "during observation")})
+			s.revision++
+			s.mu.Unlock()
+		}
+		for _, item := range v.History.Items {
+			cursor++
+			if item.Sequence != cursor {
+				t.Fatal("observation lost a sequence", cursor, item.Sequence)
+			}
+			body := item.Data.(inbox.Input).Payload
+			long := len(body) > 500
+			if long != (cursor > 2048) {
+				t.Fatal("observation did not preserve only the requested recent bodies", cursor)
+			}
+		}
+		if cursor != v.History.NextAfter {
+			t.Fatal("page cursor does not match its items")
+		}
+		return nil
+	})
+	if err != nil || pages != 3 || cursor != 2050 {
+		t.Fatal("observation did not page the full prefix", err, pages, cursor)
+	}
+	sub, err := s.Subscribe(cursor, 128, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Cancel()
+	v := sub.Initial
+	if v.Revision != 8 || len(v.History.Items) != 1 || v.History.Items[0].Sequence != 2051 ||
+		len(v.Operations) != 1 || v.Operations[0].ID != op.ID {
+		t.Fatal("subscribe lost operations or concurrent append", v)
+	}
+}
+
 func TestObservationRetainsMetadataRecentHistoryAndCanonicalBodies(t *testing.T) {
 	s := &Session{ID: "s", snapshot: sessionstore.Snapshot{Session: session.Session{ID: "s"}}}
 	body := strings.Repeat("a", 159) + "👨‍👩‍👧‍👦" + strings.Repeat("private old body ", 2000)
 	usage := llm.Usage{InputTokens: 12, OutputTokens: 3, Unknown: []llm.UsageField{llm.UsageCachedInput}, Raw: []byte(`{"attribution":{"items":{"old-raw-usage":12}}}`)}
+	timing := &llm.GenerationStatistics{Model: "model", Source: "provider_api", DurationMicros: 500000, Tokens: llm.TokenCounts{Output: 3, OutputKnown: true}}
 	items := []sessionstore.Item{
 		{Kind: sessionstore.ItemInput, Data: input("old", body)},
 		{Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{ID: "response", Model: "model", Usage: usage, Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: body}}, {Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "call", Name: "Read", Arguments: `{"path":"file.go"}`}}}}}},
@@ -30,6 +90,9 @@ func TestObservationRetainsMetadataRecentHistoryAndCanonicalBodies(t *testing.T)
 	for i := range items {
 		items[i].Sequence = sessionstore.Sequence(i + 1)
 	}
+	data := items[1].Data.(sessionstore.ModelResponse)
+	data.Response.Generation = timing
+	items[1].Data = data
 	s.items = items
 	before, err := json.Marshal(s.items)
 	if err != nil {
@@ -67,6 +130,9 @@ func TestObservationRetainsMetadataRecentHistoryAndCanonicalBodies(t *testing.T)
 	}
 	if string(response.Response.Usage.Raw) != "{}" || !reflect.DeepEqual(response.Response.Usage.Unknown, usage.Unknown) {
 		t.Fatal("observation lost reported-usage metadata")
+	}
+	if response.Response.Generation == nil || *response.Response.Generation != *timing {
+		t.Fatal("observation lost output speed metadata")
 	}
 	projection := v.History.Items[1].Data.(sessionstore.ModelResponse)
 	projection.Response.Usage.Unknown[0] = llm.UsageOutput

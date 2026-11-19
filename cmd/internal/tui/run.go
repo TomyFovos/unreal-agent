@@ -8,6 +8,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 	"github.com/unreallabsai/unreal-agent/internal/usertext"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,7 @@ type Config struct {
 	Keys             <-chan Key
 	Output           io.Writer
 	Size             func() (int, int)
+	Resize           <-chan os.Signal
 	Theme            *Theme
 	Viewer           func(time.Time) viewer.PanelSnapshot
 	ViewChanged      func(ViewMode) // frontend read-only observation scope
@@ -211,12 +213,20 @@ func Run(ctx context.Context, c Config) error {
 	var renderer Renderer
 	var complete completion
 	complete.reset()
-	tick := time.NewTicker(120 * time.Millisecond)
-	defer tick.Stop()
+	clock := time.NewTimer(time.Hour)
+	defer clock.Stop()
+	var tick, sizePoll <-chan time.Time
+	if c.Size != nil && c.Resize == nil {
+		// Embedded callers with only a size callback can still report resizes.
+		poll := time.NewTicker(120 * time.Millisecond)
+		defer poll.Stop()
+		sizePoll = poll.C
+	}
 	dirty := true
 	viewerDirty := true
 	viewerSecond := int64(0)
-	animated := false
+	var analysisSheet *Sheet
+	var analysisVersion, analysisViewerVersion uint64
 	width, height := 80, 24
 	previousWidth, previousHeight, previousRows := 0, 0, 0
 	previousConversationHeight := 0
@@ -248,6 +258,9 @@ func Run(ctx context.Context, c Config) error {
 		}
 		if dirty {
 			u.Now = time.Now()
+			if !u.Notification.Until.IsZero() && !u.Now.Before(u.Notification.Until) {
+				u.Notification = Notification{}
+			}
 			u.Input = editor.Text()
 			u.Cursor = editor.cursor
 			u.Selected = editor.Selected
@@ -259,14 +272,28 @@ func Run(ctx context.Context, c Config) error {
 					u.Picker = viewPicker(selected, width)
 				}
 			}
+			viewerChanged := false
 			if c.Viewer != nil && (viewerDirty || viewerSecond != u.Now.Unix()) {
 				u.Viewer = c.Viewer(u.Now)
 				viewerDirty, viewerSecond = false, u.Now.Unix()
-			}
-			if u.Sheet != nil && u.Sheet.Analysis != "" {
-				u.Sheet.Lines = analysis.Lines(m.Analysis(u.Now, u.Viewer.Rows), u.Sheet.Analysis, u.Theme.ASCII)
+				u.Parent = nil
+				for i := range u.Viewer.Rows {
+					if u.Viewer.Rows[i].ID == c.ID {
+						u.Parent = &u.Viewer.Rows[i]
+						break
+					}
+				}
+				viewerChanged = true
 			}
 			s := snapshot()
+			if u.Sheet != nil && u.Sheet.Analysis != "" {
+				if u.Sheet != analysisSheet || s.Version != analysisVersion || u.Viewer.Version != analysisViewerVersion || analysisShowsElapsed(u.Sheet) && viewerChanged {
+					u.Sheet.Lines = analysis.Lines(m.Analysis(u.Now, u.Viewer.Rows), u.Sheet.Analysis, u.Theme.ASCII)
+					analysisSheet, analysisVersion, analysisViewerVersion = u.Sheet, s.Version, u.Viewer.Version
+				}
+			} else {
+				analysisSheet = nil
+			}
 			if c.WatchPermissions != nil && s.Connected && s.Generation != "" && permissionGeneration != s.Generation {
 				if cancelPermission != nil {
 					cancelPermission()
@@ -356,22 +383,29 @@ func Run(ctx context.Context, c Config) error {
 			previousWidth, previousHeight, previousRows = width, height, frame.ConversationRows
 			previousConversationHeight, previousStreaming = frame.ConversationHeight, streaming
 			previousView = frame.View
-			if _, err := io.WriteString(c.Output, renderer.Draw(frame)); err != nil {
-				return err
+			if output := renderer.Draw(frame); output != "" {
+				if _, err := io.WriteString(c.Output, output); err != nil {
+					return err
+				}
 			}
-			animated = u.Busy || s.Progress != nil || !s.Connected || pulse(s, u, makeLayout(width, height)) != nil
+			if deadline := nextRender(s, u, frame.View); deadline.IsZero() {
+				clock.Stop()
+				tick = nil
+			} else {
+				clock.Reset(time.Until(deadline))
+				tick = clock.C
+			}
 			dirty = false
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case now := <-tick.C:
-			if !u.Notification.Until.IsZero() && !now.Before(u.Notification.Until) {
-				u.Notification = Notification{}
-				dirty = true
-			}
-			if now.Unix() != u.Now.Unix() || !u.Theme.Still && animated && now.UnixMilli()/120 != u.Now.UnixMilli()/120 {
-				dirty = true
+		case <-tick:
+			dirty = true
+		case <-sizePoll:
+		case _, ok := <-c.Resize:
+			if !ok {
+				c.Resize = nil
 			}
 		case <-changes:
 			dirty = true

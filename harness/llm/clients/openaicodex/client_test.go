@@ -38,6 +38,9 @@ func TestClientUsesSubscriptionProtocol(t *testing.T) {
 		if body["model"] != "gpt-test" || body["stream"] != true || body["store"] != false {
 			t.Errorf("body = %#v", body)
 		}
+		if _, sent := body["context_management"]; sent {
+			t.Error("Codex request asked for server-side context compaction")
+		}
 		input, ok := body["input"].([]any)
 		if !ok || len(input) != 2 {
 			t.Error("missing conversation input")
@@ -61,7 +64,7 @@ func TestClientUsesSubscriptionProtocol(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	request := llm.Request{Model: llm.Model{ID: "gpt-test"}, Input: []llm.Item{
+	request := llm.Request{Model: llm.Model{ID: "gpt-test"}, PublicHistory: true, Input: []llm.Item{
 		{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleSystem, Text: "Our own instructions"}},
 		{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: "hello"}},
 	}}

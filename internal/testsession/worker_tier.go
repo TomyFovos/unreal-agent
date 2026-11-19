@@ -62,7 +62,7 @@ func writeWorkerTierTree(tb testing.TB, directory string, legacyRuntime bool) Wo
 		if !legacyRuntime {
 			turn.ContextStrategy = contextengine.WindowThreeLayer
 			if model == "qwen3.8-flash" {
-				turn.ContextStrategy = contextengine.WindowSummary
+				turn.ContextStrategy = "summary"
 			}
 		}
 		itemAt(log, second-1, sessionstore.ItemTurn, turn)

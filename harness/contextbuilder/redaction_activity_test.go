@@ -24,8 +24,8 @@ func TestContextRedactionActivityReasonsBytesAndNoBodies(t *testing.T) {
 	f := newContextFixture(t, "openai-codex", contextengine.Config{})
 	f.user(t, "task", "Inspect synthetic sources")
 	const raw = "keep useful code; token=synthetic-private"
-	epochExchange(t, f, "partial", "read", `{"path":"code.go"}`, raw)
-	epochExchange(t, f, "private", "read", `{"path":"/synthetic/.codex/auth.json"}`, "private source body")
+	fixtureExchange(t, f, "partial", "read", `{"path":"code.go"}`, raw)
+	fixtureExchange(t, f, "private", "read", `{"path":"/synthetic/.codex/auth.json"}`, "private source body")
 	f.b.AddTypedToolResult(llm.ToolResult{CallID: "unsupported", Output: []llm.ToolResultOutput{{Kind: "unsupported", Value: "unsupported body"}}}, false)
 	if _, err := f.b.Build(); err != nil {
 		t.Fatal(err)
@@ -74,12 +74,12 @@ func TestContextRedactionActivityReasonsBytesAndNoBodies(t *testing.T) {
 	}
 }
 
-func TestContextRedactionRecordsSummaryProjectionAndHeader(t *testing.T) {
+func TestContextRedactionRecordsHistoricalProjectionAndHeader(t *testing.T) {
 	f := newContextFixture(t, "openai-codex", contextengine.Config{})
 	f.b.SetSystemPrompt("required instructions token=synthetic-private")
 	f.b.SetSystemPrompt("required instructions token=synthetic-private")
 	f.b.ApplyContext(sessionstore.ContextRecord{Kind: "summary", Text: "keep summary token=synthetic-private"})
-	epochExchange(t, f, "read", "read", `{"path":"code.go"}`, "safe result")
+	fixtureExchange(t, f, "read", "read", `{"path":"code.go"}`, "safe result")
 	for _, u := range f.b.engine.Units() {
 		if r, ok := u.Item.Data.(llm.ToolResult); ok {
 			r.Output = []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: "keep projection token=synthetic-private"}}
@@ -87,8 +87,12 @@ func TestContextRedactionRecordsSummaryProjectionAndHeader(t *testing.T) {
 		}
 	}
 	records := takeRedactions(t, f.b)
-	if len(records) != 3 {
-		t.Fatal("header, summary and projection must be counted once", records)
+	if len(records) != 2 {
+		t.Fatal("expected one header and one historical projection observation", records)
+	}
+	built, err := f.b.Build()
+	if err != nil || strings.Contains(requestText(built), "keep summary") {
+		t.Fatal("historical summary entered the request", err)
 	}
 	for _, r := range records {
 		if r.Redaction.Reason != contextengine.PartialRedaction {

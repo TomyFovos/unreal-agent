@@ -7,7 +7,10 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 )
 
-const disableAutoCompactEnv = "DISABLE_AUTO_COMPACT"
+const (
+	disableAutoCompactEnv = "DISABLE_AUTO_COMPACT"
+	disableCompactEnv     = "DISABLE_COMPACT"
+)
 
 // WindowPrompt renders the L2 copy and public L1 items as stream-json user
 // content. Claude Code gets its usual system additions separately. The edge
@@ -48,8 +51,9 @@ func (c *Client) conversationID(base string, opt llm.RequestOptions) string {
 
 func (c *Client) planWindow(ctx context.Context, request llm.Request, opt llm.RequestOptions, base string) (string, promptPlan, error) {
 	window := request.Window
-	previous := opt.ConversationBindings[ProviderID]
-	binding := llm.ConversationBinding{Provider: ProviderID, Boundary: window.Boundary, ID: base}
+	provider := c.providerID()
+	previous := opt.ConversationBindings[provider]
+	binding := llm.ConversationBinding{Provider: provider, Boundary: window.Boundary, ID: base}
 	if previous.ID != "" && previous.Boundary == window.Boundary {
 		binding = previous
 	} else if window.Boundary != "" {

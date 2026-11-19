@@ -58,7 +58,6 @@ type RuntimeConfig struct {
 	// Context is a versioned, disposable projection strategy. It is deliberately
 	// outside immutable runtime/auth identity, so old histories need no migration.
 	Context contextengine.Config
-	Claude  ClaudeRouteConfig
 	// ClaudeSubagents lets the Claude route drive this Host's child templates
 	// through Bash (U21); zero when there are none.
 	ClaudeSubagents  claudeagent.SubagentCLI

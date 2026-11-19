@@ -30,6 +30,8 @@ type windowProjection struct {
 	retained             []string
 	state                llm.Item
 	excerptChars         int
+	fitExcerptChars      *int
+	fitThrough           string
 	boundary             record.Locator
 	firstRequest         bool
 	midTurn              bool
@@ -51,17 +53,9 @@ type windowTurn struct {
 type windowTail struct {
 	through        string
 	retained       []string
+	units          []contextengine.Unit
 	items          []llm.Item
 	omittedThrough sessionstore.Sequence
-}
-
-// EnableWindow selects the default projection for window-capable providers. The
-// legacy compactor is still available as an explicit comparison strategy.
-func EnableWindow(b Builder, config contextengine.Config, constraints contextengine.Constraints) (*contextengine.Engine, error) {
-	if config.WindowStrategy == "" {
-		config.WindowStrategy = contextengine.WindowThreeLayer
-	}
-	return EnableCompaction(b, config, constraints)
 }
 
 // SetWindowSource supplies a detached state snapshot at a committed read boundary.
@@ -79,40 +73,17 @@ func (b *builder) SetWindowPrompt(render llm.WindowPrompt) {
 	b.windowPrompt = render
 }
 
-func (b *builder) UsesThreeLayerContext() bool {
-	return b.threeLayerConfigured() && !b.windowFallback
-}
-
-func (b *builder) threeLayerConfigured() bool {
-	return b.engine != nil && (responsesProviders[b.provider] || b.windowPrompt != nil) && b.contextConfig.WindowStrategy == contextengine.WindowThreeLayer
-}
-
-func (b *builder) setWindowFallback(fallback, midTurn bool) {
-	if b.windowFallback != fallback {
-		clear(b.derived)
-		b.estimate = derivedEstimate{}
-	}
-	b.windowFallback, b.fallbackMidTurn = fallback, midTurn
-}
+func (b *builder) UsesThreeLayerContext() bool { return b.engine != nil }
 
 func (b *builder) ContextStrategy() string {
-	if b.UsesThreeLayerContext() {
+	if b.engine != nil {
 		return contextengine.WindowThreeLayer
-	}
-	if b.engine != nil && (b.UsesAppendOnlyContext() || b.windowPrompt != nil) {
-		return contextengine.WindowSummary
 	}
 	return ""
 }
 
-// These routes all send Unreal-owned item history over the Responses protocol.
-var responsesProviders = map[string]bool{
-	"openai-codex": true, "opencode-go": true, "openai": true,
-	"openrouter": true, "fireworks": true, "ollama": true,
-}
-
 func (b *builder) FirstWindowRequest() record.Locator {
-	if b.UsesThreeLayerContext() && b.window.firstRequest {
+	if b.window.firstRequest {
 		return b.window.boundary
 	}
 	return ""
@@ -128,21 +99,13 @@ func (b *builder) excerptChars() int {
 func (b *builder) contextPrefix() []llm.Item {
 	system, _ := contextengine.PublicItem(b.committedPrefix[0])
 	items := []llm.Item{system}
-	if b.UsesThreeLayerContext() {
-		if b.window.state.Type != "" {
-			items = append(items, b.window.state)
-		}
-		return items
+	if b.window.state.Type != "" {
+		items = append(items, b.window.state)
 	}
-	return append(items, b.summary...)
+	return items
 }
 
-func (b *builder) includesUnit(u contextengine.Unit) bool {
-	if b.UsesThreeLayerContext() {
-		return b.window.includes(u)
-	}
-	return u.Class != contextengine.Omit && (u.ID > b.viewThrough || b.retained[u.ID])
-}
+func (b *builder) includesUnit(u contextengine.Unit) bool { return b.window.includes(u) }
 
 func (w windowProjection) includes(u contextengine.Unit) bool {
 	if u.Class == contextengine.Omit {
@@ -151,15 +114,15 @@ func (w windowProjection) includes(u contextengine.Unit) bool {
 	if u.ID > w.through {
 		return true
 	}
-	_, retained := slices.BinarySearch(w.retained, u.ID)
-	return retained
+	_, found := slices.BinarySearch(w.retained, u.ID)
+	return found
 }
 
 func (b *builder) applyWindow(r sessionstore.ContextRecord) {
 	if r.Window == nil {
 		return
 	}
-	b.setWindowFallback(false, false)
+	b.rebuildHistoricalWindow = false
 	delivered := b.window.deliveredThrough
 	retained := slices.Clone(r.Retained)
 	slices.Sort(retained)
@@ -172,6 +135,8 @@ func (b *builder) applyWindow(r sessionstore.ContextRecord) {
 		b.window.state.Responses = &llm.ItemEncoding{}
 		b.window.midTurn = slices.Contains(r.Window.Causes, sessionstore.WindowCauseMidTurn)
 		b.window.afterTokens = r.Window.AfterTokens
+		b.window.fitExcerptChars = r.Window.FitExcerptChars
+		b.window.fitThrough = r.Window.FitThrough
 		b.window.minimumExceedsTarget = r.Window.MinimumExceedsTarget
 		if r.Window.HeaderTokens == nil && b.windowPrompt != nil && r.Provider == b.provider {
 			// The legacy private-conversation metric counted just the text body.
@@ -185,22 +150,21 @@ func (b *builder) applyWindow(r sessionstore.ContextRecord) {
 	} else {
 		b.window.deliveredThrough = delivered
 	}
-	if b.UsesThreeLayerContext() {
-		clear(b.derived)
-		b.estimate = derivedEstimate{}
-	}
+	clear(b.derived)
+	b.estimate = derivedEstimate{}
 }
 
 // projectionUnitsAfter skips history already displaced from L1. Retained
 // units precede the raw suffix in canonical projection order.
 func (b *builder) projectionUnitsAfter(after string) []contextengine.Unit {
-	if !b.UsesThreeLayerContext() || after >= b.window.through {
+	through, retained := b.window.through, b.window.retained
+	if after >= through {
 		return b.engine.UnitsAfter(after)
 	}
-	suffix := b.engine.UnitsAfter(b.window.through)
+	suffix := b.engine.UnitsAfter(through)
 	var units []contextengine.Unit
-	for _, id := range b.window.retained {
-		if id > after && id <= b.window.through {
+	for _, id := range retained {
+		if id > after && id <= through {
 			if u, ok := b.engine.ResolveUnit(id); ok {
 				units = append(units, u)
 			}
@@ -233,13 +197,13 @@ func (b *builder) windowHeader() (string, error) {
 // PrepareToolWindow runs on the Coordinator after it commits the batch receipts.
 // The CLI is waiting for the hook reply and has not read the batch yet.
 func (b *builder) PrepareToolWindow(ctx context.Context, persist func(sessionstore.ContextRecord) error, inputTokens int64, projectQueued func() error) (bool, error) {
-	if !b.UsesThreeLayerContext() || b.windowPrompt == nil || inputTokens <= 0 {
+	if b.engine == nil || b.windowPrompt == nil || inputTokens <= 0 {
 		return false, nil
 	}
-	return b.prepareWindow(ctx, persist, false, false, inputTokens, projectQueued)
+	return b.prepareWindow(ctx, persist, false, inputTokens, projectQueued)
 }
 
-func (b *builder) prepareWindow(ctx context.Context, persist func(sessionstore.ContextRecord) error, force, reenter bool, toolInputTokens int64, projectQueued func() error) (bool, error) {
+func (b *builder) prepareWindow(ctx context.Context, persist func(sessionstore.ContextRecord) error, providerOverflow bool, toolInputTokens int64, projectQueued func() error) (bool, error) {
 	budget, err := b.contextConfig.BudgetFor(b.contextRuntime, 0)
 	if err != nil {
 		return false, err
@@ -265,10 +229,10 @@ func (b *builder) prepareWindow(ctx context.Context, persist func(sessionstore.C
 		return false, err
 	}
 	headerChanged := b.window.header != "" && b.window.header != header
-	if !midTurn && b.window.midTurn && b.window.firstRequest && !overBudget && !force && !headerChanged && !reenter {
+	if !midTurn && b.window.midTurn && b.window.firstRequest && !overBudget && !providerOverflow && !headerChanged && !b.rebuildHistoricalWindow {
 		return false, nil // use the just-committed tool boundary for its first request
 	}
-	if !atThreshold && !overBudget && !force && !headerChanged && !reenter {
+	if !atThreshold && !overBudget && !providerOverflow && !headerChanged && !b.rebuildHistoricalWindow {
 		if midTurn || b.window.header != "" {
 			return false, nil
 		}
@@ -299,17 +263,31 @@ func (b *builder) prepareWindow(ctx context.Context, persist func(sessionstore.C
 	headTokens := b.windowHeaderTokens(system)
 	limit := min(threshold-1, budget.Input)
 	preferred, minimum := b.windowCuts(units)
+	if providerOverflow {
+		preferred = minimum
+	}
 	excerpt := b.contextConfig.ToolOutputExcerptChars
-	tail := b.selectWindowTail(units, groups, preferred, excerpt)
+	tail := b.selectWindowTail(units, groups, preferred)
+	b.renderWindowTail(&tail, excerpt, nil)
 	l2, after, head := b.sizeWindow(headTokens, state, tail)
 	if after > limit && minimum != preferred {
 		// The old last-user tail is too large. Move to the newest cut and
 		// retain only the in-flight turn, queued inputs and whole dependencies.
-		tail = b.selectWindowTail(units, groups, minimum, excerpt)
+		tail = b.selectWindowTail(units, groups, minimum)
+		b.renderWindowTail(&tail, excerpt, nil)
 		l2, after, head = b.sizeWindow(headTokens, state, tail)
 	}
+	requiredInput, requiredTail := after, after-head
 	minimumExceedsTarget := after > limit
-	if after <= budget.Input && !overBudget && !midTurn && !headerChanged && !force && !reenter && b.window.minimumExceedsTarget && minimumExceedsTarget &&
+	var fitChars *int
+	if after > budget.Input {
+		fitChars, after = b.fitWindowTail(&tail, excerpt, l2, headTokens, budget.Input)
+		if fitChars == nil {
+			return false, fmt.Errorf("%w: input budget %d tokens, system and tools %d, L2 %d, required L1 tail %d, smallest L1 tail %d (minimum total %d)",
+				&contextengine.Error{Code: "required_context_exceeds_budget"}, budget.Input, headTokens, head-headTokens, requiredTail, after-head, after)
+		}
+	}
+	if after <= budget.Input && !overBudget && !midTurn && !headerChanged && !providerOverflow && !b.rebuildHistoricalWindow && b.window.minimumExceedsTarget && minimumExceedsTarget &&
 		after >= estimate && tail.through == b.window.through && slices.Equal(tail.retained, b.retainedWindowUnits(units)) {
 		return false, nil // another boundary cannot reduce the same required input
 	}
@@ -330,14 +308,14 @@ func (b *builder) prepareWindow(ctx context.Context, persist func(sessionstore.C
 	if headerChanged {
 		causes = append(causes, "header_change")
 	}
-	if force {
+	if providerOverflow {
 		causes = append(causes, "provider_overflow")
 	}
 	if midTurn {
 		causes = append(causes, sessionstore.WindowCauseMidTurn)
 	}
-	if reenter {
-		causes = append(causes, "after_summary_fallback")
+	if b.rebuildHistoricalWindow {
+		causes = append(causes, "historical_context")
 	}
 	record := sessionstore.ContextRecord{
 		Kind: sessionstore.ContextWindowBoundary, Header: header, Text: contextengine.Text(l2),
@@ -354,10 +332,12 @@ func (b *builder) prepareWindow(ctx context.Context, persist func(sessionstore.C
 			Tail: tailStats,
 		},
 	}
-	if after > budget.Input {
-		record.Kind = sessionstore.ContextWindowFallback
-		record.Text, record.Header, record.From, record.Through, record.Retained = "", "", "", "", nil
-		record.Window.Fallback = sessionstore.WindowFallbackL2OverBudget
+	if fitChars != nil {
+		record.Window.Fit = sessionstore.WindowFitExcerpted
+		record.Window.FitExcerptChars = fitChars
+		record.Window.FitThrough = b.lastUnit
+		record.Window.RequiredInputTokens = requiredInput
+		record.Window.RequiredTailTokens = requiredTail
 		record.Window.InputBudgetTokens = budget.Input
 	}
 	err = persist(record)
@@ -485,7 +465,7 @@ func (b *builder) undeliveredWindowInput(u contextengine.Unit) bool {
 		(u.Kind == contextengine.UserMessage || u.Kind == contextengine.ChildResult)
 }
 
-func (b *builder) selectWindowTail(units []contextengine.Unit, required map[string]bool, through string, excerpt int) windowTail {
+func (b *builder) selectWindowTail(units []contextengine.Unit, required map[string]bool, through string) windowTail {
 	groups := maps.Clone(required)
 	for _, u := range units {
 		if u.ID > through && u.Group != "" && u.Class != contextengine.Omit {
@@ -504,9 +484,73 @@ func (b *builder) selectWindowTail(units []contextengine.Unit, required map[stri
 			}
 			tail.retained = append(tail.retained, u.ID)
 		}
-		tail.items = append(tail.items, b.renderUnit(u, excerpt)...)
+		tail.units = append(tail.units, u)
 	}
 	return tail
+}
+
+func (b *builder) renderWindowTail(tail *windowTail, excerpt int, fit *int) {
+	tail.items = tail.items[:0]
+	for _, u := range tail.units {
+		tail.items = append(tail.items, b.renderUnit(u, excerpt, fit)...)
+	}
+}
+
+// The minimum cut has already removed optional history. Find the largest
+// common character allowance that fits without changing the retained units.
+func (b *builder) fitWindowTail(tail *windowTail, excerpt int, l2 llm.Item, header, budget int64) (*int, int64) {
+	size := func(chars int) int64 {
+		b.renderWindowTail(tail, excerpt, &chars)
+		if b.windowPrompt != nil {
+			text := b.measureWindowPrompt([]llm.Item{l2})
+			text.add(b.measureWindowPrompt(tail.items))
+			return header + text.tokens()
+		}
+		e := b.tokenEstimator()
+		return header + e.Item(l2) + e.Items(tail.items)
+	}
+	minimum := size(0)
+	if minimum > budget {
+		return nil, minimum
+	}
+	// Bytes are an upper bound on rune count. At this allowance there are no
+	// adaptive excerpts, so the already measured baseline exceeds the budget.
+	var upper int
+	for _, u := range tail.units {
+		switch value := u.Item.Data.(type) {
+		case llm.Message:
+			upper = max(upper, len(value.Text))
+		case llm.ToolResult:
+			for _, part := range value.Output {
+				if part.Kind == llm.ToolResultText {
+					upper = max(upper, len(part.Value))
+				}
+			}
+		}
+	}
+	lo, hi := 0, upper
+	for hi-lo > 1 {
+		mid := lo + (hi-lo)/2
+		if size(mid) <= budget {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	return &lo, size(lo)
+}
+
+// Compare candidate items before joining Claude's prompt lines so rounding
+// cannot cause an excerpt to increase the size of the complete prompt.
+func (b *builder) windowItemCost(item llm.Item) int64 {
+	if b.windowPrompt != nil {
+		line, ok := b.windowPrompt(item)
+		if !ok {
+			return 0
+		}
+		return textWeight(line)
+	}
+	return b.tokenEstimator().Item(item)
 }
 
 func (b *builder) renderWindowState(ctx context.Context) (string, int, sessionstore.Sequence, error) {

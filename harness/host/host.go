@@ -776,10 +776,16 @@ func (s *Session) view(after sessionstore.Sequence, limit int) (View, error) {
 	if s.observationOperations == nil {
 		s.observationOperations = make(map[operation.ID]observationOperation)
 	}
+	if len(s.operations) != 0 {
+		v.Operations = make([]operation.Operation, 0, len(s.operations))
+	}
 	for id, op := range s.operations {
 		cached, ok := s.observationOperations[id]
 		if !ok {
 			cached = observationOperation{public: clone(op)}
+			if len(op.State) != 0 && bytes.Equal(cached.public.State, op.State) {
+				cached.public.State = op.State // Both values are immutable inside the Session.
+			}
 			s.observationOperations[id] = cached
 		}
 		// Raw JSON was normalized once when this Operation changed. Public

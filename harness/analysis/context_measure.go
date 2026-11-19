@@ -197,7 +197,7 @@ func (m *contextReplay) project(observed bool, facts *sessionstore.ContextFacts,
 					group.unknown(field)
 				}
 			}
-			if w.key.Strategy == contextengine.WindowSummary && observed {
+			if w.key.Strategy == historicalSummaryStrategy && observed {
 				group.zeros("measured", "CLI_compactions", "Unreal_compactions")
 			}
 			for _, action := range []string{"show", "find"} {
@@ -327,6 +327,15 @@ func measureBoundary(c contextCounts, w *contextWindowLog, observed bool) {
 	c.add("excerpt_chars", float64(b.ToolOutputExcerptChars), "measured")
 	if b.RecentEventLimit != nil {
 		c.add("recent_event_limit", float64(*b.RecentEventLimit), "measured")
+	}
+	if b.Fit == sessionstore.WindowFitExcerpted {
+		c.add("fit_excerpted", 1, "measured")
+		if b.FitExcerptChars != nil {
+			c.add("fit_excerpt_chars", float64(*b.FitExcerptChars), "measured")
+		}
+		c.tokens("fit_required_input", &b.RequiredInputTokens, "derived")
+		c.tokens("fit_required_tail", &b.RequiredTailTokens, "derived")
+		c.tokens("fit_input_budget", &b.InputBudgetTokens, "measured")
 	}
 	if w.open == "rebuild" {
 		measureInput(c, "boundary_before_tokens", b.BeforeTokens, b.BeforeMeasurement)

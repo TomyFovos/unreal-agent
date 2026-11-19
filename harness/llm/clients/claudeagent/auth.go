@@ -35,7 +35,7 @@ func authenticatedEnvironment(env []string, key credential.Secret) []string {
 	if key.Reveal() != "" {
 		env = append(env, "ANTHROPIC_API_KEY="+key.Reveal())
 	}
-	return env
+	return append(env, disableAutoCompactEnv+"=1", disableCompactEnv+"=1")
 }
 
 // DiscoverAPI uses the same initialize handshake with an explicitly selected

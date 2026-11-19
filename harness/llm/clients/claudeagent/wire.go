@@ -25,17 +25,8 @@ type frame struct {
 	IsReplay bool `json:"isReplay"`
 
 	// system/init
-	Model           string `json:"model"`
-	APIKeySource    string `json:"apiKeySource"`
-	Status          string `json:"status"`
-	CompactResult   string `json:"compact_result"`
-	CompactError    string `json:"compact_error"`
-	CompactMetadata *struct {
-		Trigger    string `json:"trigger"`
-		PreTokens  *int64 `json:"pre_tokens"`
-		PostTokens *int64 `json:"post_tokens"`
-		DurationMS int64  `json:"duration_ms"`
-	} `json:"compact_metadata"`
+	Model         string `json:"model"`
+	APIKeySource  string `json:"apiKeySource"`
 	RateLimitInfo *struct {
 		Status      string   `json:"status"`
 		Window      string   `json:"rateLimitType"`
@@ -198,14 +189,13 @@ type controlRequest struct {
 
 // hookInput is the JSON a host hook receives, as a settings hook would on stdin.
 type hookInput struct {
-	HookEventName  string         `json:"hook_event_name"`
-	AgentID        string         `json:"agent_id"`
-	Cwd            string         `json:"cwd"`
-	ToolName       string         `json:"tool_name"`
-	ToolInput      jsontext.Value `json:"tool_input"`
-	ToolUseID      string         `json:"tool_use_id"`
-	ToolCalls      []batchCall    `json:"tool_calls"`
-	CompactSummary string         `json:"compact_summary"`
+	HookEventName string         `json:"hook_event_name"`
+	AgentID       string         `json:"agent_id"`
+	Cwd           string         `json:"cwd"`
+	ToolName      string         `json:"tool_name"`
+	ToolInput     jsontext.Value `json:"tool_input"`
+	ToolUseID     string         `json:"tool_use_id"`
+	ToolCalls     []batchCall    `json:"tool_calls"`
 }
 
 type batchCall struct {

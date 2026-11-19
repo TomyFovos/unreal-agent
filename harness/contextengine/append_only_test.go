@@ -9,21 +9,6 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 )
 
-func TestCompactionThresholdUsesWindowMaximumOutputAndFallback(t *testing.T) {
-	c, err := (Config{}).Resolve()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.ToolResultKeepTokens != 15000 || c.ToolResultMinPruneTokens != 15000 {
-		t.Fatal("wrong epoch defaults", c)
-	}
-	for _, test := range []struct{ window, output, want int64 }{{1000000, 100000, 800000}, {200000, 32000, 104000}, {0, 4096, min(c.FallbackWindow*8/10, c.FallbackWindow-4096-64000)}} {
-		if got := c.Threshold(Runtime{ContextWindow: test.window}, test.output); got != test.want {
-			t.Fatalf("threshold=%d want %d", got, test.want)
-		}
-	}
-}
-
 func TestOrderedIndexConcurrentMetadataAndImmutablePayload(t *testing.T) {
 	e, err := New(Config{})
 	if err != nil {

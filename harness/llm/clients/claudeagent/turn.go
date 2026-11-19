@@ -18,11 +18,8 @@ import (
 )
 
 const (
-	gateHook         = "unreal-gate"
-	batchHook        = "unreal-batch"
-	compactStartHook = "unreal-compact-start"
-	preCompactHook   = "unreal-pre-compact"
-	postCompactHook  = "unreal-post-compact"
+	gateHook  = "unreal-gate"
+	batchHook = "unreal-batch"
 	// ranPrefix starts the note Claude reads after Unreal handled a command
 	// that Claude Code declined (U22).
 	ranPrefix = "Unreal Agent handled"
@@ -40,7 +37,6 @@ type turn struct {
 	session   string
 	echoed    bool // Claude Code took up Unreal's message
 	subagents SubagentCLI
-	environ   []string
 
 	mu               sync.Mutex
 	model            string
@@ -56,7 +52,6 @@ type turn struct {
 	// time spent streaming them, so TPS never counts tool or approval waits.
 	steps               stepStats
 	measureFirstRequest bool
-	compacting          bool
 	firstRequest        *llm.Usage
 	stepStart           time.Time
 	stepUsage           usage
@@ -349,15 +344,6 @@ func (t *turn) hook(id, callback string, in hookInput) {
 		if err := t.out.reply(id, t.batch(in)); err != nil {
 			t.fail(err)
 		}
-	case compactStartHook:
-		_ = t.out.reply(id, map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "SessionStart", "additionalContext": t.compactContext()}})
-	case preCompactHook:
-		// PreCompact rejects hookSpecificOutput; auto compaction has no custom
-		// summary-instruction response. The manual /compact prompt is separate.
-		_ = t.out.reply(id, map[string]any{})
-	case postCompactHook:
-		t.recordActivity(llm.ActivityRecord{Kind: "claude_compact_summary", ID: t.opt.Identity.TurnID, Provider: ProviderID, EndedAt: t.now().UTC(), Reason: fmt.Sprintf("bytes=%d", len(in.CompactSummary))})
-		_ = t.out.reply(id, map[string]any{})
 	default:
 		_ = t.out.reply(id, map[string]any{})
 	}

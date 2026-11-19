@@ -42,6 +42,7 @@ type Panel struct {
 	cancel               context.CancelFunc
 	workers              sync.WaitGroup
 	updates              chan struct{}
+	topologyWake         chan struct{}
 	mu                   sync.Mutex
 	transcript           *host.HistoryPage
 	transcriptID         session.ID
@@ -52,25 +53,25 @@ type Panel struct {
 	topologyCursor       int
 }
 
-// NewPanel watches the parent and refreshes the selected child once per second.
-// Visible topology additionally observes a bounded batch of direct children.
+// NewPanel watches the parent and refreshes children while there are targets.
+// Visible topology observes a bounded batch of direct children.
 // Every child refresh is inspection only; it never opens/resumes or sends input.
 func NewPanel(ctx context.Context, parent session.ID, client *Client) *Panel {
 	ctx, cancel := context.WithCancel(ctx)
-	p := &Panel{client: client, parent: parent, ctx: ctx, cancel: cancel, updates: make(chan struct{}, 1)}
+	p := &Panel{client: client, parent: parent, ctx: ctx, cancel: cancel, updates: make(chan struct{}, 1), topologyWake: make(chan struct{}, 1)}
 	p.workers.Go(func() {
 		for ctx.Err() == nil {
-			_ = client.Watch(ctx, parent, func(n Notice) { p.setProblem(n.Err); p.notify() })
+			_ = client.Watch(ctx, parent, func(n Notice) {
+				p.setProblem(n.Err)
+				p.notify()
+				p.wakeTopology()
+			})
 			if !pause(ctx, time.Second) {
 				return
 			}
 		}
 	})
-	p.workers.Go(func() {
-		for pause(ctx, time.Second) {
-			p.refreshChildren()
-		}
-	})
+	p.workers.Go(p.watchChildren)
 	return p
 }
 
@@ -78,8 +79,38 @@ func NewPanel(ctx context.Context, parent session.ID, client *Client) *Panel {
 // Unselected child polls are capped and round-robin; Chat retains its old scope.
 func (p *Panel) SetTopologyVisible(visible bool) {
 	p.mu.Lock()
+	changed := p.topologyVisible != visible
 	p.topologyVisible = visible
 	p.mu.Unlock()
+	if changed {
+		p.wakeTopology()
+	}
+}
+
+func (p *Panel) wakeTopology() {
+	select {
+	case p.topologyWake <- struct{}{}:
+	default:
+	}
+}
+
+func (p *Panel) watchChildren() {
+	var next <-chan time.Time
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-p.topologyWake:
+			if next != nil {
+				continue // Keep the active read rate bounded during a burst of events.
+			}
+		case <-next:
+			next = nil
+		}
+		if p.refreshChildren() {
+			next = time.After(time.Second)
+		}
+	}
 }
 
 func (p *Panel) refreshTargets() []session.ID {
@@ -136,10 +167,11 @@ func (p *Panel) PrepareAnalysis(ctx context.Context) error {
 	return nil
 }
 
-func (p *Panel) refreshChildren() {
-	for _, id := range p.refreshTargets() {
+func (p *Panel) refreshChildren() bool {
+	targets := p.refreshTargets()
+	for _, id := range targets {
 		if p.ctx.Err() != nil {
-			return
+			return false
 		}
 		version := p.client.Model.Version()
 		err := p.client.Refresh(p.ctx, id)
@@ -152,6 +184,7 @@ func (p *Panel) refreshChildren() {
 			}
 		}
 	}
+	return len(targets) > 0
 }
 func pause(ctx context.Context, d time.Duration) bool {
 	timer := time.NewTimer(d)
@@ -314,6 +347,7 @@ func (p *Panel) Command(ctx context.Context, line string) (string, bool) {
 			}
 		}
 		p.notify()
+		p.wakeTopology()
 		return "Selected " + SafeText(string(id)), true
 	case "/child-history", "/child-next":
 		id := p.client.Model.Selected()

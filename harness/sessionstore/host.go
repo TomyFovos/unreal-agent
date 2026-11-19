@@ -145,6 +145,7 @@ const (
 	ContextWindowBoundary      = "window_boundary"
 	ContextWindowFallback      = "window_fallback"
 	ContextConversationBinding = "provider_conversation_binding"
+	WindowFitExcerpted         = "excerpted"
 	WindowCauseMidTurn         = "mid_turn"
 	WindowFallbackL2OverBudget = "l2_over_budget"
 )
@@ -153,7 +154,7 @@ const (
 // Unit IDs are deterministic insertion identities reconstructed by canonical replay.
 type ContextRecord struct {
 	Window              *WindowBoundary           `json:",omitzero"`
-	Generation          *llm.GenerationStatistics `json:",omitzero"` // Unreal summary generation
+	Generation          *llm.GenerationStatistics `json:",omitzero"` // historical Unreal summary generation
 	RecordRead          *RecordRead               `json:",omitzero"`
 	Conversation        *llm.ConversationRecord   `json:",omitzero"`
 	ConversationBinding *llm.ConversationBinding  `json:",omitzero"`
@@ -162,7 +163,7 @@ type ContextRecord struct {
 	Kind                string
 	UnitID              string              `json:",omitzero"`
 	Projections         []ContextProjection `json:",omitzero"`
-	Retained            []string            `json:",omitzero"` // mandatory units retained across a summary boundary
+	Retained            []string            `json:",omitzero"` // required units before the cut
 	PrunedTokens        int64               `json:",omitzero"` // estimated net input tokens removed at this boundary
 	From, Through       string              `json:",omitzero"`
 	Items               []llm.Item          `json:",omitzero"`
@@ -191,6 +192,11 @@ type WindowBoundary struct {
 	Tail                   *WindowTail `json:",omitzero"`
 	Fallback               string      `json:",omitzero"`
 	InputBudgetTokens      int64       `json:",omitzero"`
+	Fit                    string      `json:",omitzero"`
+	FitExcerptChars        *int        `json:",omitzero"`
+	FitThrough             string      `json:",omitzero"`
+	RequiredInputTokens    int64       `json:",omitzero"`
+	RequiredTailTokens     int64       `json:",omitzero"`
 }
 
 // WindowTail describes the new raw projection and indexes addressable evidence

@@ -2,67 +2,19 @@
 
 **Language:** English | [日本語](ja/context.md)
 
-Unreal Agent never deletes or mutates your canonical Session history. Instead, it builds a **derived context view** for each model request. Tool-result pruning and conversation compaction only reduce what is sent to the model; original messages, Operations, and receipts remain intact in the Session store.
+Each model request uses a three-layer context across providers and agent roles. L1 holds the current conversation window, L2 holds a copy of structured Session state at each rebuild, and L3 gives access to the original records and captured outputs. [Three-layer context and settings](context-3layer.md)
 
----
+## 1. Request Windows
 
-## 1. Responses Context Management
+Unreal fixes system instructions, tool schemas and the L2 copy at a rebuild. New messages and tool receipts append in recording order. Model or provider changes can start a new window. Claude Code starts a fresh conversation at each rebuild and resumes it by ID between rebuilds. [Claude Code window settings](context-3layer.md#rebuild-the-claude-code-window)
 
-Responses providers use the three-layer window by default. The fixed prefix contains the system instructions and a copy of the current state at each rebuild. The remainder of this section describes the comparison strategy selected by `Context.WindowStrategy: "summary"`. [Three-layer context and settings](context-3layer.md#rebuild-the-responses-request-window)
+When the required tail would exceed the input budget, Unreal fits long text with head and tail excerpts and links to L3. The window records the fitted size. If the smallest projection still exceeds the budget, the error lists the input budget and the sizes of the system and tool header, L2 and the L1 tail. A provider context overflow triggers a rebuild and one retry.
 
-- **Append-only prefix stability:** Between prune/compaction boundaries and model changes, new items are appended in recorded order without reordering or reconstructing earlier items, maximizing prompt cache hits.
-- **Provider/model boundaries:** While staying on the same provider and model, encrypted reasoning tokens and item IDs are reused. Switching models records a boundary and converts earlier history into a portable representation.
+## 2. Token Accounting
 
-### Tool-Result Omission (Pruning)
+Unreal compares the total input estimate with the model context size after response and protocol reserves. An unknown model window uses `FallbackWindow` (272,000 tokens by default). If available on the same prefix, reported input plus the estimated change governs admission. Claude uses its latest model call's input, including cache reads and writes.
 
-Unreal reduces large or outdated tool outputs in two stages:
-
-1. **Recording-time head/tail truncation:**
-   - Very large tool outputs are capped at `max_output_length` (default: 40,000 characters) when recorded into the transcript, while the Operation receipt and any recorded output files remain stored.
-   - A separate full-output file is not guaranteed for every tool; native `read`, for example, limits returned content with `max_bytes` without saving a full-output file.
-2. **Request-time pruning ([`tool_pruning.go`](../harness/contextbuilder/tool_pruning.go)):**
-   - Before sending a request, the builder keeps recent tool outputs within a token budget and replaces older tool result bodies with compact reference markers (pointing to the Canonical Unit ID and, when recorded, shell capture paths).
-   - **Obsolete file reads:** A later completed, successful native `read`/`write`/`edit`, applied AST edit, or recognized simple Bash read can make an earlier read of that file eligible for pruning. Failed or pending reads and preview-only AST edits do not establish a newer snapshot; proven per-target mutations can still supersede older reads when another target fails.
-   - **Protected items:** Active Operations, unacknowledged continuations, user/parent messages, assistant text, and reasoning are never pruned.
-
-### Automatic Summarization (Compaction)
-
-When pruning old tool results is not enough to fit within the model's context budget:
-
-1. **Compaction threshold:** Triggered at the minimum of:
-   - `80%` of the model's context window
-   - `context_window - max_output - 64,000`
-   - Configured `InputBudget`
-2. **How it works:** Unreal first prunes eligible old tool results, then requests a summary using the same provider, model, and Session cache identity. The summary and replaced range are recorded as a compaction boundary while keeping recent turns intact.
-3. **Overflow recovery:** If a provider returns a context-overflow error, Unreal forces compaction and retries the request once. If the required recent context still exceeds the budget, it fails with `required_context_exceeds_budget`.
-
-> **Notes on Token Budgeting & Metrics:**
-> - **Token accounting:** Pre-send admission and compaction thresholds use tokens for every provider. When the same prefix has reported input usage, the builder adds the provider-specific token estimate of the new response/input/results to that measured prefix. Changed provider/model, headers or historical projections use a fresh estimate. Claude uses the last call's input, including cache reads/writes, rather than the sum of its internal steps.
-> - **Estimates:** Compatible Responses API clients share a model-content estimator; Claude Code shares its actual prompt projection with the estimator. The text heuristic is four ASCII characters per token plus one token per non-ASCII rune. JSON envelopes, IDs and encrypted ciphertext bytes do not count as text tokens; schemas count once. These are approximate counts, with no admission margin. Image content still uses a size heuristic when input usage is unavailable.
-> - **Recorded evidence:** Each model Turn stores `ContextAdmission`: estimated total, measured prefix, estimated delta, adopted input count, budget/window, estimator, measurement label, header fingerprint and canonical request JSON bytes. Bytes are diagnostic only. They can be compared with the same Turn's response usage; old records without these fields remain readable.
-> - **Unknown window / output fallbacks:** An unknown context window uses `FallbackWindow`; an unknown maximum output uses `ResponseReserve` in the threshold calculation.
-> - **Prune metrics in `/analyze`:** Prune counts and savings in `/analyze` describe request-time omission, not recording-time truncation.
-
-### Context Configuration (`runtime.json`)
-
-Configured under the top-level `Context` key ([`harness/contextengine/types.go`](../harness/contextengine/types.go)):
-
-| Key | Default | Description |
-| --- | --- | --- |
-| `FallbackWindow` | `272000` | Fallback window when catalog metadata is unavailable |
-| `ResponseReserve` | `4096` | Response reserve and fallback maximum output for threshold calculation |
-| `ToolResultKeepTokens` | `15000` | Token budget reserved for recent tool outputs before older outputs become prune candidates |
-| `ToolResultMinPruneTokens` | `15000` | Minimum estimated token savings required before writing a new `prune` boundary |
-
----
-
-## 2. Claude Conversation Compaction
-
-The Claude Code subscription route defaults to the shared three-layer window. Unreal can rebuild between requests or after a tool batch. The first size-based rebuild occurs at W, and subsequent ones occur after W of growth. Input budget overflow can trigger an earlier rebuild. Each rebuild starts a fresh conversation that later turns resume by ID. [Claude Code window and settings](context-3layer.md#rebuild-the-claude-code-window)
-
-With `Context.WindowStrategy: "summary"`, Claude Code uses `--autocompact` with a window derived from `Claude.CompactThresholdTokens` (default `200000`). A nonzero route setting takes precedence over the legacy `Context.ClaudeCompactThresholdTokens` key. Unreal schedules a background `/compact` in the current conversation after 50 minutes of idle time when the latest input exceeds 120,000 tokens.
-
-The TUI footer uses the latest `message_start` input measurement, including cache reads and writes.
+Each Turn records `ContextAdmission` with the estimate, measured prefix, delta, adopted count, budget, estimator and request size. The text estimate uses four ASCII characters per token and one token per non-ASCII rune. Tool schemas count once. Images use a size heuristic where usage is unavailable.
 
 ---
 
@@ -92,10 +44,6 @@ Project instructions guide coding style and workflow. They never grant tool perm
 
 ## 4. Inspecting Context & Usage Metrics
 
-Run `/analyze` in the TUI and select **Context** or **Usage** (or export the report) to inspect:
-- Average input tokens across requests
-- Number of omitted tool results, prune boundaries, and estimated saved tokens
-- Prompt cache hit ratios
-- Claude compaction history (timing, pre-compaction input size, and completed/interrupted/failed status)
+Run `/analyze` and open **Context metrics** to see window sizes, excerpt fits, cache totals and evidence reads. Older summary and compaction records appear as **historical summary**, including their reported usage and outcomes.
 
 See [Troubleshooting — Read analysis and measurements](troubleshooting.md#read-analysis-and-measurements) for details on interpreting these numbers.

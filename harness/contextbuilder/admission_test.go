@@ -7,12 +7,11 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
-	"github.com/unreallabsai/unreal-agent/harness/llm/claudeprompt"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 )
 
-var admissionProviders = []string{"claude-code", "claude", "openai-codex", "openai", "opencode-go", "openrouter", "fireworks", "ollama"}
+var admissionProviders = []string{"claude-code", "claude-api", "claude", "openai-codex", "openai", "opencode-go", "openrouter", "fireworks", "ollama"}
 
 func TestAdmissionIgnoresLargeJSONOverhead(t *testing.T) {
 	for _, provider := range admissionProviders {
@@ -24,14 +23,14 @@ func TestAdmissionIgnoresLargeJSONOverhead(t *testing.T) {
 				{Type: llm.ItemReasoning, Data: llm.Reasoning{Raw: []byte(`{"type":"reasoning","encrypted_content":"` + strings.Repeat("opaque", 100000) + `"}`)}},
 				{Type: llm.ItemMessage, ProviderID: strings.Repeat("id", 100000), Data: llm.Message{Role: llm.RoleAssistant, Text: "ok"}},
 			}}})
-			if appendOnlyProviders[provider] {
-				adapter := summaryAdapter(func(llm.Request) llm.Response {
-					t.Fatal("JSON overhead triggered unnecessary compaction")
-					return llm.Response{}
-				})
-				if err := f.b.PrepareContext(t.Context(), adapter, llm.RequestOptions{}, func(r sessionstore.ContextRecord) error { f.b.ApplyContext(r); return nil }, false); err != nil {
-					t.Fatal(err)
+			if err := f.b.PrepareContext(t.Context(), func(r sessionstore.ContextRecord) error {
+				if r.Kind != sessionstore.ContextWindowStart {
+					t.Fatal("private JSON triggered an unnecessary rebuild", r.Kind)
 				}
+				f.b.ApplyContext(r)
+				return nil
+			}, false); err != nil {
+				t.Fatal(err)
 			}
 			built, err := f.b.Build()
 			if err != nil {
@@ -41,8 +40,8 @@ func TestAdmissionIgnoresLargeJSONOverhead(t *testing.T) {
 			if d.InputTokens > d.Budget.Input || d.Measurement != "estimated" || d.Estimator == "" {
 				t.Fatal("incorrect token diagnostic", d)
 			}
-			if provider != "claude-code" && provider != "claude" && d.RequestBytes <= d.Budget.Input {
-				t.Fatal("fixture lacks JSON overhead", d.RequestBytes)
+			if d.RequestBytes >= d.Budget.Input {
+				t.Fatal("private JSON entered the public request", d.RequestBytes)
 			}
 		})
 	}
@@ -64,7 +63,7 @@ func TestAdmissionMeasuredPrefixPlusDeltaForEveryProvider(t *testing.T) {
 			d := built.Report.Context
 			delta := int64(3)
 			if f.b.tokenEstimator().Claude() {
-				delta = f.b.tokenEstimator().Text(claudeprompt.Plan(built.Request.Input).Full) - prior
+				delta = fullTurnEstimate(f.b) - prior
 			}
 			if d.EstimatedInputTokens <= d.Budget.Input || d.MeasuredInputTokens != 1234 || d.EstimatedDeltaTokens != delta || d.InputTokens != 1234+delta || d.EstimatedInputTokens != prior+delta || d.Measurement != "measured-prefix+estimated-delta" {
 				t.Fatalf("measured prefix/delta not respected: %+v", d)
@@ -80,7 +79,7 @@ func TestAdmissionMeasuredPrefixPlusDeltaForEveryProvider(t *testing.T) {
 			}
 			f.user(t, "large-tail", strings.Repeat("x", 24000))
 			_, err = f.b.Build()
-			if provider != "claude-code" && provider != "claude" && !contextengine.IsBudgetError(err) {
+			if !contextengine.IsBudgetError(err) {
 				t.Fatal("measured prefix hid over-window tail", err)
 			}
 		})
@@ -88,7 +87,7 @@ func TestAdmissionMeasuredPrefixPlusDeltaForEveryProvider(t *testing.T) {
 }
 
 func TestAdmissionInvalidatesMeasuredPrefixAfterProjectionOrHeaderChange(t *testing.T) {
-	for _, change := range []string{"model", "provider", "instructions", "tools", "revision", "projection", "summary", "missing-usage"} {
+	for _, change := range []string{"model", "provider", "instructions", "tools", "revision", "window", "missing-usage"} {
 		t.Run(change, func(t *testing.T) {
 			f := newContextFixture(t, "openai", contextengine.Config{})
 			f.user(t, "task", "question")
@@ -105,10 +104,9 @@ func TestAdmissionInvalidatesMeasuredPrefixAfterProjectionOrHeaderChange(t *test
 				f.b.SetPermissionPrompt("changed permission")
 			case "tools":
 				f.b.AddTool(llm.Tool{Type: llm.ToolFunction, Name: "new"})
-			case "projection":
-				f.b.ApplyContext(sessionstore.ContextRecord{Kind: "projection", UnitID: f.b.lastUnit, Items: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: "replacement"}}}})
-			case "summary":
-				f.b.ApplyContext(sessionstore.ContextRecord{Kind: "summary", Through: f.b.lastUnit, Text: "summary"})
+			case "window":
+				f.b.ApplyContext(sessionstore.ContextRecord{Kind: sessionstore.ContextWindowBoundary, Through: f.b.lastUnit,
+					Text: "current state", Window: &sessionstore.WindowBoundary{}})
 			case "missing-usage":
 				f.item(t, sessionstore.ItemTurn, session.Turn{ID: "later", Type: session.TurnRegular})
 				response := llm.Response{}
@@ -140,14 +138,14 @@ func TestAdmissionPilot2WithoutRawUsesTokens(t *testing.T) {
 	f := newContextFixture(t, "openai", contextengine.Config{FallbackWindow: 786432, InputBudget: 774599})
 	f.user(t, "task", "Inspect the output")
 	f.item(t, sessionstore.ItemTurn, session.Turn{ID: "first", Type: session.TurnRegular})
-	f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "first", Response: llm.Response{Output: []llm.Item{epochCall("read", "Bash", `{"command":"read output"}`)}}})
-	epochReceipt(t, f, "read", "", false)
+	f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "first", Response: llm.Response{Output: []llm.Item{fixtureCall("read", "Bash", `{"command":"read output"}`)}}})
 	request := f.b.request
 	request.Input = f.b.deriveItems()
 	const bytes = 1024449
+	request.Input = append(request.Input, llm.Item{Type: llm.ItemToolResult, Data: llm.ToolResult{CallID: "read",
+		State: llm.ToolResultSucceeded, Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText}}}})
 	overhead := contextengine.JSONBytes(request)
-	result := llm.ToolResult{CallID: "read", Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: strings.Repeat("x", bytes-int(overhead))}}}
-	f.b.ApplyContext(sessionstore.ContextRecord{Kind: "projection", UnitID: f.b.lastUnit, Items: []llm.Item{{Type: llm.ItemToolResult, Data: result}}})
+	fixtureReceipt(t, f, "read", strings.Repeat("x", bytes-int(overhead)), false)
 	built, err := f.b.Build()
 	if err != nil {
 		t.Fatal("pilot2-like payload still refused", err)

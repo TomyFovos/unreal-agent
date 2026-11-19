@@ -19,6 +19,7 @@ var boundaryColumns = []contextColumn{
 	{"reason_header_change", "Reason header_change", ""},
 	{"reason_mid_turn", "Reason mid_turn", ""},
 	{"reason_provider_overflow", "Reason provider_overflow", ""},
+	{"reason_historical_context", "Reason historical_context", ""},
 	{"boundary_before_tokens", "Input before rebuild", " tokens"},
 	{"boundary_after_tokens", "Input after rebuild", " tokens"},
 	{"window_header_tokens", "System and tool schemas after rebuild", " tokens"},
@@ -31,6 +32,14 @@ var boundaryColumns = []contextColumn{
 	{"recent_events", "Recent events copied", ""},
 	{"recent_event_limit", "Recent event count (configured)", ""},
 	{"excerpt_chars", "Excerpt size (configured)", " chars"},
+}
+
+var fitColumns = []contextColumn{
+	{"fit_excerpted", "Fit: excerpted", ""},
+	{"fit_excerpt_chars", "Fitted head and tail allowance", " chars"},
+	{"fit_required_input", "Required input before fitting", " tokens"},
+	{"fit_required_tail", "Required L1 tail before fitting", " tokens"},
+	{"fit_input_budget", "Input budget at fitting", " tokens"},
 }
 
 var intervalColumns = []contextColumn{
@@ -165,12 +174,12 @@ func contextTables(r *ContextMeasurements) []contextTable {
 			}
 		}
 		for _, c := range s.Compactions {
-			t := contextTable{title: "Session " + string(s.Session) + " · " + c.Engine + " compaction " + c.Outcome + " · " + contextTime(&c.At) + " · " + contextLabel(c.ContextDimensions)}
+			t := contextTable{title: "Session " + string(s.Session) + " · " + "Historical " + c.Engine + " compaction " + c.Outcome + " · " + contextTime(&c.At) + " · " + contextLabel(c.ContextDimensions)}
 			t.add(c.Numbers, "", compactionColumns)
 			tables = append(tables, t)
 		}
 		for _, f := range s.Fallbacks {
-			t := contextTable{title: "Session " + string(s.Session) + " · fallback: " + f.Reason + " · " + contextTime(&f.At) + " · " + contextLabel(f.ContextDimensions)}
+			t := contextTable{title: "Session " + string(s.Session) + " · Historical fallback: " + f.Reason + " · " + contextTime(&f.At) + " · " + contextLabel(f.ContextDimensions)}
 			t.add(f.Numbers, "", fallbackColumns)
 			tables = append(tables, t)
 		}
@@ -220,18 +229,21 @@ func scopeTables(title string, scope ContextScope) []contextTable {
 func groupTable(title string, g ContextGroup, window bool) contextTable {
 	t := contextTable{title: title + " · " + contextLabel(g.ContextDimensions)}
 	t.add(g.Numbers, "", groupColumns(g.Strategy, window))
+	if _, present := g.Numbers["fit_excerpted"]; present {
+		t.add(g.Numbers, "", fitColumns)
+	}
 	return t
 }
 
 var layeredGroupColumns = buildGroupColumns(contextengine.WindowThreeLayer, false)
-var summaryGroupColumns = buildGroupColumns(contextengine.WindowSummary, false)
+var summaryGroupColumns = buildGroupColumns(historicalSummaryStrategy, false)
 var unknownGroupColumns = buildGroupColumns("", false)
 var layeredWindowColumns = buildGroupColumns(contextengine.WindowThreeLayer, true)
-var summaryWindowColumns = buildGroupColumns(contextengine.WindowSummary, true)
+var summaryWindowColumns = buildGroupColumns(historicalSummaryStrategy, true)
 
 func groupColumns(strategy string, window bool) []contextColumn {
 	if window {
-		if strategy == contextengine.WindowSummary {
+		if strategy == historicalSummaryStrategy {
 			return summaryWindowColumns
 		}
 		return layeredWindowColumns
@@ -239,7 +251,7 @@ func groupColumns(strategy string, window bool) []contextColumn {
 	switch strategy {
 	case contextengine.WindowThreeLayer:
 		return layeredGroupColumns
-	case contextengine.WindowSummary:
+	case historicalSummaryStrategy:
 		return summaryGroupColumns
 	default:
 		return unknownGroupColumns
@@ -248,7 +260,7 @@ func groupColumns(strategy string, window bool) []contextColumn {
 
 func buildGroupColumns(strategy string, window bool) []contextColumn {
 	var columns []contextColumn
-	if strategy != contextengine.WindowSummary {
+	if strategy != historicalSummaryStrategy {
 		columns = append(columns, boundaryColumns...)
 	} else {
 		columns = append(columns, boundaryColumns[0])
@@ -276,7 +288,7 @@ func buildGroupColumns(strategy string, window bool) []contextColumn {
 	if !window && strategy != contextengine.WindowThreeLayer {
 		for _, engine := range []string{"Unreal", "CLI"} {
 			for _, c := range compactionColumns {
-				columns = append(columns, contextColumn{engine + "_" + c.key, engine + " " + c.name, c.unit})
+				columns = append(columns, contextColumn{engine + "_" + c.key, "Historical " + engine + " " + c.name, c.unit})
 			}
 		}
 	}

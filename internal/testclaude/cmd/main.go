@@ -34,10 +34,6 @@ type configuration struct {
 	AgentInputTokens, AgentStepInputTokens                              int64
 	AgentUsage                                                          []jsontext.Value
 	AgentAutoCompact                                                    bool
-	CompactPreTokens, CompactPostTokens                                 int64
-	CompactFailure                                                      string
-	CompactCrash, CompactUnknownAfter                                   bool
-	CompactDelayMillis                                                  int
 }
 type call struct {
 	Arguments, Environment   []string

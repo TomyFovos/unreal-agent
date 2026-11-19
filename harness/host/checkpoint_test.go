@@ -13,12 +13,14 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
 	"github.com/unreallabsai/unreal-agent/harness/contextengine"
+	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/responsesapi"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/primitives"
+	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
@@ -56,7 +58,7 @@ func TestHostCheckpointSendsSameRequestAsFullReplay(t *testing.T) {
 			children := &restoreChildManager{active: make(chan operation.Operation, 4), updates: make(chan operation.Operation)}
 			h, err := New(t.Context(), Config{Directory: dir, PermissionMaximum: permission.Unrestricted(), Build: func(ctx context.Context, _ session.ID) (Runtime, error) {
 				builder := contextbuilder.NewBuilder()
-				engine, err := contextbuilder.EnableCompaction(builder, contextengine.Config{InputBudget: 12000}, contextengine.Constraints{})
+				engine, err := contextbuilder.EnableWindow(builder, contextengine.Config{InputBudget: 12000}, contextengine.Constraints{})
 				if err != nil {
 					return Runtime{}, err
 				}
@@ -76,7 +78,7 @@ func TestHostCheckpointSendsSameRequestAsFullReplay(t *testing.T) {
 			t.Cleanup(func() { h.Close() })
 			// The workspace choice can change after a Session checkpoint exists.
 			h.savePermissionMode(permission.FullAccess)
-			s, err := h.Resume(t.Context(), Options{ID: "parent", Initial: []inbox.Input{input("next", "review this next")}})
+			s, err := h.Resume(t.Context(), Options{ID: "parent"})
 			checkHostRestore(t, err)
 			var request []byte
 			select {
@@ -91,14 +93,34 @@ func TestHostCheckpointSendsSameRequestAsFullReplay(t *testing.T) {
 			} else if !bytes.Equal(request, full) {
 				t.Fatalf("request changed across checkpoint restore\nfull: %s\n checkpoint: %s", full, request)
 			}
-			for _, marker := range []string{"summary of old work", "peer arrived mid-turn", "pending failed request", "review this next", "Workspace selection is full_access", "opaque-native-reasoning"} {
+			for _, marker := range []string{"Unreal current state at the window boundary", "Workspace selection is full_access"} {
 				if bytes.Count(request, []byte(marker)) != 1 {
 					t.Fatalf("request should include %q once: %s", marker, request)
 				}
 			}
-			for _, excluded := range []string{"pre-compaction text", "capped Claude text"} {
+			for _, marker := range []string{"pending failed request", "review this next"} {
+				if bytes.Count(request, []byte(marker)) != 3 {
+					t.Fatalf("request should include the active text, first line and L1 copy of %q: %s", marker, request)
+				}
+			}
+			for _, excluded := range []string{"pre-compaction text", "capped Claude text", "summary of old work", "opaque-native-reasoning"} {
 				if bytes.Contains(request, []byte(excluded)) {
 					t.Fatalf("excluded context %q was sent after resume", excluded)
+				}
+			}
+			for _, evidence := range []struct {
+				locator record.Locator
+				body    string
+			}{
+				{record.Item("parent", 6), "summary of old work"},
+				{record.Input("parent", 11, record.PeerMessage), "peer arrived mid-turn"},
+			} {
+				args, err := json.Marshal(contextstate.RecordSelection{Locator: evidence.locator})
+				checkHostRestore(t, err)
+				read, err := s.ContextCommand(t.Context(), "", "inspect-old-context", contextstate.Command{Action: contextstate.ShowRecord, Args: args})
+				checkHostRestore(t, err)
+				if !bytes.Contains(read.Page.Bytes, []byte(evidence.body)) {
+					t.Fatalf("canonical evidence changed at %s", evidence.locator)
 				}
 			}
 			view, err := s.Inspect(s.StartAfter, 1)
@@ -209,6 +231,7 @@ func checkpointConversation(t *testing.T) (canonical, midTurn, afterFailure []by
 	checkHostRestore(t, store.AppendHostRecord(ctx, id, sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostActivity,
 		Activity: &llm.ActivityRecord{Kind: llm.ActivityModelFailure, ID: "failed", Reason: "synthetic failure"}}))
 	afterFailure = save()
+	appendInput(input("next", "review this next"))
 	canonical, err = os.ReadFile(filepath.Join(dir, "parent.session.jsonl"))
 	checkHostRestore(t, err)
 	return canonical, midTurn, afterFailure

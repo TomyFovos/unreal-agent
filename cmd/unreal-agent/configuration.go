@@ -4,6 +4,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/unreallabsai/unreal-agent/harness/contextengine"
@@ -17,27 +18,33 @@ func readServeConfiguration(path string) (serveConfiguration, error) {
 	if err != nil {
 		return config, fmt.Errorf("read runtime configuration: %w", err)
 	}
-	// Decode the retired key only at the operator configuration boundary; it
-	// must not remain a provider-specific setting in the shared context engine.
-	var legacyThreshold int64
+	// Retired keys are accepted only when loading the operator's file.
+	// Newly written configurations contain only the current policy.
 	type commonContext contextengine.Config
+	var windowStrategy jsontext.Value
 	legacyContext := json.UnmarshalFromFunc(func(dec *jsontext.Decoder, c *contextengine.Config) error {
 		var legacy struct {
 			commonContext
+			WindowStrategy               jsontext.Value
 			ClaudeCompactThresholdTokens int64
 		}
 		if err := json.UnmarshalDecode(dec, &legacy); err != nil {
 			return err
 		}
 		*c = contextengine.Config(legacy.commonContext)
-		legacyThreshold = legacy.ClaudeCompactThresholdTokens
+		windowStrategy = legacy.WindowStrategy
 		return nil
 	})
-	if err = json.Unmarshal(data, &config, json.RejectUnknownMembers(true), json.WithUnmarshalers(legacyContext)); err != nil {
+	var compatible struct {
+		serveConfiguration
+		Claude struct{ CompactThresholdTokens int64 }
+	}
+	if err = json.Unmarshal(data, &compatible, json.RejectUnknownMembers(true), json.WithUnmarshalers(legacyContext)); err != nil {
 		return config, fmt.Errorf("decode runtime configuration: %w", err)
 	}
-	if config.Claude.CompactThresholdTokens == 0 {
-		config.Claude.CompactThresholdTokens = legacyThreshold
+	config = compatible.serveConfiguration
+	if len(windowStrategy) != 0 {
+		slog.Warn("Context.WindowStrategy is deprecated and ignored. Unreal uses three-layer context.")
 	}
 	if config.PermissionModes != nil {
 		if err := config.PermissionModes.Validate(); err != nil {

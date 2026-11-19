@@ -177,6 +177,18 @@ func Handler(c Config) http.Handler {
 			writeFrame(w, frame{Error: "invalid_request"})
 			return
 		}
+		if r.URL.Path == "/v1/observation" {
+			s, err := c.Host.Attach(q.ID)
+			if err == nil {
+				err = s.ObservePages(r.Context(), q.Limit, func(v host.View) error {
+					return writeFrame(w, frame{View: &v})
+				})
+			}
+			if err != nil && r.Context().Err() == nil {
+				_ = writeFrame(w, frame{Error: errorCode(err), Reason: SafeReason(err.Error())})
+			}
+			return
+		}
 		result, sub, err := dispatch(r.Context(), c, r.URL.Path, q)
 		q.Secret = ""
 		if err != nil {

@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/tui"
-	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
@@ -34,9 +33,9 @@ type interruptScreen struct {
 
 func TestClaudeLargeContextDoesNotDelayTUIInput(t *testing.T) {
 	f := testclaude.New(t)
-	f.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentInputTokens: 250_000, AgentFinal: "first complete", CompactDelayMillis: 30_000})
+	f.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentInputTokens: 250_000, AgentFinal: "first complete"})
 	cfg := claudeRouteConfiguration(t, f)
-	cfg.Context.WindowStrategy = contextengine.WindowSummary
+	cfg.Context.WindowThresholdTokens = 300_000
 	c, _, _ := startInteractiveHost(t, cfg, "--normal-runtime")
 	v, err := c.Open(t.Context(), host.Create, "idle-interrupt")
 	if err != nil {
@@ -62,7 +61,7 @@ func TestClaudeLargeContextDoesNotDelayTUIInput(t *testing.T) {
 	inspectInteractive(t, c, "idle-interrupt", func(v host.View) bool {
 		return hasFinalText(v, "first complete") && v.Progress == nil
 	})
-	f.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentInputTokens: 250_000, AgentFinal: "second complete", CompactPreTokens: 250_050, CompactPostTokens: 12_000})
+	f.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentInputTokens: 250_000, AgentFinal: "second complete"})
 	submitted := time.Now()
 	keys <- tui.Key{Text: "second task"}
 	keys <- tui.Key{Name: "enter"}
@@ -87,7 +86,7 @@ func TestClaudeLargeContextDoesNotDelayTUIInput(t *testing.T) {
 			r := record.Context.Conversation
 			contexts++
 			if r.Compacted || r.Interrupted || !r.InputKnown || r.InputTokens != 250_050 {
-				t.Fatal("large context was not retained until CLI compaction", r)
+				t.Fatal("large context did not retain its reported size", r)
 			}
 		}
 	}

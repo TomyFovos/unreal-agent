@@ -31,7 +31,7 @@ func TestToolContentRedactionPreservesCodeAndCanonicalReplay(t *testing.T) {
 			}
 			f := newFixture()
 			f.user(t, "task", "Read state_store.py")
-			epochExchange(t, f, "read", "read", `{"path":"state_store.py"}`, output)
+			fixtureExchange(t, f, "read", "read", `{"path":"state_store.py"}`, output)
 			canonical, err := json.Marshal(f.history)
 			if err != nil {
 				t.Fatal(err)
@@ -58,7 +58,7 @@ func TestToolContentRedactionPreservesCodeAndCanonicalReplay(t *testing.T) {
 			}
 			replay := newFixture()
 			for _, item := range f.history {
-				epochApply(t, replay, item.Kind, item.Data)
+				appendFixtureRecord(t, replay, item.Kind, item.Data)
 			}
 			resumed, err := replay.b.Build()
 			if err != nil || !reflect.DeepEqual(built.Request, resumed.Request) {
@@ -75,7 +75,7 @@ func TestRedactedReceiptRetainsTranslatedTerminalState(t *testing.T) {
 			f := newContextFixture(t, "openai-codex", contextengine.Config{})
 			f.user(t, "task", "Inspect fixture.txt")
 			f.item(t, sessionstore.ItemTurn, session.Turn{ID: status.TurnID, Type: session.TurnRegular})
-			f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: status.TurnID, Response: llm.Response{Output: []llm.Item{epochCall(status.CallID, "read", `{"path":"fixture.txt"}`)}}})
+			f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: status.TurnID, Response: llm.Response{Output: []llm.Item{fixtureCall(status.CallID, "read", `{"path":"fixture.txt"}`)}}})
 			item := sessionstore.Item{Kind: sessionstore.ItemToolCallStatus, Data: status}
 			f.b.SetHistoryItem(item)
 			f.b.AddTypedToolResult(result, false)
@@ -103,7 +103,7 @@ func TestLegacyBuilderRedactedCallDropsNativeReplayState(t *testing.T) {
 	b := NewBuilder()
 	b.AddModelResponse(llm.Response{Output: []llm.Item{
 		{Type: llm.ItemReasoning, ProviderID: "private-reasoning-id", Data: llm.Reasoning{Raw: []byte(`{"type":"reasoning","encrypted_content":"private-reasoning-body"}`)}},
-		epochCall("read", "read", `{"path":"state_store.py","token":"synthetic-private"}`),
+		fixtureCall("read", "read", `{"path":"state_store.py","token":"synthetic-private"}`),
 	}})
 	b.AddToolResult("read", []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: "keep result"}}, false)
 	built, err := b.Build()
@@ -121,58 +121,10 @@ func TestLegacyBuilderRedactedCallDropsNativeReplayState(t *testing.T) {
 	}
 }
 
-func TestSummaryRedactionRetainsUsefulTextAndReplay(t *testing.T) {
-	f := newContextFixture(t, "openai-codex", contextengine.Config{FallbackWindow: 100000, InputBudget: 85000})
-	for i := range 8 {
-		f.turn(t, fmt.Sprint(i), "Continue the feature.", strings.Repeat("Old explanation. ", 1200))
-	}
-	const text = "Keep state_store.py and test results. token=synthetic-private\n" +
-		"private_key=-----BEGIN PRIVATE KEY-----\nsynthetic-private\n-----END PRIVATE KEY-----\nNext: production_writeback.py."
-	adapter := summaryAdapter(func(llm.Request) llm.Response {
-		return llm.Response{Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: text}}}}
-	})
-	var summary sessionstore.ContextRecord
-	err := f.b.PrepareContext(t.Context(), adapter, llm.RequestOptions{}, func(r sessionstore.ContextRecord) error {
-		if r.Kind == "summary" {
-			summary = r
-		}
-		epochApply(t, f, sessionstore.ItemHostRecord, sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostContext, Context: &r})
-		return nil
-	}, true)
-	if err != nil || summary.Through == "" || strings.Contains(summary.Text, "synthetic-private") || !strings.Contains(summary.Text, "state_store.py") || !strings.Contains(summary.Text, "Next: production_writeback.py.") || !strings.Contains(summary.Text, "[REDACTED]") {
-		t.Fatal("summary was lost or leaked credentials", err, summary)
-	}
-	built, err := f.b.Build()
-	if err != nil {
-		t.Fatal(err)
-	}
-	replay := newContextFixture(t, "openai-codex", f.b.contextConfig)
-	for _, item := range f.history {
-		epochApply(t, replay, item.Kind, item.Data)
-	}
-	resumed, err := replay.b.Build()
-	if err != nil || !reflect.DeepEqual(built.Request, resumed.Request) {
-		t.Fatal("summary replay changed context", err)
-	}
-	measurements := takeRedactions(t, f.b)
-	if len(measurements) != 1 || measurements[0].Redaction.Reason != contextengine.PartialRedaction || measurements[0].Redaction.BeforeBytes != int64(len(text)) || measurements[0].Redaction.AfterBytes != int64(len(summary.Text)) {
-		t.Fatal("generated summary redaction measurement missing or counted twice", measurements)
-	}
-	// Older summary records and placeholders keep their existing wire shape.
-	for _, old := range []string{text, "[Conversation summary redacted; sensitive data omitted.]"} {
-		summary.Text = old
-		replay.b.ApplyContext(summary)
-		resumed, err := replay.b.Build()
-		if err != nil || strings.Contains(requestText(resumed), "synthetic-private") || !strings.Contains(requestText(resumed), "Conversation summary:") {
-			t.Fatal("legacy summary could not be safely read", err)
-		}
-	}
-}
-
-func TestLegacyToolProjectionAndCapturePathsRedactParts(t *testing.T) {
+func TestHistoricalToolProjectionsKeepOriginalAndRedactionMetadata(t *testing.T) {
 	f := newContextFixture(t, "openai-codex", contextengine.Config{})
 	f.user(t, "task", "Read source.py")
-	epochExchange(t, f, "read", "read", `{"path":"source.py"}`, "keep result")
+	fixtureExchange(t, f, "read", "read", `{"path":"source.py"}`, "keep result")
 	var unit contextengine.Unit
 	for _, u := range f.b.engine.Units() {
 		if u.Kind == contextengine.ToolResult {
@@ -184,28 +136,26 @@ func TestLegacyToolProjectionAndCapturePathsRedactParts(t *testing.T) {
 	for _, kind := range []string{"projection", "prune"} {
 		f.b.ApplyContext(sessionstore.ContextRecord{Kind: kind, UnitID: unit.ID, Items: []llm.Item{{Type: llm.ItemToolResult, Data: r}}})
 		built, err := f.b.Build()
-		if err != nil || strings.Contains(requestText(built), "synthetic-private") || !strings.Contains(requestText(built), "source.py [REDACTED] ; keep result") {
+		if err != nil || strings.Contains(requestText(built), "synthetic-private") || !strings.Contains(requestText(built), "keep result") {
 			t.Fatal("legacy projection lost public content or leaked credentials", err)
 		}
 	}
-	raw, err := json.Marshal(operation.ShellState{OutPath: "/captures/token=synthetic-private", ErrPath: "/captures/public.err"})
-	if err != nil {
+	var redactions []llm.ActivityRecord
+	if err := f.b.RecordRedactions(func(r llm.ActivityRecord) error {
+		redactions = append(redactions, r)
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	info := toolReceiptInfo(sessionstore.ToolCallStatus{Operations: []operation.Operation{{Type: operation.TypeShell, Version: operation.VersionShell, MaxOutputLength: operation.DefaultMaxOutputLength, State: raw}}})
-	if !reflect.DeepEqual(info.captures, []string{"/captures/[REDACTED]", "/captures/public.err"}) {
-		t.Fatal("capture path was discarded or leaked credentials", info.captures)
-	}
-	f.b.receiptInfo[unit.ID] = info
-	if got := f.b.omittedOutput(unit, r, llm.ToolCall{Name: "read"}); !strings.Contains(got, "/captures/[REDACTED]") || !strings.Contains(got, "/captures/public.err") || strings.Contains(got, "synthetic-private") {
-		t.Fatal("pruning lost the masked capture paths", got)
+	if len(redactions) != 2 || redactions[0].Redaction.Reason != contextengine.PartialRedaction || redactions[1].Redaction.Reason != contextengine.PartialRedaction {
+		t.Fatal("historical redaction observations were lost", redactions)
 	}
 }
 
 func TestRedactedCallProjectionMakesItsGroupPortable(t *testing.T) {
 	f := newContextFixture(t, "openai-codex", contextengine.Config{})
 	f.user(t, "task", "Read source.py")
-	epochExchange(t, f, "read", "read", `{"path":"source.py"}`, "keep result")
+	fixtureExchange(t, f, "read", "read", `{"path":"source.py"}`, "keep result")
 	if _, err := f.b.Build(); err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +177,7 @@ func TestRedactedCallProjectionMakesItsGroupPortable(t *testing.T) {
 		}
 	}
 	text := requestText(built)
-	if strings.Contains(text, "synthetic-private") || !strings.Contains(text, "[REDACTED]") || !strings.Contains(text, "source.py") || !strings.Contains(text, "keep result") {
+	if strings.Contains(text, "synthetic-private") || !strings.Contains(text, "source.py") || !strings.Contains(text, "keep result") {
 		t.Fatal("redacted projection lost useful content or leaked credentials")
 	}
 }

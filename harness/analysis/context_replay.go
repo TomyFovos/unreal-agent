@@ -173,9 +173,14 @@ func (m *contextReplay) apply(item host.HistoryItem, active *sessionstore.Runtim
 			return
 		}
 		if v.ContextStrategy != "" {
-			key.Strategy = recordedStrategy(v.ContextStrategy)
-			m.selectStrategy(seq, at, key)
+			if strategy := recordedStrategy(v.ContextStrategy); strategy != "" {
+				key.Strategy = strategy
+			}
 		}
+		if key.Strategy == "" {
+			key.Strategy = historicalSummaryStrategy
+		}
+		m.selectStrategy(seq, at, key)
 		w := m.window()
 		if !w.hasTurn && w.open == "initial" && v.ContextStrategy != "" {
 			w.l3Covered = true
@@ -290,7 +295,7 @@ func (m *contextReplay) contextRecord(seq sessionstore.Sequence, at time.Time, k
 		}
 	case sessionstore.ContextWindowFallback:
 		if window := c.Window; window != nil && window.Fallback != "" {
-			key.Strategy = contextengine.WindowSummary
+			key.Strategy = historicalSummaryStrategy
 			m.selectStrategy(seq, at, key)
 			n := make(contextCounts)
 			measureInput(n, "before_tokens", window.BeforeTokens, window.BeforeMeasurement)
@@ -305,10 +310,10 @@ func (m *contextReplay) contextRecord(seq sessionstore.Sequence, at time.Time, k
 			m.fallbacks = append(m.fallbacks, ContextFallback{ContextDimensions: key, At: at, Reason: window.Fallback, Numbers: n.report()})
 		}
 	case "header":
-		key.Strategy = contextengine.WindowSummary
+		key.Strategy = historicalSummaryStrategy
 		m.selectStrategy(seq, at, key)
 	case "summary", "summary_failed":
-		key.Strategy = contextengine.WindowSummary
+		key.Strategy = historicalSummaryStrategy
 		if c.Usage != nil {
 			key.Fast = fastLabel(c.Usage.Fast)
 		}
@@ -341,7 +346,7 @@ func (m *contextReplay) cliCompaction(seq sessionstore.Sequence, at time.Time, k
 	if v.Phase != "compact" && !v.Compacted && !v.Interrupted && v.Error == "" {
 		return
 	}
-	key.Strategy = contextengine.WindowSummary
+	key.Strategy = historicalSummaryStrategy
 	if v.Provider != "" {
 		key.Provider = viewer.SafeText(v.Provider)
 	}
@@ -442,7 +447,7 @@ func (m *contextReplay) response(seq sessionstore.Sequence, at time.Time, v sess
 }
 
 func isClaude(provider string) bool {
-	return provider == "claude-code" || provider == "claude-code-api"
+	return provider == "claude-code" || provider == "claude-api" || provider == "claude-code-api"
 }
 
 func userQuestions(items []llm.Item) int {

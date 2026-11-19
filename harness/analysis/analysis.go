@@ -192,7 +192,7 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 				c := *v.Context.Conversation
 				if c.Phase == "compact" || c.Compacted || c.Interrupted || c.Error != "" {
 					a.compactions = append(a.compactions, c)
-					e.Kind = "Claude compaction"
+					e.Kind = "historical Claude compaction"
 					if c.Usage != nil {
 						a.observeInputTokens(*c.Usage)
 						viewer.AddUsage(&a.usage, *c.Usage)
@@ -206,14 +206,14 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 					a.pruning.Results++
 				}
 				a.pruning.Tokens += v.Context.PrunedTokens
-				e.Kind = "context prune"
+				e.Kind = "historical context prune"
 			}
 			if v.Context != nil && v.Context.Usage != nil {
 				a.observeInputTokens(*v.Context.Usage)
 				viewer.AddUsage(&a.usage, *v.Context.Usage)
 				a.latestUsage = viewer.Usage{}
 				viewer.AddUsage(&a.latestUsage, *v.Context.Usage)
-				e.Kind = "context compaction"
+				e.Kind = "historical context compaction"
 			}
 		case "configuration":
 			if a.active == nil {
@@ -276,6 +276,9 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 			}
 		}
 	case session.Turn:
+		if v.Type == session.TurnCompaction {
+			e.Kind = "historical Unreal compaction"
+		}
 		t := Turn{ID: v.ID, Number: len(a.turns) + 1, At: item.RecordedAt}
 		if a.active != nil && a.active.Revision == v.RuntimeRevision {
 			t.Selection = summarize(a.active)

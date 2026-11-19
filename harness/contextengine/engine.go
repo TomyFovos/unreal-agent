@@ -2,11 +2,13 @@ package contextengine
 
 import (
 	"cmp"
+	"crypto/sha256"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
-	"fmt"
 	"slices"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
@@ -18,22 +20,26 @@ import (
 // Engine is a replayable ordered index. It never selects, retrieves or evicts.
 type Engine struct {
 	mu         sync.Mutex
-	units      map[string]Unit
-	order      []string
+	units      []Unit
 	omitted    int
-	sources    map[string][]string
+	sources    map[string][]int
 	deferred   map[string]HistoryRef
 	state      State
 	ops        map[string]OperationState
 	through    sessionstore.Sequence
-	latestUser string
+	latestUser int // the most recent user's one-based unit position
+	lastRemote struct {
+		key      [sha256.Size]byte
+		metadata OperationState
+		valid    bool
+	}
 }
 
 func New(c Config) (*Engine, error) {
 	if _, err := c.Resolve(); err != nil {
 		return nil, err
 	}
-	return &Engine{units: map[string]Unit{}, sources: map[string][]string{}, ops: map[string]OperationState{}}, nil
+	return &Engine{sources: map[string][]int{}, ops: map[string]OperationState{}}, nil
 }
 
 func (e *Engine) Configure(r Runtime, c Constraints, instructions bool) {
@@ -65,13 +71,18 @@ func (e *Engine) AddWithRedaction(u Unit, source string) (string, bool, *llm.Con
 func (e *Engine) add(u Unit, source string, omitGroup bool) (string, bool, *llm.ContextRedaction) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	index := len(e.units)
 	if u.Kind == UserMessage && u.Required {
-		if previous, ok := e.units[e.latestUser]; ok {
-			previous.Required = false
-			e.units[e.latestUser] = previous
+		if e.latestUser > 0 {
+			e.units[e.latestUser-1].Required = false
 		}
+		e.latestUser = index + 1
 	}
-	u.ID = fmt.Sprintf("unit-%020d", len(e.order)+1)
+	// Keep the fixed-width IDs already stored in window and receipt records.
+	const zeroes = "00000000000000000000"
+	var digits [len(zeroes)]byte
+	n := strconv.AppendInt(digits[:0], int64(index)+1, 10)
+	u.ID = "unit-" + zeroes[:len(zeroes)-len(n)] + string(n)
 	public, ok, redaction := PublicItemWithRedaction(u.Item)
 	eligible := ok && u.Class != Omit
 	if u.Class == Omit && ok {
@@ -93,14 +104,10 @@ func (e *Engine) add(u Unit, source string, omitGroup bool) (string, bool, *llm.
 	if ref, ok := e.deferred[source]; ok {
 		u.Source.Sequence, u.Source.RecordedAt = ref.Sequence, ref.RecordedAt
 		delete(e.deferred, source)
-	} else {
-		e.sources[source] = append(e.sources[source], u.ID)
+	} else if source != "" || u.Source.Sequence == 0 {
+		e.sources[source] = append(e.sources[source], index)
 	}
-	e.units[u.ID] = u
-	if u.Kind == UserMessage && u.Required {
-		e.latestUser = u.ID
-	}
-	e.order = append(e.order, u.ID)
+	e.units = append(e.units, u)
 	return u.ID, eligible, redaction
 }
 
@@ -109,12 +116,12 @@ func (e *Engine) add(u Unit, source string, omitGroup bool) (string, bool, *llm.
 func (e *Engine) Omit(id string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if u, ok := e.units[id]; ok {
+	if index := e.unitIndex(id); index >= 0 {
+		u := &e.units[index]
 		if u.Class != Omit {
 			e.omitted++
 		}
 		u.Class, u.Item, u.Group = Omit, llm.Item{}, ""
-		e.units[id] = u
 	}
 }
 
@@ -132,12 +139,23 @@ func (e *Engine) Observe(item sessionstore.Item, source string) {
 			e.deferred[source] = HistoryRef{Sequence: item.Sequence, RecordedAt: item.RecordedAt}
 		}
 	}
-	for _, id := range e.sources[source] {
-		u := e.units[id]
+	for _, index := range e.sources[source] {
+		u := &e.units[index]
 		u.Source.Sequence, u.Source.RecordedAt = item.Sequence, item.RecordedAt
-		e.units[id] = u
 	}
 	delete(e.sources, source)
+	e.observeItem(item)
+}
+
+// ObserveReplay reads committed metadata. The builder uses the record's
+// sequence directly for replayed units, including inputs queued by a tool hook.
+func (e *Engine) ObserveReplay(item sessionstore.Item) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.observeItem(item)
+}
+
+func (e *Engine) observeItem(item sessionstore.Item) {
 	e.through = max(e.through, item.Sequence)
 	if s, ok := item.Data.(sessionstore.ToolCallStatus); ok {
 		for _, op := range s.Operations {
@@ -153,41 +171,57 @@ func (e *Engine) ObserveOperation(op operation.Operation) {
 }
 func (e *Engine) observeOperation(op operation.Operation) {
 	v := OperationState{ID: string(op.ID), Type: string(op.Type), Tool: op.ToolName, Status: string(op.Status)}
-	// Decode only declared child metadata. Never ingest arbitrary State, task,
-	// settings, endpoints, bindings, credentials or tool argument fields.
 	if op.Type == operation.TypeRemoteJob {
-		var state struct {
-			Plan struct {
-				Type string
-				Data struct {
-					ChildID, Action string
-					Configuration   *struct{ Runtime jsontext.Value }
-				}
-			}
-			Handle struct {
-				ChildID string
-				Finish  *struct{ Result struct{ Status string } }
-			}
+		key := sha256.Sum256(op.State)
+		// Status-only updates often repeat identical remote state. Retain
+		// a single decoded public observation, keyed by the canonical bytes.
+		if !e.lastRemote.valid || e.lastRemote.key != key {
+			e.lastRemote.key = key
+			e.lastRemote.metadata = remoteJobMetadata(op.State)
+			e.lastRemote.valid = true
 		}
-		if json.Unmarshal(op.State, &state) == nil && state.Plan.Type == "subagent" {
-			v.ChildID = state.Handle.ChildID
-			if v.ChildID == "" {
-				v.ChildID = state.Plan.Data.ChildID
-			}
-			if state.Plan.Data.Configuration != nil {
-				if s := sessionstore.SelectionFromConfiguration(state.Plan.Data.Configuration.Runtime); s != nil {
-					v.Provider, v.Model, v.Effort = s.Provider, s.Model, string(s.Effort)
-				}
-			}
-			if state.Handle.Finish != nil {
-				switch state.Handle.Finish.Result.Status {
-				case "completed", "failed":
-					v.Outcome = state.Handle.Finish.Result.Status
-				}
-			}
-		}
+		meta := e.lastRemote.metadata
+		v.ChildID, v.Provider, v.Model, v.Effort, v.Outcome = meta.ChildID, meta.Provider, meta.Model, meta.Effort, meta.Outcome
 	}
 	e.ops[v.ID] = v
+}
+
+func remoteJobMetadata(raw jsontext.Value) OperationState {
+	// Decode only declared metadata. Keep arbitrary plans, handles and runtime
+	// bindings out of the Context Engine's state.
+	var state struct {
+		Plan struct {
+			Type string
+			Data struct {
+				ChildID, Action string
+				Configuration   *struct{ Runtime jsontext.Value }
+			}
+		}
+		Handle struct {
+			ChildID string
+			Finish  *struct{ Result struct{ Status string } }
+		}
+	}
+	var v OperationState
+	if json.Unmarshal(raw, &state) != nil || state.Plan.Type != "subagent" {
+		return v
+	}
+	v.ChildID = state.Handle.ChildID
+	if v.ChildID == "" {
+		v.ChildID = state.Plan.Data.ChildID
+	}
+	if state.Plan.Data.Configuration != nil {
+		if s := sessionstore.SelectionFromConfiguration(state.Plan.Data.Configuration.Runtime); s != nil {
+			v.Provider, v.Model, v.Effort = s.Provider, s.Model, string(s.Effort)
+		}
+	}
+	if state.Handle.Finish != nil {
+		switch state.Handle.Finish.Result.Status {
+		case "completed", "failed":
+			v.Outcome = state.Handle.Finish.Result.Status
+		}
+	}
+	return v
 }
 
 // State contains only current operational metadata; sequence/time never enter a prompt.
@@ -214,7 +248,7 @@ func (e *Engine) Units() []Unit {
 func (e *Engine) UnitCounts() (total, omitted int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return len(e.order), e.omitted
+	return len(e.units), e.omitted
 }
 
 // UnitsAfter returns the ordered suffix without copying the preceding units.
@@ -223,10 +257,9 @@ func (e *Engine) UnitCounts() (total, omitted int) {
 func (e *Engine) UnitsAfter(after string) []Unit {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	start := sort.Search(len(e.order), func(i int) bool { return e.order[i] > after })
-	result := make([]Unit, 0, len(e.order)-start)
-	for _, id := range e.order[start:] {
-		u := e.units[id]
+	start := sort.Search(len(e.units), func(i int) bool { return e.units[i].ID > after })
+	result := make([]Unit, 0, len(e.units)-start)
+	for _, u := range e.units[start:] {
 		u.Item = clonePublicItem(u.Item)
 		result = append(result, u)
 	}
@@ -236,12 +269,25 @@ func (e *Engine) UnitsAfter(after string) []Unit {
 func (e *Engine) ResolveUnit(id string) (Unit, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	u, ok := e.units[id]
-	if !ok || u.Class == Omit {
+	index := e.unitIndex(id)
+	if index < 0 || e.units[index].Class == Omit {
 		return Unit{}, false
 	}
+	u := e.units[index]
 	u.Item = clonePublicItem(u.Item)
 	return u, true
+}
+
+func (e *Engine) unitIndex(id string) int {
+	digits, ok := strings.CutPrefix(id, "unit-")
+	if !ok {
+		return -1
+	}
+	n, err := strconv.ParseUint(digits, 10, 64)
+	if err != nil || n == 0 || n > uint64(len(e.units)) || e.units[n-1].ID != id {
+		return -1
+	}
+	return int(n - 1)
 }
 
 func clonePublicItem(item llm.Item) llm.Item {

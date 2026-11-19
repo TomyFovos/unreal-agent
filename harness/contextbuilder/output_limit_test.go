@@ -1,7 +1,6 @@
 package contextbuilder
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -17,13 +16,13 @@ func TestOutputLimitKeepsCompletedToolReceiptWithoutReplayingCall(t *testing.T) 
 		t.Run(fmt.Sprintf("engine=%v", engine), func(t *testing.T) {
 			b := NewBuilder().(*builder)
 			if engine {
-				if _, err := EnableCompaction(b, contextengine.Config{}, contextengine.Constraints{}); err != nil {
+				if _, err := EnableWindow(b, contextengine.Config{}, contextengine.Constraints{}); err != nil {
 					t.Fatal(err)
 				}
 			}
 			b.SetRuntimeProvider("openai-codex")
 			b.AddModelResponse(llm.Response{Stop: llm.StopMaxOutputTokens, Output: []llm.Item{
-				epochCall("read", "Read", `{"path":"failed-call-argument"}`),
+				fixtureCall("read", "Read", `{"path":"failed-call-argument"}`),
 			}})
 			b.AddToolResult("read", []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: "committed tool receipt"}}, false)
 			result, err := b.Build()
@@ -92,31 +91,15 @@ func TestOutputLimitInvalidatesMeasurementsFromOldProjection(t *testing.T) {
 	}
 }
 
-func TestOutputLimitDoesNotInstallFailedCompaction(t *testing.T) {
-	f := newContextFixture(t, "openai-codex", contextengine.Config{FallbackWindow: 10000, InputBudget: 8000})
-	f.turn(t, "first", "preserve this request", strings.Repeat("Earlier content. ", 900))
+func TestHistoricalFailedSummaryStaysOutsideTheRequest(t *testing.T) {
+	f := newContextFixture(t, "openai-codex", contextengine.Config{})
+	f.turn(t, "first", "preserve this request", "old assistant answer")
 	f.user(t, "next", "follow up")
 	const partial = "partial summary"
-	adapter := summaryAdapter(func(llm.Request) llm.Response {
-		return llm.Response{Stop: llm.StopMaxOutputTokens, Output: []llm.Item{
-			{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: partial}},
-		}}
-	})
-	var record sessionstore.ContextRecord
-	err := f.b.PrepareContext(t.Context(), adapter, llm.RequestOptions{}, func(r sessionstore.ContextRecord) error {
-		if r.Kind == "summary_failed" {
-			record = r
-		}
-		f.b.ApplyContext(r)
-		return nil
-	}, true)
-	var failure *SummaryModelError
-	if !errors.As(err, &failure) || record.Text != string(llm.StopMaxOutputTokens) || len(record.Items) != 1 ||
-		record.Items[0].Data.(llm.Message).Text != partial {
-		t.Fatalf("failed compaction lost its record: %+v %v", record, err)
-	}
+	f.b.ApplyContext(sessionstore.ContextRecord{Kind: "summary_failed", Text: string(llm.StopMaxOutputTokens),
+		Items: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: partial}}}})
 	result, err := f.b.Build()
 	if err != nil || strings.Contains(requestText(result), partial) || !strings.Contains(requestText(result), "preserve this request") {
-		t.Fatalf("failed compaction altered the request: %v", err)
+		t.Fatalf("historical failed compaction altered the request: %v", err)
 	}
 }

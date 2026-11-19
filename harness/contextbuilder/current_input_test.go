@@ -35,7 +35,7 @@ func TestCurrentInputRedactsCredentialsWithoutStopping(t *testing.T) {
 		for _, compact := range []bool{false, true} {
 			b := NewBuilder()
 			if compact {
-				if _, err := EnableCompaction(b, contextengine.Config{}, contextengine.Constraints{}); err != nil {
+				if _, err := EnableWindow(b, contextengine.Config{}, contextengine.Constraints{}); err != nil {
 					t.Fatal(err)
 				}
 			}

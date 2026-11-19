@@ -100,11 +100,11 @@ Run `/analyze` in the TUI to inspect detailed Session diagnostics and token acco
 | **Turns** | Per-turn provider, model, effort, and token usage |
 | **Tools** | Tool operation outcomes and Claude Bash hook durations (`native_bash`) |
 | **Agents** | Child agents, final statuses, and `child_start` template/model/effort records |
-| **Context** | Context window size, average input tokens, pruned tool results, estimated token savings, prune boundaries, and Claude compaction events |
+| **Context** | Context window size, average input tokens and historical compaction observations |
 | **Timeline** | Chronological event log and activity durations |
 | **Errors** | Recorded errors and redacted provider diagnostics |
 | **Layers** | Request and worker-model comparisons across the Session tree |
-| **Context metrics** | Three-layer and summary comparison, per-window cache and L1/L2/L3 measurements, child reviews, and user questions per work hour |
+| **Context metrics** | Three-layer windows, excerpt fits, historical summary records, per-window cache and L1/L2/L3 measurements, child reviews, and user questions per work hour |
 | **Export** | Save the analysis views, including the context measurement tables, as JSON or Markdown |
 
 **Context metrics** includes archived descendants and labels values `measured`, `derived`, or `unknown`. [Three-layer context measurements](context-3layer.md#measuring)
@@ -112,7 +112,11 @@ Run `/analyze` in the TUI to inspect detailed Session diagnostics and token acco
 ### How Metrics Are Calculated
 
 - **Cache percentage:** `cached_input / input` across reported usage.
-- **Footer context vs. Average input:** The TUI footer shows the **latest request's** context size (not the sum of a multi-step tool loop). Average input in `/analyze` averages across all reported model calls (including summarization calls).
+- **Footer context vs. Average input:** The TUI footer shows the **latest request's** context size (not the sum of a multi-step tool loop). Average input in `/analyze` averages across all reported model calls (including calls recorded under the historical summary strategy).
 - **Generation speed (`tok/s`):** Calculated from reported output tokens and generation time. A `~` prefix indicates client-clock timing. Claude Bash elapsed time measures from the pre-tool hook to completion.
 - **Claude turn-total usage:** Already included in response totals—do not add it a second time.
 - **Unknown vs. Zero:** If a provider does not report token usage, Unreal displays it as **unknown** (`—`), never as `0`. Labels like `partial/incomplete history` or `resync` indicate that statistics reflect only the observed portion of history.
+
+### Context budget errors
+
+`required_context_exceeds_budget` reports the input budget and the sizes of the system and tool header, the L2 state copy, and the required L1 tail before and after attempting to fit it. Use the breakdown to identify whether the active request, tool output, or the state copy accounts for the size. If a provider rejects an already admitted request for its context size, Unreal rebuilds the window and retries once. [Three-layer window settings](context-3layer.md#rebuild-the-responses-request-window)

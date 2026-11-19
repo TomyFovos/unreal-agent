@@ -77,6 +77,7 @@ type Frame struct {
 type displayRow struct {
 	content    line
 	role, seam string
+	work       *backgroundWork
 }
 type layout struct {
 	width, height, main, text int
@@ -323,7 +324,12 @@ func conversation(s Snapshot, u UIState, l layout) []displayRow {
 	flush := func(active bool) {
 		if work.entries > 0 {
 			gap()
-			out = append(out, displayRow{content: work.rowWithMark(marks, l.text, u.Theme, active, u.Now.UnixMilli())})
+			row := displayRow{content: work.row(marks, l.text, u.Theme)}
+			if active {
+				animated := work
+				row.work = &animated
+			}
+			out = append(out, row)
 			lastRole = "background"
 			work = backgroundWork{}
 		}
@@ -896,6 +902,9 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 		rows = append(rows, pane...)
 	} else {
 		for _, r := range visible {
+			if r.work != nil {
+				r.content = r.work.rowWithMark(marksFor(u, s), l.text, u.Theme, true, u.Now.UnixMilli())
+			}
 			rows = append(rows, l.row(r))
 		}
 	}

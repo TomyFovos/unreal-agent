@@ -1,6 +1,7 @@
 package claudeagent
 
 import (
+	"context"
 	"encoding/json/v2"
 	"fmt"
 	"os"
@@ -10,11 +11,12 @@ import (
 	"testing"
 
 	"github.com/unreallabsai/unreal-agent/harness/credential"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 )
 
 func TestExplicitAPIKeyEnvironmentAndErrors(t *testing.T) {
 	key := credential.NewSecret("chosen-api-test-key")
-	ambient := []string{"HOME=/fake", "ANTHROPIC_API_KEY=ambient", "ANTHROPIC_AUTH_TOKEN=ambient-auth", "CLAUDE_CODE_USE_BEDROCK=1"}
+	ambient := []string{"HOME=/fake", "ANTHROPIC_API_KEY=ambient", "ANTHROPIC_AUTH_TOKEN=ambient-auth", "CLAUDE_CODE_USE_BEDROCK=1", disableAutoCompactEnv + "=0", disableCompactEnv + "=0"}
 	for _, api := range []bool{false, true} {
 		selected := credential.Secret{}
 		if api {
@@ -23,6 +25,11 @@ func TestExplicitAPIKeyEnvironmentAndErrors(t *testing.T) {
 		env := authenticatedEnvironment(ambient, selected)
 		if slices.Contains(env, "ANTHROPIC_API_KEY="+key.Reveal()) != api {
 			t.Fatal("API key environment did not follow explicit selection")
+		}
+		for _, name := range []string{disableAutoCompactEnv, disableCompactEnv} {
+			if !slices.Contains(env, name+"=1") || slices.Contains(env, name+"=0") {
+				t.Fatal("Claude launch retained an ambient compaction setting", name)
+			}
 		}
 		for _, entry := range env {
 			if strings.Contains(entry, "ambient") || strings.Contains(entry, "BEDROCK") {
@@ -52,6 +59,45 @@ func TestExplicitAPIKeyEnvironmentAndErrors(t *testing.T) {
 	}
 	if _, err := NewAPIClient(newHarness(t, "echo").client.config, credential.Material{}); err == nil {
 		t.Fatal("API client allowed missing key and subscription fallback")
+	}
+}
+
+func TestExplicitClaudeAPIKeyUsesItsOwnWindow(t *testing.T) {
+	h := newHarness(t, "api_echo")
+	client, err := NewAPIClient(h.client.config, credential.Material{Token: credential.NewSecret("chosen-api-test-key")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const boundary = "rec:shared/10"
+	request := llm.Request{
+		Window: &llm.ConversationWindow{Boundary: boundary, DeliveredItems: 1},
+		Input:  []llm.Item{user("old prompt"), user("new prompt")},
+	}
+	var binding llm.ConversationBinding
+	opt := llm.RequestOptions{
+		Identity: llm.RequestIdentity{SessionID: "shared"}, Tools: h.tools,
+		ConversationBindings: map[string]llm.ConversationBinding{
+			ProviderID: {ID: "subscription-conversation", Provider: ProviderID, Boundary: boundary},
+		},
+		RecordConversationBinding: func(_ context.Context, v llm.ConversationBinding) error {
+			binding = v
+			return nil
+		},
+	}
+	if _, err := client.Respond(t.Context(), request, opt); err != nil {
+		t.Fatal(err)
+	}
+	if binding.Provider != APIProviderID || binding.Boundary != boundary || binding.ID == "" || binding.ID == "subscription-conversation" {
+		t.Fatalf("API launch did not bind its own window: %+v", binding)
+	}
+	data, err := os.ReadFile(h.args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Split(string(data), "\n")
+	i := slices.Index(args, "--session-id")
+	if i < 0 || i+1 >= len(args) || args[i+1] != binding.ID || slices.Contains(args, "--autocompact") {
+		t.Fatal("API launch did not create the window's Claude conversation", args)
 	}
 }
 

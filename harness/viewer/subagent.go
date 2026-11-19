@@ -91,6 +91,17 @@ func (r ParentReader) Observe(ctx context.Context, id session.ID, recent int) (h
 	return owner.Observe(ctx, recent)
 }
 
+func (r ParentReader) ObservePages(ctx context.Context, id session.ID, recent int, consume func(host.View) error) error {
+	if id != r.ParentID {
+		return ErrUnavailable
+	}
+	owner, err := r.owner(ctx)
+	if err != nil {
+		return err
+	}
+	return owner.ObservePages(ctx, recent, consume)
+}
+
 func (r ParentReader) Inspect(ctx context.Context, id session.ID, after sessionstore.Sequence, limit int) (host.View, error) {
 	if limit < 1 || limit > 4096 {
 		return host.View{}, ErrInvalidPage

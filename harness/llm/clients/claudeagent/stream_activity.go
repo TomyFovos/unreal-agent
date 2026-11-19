@@ -16,7 +16,6 @@ const streamActivityInterval = 60 * time.Second
 // UTF-8 bytes / 4, rounded up, and never enter usage or generation statistics.
 type streamObservation struct {
 	Event                  string           `json:"event"`
-	Compaction             bool             `json:"compaction,omitzero"`
 	ParentToolUseID        string           `json:"parent_tool_use_id,omitzero"`
 	InputTokens            *int64           `json:"input_tokens,omitzero"`
 	DeltaCount             *int64           `json:"delta_count,omitzero"`
@@ -54,7 +53,6 @@ type streamRequestActivity struct {
 type streamActivities struct {
 	mu              sync.Mutex
 	turnID          string
-	compaction      bool
 	mainModel       string
 	seq             int
 	active          map[string]*streamRequestActivity
@@ -67,7 +65,7 @@ type streamActivities struct {
 }
 
 func (t *turn) observeStreams(interval time.Duration) (*streamActivities, func()) {
-	s := &streamActivities{turnID: t.opt.Identity.TurnID, compaction: t.compacting, active: map[string]*streamRequestActivity{}, counts: map[string]map[string]int64{}, limits: map[string][]outputLimitHit{}, now: t.now, record: t.recordActivity}
+	s := &streamActivities{turnID: t.opt.Identity.TurnID, active: map[string]*streamRequestActivity{}, counts: map[string]map[string]int64{}, limits: map[string][]outputLimitHit{}, now: t.now, record: t.recordActivity}
 	if t.opt.RecordActivity == nil {
 		return s, func() {}
 	}
@@ -254,12 +252,11 @@ func (r *streamRequestActivity) snapshot(event string) streamObservation {
 
 func (s *streamActivities) emit(scope string, r *streamRequestActivity, observation streamObservation, at time.Time) {
 	observation.ParentToolUseID = scope
-	observation.Compaction = s.compaction
 	data, _ := json.Marshal(observation)
 	record := llm.ActivityRecord{Kind: "claude_stream", ID: s.turnID, Provider: ProviderID, EndedAt: at, Reason: string(data)}
 	if r != nil {
 		record.ID, record.Model, record.StartedAt = r.id, r.model, r.started
-		if scope == "" && !s.compaction && r.model != "<synthetic>" {
+		if scope == "" && r.model != "<synthetic>" {
 			switch observation.Event {
 			case "message_start":
 				record.RequestUsage = r.input.requestUsage()

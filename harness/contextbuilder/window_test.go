@@ -22,14 +22,14 @@ import (
 func TestWindowReservesAnotherWOfGrowthAfterRebuild(t *testing.T) {
 	const threshold = 8_000
 	f := newContextFixture(t, "openai-codex", contextengine.Config{
-		WindowStrategy: contextengine.WindowThreeLayer, WindowThresholdTokens: threshold, InputBudget: 50_000,
+		WindowThresholdTokens: threshold, InputBudget: 50_000,
 	})
 	f.turn(t, "old", "Keep working on the original request.", strings.Repeat("completed work ", 3_000))
 	var records []sessionstore.ContextRecord
 	persist := windowRecorder(t, f, &records)
 	prepare := func() {
 		t.Helper()
-		if err := f.b.PrepareContext(t.Context(), nil, llm.RequestOptions{}, persist, false); err != nil {
+		if err := f.b.PrepareContext(t.Context(), persist, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -72,14 +72,14 @@ func TestWindowReservesAnotherWOfGrowthAfterRebuild(t *testing.T) {
 func TestWindowRecordsRequiredMinimumWithoutDroppingInput(t *testing.T) {
 	const threshold = 2_000
 	f := newContextFixture(t, "openai-codex", contextengine.Config{
-		WindowStrategy: contextengine.WindowThreeLayer, WindowThresholdTokens: threshold, InputBudget: 20_000,
+		WindowThresholdTokens: threshold, InputBudget: 20_000,
 	})
 	original := "  Original request\r\n\t" + strings.Repeat("required details ", 800)
 	f.user(t, "pending", original)
 	var records []sessionstore.ContextRecord
 	persist := windowRecorder(t, f, &records)
 	for range 2 {
-		if err := f.b.PrepareContext(t.Context(), nil, llm.RequestOptions{}, persist, false); err != nil {
+		if err := f.b.PrepareContext(t.Context(), persist, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -97,7 +97,7 @@ func TestWindowRecordsRequiredMinimumWithoutDroppingInput(t *testing.T) {
 
 func TestFirstWindowUsesRecentEventsFromActiveHumanInput(t *testing.T) {
 	f := newContextFixture(t, "openai-codex", contextengine.Config{
-		WindowStrategy: contextengine.WindowThreeLayer, WindowThresholdTokens: 2_000,
+		WindowThresholdTokens: 2_000,
 	})
 	f.turn(t, "earlier", "older request", strings.Repeat("completed work ", 1_000))
 	f.user(t, "active", "active request")
@@ -109,7 +109,7 @@ func TestFirstWindowUsesRecentEventsFromActiveHumanInput(t *testing.T) {
 		return state, f.sequence, nil
 	})
 	var records []sessionstore.ContextRecord
-	if err := f.b.PrepareContext(t.Context(), nil, llm.RequestOptions{}, windowRecorder(t, f, &records), false); err != nil {
+	if err := f.b.PrepareContext(t.Context(), windowRecorder(t, f, &records), false); err != nil {
 		t.Fatal(err)
 	}
 	if len(records) != 1 || records[0].Kind != sessionstore.ContextWindowBoundary || records[0].Window.RecentEvents != 1 {
@@ -130,7 +130,7 @@ func TestFirstWindowUsesRecentEventsFromActiveHumanInput(t *testing.T) {
 func TestToolWindowCutsAutonomousTailAndKeepsInFlightBatches(t *testing.T) {
 	const threshold = 8_000
 	f := newContextFixture(t, claudeagent.ProviderID, contextengine.Config{
-		WindowStrategy: contextengine.WindowThreeLayer, WindowThresholdTokens: threshold,
+		WindowThresholdTokens: threshold,
 	})
 	f.b.SetWindowPrompt(claudeagent.WindowPromptLine)
 	f.b.SetWindowSource("fixture", func(context.Context) (contextstate.State, sessionstore.Sequence, error) {
@@ -211,7 +211,7 @@ func windowRecorder(t *testing.T, f *contextFixture, records *[]sessionstore.Con
 
 func TestWindowStartsAtThresholdAndKeepsItsPrefix(t *testing.T) {
 	f := newContextFixture(t, "openai-codex", contextengine.Config{
-		WindowStrategy: contextengine.WindowThreeLayer, L2TargetTokens: 10, RecentEventCount: 1,
+		L2TargetTokens: 10, RecentEventCount: 1,
 	})
 	l2Body := strings.Repeat("active task body ", 100)
 	loc := record.Input("session", 1, record.UserMessage)
@@ -244,7 +244,7 @@ func TestWindowStartsAtThresholdAndKeepsItsPrefix(t *testing.T) {
 	}
 	prepare := func() Result {
 		t.Helper()
-		if err := f.b.PrepareContext(t.Context(), nil, llm.RequestOptions{}, persist, false); err != nil {
+		if err := f.b.PrepareContext(t.Context(), persist, false); err != nil {
 			t.Fatal(err)
 		}
 		built, err := f.b.Build()
@@ -294,83 +294,97 @@ func TestWindowStartsAtThresholdAndKeepsItsPrefix(t *testing.T) {
 	}
 }
 
-func TestWindowFallbackRunsSummaryForOneRequest(t *testing.T) {
-	config := contextengine.Config{
-		WindowStrategy: contextengine.WindowThreeLayer, WindowThresholdTokens: 2_000, FallbackWindow: 20_000, InputBudget: 12_000,
-	}
-	f := newContextFixture(t, "openai-codex", config)
-	for _, id := range []string{"old-1", "old-2", "old-3", "old-4"} {
-		f.turn(t, id, "old request", strings.Repeat("recorded work ", 1_000))
-	}
-	f.user(t, "current", "preserve the active request")
-	state := contextstate.State{Rules: map[string]contextstate.Rule{
-		"rule": {Excerpt: strings.Repeat("oversized state ", 4_000)},
-	}}
-	f.b.SetWindowSource("fixture", func(context.Context) (contextstate.State, sessionstore.Sequence, error) {
-		return state, f.sequence, nil
-	})
-	var records []sessionstore.ContextRecord
-	persist := windowRecorder(t, f, &records)
-	summaries := 0
-	adapter := summaryAdapter(func(req llm.Request) llm.Response {
-		summaries++
-		if req.PublicHistory || req.Window != nil || contextengine.Text(req.Input[len(req.Input)-1]) != summaryInstruction {
-			t.Fatalf("fallback did not use the summary request: %+v", req.Window)
-		}
-		return llm.Response{Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "old work summary"}}}}
-	})
-	if err := f.b.PrepareContext(t.Context(), adapter, llm.RequestOptions{}, persist, false); err != nil {
-		t.Fatal(err)
-	}
-	built, err := f.b.Build()
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := requestText(built)
-	if summaries != 1 || built.Request.PublicHistory || built.Request.Window != nil || f.b.ContextStrategy() != contextengine.WindowSummary ||
-		!strings.Contains(text, "old work summary") || !strings.Contains(text, "preserve the active request") || strings.Contains(text, "oversized state") {
-		t.Fatal("fallback did not admit the original request through summary")
-	}
-	fallback := records[0]
-	w := fallback.Window
-	if fallback.Kind != sessionstore.ContextWindowFallback || fallback.Text != "" || w == nil ||
-		w.Fallback != sessionstore.WindowFallbackL2OverBudget || w.InputBudgetTokens != config.InputBudget ||
-		w.L2Tokens <= config.InputBudget || w.Tail == nil || w.Tail.Items != 1 ||
-		w.AfterTokens != *w.HeaderTokens+w.L2Tokens+w.Tail.Tokens ||
-		records[len(records)-1].Kind != "summary" {
-		t.Fatalf("fallback diagnostics do not describe the rejected projection: %+v", w)
-	}
+func TestWindowExcerptsRequiredTailAndReplaysExactly(t *testing.T) {
+	for _, provider := range []string{"openai-codex", claudeagent.ProviderID, claudeagent.APIProviderID} {
+		t.Run(provider, func(t *testing.T) {
+			const budget = 4_000
+			config := contextengine.Config{WindowThresholdTokens: 10_000, InputBudget: budget}
+			f := newContextFixture(t, provider, config)
+			// These are canonical tool results, with a private-conversation
+			// renderer for both Claude connections.
+			f.b.textOnly = false
+			f.b.SetWindowSource("fixture", nil)
+			f.user(t, "active", "Finish the current task.")
+			f.item(t, sessionstore.ItemTurn, session.Turn{ID: "in-flight", Type: session.TurnRegular})
+			message := "MESSAGE HEAD " + strings.Repeat("会話の本文", 5_000) + " MESSAGE TAIL"
+			output := "OUTPUT HEAD " + strings.Repeat("ツール出力", 5_000) + " OUTPUT TAIL"
+			f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "in-flight", Response: llm.Response{Output: []llm.Item{
+				{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: message}},
+				fixtureCall("read", "Read", "{}"),
+			}}})
+			f.item(t, sessionstore.ItemToolCallStatus, sessionstore.ToolCallStatus{
+				TurnID: "in-flight", CallID: "read", Status: tool.CallStatus{Error: output},
+			})
 
-	replay := newContextFixture(t, "openai-codex", config)
-	for _, item := range f.history {
-		replay.item(t, item.Kind, item.Data)
-		if r, ok := item.Data.(sessionstore.HostRecord); ok {
-			replay.b.ApplyContext(*r.Context)
-		}
-	}
-	restored, err := replay.b.Build()
-	if err != nil || !reflect.DeepEqual(built.Request.Input, restored.Request.Input) || restored.Request.PublicHistory {
-		t.Fatal("replay changed the fallback request", err)
-	}
-	f.b.SetHistoryItem(sessionstore.Item{Data: session.Turn{ID: "summary-turn", Type: session.TurnRegular, ContextStrategy: contextengine.WindowSummary}})
-	f.b.Commit()
-	state.Rules = nil
-	f.user(t, "next", "try the layered window again")
-	if err := f.b.PrepareContext(t.Context(), nil, llm.RequestOptions{}, persist, false); err != nil {
-		t.Fatal(err)
-	}
-	next, err := f.b.Build()
-	if err != nil || !next.Request.PublicHistory || records[len(records)-1].Kind != sessionstore.ContextWindowBoundary ||
-		f.b.ContextStrategy() != contextengine.WindowThreeLayer || !strings.Contains(requestText(next), "try the layered window again") {
-		t.Fatal("next request did not rebuild a three-layer window", err)
+			var records []sessionstore.ContextRecord
+			if err := f.b.PrepareContext(t.Context(), windowRecorder(t, f, &records), false); err != nil {
+				t.Fatal(err)
+			}
+			if len(records) != 1 || records[0].Kind != sessionstore.ContextWindowBoundary {
+				t.Fatalf("expected a single rebuild, got %d records", len(records))
+			}
+			w := records[0].Window
+			if w.Fit != sessionstore.WindowFitExcerpted || w.FitExcerptChars == nil || *w.FitExcerptChars < 30 ||
+				w.RequiredInputTokens <= budget || w.InputBudgetTokens != budget ||
+				w.RequiredInputTokens != *w.HeaderTokens+w.L2Tokens+w.RequiredTailTokens ||
+				w.AfterTokens != *w.HeaderTokens+w.L2Tokens+w.Tail.Tokens ||
+				w.AfterTokens > budget || w.Tail.Tokens >= w.RequiredTailTokens {
+				t.Fatalf("incorrect fit measurements: %+v", w)
+			}
+			built, err := f.b.Build()
+			if err != nil || built.Report.Context.InputTokens != w.AfterTokens {
+				t.Fatalf("fitted projection did not match admission: %v", err)
+			}
+			text := requestText(built)
+			for _, want := range []string{"Finish the current task.", "MESSAGE HEAD", "MESSAGE TAIL", "OUTPUT HEAD", "OUTPUT TAIL",
+				"rec:fixture/3/message/0", "rec:fixture/4/tool-error", "bytes truncated"} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("excerpt lost %q", want)
+				}
+			}
+			if strings.Contains(text, message) || strings.Contains(text, output) {
+				t.Fatal("request sent the unbounded tail")
+			}
+			read := f.b.engine.Units()
+			if contextengine.Text(read[1].Item) != message || contextengine.Text(read[3].Item) != output {
+				t.Fatal("excerpts changed the originals")
+			}
+			replay := newContextFixture(t, provider, config)
+			replay.b.textOnly = false
+			replay.b.SetWindowSource("fixture", nil)
+			for _, item := range f.history {
+				replay.item(t, item.Kind, item.Data)
+				if r, ok := item.Data.(sessionstore.HostRecord); ok {
+					raw, err := json.Marshal(r.Context)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var window sessionstore.ContextRecord
+					if err := json.Unmarshal(raw, &window); err != nil {
+						t.Fatal(err)
+					}
+					replay.b.ApplyContext(window)
+				}
+			}
+			restored, err := replay.b.Build()
+			if err != nil || !reflect.DeepEqual(restored.Request, built.Request) {
+				t.Fatalf("recorded excerpts changed after restore: %v", err)
+			}
+			// The cap only applies to units that existed at the boundary.
+			followup := strings.Repeat("new input ", 1_000)
+			replay.user(t, "followup", followup)
+			unit, ok := replay.b.engine.ResolveUnit(replay.b.lastUnit)
+			if !ok || contextengine.Text(replay.b.deriveUnit(unit)[0]) != followup {
+				t.Fatal("the fit clipped an input appended after the boundary")
+			}
+		})
 	}
 }
 
-func TestToolWindowFallbackContinuesWithPrivateSummaryMode(t *testing.T) {
+func TestToolWindowReportsUnfittableL2WithoutCreatingBoundary(t *testing.T) {
 	f := newContextFixture(t, claudeagent.ProviderID, contextengine.Config{
-		WindowStrategy: contextengine.WindowThreeLayer, WindowThresholdTokens: 2_000, InputBudget: 4_000,
+		WindowThresholdTokens: 2_000, InputBudget: 4_000,
 	})
-	f.b.SetWindowPrompt(claudeagent.WindowPromptLine)
 	f.user(t, "active", "Keep working")
 	f.item(t, sessionstore.ItemTurn, session.Turn{ID: "in-flight", Type: session.TurnRegular})
 	f.b.SetWindowSource("fixture", func(context.Context) (contextstate.State, sessionstore.Sequence, error) {
@@ -379,56 +393,35 @@ func TestToolWindowFallbackContinuesWithPrivateSummaryMode(t *testing.T) {
 		}}, f.sequence, nil
 	})
 	var records []sessionstore.ContextRecord
-	persist := windowRecorder(t, f, &records)
-	rotated, err := f.b.PrepareToolWindow(t.Context(), persist, 5_000, nil)
-	if err != nil || !rotated || len(records) != 1 || records[0].Kind != sessionstore.ContextWindowFallback ||
-		!slices.Contains(records[0].Window.Causes, sessionstore.WindowCauseMidTurn) {
-		t.Fatalf("oversized tool window did not hand off the turn: rotated=%v err=%v", rotated, err)
+	rotated, err := f.b.PrepareToolWindow(t.Context(), windowRecorder(t, f, &records), 5_000, nil)
+	if rotated || len(records) != 0 || !contextengine.IsBudgetError(err) {
+		t.Fatalf("unfittable state was admitted: rotated=%v records=%d error=%v", rotated, len(records), err)
 	}
-	if err := f.b.PrepareContext(t.Context(), nil, llm.RequestOptions{}, persist, false); err != nil {
-		t.Fatal(err)
-	}
-	built, err := f.b.Build()
-	if err != nil || len(records) != 1 || built.Request.Window != nil || built.Request.PublicHistory ||
-		f.b.ContextStrategy() != contextengine.WindowSummary || !strings.Contains(requestText(built), "Keep working") {
-		t.Fatal("private adapter did not receive the summary continuation", err)
+	for _, size := range []string{"input budget 4000 tokens", "system and tools", "L2", "required L1 tail", "smallest L1 tail", "minimum total"} {
+		if !strings.Contains(err.Error(), size) {
+			t.Fatalf("missing %q in %v", size, err)
+		}
 	}
 }
 
 func TestWindowDefaultRoutesAndOptions(t *testing.T) {
-	for _, tc := range []struct {
-		provider, strategy string
-		active             bool
-	}{
-		{provider: "openai-codex", active: true},
-		{provider: "opencode-go", active: true},
-		{provider: "openai", active: true},
-		{provider: "openrouter", active: true},
-		{provider: "fireworks", active: true},
-		{provider: "ollama", active: true},
-		{provider: "claude-code"},
-		{provider: "openai-codex", strategy: contextengine.WindowSummary},
-	} {
-		b := NewBuilder().(*builder)
-		if _, err := EnableWindow(b, contextengine.Config{WindowStrategy: tc.strategy}, contextengine.Constraints{}); err != nil {
-			t.Fatal(err)
-		}
-		b.SetRuntimeProvider(tc.provider)
-		if b.UsesThreeLayerContext() != tc.active || b.contextConfig.WindowThresholdTokens != 200_000 ||
-			b.contextConfig.L2TargetTokens != 5000 {
-			t.Errorf("window defaults for %s/%s: %+v", tc.provider, tc.strategy, b.contextConfig)
+	for _, provider := range []string{"openai-codex", "opencode-go", "openai", "openrouter", "fireworks", "ollama", claudeagent.ProviderID, claudeagent.APIProviderID} {
+		b := newContextFixture(t, provider, contextengine.Config{}).b
+		if !b.UsesThreeLayerContext() || b.ContextStrategy() != contextengine.WindowThreeLayer ||
+			b.contextConfig.WindowThresholdTokens != 200_000 || b.contextConfig.L2TargetTokens != 5000 {
+			t.Errorf("window defaults for %s: %+v", provider, b.contextConfig)
 		}
 	}
 }
 
 func TestWindowKeepsInputsPendingBeforeLastUserMessage(t *testing.T) {
 	f := newContextFixture(t, "openai-codex", contextengine.Config{
-		WindowStrategy: contextengine.WindowThreeLayer, WindowThresholdTokens: 2000,
+		WindowThresholdTokens: 2000,
 	})
 	f.turn(t, "old", "Raw old input", strings.Repeat("worked on the old request. ", 400))
 	f.user(t, "first-pending", "First queued user input")
 	f.user(t, "next-pending", "Second queued user input")
-	if err := f.b.PrepareContext(t.Context(), nil, llm.RequestOptions{}, func(r sessionstore.ContextRecord) error {
+	if err := f.b.PrepareContext(t.Context(), func(r sessionstore.ContextRecord) error {
 		f.b.ApplyContext(r)
 		return nil
 	}, false); err != nil {
@@ -446,7 +439,7 @@ func TestWindowKeepsInputsPendingBeforeLastUserMessage(t *testing.T) {
 
 func TestToolWindowUsesStrictInputBudget(t *testing.T) {
 	f := newContextFixture(t, "claude", contextengine.Config{
-		WindowStrategy: contextengine.WindowThreeLayer, WindowThresholdTokens: 200, InputBudget: 100,
+		WindowThresholdTokens: 800, InputBudget: 600,
 	})
 	f.b.SetWindowPrompt(func(llm.Item) (string, bool) { return "projected window", true })
 	var records []sessionstore.ContextRecord
@@ -454,21 +447,21 @@ func TestToolWindowUsesStrictInputBudget(t *testing.T) {
 		records = append(records, r)
 		return nil
 	}
-	if rotated, err := f.b.PrepareToolWindow(t.Context(), persist, 100, nil); err != nil || rotated || len(records) != 0 {
+	if rotated, err := f.b.PrepareToolWindow(t.Context(), persist, 600, nil); err != nil || rotated || len(records) != 0 {
 		t.Fatalf("at the input budget: rotated=%t records=%d error=%v", rotated, len(records), err)
 	}
-	if rotated, err := f.b.PrepareToolWindow(t.Context(), persist, 101, nil); err != nil || !rotated || len(records) != 1 {
+	if rotated, err := f.b.PrepareToolWindow(t.Context(), persist, 601, nil); err != nil || !rotated || len(records) != 1 {
 		t.Fatalf("over the input budget: rotated=%t records=%d error=%v", rotated, len(records), err)
 	}
 	w := records[0].Window
-	if w.BeforeTokens != 101 || !slices.Equal(w.Causes, []string{"admission", sessionstore.WindowCauseMidTurn}) {
+	if w.BeforeTokens != 601 || !slices.Equal(w.Causes, []string{"admission", sessionstore.WindowCauseMidTurn}) {
 		t.Fatalf("unexpected boundary: %+v", w)
 	}
 }
 
 func TestWindowKeepsRunningToolGroupAcrossRawCut(t *testing.T) {
 	f := newContextFixture(t, "openai-codex", contextengine.Config{
-		WindowStrategy: contextengine.WindowThreeLayer, WindowThresholdTokens: 2000,
+		WindowThresholdTokens: 2000,
 	})
 	f.turn(t, "old", "Raw old input", strings.Repeat("worked on the old request. ", 400))
 	f.user(t, "asked", "Start a child")
@@ -481,7 +474,7 @@ func TestWindowKeepsRunningToolGroupAcrossRawCut(t *testing.T) {
 	}})
 	f.b.AddToolResult("working", nil, true)
 	f.user(t, "after-call", "Check other work")
-	if err := f.b.PrepareContext(t.Context(), nil, llm.RequestOptions{}, func(r sessionstore.ContextRecord) error {
+	if err := f.b.PrepareContext(t.Context(), func(r sessionstore.ContextRecord) error {
 		f.item(t, sessionstore.ItemHostRecord, sessionstore.HostRecord{Kind: sessionstore.HostContext, Context: &r})
 		f.b.ApplyContext(r)
 		return nil

@@ -129,8 +129,8 @@ func IsBudgetError(err error) bool {
 	return errors.As(err, &e) && e.Code == "required_context_exceeds_budget"
 }
 
-// Config controls view compaction. Retired selection fields remain decodable
-// for existing configurations; they no longer affect derivation.
+// Config controls the three-layer window. Retired sizing fields remain
+// decodable for existing configurations.
 type Config struct {
 	Version                                                       int    `json:",omitzero"`
 	Mode                                                          string `json:",omitzero"`
@@ -140,15 +140,13 @@ type Config struct {
 	RetrievalLimit, CheckpointThreshold                           int    `json:",omitzero"`
 	LargeToolTokens                                               int64  `json:",omitzero"`
 	ToolResultKeepTokens, ToolResultMinPruneTokens                int64  `json:",omitzero"`
-	WindowStrategy                                                string `json:",omitzero"`
 	WindowThresholdTokens, L2TargetTokens                         int64  `json:",omitzero"`
 	RecentEventCount, ToolOutputExcerptChars, CacheRewarmMinutes  int    `json:",omitzero"`
 }
 
-const (
-	WindowThreeLayer = "three-layer"
-	WindowSummary    = "summary"
-)
+const WindowThreeLayer = "three-layer"
+
+const DefaultWindowThresholdTokens int64 = 200_000
 
 func (c Config) Resolve() (Config, error) {
 	if c.Version == 0 {
@@ -160,14 +158,11 @@ func (c Config) Resolve() (Config, error) {
 	if c.Version != Version || c.Mode != "bounded" && c.Mode != "legacy" {
 		return c, &Error{"unsupported_strategy"}
 	}
-	if c.WindowStrategy != "" && c.WindowStrategy != WindowThreeLayer && c.WindowStrategy != WindowSummary {
-		return c, &Error{"unsupported_window_strategy"}
-	}
 	if c.WindowThresholdTokens < 0 || c.L2TargetTokens < 0 || c.RecentEventCount < 0 || c.ToolOutputExcerptChars < 0 || c.CacheRewarmMinutes < 0 {
 		return c, &Error{"invalid_configuration"}
 	}
 	if c.WindowThresholdTokens == 0 {
-		c.WindowThresholdTokens = llm.DefaultCompactThresholdTokens
+		c.WindowThresholdTokens = DefaultWindowThresholdTokens
 	}
 	if c.L2TargetTokens == 0 {
 		c.L2TargetTokens = 5000
@@ -191,15 +186,6 @@ func (c Config) Resolve() (Config, error) {
 	}
 	if c.ProtocolReserve == 0 {
 		c.ProtocolReserve = 1024
-	}
-	if c.LargeToolTokens == 0 {
-		c.LargeToolTokens = 2048
-	}
-	if c.ToolResultKeepTokens == 0 {
-		c.ToolResultKeepTokens = 15000
-	}
-	if c.ToolResultMinPruneTokens == 0 {
-		c.ToolResultMinPruneTokens = 15000
 	}
 	if c.FallbackWindow <= c.ResponseReserve+c.ProtocolReserve {
 		return c, &Error{"invalid_budget"}
@@ -225,14 +211,3 @@ func ReferenceText(u Unit) string {
 
 // BudgetFor uses existing window/reserve defaults, including legacy configuration.
 func (c Config) BudgetFor(r Runtime, schemas int64) (Budget, error) { return c.budget(r, schemas) }
-
-func (c Config) Threshold(r Runtime, maximumOutput int64) int64 {
-	w := r.ContextWindow
-	if w <= 0 {
-		w = c.FallbackWindow
-	}
-	if maximumOutput <= 0 {
-		maximumOutput = c.ResponseReserve
-	}
-	return min(w*8/10, w-maximumOutput-64000, c.InputBudget)
-}

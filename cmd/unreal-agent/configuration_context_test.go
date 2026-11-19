@@ -1,40 +1,49 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json/v2"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestRuntimeConfigurationMovesLegacyClaudeThresholdToRoute(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		json string
-		want int64
-	}{
-		{"default", `{}`, 0},
-		{"legacy", `{"Context":{"ClaudeCompactThresholdTokens":123456,"InputBudget":456789}}`, 123456},
-		{"route", `{"Claude":{"CompactThresholdTokens":234567},"Context":{"InputBudget":456789}}`, 234567},
-		{"route-wins", `{"Context":{"ClaudeCompactThresholdTokens":123456,"InputBudget":456789},"Claude":{"CompactThresholdTokens":234567}}`, 234567},
-		{"legacy-default", `{"Context":{"ClaudeCompactThresholdTokens":-1,"InputBudget":456789}}`, -1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+func TestRuntimeConfigurationIgnoresRetiredWindowStrategy(t *testing.T) {
+	for _, value := range []string{"", "\"summary\"", "\"three-layer\"", "\"unknown-old-value\"", "null"} {
+		t.Run(value, func(t *testing.T) {
+			raw := "{\"Context\":{\"InputBudget\":456789,\"ClaudeCompactThresholdTokens\":123456"
+			if value != "" {
+				raw += ",\"WindowStrategy\":" + value
+			}
+			raw += "},\"Claude\":{\"CompactThresholdTokens\":234567}}"
 			path := filepath.Join(t.TempDir(), "runtime.json")
-			if err := os.WriteFile(path, []byte(tc.json), 0600); err != nil {
+			if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
 				t.Fatal(err)
 			}
+			var log bytes.Buffer
+			logger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&log, nil)))
+			defer slog.SetDefault(logger)
 			config, err := readServeConfiguration(path)
-			if err != nil || config.Claude.CompactThresholdTokens != tc.want {
-				t.Fatalf("route threshold = %d, want %d: %v", config.Claude.CompactThresholdTokens, tc.want, err)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if tc.name != "default" && config.Context.InputBudget != 456789 {
+			if config.Context.InputBudget != 456789 {
 				t.Fatal("common context setting was lost")
 			}
 			encoded, err := json.Marshal(config)
-			if err != nil || strings.Contains(string(encoded), "ClaudeCompactThresholdTokens") {
-				t.Fatal("retired key was reintroduced into configuration", string(encoded), err)
+			if err != nil || strings.Contains(string(encoded), "ThresholdTokens") || strings.Contains(string(encoded), "WindowStrategy") {
+				t.Fatal("retired key reappeared in configuration", string(encoded), err)
+			}
+			want := 0
+			if value != "" {
+				want = 1
+			}
+			if strings.Count(log.String(), "\n") != want ||
+				(want == 1 && !strings.Contains(log.String(), "Context.WindowStrategy is deprecated and ignored")) {
+				t.Fatalf("unexpected deprecation log: %q", log.String())
 			}
 		})
 	}

@@ -439,11 +439,7 @@ func Run(
 	}
 	currentHost, err := host.New(runContext, host.Config{Directory: storeDirectory, Build: func(sessionContext context.Context, id session.ID) (host.Runtime, error) {
 		constraints := contextengine.Constraints{ToolPolicy: "enforced-by-Unreal", Filesystem: "enforced-by-Unreal", Network: "enforced-by-Unreal", Process: "enforced-by-Unreal"}
-		enableContext := contextbuilder.EnableCompaction
-		if selected.Descriptor != nil {
-			enableContext = contextbuilder.EnableWindow
-		}
-		engine, e := enableContext(builder, config.Context, constraints)
+		engine, e := contextbuilder.EnableWindow(builder, config.Context, constraints)
 		if e != nil {
 			return host.Runtime{}, e
 		}
@@ -457,7 +453,7 @@ func Run(
 		runtimeRegistry := registry
 		jobs := configuredTools.RemoteJobs
 		var handler *contexttools.Handler
-		if selected.Descriptor != nil && builder.(interface{ UsesThreeLayerContext() bool }).UsesThreeLayerContext() {
+		if selected.Descriptor != nil {
 			owner, _ := host.SessionFromContext(sessionContext)
 			runtimeRegistry, e = tool.WithExtensions(registry, contexttools.Extensions(parsed.DisallowedTools))
 			if e != nil {

@@ -166,7 +166,8 @@ func isContextMean(key string) bool {
 	switch key {
 	case "boundary_before_tokens", "boundary_after_tokens", "window_header_tokens", "threshold_tokens", "l2_copy_tokens", "l2_target_tokens",
 		"tail_tokens", "tail_items", "recent_events", "recent_event_limit", "excerpt_chars", "boundary_interval_requests",
-		"boundary_interval_seconds", "pending_approvals", "pending_user_questions", "pending_child_questions":
+		"boundary_interval_seconds", "pending_approvals", "pending_user_questions", "pending_child_questions",
+		"fit_excerpt_chars", "fit_required_input", "fit_required_tail", "fit_input_budget":
 		return true
 	}
 	return (strings.HasPrefix(key, "Unreal_") || strings.HasPrefix(key, "CLI_")) && !strings.HasSuffix(key, "_compactions")
@@ -232,7 +233,7 @@ func (k ContextDimensions) public() ContextDimensions {
 	return k
 }
 
-var windowReasons = []string{"threshold", "over_budget", "header_change", "mid_turn", "provider_overflow"}
+var windowReasons = []string{"threshold", "over_budget", "header_change", "mid_turn", "provider_overflow", "historical_context"}
 
 var stateCommands = []string{"decide", "plan", "rule", "accept", "reject", "question"}
 
@@ -243,11 +244,17 @@ var machineKinds = []contextstate.EventKind{
 	contextstate.RecentObserved, contextstate.MetricsChanged, contextstate.BoundaryObserved, contextstate.WindowRebuilt,
 }
 
+const historicalSummaryStrategy = "historical summary"
+
 func recordedStrategy(s string) string {
-	if s == contextengine.WindowThreeLayer || s == contextengine.WindowSummary {
+	switch s {
+	case contextengine.WindowThreeLayer:
 		return s
+	case "summary", historicalSummaryStrategy:
+		return historicalSummaryStrategy
+	default:
+		return ""
 	}
-	return ""
 }
 
 func fastLabel(v *bool) string {

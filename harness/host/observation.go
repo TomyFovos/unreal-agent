@@ -30,20 +30,62 @@ func (s *Session) Observe(ctx context.Context, recent int) (View, error) {
 	if err != nil {
 		return View{}, err
 	}
-	start := len(s.items) - min(max(recent, 0), len(s.items))
-	items := make([]HistoryItem, len(s.items))
-	for i, item := range s.items {
-		if err := context.Cause(ctx); err != nil {
-			return View{}, err
+	v.History.Items, err = observationItems(ctx, s.items, len(s.items)-max(recent, 0))
+	if err != nil {
+		return View{}, err
+	}
+	return v, nil
+}
+
+// ObservePages streams a fixed history prefix in bounded pages. The viewer
+// subscribes from the final cursor to obtain Operations and any later commits.
+// Items are Session-owned and immutable after append, so encoding a page does
+// not hold the Session lock or delay a live turn.
+func (s *Session) ObservePages(ctx context.Context, recent int, send func(View) error) error {
+	defer startupPhase(ctx, s.ID, "viewer.observe")()
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	items := s.items
+	v := clone(View{Session: s.snapshot, Generation: s.Generation, Revision: s.revision, Running: s.running,
+		ProjectInstructions: s.instructions})
+	if s.err != nil {
+		v.Failure = s.err.Error()
+	}
+	s.mu.Unlock()
+	const pageSize = 1024
+	fullFrom := len(items) - min(max(recent, 0), len(items))
+	for start := 0; ; {
+		end := min(start+pageSize, len(items))
+		page, err := observationItems(ctx, items[start:end], fullFrom-start)
+		if err != nil {
+			return err
 		}
-		if i < start {
+		v.History = HistoryPage{Items: page, NextAfter: sessionstore.Sequence(end), More: end < len(items)}
+		if err = send(v); err != nil || !v.History.More {
+			return err
+		}
+		start = end
+	}
+}
+
+func observationItems(ctx context.Context, source []sessionstore.Item, fullFrom int) ([]HistoryItem, error) {
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
+	}
+	items := make([]HistoryItem, len(source))
+	for i, item := range source {
+		if err := context.Cause(ctx); err != nil {
+			return nil, err
+		}
+		if i < fullFrom {
 			items[i] = observationItem(item)
 		} else {
 			items[i] = clone(ProjectHistoryItem(item))
 		}
 	}
-	v.History.Items = items
-	return v, nil
+	return items, nil
 }
 
 // observationItem retains the exact inputs to viewer statistics, activity,
@@ -61,6 +103,10 @@ func observationItem(item sessionstore.Item) HistoryItem {
 		return HistoryItem(item)
 	case sessionstore.ModelResponse:
 		response := llm.Response{ID: data.Response.ID, Model: data.Response.Model, Usage: usageMetadata(data.Response.Usage)}
+		if data.Response.Generation != nil {
+			generation := *data.Response.Generation
+			response.Generation = &generation
+		}
 		for _, output := range data.Response.Output {
 			switch value := output.Data.(type) {
 			case llm.Message:

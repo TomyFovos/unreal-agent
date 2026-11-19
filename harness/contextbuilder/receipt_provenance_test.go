@@ -17,7 +17,7 @@ func portableReceiptBuilder(t *testing.T, bounded bool) *builder {
 	t.Helper()
 	b := NewBuilder().(*builder)
 	if bounded {
-		if _, err := EnableCompaction(b, contextengine.Config{InputBudget: 24576}, contextengine.Constraints{}); err != nil {
+		if _, err := EnableWindow(b, contextengine.Config{InputBudget: 24576}, contextengine.Constraints{}); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -78,6 +80,10 @@ func Terminal(ctx context.Context, c Config) error {
 		c.Theme = &theme
 	}
 	c.Output = terminalWriter{ctx: ctx, fd: fd}
+	resize := make(chan os.Signal, 1)
+	signal.Notify(resize, syscall.SIGWINCH)
+	defer signal.Stop(resize)
+	c.Resize = resize
 	c.Size = func() (int, int) {
 		w, h, e := term.GetSize(fd)
 		if e != nil {

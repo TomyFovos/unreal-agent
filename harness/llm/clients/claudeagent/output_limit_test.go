@@ -79,7 +79,7 @@ func TestOutputLimitProjectsClaudeHistory(t *testing.T) {
 				t.Fatalf("lost capped fragment or its stop: %+v", response.Output)
 			}
 			b := contextbuilder.NewBuilder()
-			if _, err := contextbuilder.EnableCompaction(b, contextengine.Config{}, contextengine.Constraints{}); err != nil {
+			if _, err := contextbuilder.EnableWindow(b, contextengine.Config{}, contextengine.Constraints{}); err != nil {
 				t.Fatal(err)
 			}
 			b.(interface{ SetRuntimeProvider(string) }).SetRuntimeProvider(ProviderID)

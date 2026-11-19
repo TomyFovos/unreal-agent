@@ -57,7 +57,7 @@ func FuzzContinuationRepairWirePairs(f *testing.F) {
 func newRepairHistory(t *testing.T, config contextengine.Config) *repairHistory {
 	t.Helper()
 	b := contextbuilder.NewBuilder()
-	engine, err := contextbuilder.EnableCompaction(b, config, contextengine.Constraints{})
+	engine, err := contextbuilder.EnableWindow(b, config, contextengine.Constraints{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func (h *repairHistory) user(id, text string) {
 	})
 }
 func (h *repairHistory) request(turn string) (contextbuilder.Result, []map[string]any, error) {
-	if err := prepareAppendHistory(h, nil, false, nil); err != nil {
+	if err := prepareAppendHistory(h, false); err != nil {
 		return contextbuilder.Result{}, nil, err
 	}
 	built, err := h.b.Build()
@@ -385,12 +385,17 @@ func TestContinuationRepairResponseOrderAndUnreceivedUpdate(t *testing.T) {
 	}
 	var order []string
 	for _, item := range wire {
-		if id, ok := item["id"].(string); ok {
-			order = append(order, id)
+		switch {
+		case item["role"] == "assistant":
+			order = append(order, item["content"].(string))
+		case item["type"] == "function_call":
+			order = append(order, item["call_id"].(string))
+		case item["type"] == "reasoning":
+			t.Fatal("private reasoning entered the public window")
 		}
 	}
-	if !slices.Equal(order, []string{"reason-a", "commentary", "fc-read-a", "reason-b", "fc-read-b"}) {
-		t.Fatal("provider response order changed")
+	if !slices.Equal(order, []string{"Inspecting.", "read-a", "read-b"}) {
+		t.Fatal("public response order changed", order)
 	}
 	h.response("t2", llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "Waiting."}})
 	h.user("new-user", "another instruction")

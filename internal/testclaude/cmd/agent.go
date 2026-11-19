@@ -130,35 +130,8 @@ func agent(dir string, args []string, c configuration) {
 		_ = out.Encode(map[string]any{"type": "user", "isReplay": true, "parent_tool_use_id": nil, "message": message})
 	}
 	if strings.HasPrefix(prompt, "/compact") {
-		_ = out.Encode(map[string]any{"type": "system", "subtype": "status", "status": "compacting"})
-		time.Sleep(time.Duration(c.CompactDelayMillis) * time.Millisecond)
-		if c.CompactCrash {
-			fmt.Fprintln(os.Stderr, "synthetic compact process failure")
-			os.Exit(9)
-		}
-		if c.CompactFailure != "" {
-			_ = out.Encode(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true, "result": c.CompactFailure})
-		} else {
-			before, after := c.CompactPreTokens, c.CompactPostTokens
-			if before == 0 {
-				before = 250_000
-			}
-			if after == 0 {
-				after = 12_000
-			}
-			metadata := map[string]any{"trigger": "manual", "pre_tokens": before}
-			result := map[string]any{"type": "result", "subtype": "success", "is_error": false, "result": "compact complete"}
-			if !c.CompactUnknownAfter {
-				metadata["post_tokens"] = after
-				result["usage"] = map[string]any{"input_tokens": after}
-			}
-			_ = out.Encode(map[string]any{"type": "system", "subtype": "compact_boundary", "compact_metadata": metadata})
-			_ = out.Encode(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": "synthetic conversation summary"}})
-			_ = out.Encode(result)
-		}
-		for next() != nil {
-		}
-		return
+		fmt.Fprintln(os.Stderr, "unexpected compaction request")
+		os.Exit(9)
 	}
 	if c.AgentAutoCompact && os.Getenv("DISABLE_AUTO_COMPACT") != "1" {
 		_ = out.Encode(map[string]any{"type": "system", "subtype": "compact_boundary", "compact_metadata": map[string]any{

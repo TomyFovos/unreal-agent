@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -21,7 +22,7 @@ import (
 func appendOnlyTestBuilder(t *testing.T) contextbuilder.Builder {
 	t.Helper()
 	b := contextbuilder.NewBuilder()
-	if _, err := contextbuilder.EnableCompaction(b, contextengine.Config{}, contextengine.Constraints{}); err != nil {
+	if _, err := contextbuilder.EnableWindow(b, contextengine.Config{}, contextengine.Constraints{}); err != nil {
 		t.Fatal(err)
 	}
 	b.(interface{ SetRuntimeProvider(string) }).SetRuntimeProvider("openai-codex")
@@ -29,7 +30,7 @@ func appendOnlyTestBuilder(t *testing.T) contextbuilder.Builder {
 	return b
 }
 
-func TestContextOverflowCompactsAndRetriesExactlyOnce(t *testing.T) {
+func TestContextOverflowRebuildsAndRetriesExactlyOnce(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		run := newStopTestRun(t, 0)
 		store, err := localfile.New(t.TempDir())
@@ -60,49 +61,58 @@ func TestContextOverflowCompactsAndRetriesExactlyOnce(t *testing.T) {
 		if len(run.calls) != 1 {
 			t.Fatal("missing ordinary request")
 		}
-		original := run.calls[0].request
-		run.respond(t, 0, llm.Response{Failure: &llm.Failure{Code: "context_length_exceeded"}})
+		original, err := json.Marshal(run.calls[0].request)
+		if err != nil || !strings.Contains(string(original), "older conversation") {
+			t.Fatal("fixture did not start with the raw history", err)
+		}
+		overflow := llm.Response{Failure: &llm.Failure{Code: "context_length_exceeded"}}
+		run.respond(t, 0, overflow)
 		if len(run.calls) != 2 {
-			t.Fatal("missing summary request")
+			t.Fatalf("requests after overflow = %d, want 2", len(run.calls))
 		}
-		summary := run.calls[1].request
-		before, _ := json.Marshal(original.Input)
-		prefix, _ := json.Marshal(summary.Input[:len(summary.Input)-1])
-		// Only changed state records may be appended before forced compaction.
-		if !strings.HasPrefix(string(prefix), strings.TrimSuffix(string(before), "]")) {
-			t.Fatal("summary lost conversation prefix")
+		retry, err := json.Marshal(run.calls[1].request)
+		if err != nil || strings.Contains(string(retry), "older conversation") ||
+			!strings.Contains(string(retry), "Unreal current state at the window boundary") ||
+			!strings.Contains(string(retry), "Continue") {
+			t.Fatal("retry did not use the rebuilt window", err)
 		}
-		run.respond(t, 1, textResponse("Task: Continue. Earlier conversation summarized."))
-		if len(run.calls) != 3 {
-			t.Fatal("missing compacted retry")
-		}
-		retry, _ := json.Marshal(run.calls[2].request)
-		if !strings.Contains(string(retry), "Conversation summary") {
-			t.Fatal("retry did not use compacted view")
-		}
-		run.respond(t, 2, llm.Response{Failure: &llm.Failure{Code: "context_length_exceeded"}})
-		if len(run.calls) != 3 {
+		run.respond(t, 1, overflow)
+		if len(run.calls) != 2 {
 			t.Fatal("retried overflow more than once")
 		}
-		run.input(t, stopInput(t, "stop", inbox.StopWhenIdle))
-		run.assertStopped(t)
+		select {
+		case err := <-run.done:
+			if err == nil || !strings.Contains(err.Error(), "provider context window exceeded") {
+				t.Fatal("second overflow was not reported", err)
+			}
+		default:
+			t.Fatal("second overflow left the request running")
+		}
 		page, err := store.Items(t.Context(), "session-1", 0, 1000)
 		if err != nil {
 			t.Fatal(err)
 		}
-		summaries, oldInputs := 0, 0
+		boundaries, oldInputs := 0, 0
 		for _, item := range page.Items {
-			if r, ok := item.Data.(sessionstore.HostRecord); ok && r.Context != nil && r.Context.Kind == "summary" {
-				summaries++
+			if r, ok := item.Data.(sessionstore.HostRecord); ok && r.Context != nil {
+				switch r.Context.Kind {
+				case "summary", "summary_failed", sessionstore.ContextWindowFallback:
+					t.Fatal("recorded a new summary or fallback", r.Context.Kind)
+				case sessionstore.ContextWindowBoundary:
+					if !slices.Contains(r.Context.Window.Causes, "provider_overflow") {
+						t.Fatal("retry boundary lacks its recorded cause")
+					}
+					boundaries++
+				}
 			}
 			if item.Kind == sessionstore.ItemInput {
 				oldInputs++
 			}
 		}
-		if summaries != 1 || oldInputs < 11 {
-			t.Fatal("canonical summary or original inputs lost")
+		if boundaries != 1 || oldInputs != 11 {
+			t.Fatalf("boundaries=%d, canonical inputs=%d", boundaries, oldInputs)
 		}
-		// A fresh owner reconstructs the same model view from durable records.
+		// A fresh owner reconstructs the same window from durable records.
 		resumed := newStopTestRun(t, 0)
 		resumed.current.dependencies.ContextBuilder = appendOnlyTestBuilder(t)
 		restoreTestRun(t, resumed, store)
@@ -114,8 +124,33 @@ func TestContextOverflowCompactsAndRetriesExactlyOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 		encoded, _ := json.Marshal(built.Request)
-		if !strings.Contains(string(encoded), "Conversation summary") {
-			t.Fatal("resume lost compacted view")
+		if string(encoded) != string(retry) {
+			t.Fatal("resume changed the rebuilt request")
+		}
+	})
+}
+
+func TestContextBudgetErrorReachesUserBeforeInference(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		run := newStopTestRun(t, 0)
+		b := contextbuilder.NewBuilder()
+		if _, err := contextbuilder.EnableWindow(b, contextengine.Config{InputBudget: 1_000}, contextengine.Constraints{}); err != nil {
+			t.Fatal(err)
+		}
+		run.current.dependencies.ContextBuilder = b
+		run.start(t)
+		run.input(t, externalEvent(t, 1, "too-large", strings.Repeat("依頼本文", 2_000)))
+		if len(run.calls) != 0 {
+			t.Fatalf("over-budget request made %d model calls", len(run.calls))
+		}
+		select {
+		case err := <-run.done:
+			if !contextengine.IsBudgetError(err) || !strings.Contains(err.Error(), "input budget 1000 tokens") ||
+				!strings.Contains(err.Error(), "required L1 tail") || !strings.Contains(err.Error(), "L2") {
+				t.Fatal("user did not receive the budget breakdown", err)
+			}
+		default:
+			t.Fatal("over-budget request did not finish")
 		}
 	})
 }

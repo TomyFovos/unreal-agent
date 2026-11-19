@@ -11,7 +11,7 @@ import (
 )
 
 // A new epoch identifies a changed historical projection. It prevents using a
-// successful request's usage after pruning, compaction or portable replay.
+// successful request's usage after a window rebuild or portable replay.
 type estimateEpoch struct{ marker bool }
 
 type requestEstimate struct {
@@ -71,7 +71,7 @@ func (b *builder) tokenEstimator() contextengine.TokenEstimator {
 // derived representations. Header edits invalidate only the prefix.
 func (b *builder) estimateRequest() int64 {
 	e := b.tokenEstimator()
-	windowPrompt := b.UsesThreeLayerContext() && b.windowPrompt != nil
+	windowPrompt := b.windowPrompt != nil
 	if b.estimate.epoch == nil {
 		b.estimate.epoch = &estimateEpoch{}
 	}
@@ -93,7 +93,7 @@ func (b *builder) estimateRequest() int64 {
 			b.estimate.windowHead = b.measureWindowPrompt(input)
 			b.estimate.prefix = b.windowHeaderTokens(input[0])
 		} else {
-			b.estimate.prefix = e.Request(llm.Request{Tools: b.request.Tools, Input: input})
+			b.estimate.prefix = b.windowHeaderTokens(input[0]) + e.Items(input[1:])
 		}
 		data, err := json.Marshal(struct {
 			Provider      string
@@ -102,7 +102,7 @@ func (b *builder) estimateRequest() int64 {
 			Tools         []llm.Tool
 			Input         []llm.Item
 			PublicHistory bool `json:",omitzero"`
-		}{b.provider, b.contextRuntime.Revision, b.request.Model, b.request.Tools, input, b.UsesThreeLayerContext()}, json.Deterministic(true))
+		}{b.provider, b.contextRuntime.Revision, b.request.Model, b.request.Tools, input, true}, json.Deterministic(true))
 		if err != nil {
 			// Do not match a measured prefix whose header cannot be encoded.
 			b.estimate.epoch = &estimateEpoch{}
@@ -114,9 +114,6 @@ func (b *builder) estimateRequest() int64 {
 		size := b.estimate.windowHead
 		size.add(b.estimate.window)
 		return b.estimate.prefix + size.tokens()
-	}
-	if e.Claude() {
-		return e.Request(llm.Request{Input: b.deriveItems()})
 	}
 	return b.estimate.prefix + b.estimate.tokens
 }

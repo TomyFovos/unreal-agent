@@ -154,7 +154,6 @@ type conversationCache struct {
 	transcript *transcriptPage
 	loading    bool
 	second     int64
-	clock      frameClock
 	timed      bool
 	rows       []displayRow
 	valid      bool
@@ -213,7 +212,7 @@ func (c *bodyCache) chipRows(e Entry, s Snapshot, u UIState, l layout) ([]bodyLi
 func (c *bodyCache) conversationRows(s Snapshot, u UIState, l layout) []displayRow {
 	k, second := renderProjection(s, u), u.Now.Unix()
 	v := &c.conversation
-	if k.reusable() && v.valid && v.key == k && v.width == l.text && v.theme == u.Theme && v.transcript == u.Transcript && v.loading == u.HistoryLoading && (!backgroundActive(s, u) || v.clock == renderClock(u)) {
+	if k.reusable() && v.valid && v.key == k && v.width == l.text && v.theme == u.Theme && v.transcript == u.Transcript && v.loading == u.HistoryLoading {
 		if v.timed && v.second != second {
 			var rows []displayRow
 			end := 0
@@ -237,7 +236,7 @@ func (c *bodyCache) conversationRows(s Snapshot, u UIState, l layout) []displayR
 	v.patches = nil
 	u.collect = v
 	rows := conversation(s, u, l)
-	*v = conversationCache{key: k, width: l.text, theme: u.Theme, transcript: u.Transcript, loading: u.HistoryLoading, second: second, clock: renderClock(u), timed: len(v.patches) > 0, rows: rows, valid: true, patches: v.patches}
+	*v = conversationCache{key: k, width: l.text, theme: u.Theme, transcript: u.Transcript, loading: u.HistoryLoading, second: second, timed: len(v.patches) > 0, rows: rows, valid: true, patches: v.patches}
 	return rows
 }
 

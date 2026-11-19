@@ -96,15 +96,17 @@ func TestLaunchKeepsProjectInstructionsNativeAndEnablesOnlyMeasuredTools(t *test
 			}
 		case "--settings":
 			var settings struct {
-				Excludes []string `json:"claudeMdExcludes"`
+				Excludes []string          `json:"claudeMdExcludes"`
+				Env      map[string]string `json:"env"`
 			}
-			if err := json.Unmarshal([]byte(args[i+1]), &settings); err != nil || !slices.Contains(settings.Excludes, parentInstructions) {
+			if err := json.Unmarshal([]byte(args[i+1]), &settings); err != nil || !slices.Contains(settings.Excludes, parentInstructions) ||
+				settings.Env[disableAutoCompactEnv] != "1" || settings.Env[disableCompactEnv] != "1" {
 				t.Fatal(args[i+1], err)
 			}
 		}
 	}
-	if slices.Contains(args, "--disallowedTools") || slices.Contains(args, "--disable-slash-commands") {
-		t.Fatal("redundant tool denylist or disabled /compact", args)
+	if slices.Contains(args, "--disallowedTools") || slices.Contains(args, "--disable-slash-commands") || slices.Contains(args, "--autocompact") {
+		t.Fatal("unexpected Claude Code flags", args)
 	}
 	for _, disabled := range []string{"Agent", "Monitor", "AskUserQuestion"} {
 		if slices.Contains(strings.Split(enabledTools, ","), disabled) {

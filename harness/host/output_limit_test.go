@@ -43,6 +43,7 @@ func testOutputLimitResponseHistory(t *testing.T, provider string) {
 	const id session.ID = "output-limit"
 	const successfulUsage = 150
 	const goodReasoning = `{"type":"reasoning","id":"reasoning-good","summary":[],"encrypted_content":"successful-cipher"}`
+	const goodText = `{"type":"message","id":"message-good","role":"assistant","status":"completed","content":[{"type":"output_text","text":"earlier public answer","annotations":[]}]}`
 	const badReasoning = `{"type":"reasoning","id":"reasoning-limited","summary":[],"encrypted_content":"discarded-cipher"}`
 	const badText = `{"type":"message","id":"message-limited","role":"assistant","status":"incomplete","content":[{"type":"output_text","text":"discarded-text","annotations":[]}]}`
 	const badCall = `{"type":"function_call","id":"function-limited","call_id":"incomplete-call","name":"Read","arguments":"{\"path\":","status":"incomplete"}`
@@ -71,7 +72,7 @@ func testOutputLimitResponseHistory(t *testing.T, provider string) {
 			}
 			stream += fmt.Sprintf("data: "+`{"type":"response.incomplete","response":{"id":"limited","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[%s],"usage":{"input_tokens":9000,"output_tokens":300}}}`+"\n\n", items)
 		default:
-			stream = fmt.Sprintf("data: "+`{"type":"response.completed","response":{"id":"initial","status":"completed","output":[%s],"usage":{"input_tokens":%d,"output_tokens":10}}}`+"\n\n", goodReasoning, successfulUsage)
+			stream = fmt.Sprintf("data: "+`{"type":"response.completed","response":{"id":"initial","status":"completed","output":[%s,%s],"usage":{"input_tokens":%d,"output_tokens":10}}}`+"\n\n", goodReasoning, goodText, successfulUsage)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(stream))}, nil
 	})}
@@ -98,7 +99,7 @@ func testOutputLimitResponseHistory(t *testing.T, provider string) {
 			b := contextbuilder.NewBuilder()
 			b.SetModel(llm.Model{ID: "fixture", ReasoningEffort: llm.ReasoningEffortMax})
 			b.(interface{ SetRuntimeProvider(string) }).SetRuntimeProvider(provider)
-			engine, err := contextbuilder.EnableCompaction(b, contextengine.Config{InputBudget: 2400}, contextengine.Constraints{})
+			engine, err := contextbuilder.EnableWindow(b, contextengine.Config{InputBudget: 2400}, contextengine.Constraints{})
 			if err != nil {
 				adapter.Close()
 				return Runtime{}, err
@@ -173,23 +174,23 @@ func testOutputLimitResponseHistory(t *testing.T, provider string) {
 			response = record.Response
 		}
 	}
-	if response.Stop != llm.StopMaxOutputTokens || response.Usage.OutputTokens != 300 || len(response.Output) != 3 || len(ops) != 0 {
+	if response.Stop != llm.StopMaxOutputTokens || response.Usage.OutputTokens != 300 || len(response.Output) != 2 || len(ops) != 0 {
 		t.Fatalf("capped response was lost or executed a tool: %+v, operations=%v", response, ops)
 	}
-	if raw := response.Output[0].Data.(llm.Reasoning).Raw; !bytes.Equal(raw, []byte(badReasoning)) {
-		t.Fatalf("capped reasoning did not round-trip: %s", raw)
+	if bytes.Contains(canonical, []byte("successful-cipher")) || bytes.Contains(canonical, []byte("discarded-cipher")) {
+		t.Fatal("private reasoning entered the layered history")
 	}
-	if response.Output[1].Data.(llm.Message).Text != "discarded-text" || response.Output[2].Data.(llm.ToolCall) != (llm.ToolCall{CallID: "incomplete-call", Name: "Read", Arguments: `{"path":`, Incomplete: true}) {
+	if response.Output[0].Data.(llm.Message).Text != "discarded-text" || response.Output[1].Data.(llm.ToolCall) != (llm.ToolCall{CallID: "incomplete-call", Name: "Read", Arguments: `{"path":`, Incomplete: true}) {
 		t.Fatal("capped text or tool arguments were lost")
 	}
 	live, projectedEstimate := request("next", next, "next")
 	stop(t, s)
-	for _, forbidden := range []string{"discarded-text", "discarded-cipher", "incomplete-call", "max_output_tokens", "Incomplete response returned"} {
+	for _, forbidden := range []string{"discarded-text", "discarded-cipher", "successful-cipher", "incomplete-call", "max_output_tokens", "Incomplete response returned"} {
 		if bytes.Contains(live, []byte(forbidden)) {
 			t.Fatalf("next request included %q: %s", forbidden, live)
 		}
 	}
-	for _, required := range []string{next, limited, goodReasoning, `"effort":"max"`} {
+	for _, required := range []string{next, limited, "earlier public answer", `"effort":"max"`} {
 		if !bytes.Contains(live, []byte(required)) {
 			t.Fatalf("next request omitted %q: %s", required, live)
 		}

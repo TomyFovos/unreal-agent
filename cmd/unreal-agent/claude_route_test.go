@@ -7,6 +7,7 @@ import (
 	"encoding/json/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -40,11 +41,10 @@ func claudeRouteConfiguration(t *testing.T, f *testclaude.Fixture) serveConfigur
 	}
 }
 
-func TestClaudeThresholdDoesNotStartSeparateIdleCompaction(t *testing.T) {
+func TestClaudeRouteDoesNotRequestCompaction(t *testing.T) {
 	f := testclaude.New(t)
 	f.Set(t, testclaude.Config{Catalog: hostClaudeCatalog, AgentInputTokens: 120_000, AgentFinal: "first complete"})
 	cfg := claudeRouteConfiguration(t, f)
-	cfg.Claude.CompactThresholdTokens = 100_000
 	c, _, _ := startInteractiveHost(t, cfg, "--normal-runtime")
 	v, err := c.Open(t.Context(), host.Create, "compact-route")
 	if err != nil {
@@ -61,6 +61,10 @@ func TestClaudeThresholdDoesNotStartSeparateIdleCompaction(t *testing.T) {
 		t.Fatalf("unexpected separate process: %+v", calls)
 	}
 	for _, call := range calls {
+		if claudeCallOption(call, "--autocompact") != "" || !slices.Contains(call.Environment, "DISABLE_AUTO_COMPACT=1") ||
+			!slices.Contains(call.Environment, "DISABLE_COMPACT=1") {
+			t.Fatal("Claude launch did not disable compaction")
+		}
 		if call.OverlappingPID != 0 {
 			t.Fatalf("conversation processes overlapped: %+v", call)
 		}

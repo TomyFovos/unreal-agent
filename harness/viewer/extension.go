@@ -245,6 +245,17 @@ func (r Remote) Observe(ctx context.Context, id session.ID, recent int) (host.Vi
 	}
 	return *reply.View, nil
 }
+
+func (r Remote) ObservePages(ctx context.Context, id session.ID, recent int, consume func(host.View) error) error {
+	if reader, ok := r.Parent.(PagedObservationReader); ok && id == r.ParentID {
+		err := reader.ObservePages(ctx, id, recent, consume)
+		if !errors.Is(err, errors.ErrUnsupported) {
+			return err
+		}
+	}
+	return ErrUnavailable
+}
+
 func (r Remote) Subscribe(ctx context.Context, id session.ID, after sessionstore.Sequence, limit, capacity int) (host.Subscription, error) {
 	if id == r.ParentID {
 		if r.Parent == nil {

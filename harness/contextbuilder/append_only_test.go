@@ -1,7 +1,6 @@
 package contextbuilder
 
 import (
-	"encoding/json/v2"
 	"strings"
 	"testing"
 
@@ -11,65 +10,17 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 )
 
-func TestRecordedToolProjectionUsesCallLimitAndKeepsTypedStateAfterReplay(t *testing.T) {
-	t.Parallel()
-	f := newContextFixture(t, "openai-codex", contextengine.Config{})
-	f.user(t, "task", "Inspect the output")
-	f.item(t, sessionstore.ItemTurn, session.Turn{ID: "turn", Type: session.TurnRegular})
-	f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{Output: []llm.Item{{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "read", Name: "read", Arguments: `{"path":"source.go","max_output_length":100}`}}}}})
-	original := "HEAD" + strings.Repeat("middle ", 100) + "TAIL"
-	f.b.AddTypedToolResult(llm.ToolResult{CallID: "read", State: llm.ToolResultSucceeded, Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: original}}}, false)
-	if len(f.b.pendingProjections) != 1 {
-		t.Fatal("projection was not fixed at recording time")
-	}
-	record := f.b.pendingProjections[0]
-	encoded, err := json.Marshal(record)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var replay sessionstore.ContextRecord
-	if err := json.Unmarshal(encoded, &replay); err != nil {
-		t.Fatal(err)
-	}
-	f.b.ApplyContext(replay)
-	result, err := f.b.Build()
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, item := range result.Request.Input {
-		if r, ok := item.Data.(llm.ToolResult); ok && r.CallID == "read" {
-			text := r.Output[0].Value
-			if r.State != llm.ToolResultSucceeded || strings.Contains(text, original) || !strings.Contains(text, "HEAD") || !strings.Contains(text, "TAIL") || !strings.Contains(text, "Unit ID") {
-				t.Fatal("projection lost state/head/tail/reference")
-			}
-			found = true
-		}
-	}
-	unit, ok := f.b.engine.ResolveUnit(record.UnitID)
-	if !found || !ok || contextengine.Text(unit.Item) != original {
-		t.Fatal("canonical full result was changed")
-	}
-}
-
-func TestClaudeOwnHistoryDoesNotUseCodexCompactionBudget(t *testing.T) {
-	t.Parallel()
-	f := newContextFixture(t, "claude-code", contextengine.Config{InputBudget: 6000})
-	f.turn(t, "old", "Initial task", strings.Repeat("Claude Code keeps this history. ", 3000))
-	f.user(t, "new", "Next input")
-	if _, err := f.b.Build(); err != nil {
-		t.Fatal("local Codex budget blocked Claude's own history", err)
-	}
-}
-
 func TestMeasuredInputTakesPrecedenceOverTokenEstimate(t *testing.T) {
 	t.Parallel()
 	f := newContextFixture(t, "openai-codex", contextengine.Config{})
 	f.b.SetContextRuntime(sessionstore.RuntimeSelection{Provider: "openai-codex", Model: "synthetic-model", ContextWindow: 200000}, true)
+	if err := f.b.PrepareContext(t.Context(), func(r sessionstore.ContextRecord) error { f.b.ApplyContext(r); return nil }, false); err != nil {
+		t.Fatal(err)
+	}
 	f.user(t, "task", "Continue this task"+strings.Repeat("x", 840000))
 	f.item(t, sessionstore.ItemTurn, session.Turn{ID: "turn", Type: session.TurnRegular})
 	f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{Usage: llm.Usage{InputTokens: 2000}, Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: strings.Repeat("x", 210000)}}}}})
-	if err := f.b.PrepareContext(t.Context(), nil, llm.RequestOptions{}, func(r sessionstore.ContextRecord) error { f.b.ApplyContext(r); return nil }, false); err != nil {
+	if err := f.b.PrepareContext(t.Context(), func(r sessionstore.ContextRecord) error { f.b.ApplyContext(r); return nil }, false); err != nil {
 		t.Fatal(err)
 	}
 	built, err := f.b.Build()

@@ -34,6 +34,13 @@ type ObservationReader interface {
 	Observe(context.Context, session.ID, int) (host.View, error)
 }
 
+// PagedObservationReader supplies a fixed canonical prefix, with complete
+// recent items and no Operation snapshot. Subscribe or Inspect at the final
+// cursor supplies current Operations and anything committed during the read.
+type PagedObservationReader interface {
+	ObservePages(context.Context, session.ID, int, func(host.View) error) error
+}
+
 // VersionReader avoids retransmitting an unchanged, fully observed stopped
 // Session while preserving periodic detection of a new Host generation.
 type VersionReader interface {

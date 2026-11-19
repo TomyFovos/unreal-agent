@@ -38,6 +38,7 @@ type projection struct {
 	view              host.View
 	cursor            sessionstore.Sequence
 	recent            []host.HistoryItem
+	recentNext        int
 	activityTimes     [256]time.Time
 	activityNext      int
 	activityCount     int
@@ -232,7 +233,6 @@ func (m *Model) AppendPage(id session.ID, after sessionstore.Sequence, view host
 func (m *Model) Apply(id session.ID, event host.Event) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.version++
 	p := m.sessions[id]
 	if p == nil || p.resync {
 		return ErrResync
@@ -243,8 +243,15 @@ func (m *Model) Apply(id session.ID, event host.Event) error {
 	if event.Kind == "gap" || event.Revision != p.view.Revision+1 || p.more {
 		p.resync = true
 		p.runtime = RuntimeUnknown
+		m.version++
 		return ErrResync
 	}
+	if event.Kind == "progress" || event.Kind == "context" {
+		// Transient chat metadata has no effect on canonical viewer rows.
+		p.view.Revision = event.Revision
+		return nil
+	}
+	m.version++
 	e, err := copyValue(event)
 	if err != nil {
 		return err
@@ -261,10 +268,18 @@ func (m *Model) Apply(id session.ID, event host.Event) error {
 			p.runtime = RuntimeUnknown
 			return err
 		}
-		if status, ok := e.Item.Data.(sessionstore.ToolCallStatus); ok {
-			for _, op := range status.Operations {
+		switch data := e.Item.Data.(type) {
+		case sessionstore.ToolCallStatus:
+			for _, op := range data.Operations {
 				m.setOperation(p, op)
 			}
+		case inbox.Input:
+			if op, err := sessionstore.DecodeOperationIntent(data); err == nil {
+				m.setOperation(p, op)
+			}
+		case sessionstore.Fork:
+			clear(p.operations)
+			clear(p.children)
 		}
 	case "operation":
 		if e.Operation == nil || e.Operation.ID == "" {
@@ -273,9 +288,6 @@ func (m *Model) Apply(id session.ID, event host.Event) error {
 			return ErrResync
 		}
 		m.setOperation(p, *e.Operation)
-	case "progress":
-		// Streaming text is transient. Advancing its revision keeps the stream
-		// contiguous without inventing canonical activity, usage, or Finish.
 	case "stopped":
 		p.runtime = RuntimeStopped
 		p.view.Running = false
@@ -331,8 +343,8 @@ func (m *Model) item(p *projection, item host.HistoryItem) error {
 	if len(p.recent) < m.options.RecentLimit {
 		p.recent = append(p.recent, item)
 	} else {
-		copy(p.recent, p.recent[1:])
-		p.recent[len(p.recent)-1] = item
+		p.recent[p.recentNext] = item
+		p.recentNext = (p.recentNext + 1) % len(p.recent)
 	}
 	switch data := item.Data.(type) {
 	case sessionstore.HostRecord:
@@ -701,13 +713,17 @@ func (m *Model) Detail(id session.ID, now time.Time) (Detail, bool) {
 		if r.ID == id {
 			d := Detail{Row: cloneRow(r)}
 			if p := m.sessions[id]; p != nil {
+				items := p.recent
+				if p.recentNext != 0 {
+					items = slices.Concat(items[p.recentNext:], items[:p.recentNext])
+				}
 				var err error
-				d.Recent, err = copyValue(p.recent)
+				d.Recent, err = copyValue(items)
 				if err != nil {
 					return Detail{}, false
 				}
-				if len(p.recent) > 0 {
-					d.RecentAfter = p.recent[0].Sequence - 1
+				if len(d.Recent) > 0 {
+					d.RecentAfter = d.Recent[0].Sequence - 1
 				}
 			}
 			return d, true

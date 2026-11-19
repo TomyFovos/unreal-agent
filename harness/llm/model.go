@@ -4,9 +4,6 @@ import "encoding/json/jsontext"
 
 type Role string
 
-// DefaultCompactThresholdTokens is the initial input size for rebuilding a conversation.
-const DefaultCompactThresholdTokens int64 = 200_000
-
 const (
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"

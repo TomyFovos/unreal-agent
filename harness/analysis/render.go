@@ -227,5 +227,5 @@ func compactionLines(r Report) []string {
 	if r.InputTokenResponses > 0 {
 		average = fmt.Sprintf("%.1f (%d reported calls)", r.AverageInputTokens, r.InputTokenResponses)
 	}
-	return []string{"Average input tokens / call  " + average, fmt.Sprintf("Pruned tool results  %d · estimated tokens removed %d · epochs %d", r.Pruning.Results, r.Pruning.Tokens, r.Pruning.Epochs)}
+	return []string{"Average input tokens / call  " + average, fmt.Sprintf("Historical · Pruned tool results  %d · estimated tokens removed %d · epochs %d", r.Pruning.Results, r.Pruning.Tokens, r.Pruning.Epochs)}
 }

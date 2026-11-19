@@ -8,8 +8,9 @@ import (
 // Renderer replaces changed rows in place. It never clears the whole screen,
 // writes the right margin, or inserts a printable substitute for the cursor.
 type Renderer struct {
-	previous      []string
-	width, height int
+	previous         []string
+	width, height    int
+	cursorX, cursorY int
 }
 
 func (r *Renderer) Draw(f Frame) string {
@@ -27,9 +28,12 @@ func (r *Renderer) Draw(f Frame) string {
 	for i := len(f.Lines); i < min(len(r.previous), f.Height); i++ {
 		fmt.Fprintf(&b, "\x1b[%d;1H\x1b[K", i+1)
 	}
-	fmt.Fprintf(&b, "\x1b[%d;%dH\x1b[?25h", max(1, f.CursorY+1), max(1, f.CursorX+1))
+	if resize || b.Len() > 0 || r.cursorX != f.CursorX || r.cursorY != f.CursorY {
+		fmt.Fprintf(&b, "\x1b[%d;%dH\x1b[?25h", max(1, f.CursorY+1), max(1, f.CursorX+1))
+	}
 	r.previous = append(r.previous[:0], f.Lines...)
 	r.width = f.Width
 	r.height = f.Height
+	r.cursorX, r.cursorY = f.CursorX, f.CursorY
 	return b.String()
 }

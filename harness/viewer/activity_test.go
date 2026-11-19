@@ -79,12 +79,17 @@ func TestRowActivityIgnoresTransientEventsAndResetsOnReplace(t *testing.T) {
 	m := New(Options{})
 	item := input(1, "first")
 	must(t, m.Replace("s", view("s", "g", 1, item)))
+	version := m.Version()
+	must(t, m.Apply("s", host.Event{Kind: "context", Generation: "g", Revision: 2}))
+	must(t, m.Apply("s", host.Event{Kind: "progress", Generation: "g", Revision: 3}))
+	if m.Version() != version {
+		t.Fatal("transient chat updates invalidated the viewer projection")
+	}
 	for i, event := range []host.Event{
-		{Kind: "progress"},
 		{Kind: "operation", Operation: &operation.Operation{ID: "op", Status: operation.StatusReady}},
 		{Kind: "stopped"},
 	} {
-		event.Generation, event.Revision = "g", uint64(i+2)
+		event.Generation, event.Revision = "g", uint64(i+4)
 		must(t, m.Apply("s", event))
 	}
 	m.Disconnect("s")

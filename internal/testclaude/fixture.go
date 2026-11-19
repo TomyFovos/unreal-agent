@@ -37,10 +37,6 @@ type Config struct {
 	AgentInputTokens, AgentStepInputTokens int64
 	AgentUsage                             []jsontext.Value // per-call message_start usage, including the final call
 	AgentAutoCompact                       bool             // emit an automatic boundary unless disabled
-	CompactPreTokens, CompactPostTokens    int64
-	CompactFailure                         string
-	CompactCrash, CompactUnknownAfter      bool
-	CompactDelayMillis                     int
 }
 
 // AgentStep is one tool call the synthetic Claude Code runs itself. Refused
