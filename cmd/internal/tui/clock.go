@@ -45,6 +45,9 @@ func nextRender(s Snapshot, u UIState, view ViewMode) time.Time {
 		if view == ViewChat {
 			continue
 		}
+		if !u.Theme.Still && row.ModelPhase != "" && childVisualState(row, s) == stateWorking {
+			consider(u.Now.Truncate(120 * time.Millisecond).Add(120 * time.Millisecond))
+		}
 		// Activity moves across the same rolling minute buckets as the cards.
 		// Coalesce nearby boundaries at the display's one-second resolution.
 		bucket := func(at time.Time) {

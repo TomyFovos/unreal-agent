@@ -3,7 +3,12 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/host"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/session"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
 
@@ -35,5 +40,21 @@ func TestCardRowsPlaceChildNumbersOnTheSecondLine(t *testing.T) {
 	main := workCardRows(workCard{id: "m", title: "◆ メイン", main: true, stats: "1k", observed: true}, 100, Theme{Plain: true}, false)
 	if strings.Contains(main[1].plain(), "1k") {
 		t.Fatal("the main agent's numbers belong to the footer")
+	}
+}
+
+func TestCardStatsFromClaudeResponse(t *testing.T) {
+	usage := llm.Usage{InputTokens: 1000, CachedInputTokens: 700, CacheWriteInputTokens: 200, OutputTokens: 100}
+	generation := &llm.GenerationStatistics{Tokens: llm.ReportedTokens(usage), DurationMicros: 2_000_000, Source: "client_clock"}
+	v := host.View{Session: sessionstore.Snapshot{Session: session.Session{ID: "claude"}}, History: host.HistoryPage{NextAfter: 2, Items: []host.HistoryItem{
+		{Sequence: 1, Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostActivity, Activity: &llm.ActivityRecord{Kind: "claude_stream", Provider: "claude-code"}}},
+		{Sequence: 2, Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{Response: llm.Response{Usage: usage, Generation: generation}}},
+	}}}
+	m := viewer.New(viewer.Options{})
+	if err := m.Replace("claude", v); err != nil {
+		t.Fatal(err)
+	}
+	if got := cardStats(m.Rows(time.Now())[0]); got != "1k · 50 tok/s · 70%" {
+		t.Fatalf("Claude card statistics = %q", got)
 	}
 }

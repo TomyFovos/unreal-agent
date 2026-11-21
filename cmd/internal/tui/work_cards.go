@@ -2,11 +2,12 @@ package tui
 
 import (
 	"fmt"
-	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/host"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 	"github.com/unreallabsai/unreal-agent/internal/secretguard"
@@ -20,6 +21,7 @@ type workCard struct {
 	elapsed                 string
 	stats                   string // a child's context · speed · cache, numbers only
 	state                   visualState
+	modelPhase              host.ModelPhase
 	depth                   int
 	main, stalled, observed bool
 	activity                [10]int // -1 is before creation; zero is observed inactivity
@@ -41,7 +43,7 @@ func childTitle(r viewer.Row) string {
 
 func childStalled(r viewer.Row, s Snapshot, now time.Time) bool {
 	// A live runtime may be generating without committing a canonical item.
-	return r.Runtime != viewer.RuntimeRunning && childVisualState(r, s) == stateWorking && !r.LastActivityAt.IsZero() && now.Sub(r.LastActivityAt) >= 5*time.Minute
+	return r.ModelPhase == "" && r.Runtime != viewer.RuntimeRunning && childVisualState(r, s) == stateWorking && !r.LastActivityAt.IsZero() && now.Sub(r.LastActivityAt) >= 5*time.Minute
 }
 
 func cardModel(r viewer.Row) string {
@@ -59,14 +61,15 @@ func cardModel(r viewer.Row) string {
 // as bare numbers; the footer keeps the main agent's.
 func cardStats(r viewer.Row) string {
 	var parts []string
-	if u := r.LastUsage; u.Known && u.Input > 0 {
+	u := r.LastUsage
+	if u.Known && u.Input > 0 && !slices.Contains(u.Unknown, llm.UsageInput) {
 		parts = append(parts, strings.ReplaceAll(strings.ReplaceAll(number(u.Input), ".0k", "k"), ".0m", "m"))
 	}
-	if r.OutputTPS > 0 {
+	if r.OutputTPSKnown || r.OutputTPS > 0 {
 		parts = append(parts, fmt.Sprintf("%.0f tok/s", r.OutputTPS))
 	}
-	if u := r.LastUsage; u.Known && u.Input > 0 && u.CachedInput >= 0 {
-		parts = append(parts, fmt.Sprintf("%.0f%%", float64(u.CachedInput)*100/float64(u.Input)))
+	if ratio, known := u.CacheRatio(); known {
+		parts = append(parts, fmt.Sprintf("%.0f%%", 100*ratio))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -231,6 +234,9 @@ func newWorkCardIndex(s Snapshot, panel viewer.PanelSnapshot, now time.Time) *wo
 		seen[r.ID] = true
 		depth = max(depth, max(0, r.Depth-1))
 		card := workCard{id: r.ID, mark: marks[r.ID], title: childTitle(r), state: states[r.ID], depth: depth, elapsed: childElapsed(r, s, u), model: cardModel(r), stats: cardStats(r), now: currentChildOperation(r), observed: observed(r), activity: activityBuckets(r, now)}
+		if card.state == stateWorking {
+			card.modelPhase = r.ModelPhase
+		}
 		if states[r.ID] == stateUsageWait {
 			card.now = llm.UsageLimitWaiting(r.UsageWaitUntil)
 		} else if states[r.ID] == stateWorking && activeDescendant[r.ID] {

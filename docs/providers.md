@@ -37,6 +37,12 @@ Unreal Agent supports Claude and ChatGPT subscription logins, optional OpenAI an
 - **Model catalog:** Populated automatically from Claude Code's initialization handshake.
 - **Compaction & instructions:** See [Context and Project Instructions](context.md).
 
+### Subscription usage limits
+
+When Claude Code hits a session (5-hour), weekly, or model-specific subscription limit, Unreal shows the retry time in the TUI and `/analyze`. Unreal uses the reset timestamp from a rejected `rate_limit_event` when available. Claude Code can also report the reset in the error text, where a time without a timezone uses the local timezone. [Claude Code usage-limit messages](https://code.claude.com/docs/en/errors#usage-limits), [2.1.x stream-json reproduction](https://github.com/anthropics/claude-code/issues/103820)
+
+Child agents keep running and their reports are stored during the wait. At the reset, Unreal retries once with the queued reports and waits again if the limit still applies. When the provider gives no usable reset time, the existing usage-limit backoff determines the next retry.
+
 ---
 
 ## Codex (Standard Subscription Route)

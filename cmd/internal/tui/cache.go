@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
@@ -95,6 +96,16 @@ type cachedCardRows struct {
 func cardRows(c workCard, width int, u UIState, alternate bool) []line {
 	if c.main && (strings.HasPrefix(c.now, "待機中（子 ") || strings.HasPrefix(c.now, "会話を圧縮中")) {
 		c.now = u.Theme.spinner(u.Now.UnixMilli()) + " " + c.now
+	}
+	if c.modelPhase != "" {
+		phase := "考え中"
+		if c.modelPhase == host.ModelStreaming {
+			phase = "生成中"
+		}
+		if c.now != "" {
+			phase += " / " + c.now
+		}
+		c.now = u.Theme.spinner(u.Now.UnixMilli()) + " " + phase
 	}
 	if u.cache == nil {
 		return workCardRows(c, width, u.Theme, alternate)

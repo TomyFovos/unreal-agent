@@ -45,12 +45,32 @@ func (c *parentReadCache) inspect(ctx context.Context, owner *host.Session, pare
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	identity, err := c.childOperation(owner, id)
+	if err != nil {
+		return host.View{}, err
+	}
+	// id comes from the validated canonical Child plan above, not from an
+	// arbitrary path supplied by the gateway caller.
+	child, err := c.loadChild(ctx, directory, id, false)
+	if err != nil {
+		return host.View{}, err
+	}
+	config := child.Configuration
+	if config == nil || config.ParentID != parent || config.ChildID != id || config.OperationID != identity {
+		return host.View{}, fmt.Errorf("child canonical configuration does not match parent")
+	}
+	return copyValue(childPage(child.View, after, limit, false))
+}
+
+// Caller holds c.mu. Root edges use the owner's committed operations.
+func (c *parentReadCache) childOperation(owner *host.Session, id session.ID) (operation.ID, error) {
+	parent := owner.ID
 	revision := owner.OperationRevision()
 	p, ok := c.parents[parent]
 	if !ok || p.owner != owner || p.revision != revision {
 		latest, err := owner.Inspect(0, 1)
 		if err != nil {
-			return host.View{}, err
+			return "", err
 		}
 		p = parentIdentity{owner: owner, revision: revision, children: make(map[session.ID]operation.ID), ambiguous: make(map[session.ID]bool)}
 		for _, op := range latest.Operations {
@@ -70,37 +90,31 @@ func (c *parentReadCache) inspect(ctx context.Context, owner *host.Session, pare
 		c.parents[parent] = p
 	}
 	if p.err != nil {
-		return host.View{}, p.err
+		return "", p.err
 	}
 	if p.ambiguous[id] {
-		return host.View{}, fmt.Errorf("ambiguous child identity")
+		return "", fmt.Errorf("ambiguous child identity")
 	}
 	identity := p.children[id]
 	if identity == "" {
-		return host.View{}, ErrUnavailable
+		return "", ErrUnavailable
 	}
-	// id comes from the validated canonical Child plan above, not from an
-	// arbitrary path supplied by the gateway caller.
-	child, err := c.loadChild(ctx, directory, id, false)
-	if err != nil {
-		return host.View{}, err
-	}
-	config := child.Configuration
-	if config == nil || config.ParentID != parent || config.ChildID != id || config.OperationID != identity {
-		return host.View{}, fmt.Errorf("child canonical configuration does not match parent")
-	}
-	view := child.View
-	view.ContextFacts = nil
-	items := view.History.Items
+	return identity, nil
+}
+
+func childPage(v host.View, after sessionstore.Sequence, limit int, analysis bool) host.View {
+	items := v.History.Items
 	start := min(uint64(after), uint64(len(items)))
 	end := min(start+uint64(limit), uint64(len(items)))
 	next := after
 	if end > start {
 		next = items[end-1].Sequence
 	}
-	view.History = host.HistoryPage{Items: items[start:end], NextAfter: next, More: end < uint64(len(items))}
-	// Protect the cached observation from callers mutating public snapshots.
-	return copyValue(view)
+	v.History = host.HistoryPage{Items: items[start:end], NextAfter: next, More: end < uint64(len(items))}
+	if !analysis {
+		v.ContextFacts = nil
+	}
+	return v
 }
 
 // Caller holds c.mu. Archive moves preserve the inode and do not invalidate
@@ -132,8 +146,8 @@ func (c *parentReadCache) loadChild(ctx context.Context, directory string, id se
 	return observed.child, nil
 }
 
-func (c *parentReadCache) treeChild(ctx context.Context, directory string, id session.ID) (subagent.ChildView, error) {
+func (c *parentReadCache) treeChild(ctx context.Context, directory string, id session.ID, analysis bool) (subagent.ChildView, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.loadChild(ctx, directory, id, true)
+	return c.loadChild(ctx, directory, id, analysis)
 }

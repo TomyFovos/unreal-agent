@@ -183,6 +183,7 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 		if !done && !waitingForTools && ctx.Err() == nil && s.running && s.currentTurn() == turn && s.progress != nil && s.progress.Epoch == epoch {
 			current := s.progress
 			if p.Attempt >= current.Attempt {
+				modelPhase := current.modelPhase()
 				if p.Reset || p.Attempt > current.Attempt {
 					current.Text = ""
 					pendingUTF8 = ""
@@ -217,7 +218,7 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 				}
 				current.Text += strings.ToValidUTF8(pendingUTF8[:end], "")
 				pendingUTF8 = pendingUTF8[end:]
-				if p.Reset || phaseChanged || lastBroadcast.IsZero() || now().Sub(lastBroadcast) >= 30*time.Millisecond {
+				if p.Reset || phaseChanged || current.modelPhase() != modelPhase || lastBroadcast.IsZero() || now().Sub(lastBroadcast) >= 30*time.Millisecond {
 					s.broadcast(Event{Kind: "progress", Progress: current})
 					lastBroadcast = now()
 				}

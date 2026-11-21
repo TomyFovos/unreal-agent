@@ -98,6 +98,9 @@ func treeLines(r *TreeReport) []string {
 	out = append(out, "", "Per-session observations (recorded start or first response; measured, derived or unknown)")
 	for _, s := range r.Sessions {
 		out = append(out, fmt.Sprintf("%s [%s; layer %s; selection %s] %s", s.ID, s.Layer, s.LayerSource, s.SelectionSource, modelLabel(s.ModelKey)), "  wall "+metricText(s.WallTime, "s")+"; first response "+metricText(s.FirstResponse, "s")+"; wait "+metricText(s.UsageLimitWait, "s"))
+		if !s.UsageRetryAt.IsZero() {
+			out = append(out, "  "+llm.UsageLimitWaiting(s.UsageRetryAt))
+		}
 		for i, req := range s.Requests {
 			out = append(out, fmt.Sprintf("  request %d (%s) %s: duration %s; output TPS %s", i+1, req.Kind, requestModelLabel(req.ModelKey, req.Fast), metricText(req.Duration, "s"), metricText(req.OutputTPS, " tok/s")))
 		}

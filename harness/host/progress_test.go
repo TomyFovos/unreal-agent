@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -14,6 +15,37 @@ import (
 func progressSession() *Session {
 	return &Session{running: true, Generation: "g", subscribers: map[uint64]chan Event{}, items: []sessionstore.Item{{Kind: sessionstore.ItemTurn, Data: session.Turn{ID: "turn1"}}}}
 }
+
+func TestModelProgressNotifiesOnFirstDeltaAndCompletion(t *testing.T) {
+	s := progressSession()
+	check := func(want ModelPhase, prev <-chan struct{}) <-chan struct{} {
+		t.Helper()
+		select {
+		case <-prev:
+		default:
+			t.Fatalf("no notification for phase %q", want)
+		}
+		info, changed := s.WatchModelProgress()
+		if info.Phase != want {
+			t.Fatalf("phase = %q, want %q", info.Phase, want)
+		}
+		return changed
+	}
+	_, changed := s.WatchModelProgress()
+	a := &progressAdapter{session: s, now: func() time.Time { return time.Unix(1, 0) },
+		next: modelFunc(func(_ context.Context, _ llm.Request, o llm.RequestOptions) (llm.Response, error) {
+			changed = check(ModelRequesting, changed)
+			o.Progress(llm.Progress{Attempt: 1, Reset: true})
+			o.Progress(llm.Progress{Attempt: 1, Delta: "first text"})
+			changed = check(ModelStreaming, changed)
+			return llm.Response{}, nil
+		})}
+	if _, err := a.Respond(t.Context(), llm.Request{}, llm.RequestOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	check("", changed)
+}
+
 func TestProgressBoundResetLateAndFallback(t *testing.T) {
 	s := progressSession()
 	var late func(llm.Progress)

@@ -16,6 +16,9 @@ import (
 	"sync"
 )
 
+// The hello ID advertises phase frames. Earlier processes ignore that field.
+const modelProgressHandshake inbox.ID = "model_progress"
+
 type frame struct {
 	Version    uint32
 	Connection string
@@ -31,8 +34,9 @@ type frame struct {
 	// Mode is the parent's permission mode (hello, mode). Approval is a
 	// child's request (approval, approval_done) or the parent's answer
 	// (decide). None of these is durable: a restarted child asks again.
-	Mode     permission.Mode `json:",omitzero"`
-	Approval *Approval       `json:",omitzero"`
+	Mode          permission.Mode     `json:",omitzero"`
+	Approval      *Approval           `json:",omitzero"`
+	ModelProgress *host.ModelProgress `json:",omitzero"`
 }
 
 func encodeFrame(f frame) ([]byte, error) {

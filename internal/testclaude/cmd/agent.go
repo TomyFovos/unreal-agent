@@ -129,6 +129,12 @@ func agent(dir string, args []string, c configuration) {
 	if slices.Contains(args, "--replay-user-messages") {
 		_ = out.Encode(map[string]any{"type": "user", "isReplay": true, "parent_tool_use_id": nil, "message": message})
 	}
+	if len(c.AgentReply) > 0 {
+		for _, frame := range c.AgentReply {
+			_ = out.Encode(frame)
+		}
+		os.Exit(c.Exit)
+	}
 	if strings.HasPrefix(prompt, "/compact") {
 		fmt.Fprintln(os.Stderr, "unexpected compaction request")
 		os.Exit(9)

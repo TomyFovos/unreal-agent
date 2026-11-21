@@ -37,6 +37,12 @@ Unreal Agent は共通の `/model` で、Claude・ChatGPT のサブスク、任�
 - **モデル一覧:** Claude Code の初期化レスポンスから自動取得されます。
 - **会話圧縮と指示書:** [コンテキストと指示書](context.md) を参照してください。
 
+### サブスクリプションの利用上限
+
+Claude Code がセッション（5 時間）、週次、またはモデル別の利用上限に達すると、Unreal は TUI と `/analyze` に再試行時刻を表示します。`rate_limit_event` の拒否通知に解除時刻があれば、その値を優先します。エラー文に時刻だけがあり、タイムゾーンの指定がない場合はローカル時刻として扱います。[Claude Code の利用上限メッセージ](https://code.claude.com/docs/en/errors#usage-limits)、[2.1.x の stream-json 出力例](https://github.com/anthropics/claude-code/issues/103820)
+
+待機中も子エージェントは作業を続け、届いた報告は保存されます。解除時刻に報告を添えて 1 回再試行し、まだ上限に達していれば再び待機します。解除時刻を取得できない場合は、既存の利用上限バックオフで再試行時刻を決めます。
+
 ---
 
 ## Codex（通常のサブスクリプション経路）

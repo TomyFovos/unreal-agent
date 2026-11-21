@@ -2,89 +2,135 @@ package viewer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/subagent"
 )
 
 // InspectTree is an explicit analysis read. Ordinary child controls retain
 // their direct-parent scope. Every edge is proven by both canonical records.
 func (r ParentReader) InspectTree(ctx context.Context, id session.ID, after sessionstore.Sequence, limit int) (host.View, error) {
+	return r.inspectTree(ctx, id, after, limit, true)
+}
+
+// InspectTopology observes the visible tree using the same lineage proof as
+// analysis. The direct-child reader remains the fast path for direct children.
+func (r ParentReader) InspectTopology(ctx context.Context, id session.ID, after sessionstore.Sequence, limit int) (host.View, error) {
+	if v, err := r.Inspect(ctx, id, after, limit); !errors.Is(err, ErrUnavailable) {
+		if err != nil || id == r.ParentID {
+			return v, err
+		}
+		owner, err := r.owner(ctx)
+		if err != nil {
+			return host.View{}, err
+		}
+		v.ModelPhase = owner.ChildModelPhase([]session.ID{id})
+		return v, nil
+	}
+	return r.inspectTree(ctx, id, after, limit, false)
+}
+
+func (r ParentReader) inspectTree(ctx context.Context, id session.ID, after sessionstore.Sequence, limit int, analysis bool) (host.View, error) {
 	if limit < 1 || limit > 4096 {
 		return host.View{}, ErrInvalidPage
 	}
 	if r.cache == nil {
 		r.cache = newParentReadCache()
 	}
-	if _, err := r.owner(ctx); err != nil {
-		return host.View{}, err
-	}
-	return r.inspectTree(ctx, id, after, min(limit, 256), map[session.ID]bool{})
-}
-
-func (r ParentReader) inspectTree(ctx context.Context, id session.ID, after sessionstore.Sequence, limit int, seen map[session.ID]bool) (host.View, error) {
-	if err := ctx.Err(); err != nil {
-		return host.View{}, err
-	}
-	if seen[id] {
-		return host.View{}, fmt.Errorf("cyclic child lineage")
-	}
-	seen[id] = true
-	child, err := r.cache.treeChild(ctx, r.Directory, id)
+	owner, err := r.owner(ctx)
 	if err != nil {
 		return host.View{}, err
 	}
-	if id != r.ParentID {
-		config := child.Configuration
-		if config == nil || config.ChildID != id {
-			return host.View{}, ErrUnavailable
-		}
-		parent, err := r.inspectTree(ctx, config.ParentID, 0, 1, seen)
-		if err != nil {
-			return host.View{}, err
-		}
-		matches := 0
-		for _, op := range parent.Operations {
-			c, ok, err := DecodeSubagent(config.ParentID, op)
-			if err != nil {
-				return host.View{}, err
-			}
-			if ok && c.ID == id && op.ID == config.OperationID {
-				matches++
-			}
-		}
-		if matches != 1 {
-			return host.View{}, ErrUnavailable
-		}
+	child, path, err := r.treeChild(ctx, owner, id, analysis, map[session.ID]bool{})
+	if err != nil {
+		return host.View{}, err
 	}
-	v := child.View
-	items := v.History.Items
-	start := min(uint64(after), uint64(len(items)))
-	end := min(start+uint64(limit), uint64(len(items)))
-	next := after
-	if end > start {
-		next = items[end-1].Sequence
+	v := childPage(child.View, after, min(limit, 256), analysis)
+	if !analysis {
+		v.ModelPhase = owner.ChildModelPhase(path)
 	}
-	v.History = host.HistoryPage{Items: items[start:end], NextAfter: next, More: end < uint64(len(items))}
 	if f := v.ContextFacts; f != nil {
-		lo := 0
-		if after > 0 {
-			lo = sort.Search(len(f.Rows), func(i int) bool { return f.Rows[i].After > after })
-		}
-		hi := sort.Search(len(f.Rows), func(i int) bool { return f.Rows[i].After > next })
-		v.ContextFacts = &sessionstore.ContextFacts{Through: next, Rows: f.Rows[lo:hi]}
+		lo := sort.Search(len(f.Rows), func(i int) bool { return f.Rows[i].After > after })
+		hi := sort.Search(len(f.Rows), func(i int) bool { return f.Rows[i].After > v.History.NextAfter })
+		v.ContextFacts = &sessionstore.ContextFacts{Through: v.History.NextAfter, Rows: f.Rows[lo:hi]}
 	}
 	return copyValue(v)
+}
+
+func (r ParentReader) treeChild(ctx context.Context, owner *host.Session, id session.ID, analysis bool, seen map[session.ID]bool) (subagent.ChildView, []session.ID, error) {
+	if err := ctx.Err(); err != nil {
+		return subagent.ChildView{}, nil, err
+	}
+	if seen[id] {
+		return subagent.ChildView{}, nil, fmt.Errorf("cyclic child lineage")
+	}
+	seen[id] = true
+	child, err := r.cache.treeChild(ctx, r.Directory, id, analysis)
+	if err != nil {
+		return subagent.ChildView{}, nil, err
+	}
+	if id == r.ParentID {
+		return child, nil, nil
+	}
+	config := child.Configuration
+	if config == nil || config.ChildID != id {
+		return subagent.ChildView{}, nil, ErrUnavailable
+	}
+	if config.ParentID == owner.ID {
+		r.cache.mu.Lock()
+		op, err := r.cache.childOperation(owner, id)
+		r.cache.mu.Unlock()
+		if err != nil {
+			return subagent.ChildView{}, nil, err
+		}
+		if op != config.OperationID {
+			return subagent.ChildView{}, nil, ErrUnavailable
+		}
+		return child, []session.ID{id}, nil
+	}
+	parent, parentPath, err := r.treeChild(ctx, owner, config.ParentID, false, seen)
+	if err != nil {
+		return subagent.ChildView{}, nil, err
+	}
+	matches := 0
+	for _, op := range parent.View.Operations {
+		c, ok, err := DecodeSubagent(config.ParentID, op)
+		if err != nil {
+			return subagent.ChildView{}, nil, err
+		}
+		if ok && c.ID == id && op.ID == config.OperationID {
+			matches++
+		}
+	}
+	if matches != 1 {
+		return subagent.ChildView{}, nil, ErrUnavailable
+	}
+	return child, append(parentPath, id), nil
 }
 
 func (r Remote) InspectTree(ctx context.Context, id session.ID, after sessionstore.Sequence, limit int) (host.View, error) {
 	if id == r.ParentID && r.Call == nil {
 		return r.Inspect(ctx, id, after, limit)
 	}
-	reply, err := r.exchange(ctx, extensionRequest{Action: "inspect_tree", ParentID: r.ParentID, ID: id, After: after, Limit: limit})
+	return r.inspectDescendant(ctx, "inspect_tree", id, after, limit)
+}
+
+func (r Remote) InspectTopology(ctx context.Context, id session.ID, after sessionstore.Sequence, limit int) (host.View, error) {
+	v, err := r.inspectDescendant(ctx, "inspect_topology", id, after, limit)
+	var extension *ExtensionError
+	if errors.As(err, &extension) && extension.Code == "unsupported_action" {
+		return r.Inspect(ctx, id, after, limit)
+	}
+	return v, err
+}
+
+func (r Remote) inspectDescendant(ctx context.Context, action string, id session.ID, after sessionstore.Sequence, limit int) (host.View, error) {
+	reply, err := r.exchange(ctx, extensionRequest{Action: action, ParentID: r.ParentID, ID: id, After: after, Limit: limit})
 	if err != nil {
 		return host.View{}, err
 	}

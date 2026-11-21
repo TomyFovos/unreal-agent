@@ -38,6 +38,8 @@ type turn struct {
 	echoed    bool // Claude Code took up Unreal's message
 	subagents SubagentCLI
 
+	usageLimit subscriptionLimit // observed and read by the stream reader
+
 	mu               sync.Mutex
 	model            string
 	text             []llm.Item                 // main-agent text not yet recorded
@@ -96,6 +98,9 @@ func (t *turn) recordSubscriptionUsage(f frame, model llm.Model) {
 	switch info.Status {
 	case "allowed", "allowed_warning", "rejected":
 		u.Status = info.Status
+		if f.ParentToolUseID == nil {
+			t.usageLimit.rate = info
+		}
 	}
 	if info.Utilization != nil && *info.Utilization >= 0 {
 		u.UsedPercent = new(100 * *info.Utilization)
@@ -203,6 +208,7 @@ func (t *turn) handle(f frame) *frame {
 			return nil
 		}
 		m := incoming.message
+		t.usageLimit.observeAssistant(f, m)
 		t.mu.Lock()
 		if f.ParentToolUseID == nil {
 			t.captureFirstRequest(m.Usage)

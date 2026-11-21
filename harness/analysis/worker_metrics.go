@@ -97,6 +97,7 @@ type sessionMetrics struct {
 	endSource       string
 	wait            Metric
 	waitStart       time.Time
+	waitRetryAt     time.Time
 	waitSource      string
 	responseRuntime llm.ActivityRecord
 }
@@ -175,13 +176,14 @@ func (m *sessionMetrics) apply(item host.HistoryItem, active *sessionstore.Runti
 				}
 			}
 			if a.Kind == "usage_limit_wait" {
+				m.waitRetryAt = a.RetryAt
 				at, source := a.StartedAt, "measured"
 				if at.IsZero() {
 					at, source = item.RecordedAt, "derived"
 				}
 				if !a.EndedAt.IsZero() {
 					m.addWait(at, a.EndedAt, source)
-					m.waitStart = time.Time{}
+					m.waitStart, m.waitRetryAt = time.Time{}, time.Time{}
 				} else if a.RetryAt.IsZero() {
 					if !m.waitStart.IsZero() {
 						if m.waitSource == "derived" {

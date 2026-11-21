@@ -37,6 +37,7 @@ type Config struct {
 	AgentInputTokens, AgentStepInputTokens int64
 	AgentUsage                             []jsontext.Value // per-call message_start usage, including the final call
 	AgentAutoCompact                       bool             // emit an automatic boundary unless disabled
+	AgentReply                             []jsontext.Value // stream-json frames to emit after init and before exit
 }
 
 // AgentStep is one tool call the synthetic Claude Code runs itself. Refused

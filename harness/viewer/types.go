@@ -28,6 +28,10 @@ type Reader interface {
 	Subscribe(context.Context, session.ID, sessionstore.Sequence, int, int) (host.Subscription, error)
 }
 
+type topologyInspector interface {
+	InspectTopology(context.Context, session.ID, sessionstore.Sequence, int) (host.View, error)
+}
+
 // ObservationReader supplies one compact initial projection while preserving
 // the requested recent transcript. Explicit History calls still use Inspect.
 type ObservationReader interface {
@@ -123,7 +127,8 @@ type Row struct {
 	End                   *sessionstore.EndRecord `json:",omitzero"`
 	Failure               string
 	Activity              string
-	UsageWaitUntil        time.Time `json:",omitzero"`
+	ModelPhase            host.ModelPhase `json:",omitzero"`
+	UsageWaitUntil        time.Time       `json:",omitzero"`
 	CreatedAt             time.Time
 	RecentActivity        []time.Time // canonical item timestamps within the last ten minutes
 	LastActivityAt        time.Time   // latest canonical activity, independent of the transcript cache
@@ -136,9 +141,9 @@ type Row struct {
 	NeedsResync bool
 	Problem     string
 	LastUsage   Usage
-	// OutputTPS is the latest response's output tokens per second, when the
-	// provider reported its timing; zero when unknown.
-	OutputTPS float64 `json:",omitzero"`
+	// OutputTPS is the latest measured speed, using provider or Host timing.
+	OutputTPS      float64 `json:",omitzero"`
+	OutputTPSKnown bool    `json:",omitzero"`
 }
 type Detail struct {
 	Row         Row

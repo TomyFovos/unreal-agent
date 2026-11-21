@@ -28,3 +28,40 @@ func TestRowCarriesLatestOutputSpeed(t *testing.T) {
 		t.Fatalf("speed=%v last=%+v", r.OutputTPS, r.LastUsage)
 	}
 }
+
+func TestRowDistinguishesMeasuredZeroFromMissingUsage(t *testing.T) {
+	m := New(Options{})
+	timed := llm.Response{Usage: llm.Usage{InputTokens: 100}, Generation: &llm.GenerationStatistics{
+		Tokens: llm.TokenCounts{OutputKnown: true}, DurationMicros: 1_000_000, Source: "client_clock",
+	}}
+	first := host.HistoryItem{Sequence: 1, Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{Response: timed}}
+	must(t, m.Replace("s", view("s", "g", 1, first)))
+	r := row(t, m, "s")
+	if !r.OutputTPSKnown || r.OutputTPS != 0 || CacheLabel(r.LastUsage) != "cache 0.00%" {
+		t.Fatalf("measured zero was lost: %+v", r)
+	}
+	timed.Usage.Unknown = []llm.UsageField{llm.UsageCachedInput, llm.UsageOutput}
+	timed.Generation = &llm.GenerationStatistics{DurationMicros: 1_000_000, Source: "client_clock"}
+	second := host.HistoryItem{Sequence: 2, Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{Response: timed}}
+	must(t, m.Apply("s", host.Event{Generation: "g", Revision: 2, Kind: "item", Item: &second}))
+	r = row(t, m, "s")
+	if r.OutputTPSKnown || CacheLabel(r.LastUsage) != "cache -" {
+		t.Fatalf("missing counters were treated as measured: %+v", r)
+	}
+}
+
+func TestRowKeepsResponseCacheRatioAcrossCompaction(t *testing.T) {
+	m := New(Options{})
+	compaction := host.HistoryItem{Sequence: 2, Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{
+		Version: 1, Kind: sessionstore.HostContext, Context: &sessionstore.ContextRecord{Usage: &llm.Usage{InputTokens: 10}},
+	}}
+	first := response(1, "response", 100, 10)
+	r := first.Data.(sessionstore.ModelResponse)
+	r.Response.Usage.CachedInputTokens = 80
+	first.Data = r
+	must(t, m.Replace("s", view("s", "g", 1, first, compaction)))
+	got := row(t, m, "s")
+	if got.Usage.Input != 110 || CacheLabel(got.LastUsage) != "cache 80.00%" {
+		t.Fatalf("compaction changed response cache stats or was omitted from totals: %+v", got)
+	}
+}

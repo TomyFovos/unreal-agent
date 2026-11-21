@@ -25,14 +25,11 @@ type frame struct {
 	IsReplay bool `json:"isReplay"`
 
 	// system/init
-	Model         string `json:"model"`
-	APIKeySource  string `json:"apiKeySource"`
-	RateLimitInfo *struct {
-		Status      string   `json:"status"`
-		Window      string   `json:"rateLimitType"`
-		Utilization *float64 `json:"utilization"`
-		ResetsAt    int64    `json:"resetsAt"`
-	} `json:"rate_limit_info"`
+	Model        string `json:"model"`
+	APIKeySource string `json:"apiKeySource"`
+
+	// rate_limit_event
+	RateLimitInfo *rateLimitInfo `json:"rate_limit_info"`
 
 	// system/permission_denied
 	ToolName           string `json:"tool_name"`
@@ -46,14 +43,25 @@ type frame struct {
 	StopReason string   `json:"stop_reason"`
 	Usage      *usage   `json:"usage"`
 
+	// APIError can identify an exhausted quota on assistant and result frames.
+	APIError          jsontext.Value `json:"api_error"`
+	IsAPIErrorMessage bool           `json:"isApiErrorMessage"`
+
 	// system/api_retry and system/api_error. Error may be a string or object;
-	// only its numeric status is used for activity, never its message.
+	// only its numeric status is recorded in retry activity.
 	Attempt      int              `json:"attempt"`
 	MaxRetries   int              `json:"max_retries"`
 	RetryDelayMS int64            `json:"retry_delay_ms"`
 	ErrorStatus  *int             `json:"error_status"`
 	Error        jsontext.Value   `json:"error"`
 	NoResponse   *noResponseRetry `json:"no_response"`
+}
+
+type rateLimitInfo struct {
+	Status      string   `json:"status"`
+	Window      string   `json:"rateLimitType"`
+	Utilization *float64 `json:"utilization"`
+	ResetsAt    int64    `json:"resetsAt"`
 }
 
 type noResponseRetry struct {

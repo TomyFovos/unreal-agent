@@ -120,9 +120,16 @@ func RenderDetail(d Detail) string {
 	return b.String()
 }
 
-func CacheLabel(u Usage) string {
+func (u Usage) CacheRatio() (float64, bool) {
 	if !u.Known || u.Input <= 0 || u.CachedInput < 0 || u.CachedInput > u.Input || slices.Contains(u.Unknown, llm.UsageInput) || slices.Contains(u.Unknown, llm.UsageCachedInput) {
-		return "cache -"
+		return 0, false
 	}
-	return fmt.Sprintf("cache %.2f%%", 100*float64(u.CachedInput)/float64(u.Input))
+	return float64(u.CachedInput) / float64(u.Input), true
+}
+
+func CacheLabel(u Usage) string {
+	if ratio, known := u.CacheRatio(); known {
+		return fmt.Sprintf("cache %.2f%%", 100*ratio)
+	}
+	return "cache -"
 }

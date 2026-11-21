@@ -132,10 +132,18 @@ func (c *Client) observe(ctx context.Context, id session.ID) (host.View, bool, e
 	return v, true, err
 }
 
-// Refresh reads canonical state without starting or resuming any runtime.
+// Refresh reads current state without starting or resuming any runtime.
 func (c *Client) Refresh(ctx context.Context, id session.ID) error {
+	return c.refresh(ctx, id, false)
+}
+
+func (c *Client) refresh(ctx context.Context, id session.ID, topology bool) error {
 	if c.Reader == nil {
 		return ErrUnavailable
+	}
+	read := c.Reader.Inspect
+	if r, ok := c.Reader.(topologyInspector); topology && ok {
+		read = r.InspectTopology
 	}
 	if err := c.enter(id); err != nil {
 		return err
@@ -161,7 +169,7 @@ func (c *Client) Refresh(ctx context.Context, id session.ID) error {
 				return v, err
 			}
 		}
-		return c.Reader.Inspect(ctx, id, after, page)
+		return read(ctx, id, after, page)
 	}
 	v, err := inspect()
 	if after != 0 && (err != nil || v.Generation != generation || !validPage(after, v.History)) {
@@ -173,15 +181,15 @@ func (c *Client) Refresh(ctx context.Context, id session.ID) error {
 		return err
 	}
 	if after == 0 {
-		err = c.pages(ctx, id, v)
+		err = c.Model.Replace(id, v)
 	} else {
 		err = c.Model.AppendPage(id, after, v)
-		for err == nil && v.History.More {
-			after = v.History.NextAfter
-			v, err = c.Reader.Inspect(ctx, id, after, page)
-			if err == nil {
-				err = c.Model.AppendPage(id, after, v)
-			}
+	}
+	for err == nil && v.History.More {
+		after = v.History.NextAfter
+		v, err = read(ctx, id, after, page)
+		if err == nil {
+			err = c.Model.AppendPage(id, after, v)
 		}
 	}
 	if err != nil {

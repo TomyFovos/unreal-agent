@@ -161,6 +161,7 @@ type View struct {
 	Context         *contextengine.Diagnostics `json:",omitzero"`
 	ContextFacts    *sessionstore.ContextFacts `json:",omitzero"` // populated by the explicit analysis reader
 	Progress        *Progress                  `json:",omitzero"`
+	ModelPhase      ModelPhase                 `json:",omitzero"` // scoped child observation
 	Session         sessionstore.Snapshot
 	Generation      string
 	Revision        uint64
@@ -226,6 +227,8 @@ type Session struct {
 	subscribers           map[uint64]chan Event
 	nextSubscriber        uint64
 	progress              *Progress
+	modelProgress         ModelProgress
+	modelProgressChanged  chan struct{}
 	contextReport         *contextengine.Diagnostics
 	instructions          *projectinstructions.Metadata
 	boundInstructions     *projectinstructions.Snapshot
@@ -830,6 +833,10 @@ func (s *Session) Subscribe(after sessionstore.Sequence, limit, capacity int) (S
 	}}, nil
 }
 func (s *Session) broadcast(event Event) {
+	if phase := s.progress.modelPhase(); phase != s.modelProgress.Phase {
+		s.modelProgress.Phase = phase
+		s.modelProgressChangedLocked()
+	}
 	s.revision++
 	event.Generation = s.Generation
 	event.Revision = s.revision

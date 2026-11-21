@@ -73,6 +73,7 @@ type Report struct {
 	Activities          []llm.ActivityRecord     `json:",omitzero"`
 	Redactions          []RedactionTotals        `json:",omitzero"`
 	Compactions         []llm.ConversationRecord `json:",omitzero"`
+	UsageRetryAt        time.Time                `json:",omitzero"`
 	AverageInputTokens  float64
 	InputTokenResponses int
 	Pruning             Pruning
@@ -404,6 +405,7 @@ func count(c *Counts, status string, d viewer.Duration) {
 func (a *Accumulator) Snapshot(now time.Time, _ bool, resync bool, rows []viewer.Row, ops []operation.Operation) Report {
 	r := Report{LatestUsage: a.latestUsage, Version: 1, Session: a.id, At: now, CreatedAt: a.created, Partial: a.partial || resync, Resync: resync, Selection: summarize(a.active), Pending: summarize(a.pending), Usage: a.usage, Turns: append([]Turn(nil), a.turns...), Timeline: append([]Event(nil), a.events...), Errors: Errors{Provider: a.providerErrors, Crashes: a.crashes, Recent: append([]Event(nil), a.errors...)}}
 	r.Activities = append([]llm.ActivityRecord(nil), a.activities...)
+	r.UsageRetryAt = a.metrics.waitRetryAt
 	r.Redactions = redactionTotals(r.Activities)
 	r.Compactions = append([]llm.ConversationRecord(nil), a.compactions...)
 	r.Pruning, r.InputTokenResponses = a.pruning, a.inputTokenResponses

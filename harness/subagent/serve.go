@@ -187,6 +187,9 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 	if control != nil {
 		workers.Go(func() { forwardApprovals(ctx, ep, control) })
 	}
+	if hello.ID == modelProgressHandshake {
+		workers.Go(func() { forwardModelProgress(ctx, ep, child) })
+	}
 	workers.Go(func() { forwardUsageWait(ctx, ep, child, config) })
 	// Ready has stable identity in canonical ChildConfig and is retryable after
 	// either side loses an ACK. Final completion never travels as a Peer input.
@@ -227,6 +230,22 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 				return ep.write(ctx, f)
 			}
 			return child.Wait(ctx)
+		}
+	}
+}
+
+func forwardModelProgress(ctx context.Context, ep *endpoint, child *host.Session) {
+	for ctx.Err() == nil {
+		progress, changed := child.WatchModelProgress()
+		f := ep.envelope("model_progress")
+		f.ModelProgress = &progress
+		if err := ep.write(ctx, f); err != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
 		}
 	}
 }

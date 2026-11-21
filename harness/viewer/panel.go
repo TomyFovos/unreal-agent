@@ -54,7 +54,7 @@ type Panel struct {
 }
 
 // NewPanel watches the parent and refreshes children while there are targets.
-// Visible topology observes a bounded batch of direct children.
+// Visible topology observes a bounded batch of verified descendants.
 // Every child refresh is inspection only; it never opens/resumes or sends input.
 func NewPanel(ctx context.Context, parent session.ID, client *Client) *Panel {
 	ctx, cancel := context.WithCancel(ctx)
@@ -125,12 +125,10 @@ func (p *Panel) refreshTargets() []session.ID {
 	if !visible {
 		return targets
 	}
+	_, supportsTree := p.client.Reader.(topologyInspector)
 	var candidates []session.ID
 	for _, r := range p.client.Model.Rows(time.Now()) {
-		// The existing gateway's scoped reader authorizes direct children. A
-		// child snapshot can expose nested lineage, but we do not widen that
-		// authorization or guess an unobserved grandchild's activities.
-		if r.ParentID == p.parent && r.ID != selected && r.Finish == nil && !terminal(r.ParentOperationStatus) {
+		if (r.ParentID == p.parent || supportsTree && r.Depth > 1) && r.ID != selected && r.Finish == nil && !terminal(r.ParentOperationStatus) {
 			candidates = append(candidates, r.ID)
 		}
 	}
@@ -169,12 +167,15 @@ func (p *Panel) PrepareAnalysis(ctx context.Context) error {
 
 func (p *Panel) refreshChildren() bool {
 	targets := p.refreshTargets()
+	p.mu.Lock()
+	topology := p.topologyVisible
+	p.mu.Unlock()
 	for _, id := range targets {
 		if p.ctx.Err() != nil {
 			return false
 		}
 		version := p.client.Model.Version()
-		err := p.client.Refresh(p.ctx, id)
+		err := p.client.refresh(p.ctx, id, topology)
 		if !errors.Is(err, ErrWatching) {
 			if id == p.client.Model.Selected() {
 				p.setProblem(err)

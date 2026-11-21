@@ -34,6 +34,7 @@ type configuration struct {
 	AgentInputTokens, AgentStepInputTokens                              int64
 	AgentUsage                                                          []jsontext.Value
 	AgentAutoCompact                                                    bool
+	AgentReply                                                          []jsontext.Value
 }
 type call struct {
 	Arguments, Environment   []string

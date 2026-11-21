@@ -395,6 +395,33 @@ func TestWorkerTierUnknownWaitAndNoReviewDenominator(t *testing.T) {
 	}
 }
 
+func TestAnalyzeShowsActiveUsageReset(t *testing.T) {
+	a := New("main")
+	at := time.Unix(1000, 0)
+	until := at.Add(time.Hour)
+	tree := &Tree{nodes: []*treeNode{{acc: a, observed: true}}}
+	record := func(at, retryAt time.Time) {
+		a.Apply(host.HistoryItem{RecordedAt: at, Data: sessionstore.HostRecord{
+			Kind: sessionstore.HostActivity, Activity: &llm.ActivityRecord{Kind: "usage_limit_wait", StartedAt: at, RetryAt: retryAt},
+		}})
+	}
+	check := func(at time.Time, waiting bool) {
+		t.Helper()
+		report := a.Snapshot(at, true, false, nil, nil)
+		report.Tree = tree.Snapshot(a)
+		for _, view := range []string{"Overview", "Usage", "Layers"} {
+			lines := strings.Join(Lines(report, view, true), "\n")
+			if strings.Contains(lines, llm.UsageLimitWaiting(until)) != waiting {
+				t.Fatalf("%s waiting = %t\n%s", view, waiting, lines)
+			}
+		}
+	}
+	record(at, until)
+	check(at, true)
+	record(until, time.Time{})
+	check(until, false)
+}
+
 func TestWorkerTierModelSwitchAndMixedRework(t *testing.T) {
 	a := New("root")
 	at := time.Unix(1000, 0)

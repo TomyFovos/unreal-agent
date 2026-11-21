@@ -2,10 +2,11 @@ package analysis
 
 import (
 	"fmt"
-	"github.com/unreallabsai/unreal-agent/harness/llm"
-	"github.com/unreallabsai/unreal-agent/harness/viewer"
 	"slices"
 	"strings"
+
+	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
 
 var Views = []string{"Overview", "Usage", "Turns", "Tools", "Agents", "Context", "Timeline", "Errors", "Layers", "Context metrics", "Export"}
@@ -28,7 +29,11 @@ func Lines(r Report, view string, ascii bool) []string {
 	if r.Resync {
 		out = append(out, "resync: observed canonical data only")
 	}
-	switch strings.ToLower(view) {
+	view = strings.ToLower(view)
+	if !r.UsageRetryAt.IsZero() && (view == "overview" || view == "usage") {
+		out = append(out, llm.UsageLimitWaiting(r.UsageRetryAt))
+	}
+	switch view {
 	case "context metrics":
 		out = append(out, contextLines(contextMeasurements(r))...)
 	case "layers":

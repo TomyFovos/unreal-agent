@@ -105,8 +105,13 @@ func (h ExtensionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		out.Error = "invalid_request"
 	} else {
 		switch q.Action {
-		case "inspect_tree":
-			v, e := (ParentReader{Host: h.Host, ParentID: q.ParentID, Directory: h.Directory, cache: h.cache}).InspectTree(r.Context(), q.ID, q.After, q.Limit)
+		case "inspect_tree", "inspect_topology":
+			reader := ParentReader{Host: h.Host, ParentID: q.ParentID, Directory: h.Directory, cache: h.cache}
+			inspect := reader.InspectTree
+			if q.Action == "inspect_topology" {
+				inspect = reader.InspectTopology
+			}
+			v, e := inspect(r.Context(), q.ID, q.After, q.Limit)
 			if e != nil {
 				err = e
 			} else {

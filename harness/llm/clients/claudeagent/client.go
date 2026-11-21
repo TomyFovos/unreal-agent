@@ -145,6 +145,7 @@ func (c *Client) Close() error { return nil }
 type Error struct {
 	Code    string
 	Message string
+	resetAt time.Time
 }
 
 func (e *Error) Error() string {
@@ -356,6 +357,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	}
 
 	reader := bufio.NewReaderSize(stdout, 64<<10)
+	subscription := c.providerID() == ProviderID
 	var result *frame
 	var lastInput *int64
 	for result == nil {
@@ -366,7 +368,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		if len(line) > 0 {
 			var f frame
 			if json.Unmarshal(line, &f) == nil {
-				if c.providerID() == ProviderID && f.Type == "rate_limit_event" && f.RateLimitInfo != nil {
+				if subscription && f.Type == "rate_limit_event" && f.RateLimitInfo != nil {
 					t.recordSubscriptionUsage(f, request.Model)
 				}
 				streams.observe(f)
@@ -392,7 +394,15 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	}
 	if result == nil {
 		finishProcess()
-		return llm.Response{}, startFailure(stderr.String(), &Error{Code: "subprocess_failure", Message: lastLine(stderr.String())})
+		stderrText := stderr.String()
+		fallback := &Error{Code: "subprocess_failure", Message: lastLine(stderrText)}
+		failure := startFailure(stderrText, fallback)
+		if subscription && failure == fallback {
+			if limited := t.usageLimit.failure(nil, time.Now()); limited != nil {
+				return llm.Response{}, limited
+			}
+		}
+		return llm.Response{}, failure
 	}
 	t.recordTurnUsage(result)
 	// The result's usage sums every model call. The last message_start
@@ -430,6 +440,11 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		}
 		if strings.HasPrefix(message, "Prompt is too long") {
 			return llm.Response{}, &Error{Code: "context_length_exceeded", Message: clip(message, 2000)}
+		}
+		if subscription {
+			if limited := t.usageLimit.failure(result, time.Now()); limited != nil {
+				return llm.Response{}, limited
+			}
 		}
 		return llm.Response{}, &Error{Code: "turn_failed", Message: clip(message, 2000)}
 	}

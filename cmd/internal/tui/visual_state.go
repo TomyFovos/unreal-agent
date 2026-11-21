@@ -75,7 +75,11 @@ func childVisualState(r viewer.Row, s Snapshot) visualState {
 			return stateEnded
 		}
 	}
-	return operationVisualState(r.ParentOperationStatus)
+	state := operationVisualState(r.ParentOperationStatus)
+	if state == stateUnknown && r.ModelPhase != "" {
+		return stateWorking
+	}
+	return state
 }
 
 // A lead can be idle between turns while its descendants work. Its own last

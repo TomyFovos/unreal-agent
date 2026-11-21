@@ -49,6 +49,7 @@ func startProcess(ctx context.Context, c Config, child ChildConfig, mode permiss
 	go func() {
 		defer close(p.done)
 		defer cancel()
+		defer c.Owner.SetChildModelProgress(child.ChildID, host.ModelProgress{})
 		decoder := frameDecoder{}
 		welcomed := false
 		draining := false
@@ -81,6 +82,10 @@ func startProcess(ctx context.Context, c Config, child ChildConfig, mode permiss
 							} else {
 								welcomed = true
 								close(p.connected)
+							}
+						case "model_progress":
+							if welcomed && f.ModelProgress != nil {
+								c.Owner.SetChildModelProgress(child.ChildID, *f.ModelProgress)
 							}
 						case "approval", "approval_done":
 							if f.Approval == nil || f.Approval.ID == "" {
@@ -146,6 +151,7 @@ func startProcess(ctx context.Context, c Config, child ChildConfig, mode permiss
 	}()
 	go func() {
 		hello := ep.envelope("hello")
+		hello.ID = modelProgressHandshake
 		hello.Config = &child
 		hello.Mode = mode
 		if err := p.write(ctx, hello); err != nil {

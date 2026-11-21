@@ -53,6 +53,7 @@ type projection struct {
 	usage             Usage
 	lastUsage         Usage
 	outputTPS         float64
+	outputTPSKnown    bool
 	finish            *Finish
 	end               *sessionstore.EndRecord
 	activity          string
@@ -152,6 +153,7 @@ func (m *Model) snapshot(p *projection, v host.View) {
 	p.view.Running = v.Running
 	p.view.Failure = v.Failure
 	p.view.ProjectInstructions = v.ProjectInstructions
+	p.view.ModelPhase = v.ModelPhase
 	previous, children := p.operations, p.children
 	p.operations = make(map[operation.ID]operation.Operation, len(v.Operations))
 	p.children = make(map[operation.ID]decodedChild)
@@ -199,7 +201,7 @@ func (m *Model) AppendPage(id session.ID, after sessionstore.Sequence, view host
 	if view.Revision < p.view.Revision {
 		return ErrStale
 	}
-	if (!view.Running || p.runtime != RuntimeUnknown) && len(view.History.Items) == 0 && !view.History.More && !p.more && view.Revision == p.view.Revision && reflect.DeepEqual(view.Session, p.view.Session) && view.Running == p.view.Running && view.Failure == p.view.Failure && reflect.DeepEqual(view.ProjectInstructions, p.view.ProjectInstructions) && len(view.Operations) == len(p.operations) {
+	if (!view.Running || p.runtime != RuntimeUnknown) && len(view.History.Items) == 0 && !view.History.More && !p.more && view.Revision == p.view.Revision && reflect.DeepEqual(view.Session, p.view.Session) && view.Running == p.view.Running && view.Failure == p.view.Failure && view.ModelPhase == p.view.ModelPhase && reflect.DeepEqual(view.ProjectInstructions, p.view.ProjectInstructions) && len(view.Operations) == len(p.operations) {
 		same := true
 		for _, op := range view.Operations {
 			if old, ok := p.operations[op.ID]; !ok || !reflect.DeepEqual(old, op) {
@@ -247,7 +249,7 @@ func (m *Model) Apply(id session.ID, event host.Event) error {
 		return ErrResync
 	}
 	if event.Kind == "progress" || event.Kind == "context" {
-		// Transient chat metadata has no effect on canonical viewer rows.
+		// The main chat consumes stream text. Child reads carry phase only.
 		p.view.Revision = event.Revision
 		return nil
 	}
@@ -302,8 +304,9 @@ func (m *Model) Apply(id session.ID, event host.Event) error {
 func (m *Model) Disconnect(id session.ID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if p := m.sessions[id]; p != nil && p.runtime != RuntimeUnknown {
+	if p := m.sessions[id]; p != nil && (p.runtime != RuntimeUnknown || p.view.ModelPhase != "") {
 		p.runtime = RuntimeUnknown
+		p.view.ModelPhase = ""
 		m.version++
 	}
 }
@@ -362,8 +365,6 @@ func (m *Model) item(p *projection, item host.HistoryItem) error {
 		}
 		if data.Kind == sessionstore.HostContext && data.Context != nil && data.Context.Usage != nil {
 			addUsage(&p.usage, *data.Context.Usage)
-			p.lastUsage = Usage{}
-			addUsage(&p.lastUsage, *data.Context.Usage)
 		}
 		if data.Kind == "configuration" {
 			p.managedPolicyMode = sessionstore.ManagedPolicyModeFromConfiguration(data.Configuration)
@@ -395,10 +396,13 @@ func (m *Model) item(p *projection, item host.HistoryItem) error {
 			addUsage(&p.usage, data.Response.Usage)
 			p.lastUsage = Usage{}
 			addUsage(&p.lastUsage, data.Response.Usage)
-			if data.Response.Generation != nil && data.Response.Generation.Valid() {
-				if rate, known := data.Response.Generation.OutputTPS(); known {
-					p.outputTPS = rate
-				}
+			var rate float64
+			var known bool
+			if g := data.Response.Generation; g != nil {
+				rate, known = g.OutputTPS()
+			}
+			if known || !p.lastUsage.Known || !llm.ReportedTokens(data.Response.Usage).OutputKnown {
+				p.outputTPS, p.outputTPSKnown = rate, known
 			}
 		}
 		for _, out := range data.Response.Output {
@@ -529,6 +533,7 @@ func (m *Model) base(id session.ID, p *projection, now time.Time) Row {
 	r.Runtime = p.runtime
 	r.Failure = p.view.Failure
 	r.Activity = p.activity
+	r.ModelPhase = p.view.ModelPhase
 	r.UsageWaitUntil = p.usageWaitUntil
 	r.CreatedAt = p.view.Session.Session.CreatedAt
 	r.LastActivityAt = p.lastActivityAt
@@ -542,6 +547,7 @@ func (m *Model) base(id session.ID, p *projection, now time.Time) Row {
 	r.Usage = p.usage
 	r.LastUsage = p.lastUsage
 	r.OutputTPS = p.outputTPS
+	r.OutputTPSKnown = p.outputTPSKnown
 	r.Usage.Partial = r.Usage.Partial || p.more || p.resync
 	r.Cursor = p.cursor
 	r.More = p.more
@@ -553,6 +559,9 @@ func (m *Model) base(id session.ID, p *projection, now time.Time) Row {
 		r.End = &end
 		r.Runtime = RuntimeStopped
 		r.UsageWaitUntil = time.Time{}
+	}
+	if p.finish != nil || p.end != nil || p.resync || p.runtime == RuntimeStopped {
+		r.ModelPhase = ""
 	}
 	end := time.Time{}
 	if p.finish != nil {
@@ -622,6 +631,9 @@ func (m *Model) rows(now time.Time) []Row {
 				r.ParentOperationID = op.ID
 				r.ParentOperationStatus = op.Status
 				r.Label = child.Label
+				if terminal(op.Status) || p.runtime == RuntimeStopped {
+					r.ModelPhase = ""
+				}
 				if r.Selection == nil && child.Selection != nil {
 					copy := *child.Selection
 					copy.Binding = ""

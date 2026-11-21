@@ -29,6 +29,7 @@ type SessionMetric struct {
 	Finish                                  string
 	StartedAt, EndedAt                      time.Time
 	WallTime, FirstResponse, UsageLimitWait Metric
+	UsageRetryAt                            time.Time `json:",omitzero"`
 	Requests                                []RequestMetric
 	Review                                  string
 	RejectionEvents                         int
@@ -312,6 +313,7 @@ func (t *Tree) Snapshot(root *Accumulator) *TreeReport {
 			}
 		}
 		s.UsageLimitWait = m.waitMetric(n.observed)
+		s.UsageRetryAt = m.waitRetryAt
 		r.Sessions = append(r.Sessions, s)
 	}
 	r.buildTasks()
