@@ -66,72 +66,140 @@ func (t *turn) recordActivity(record llm.ActivityRecord) {
 	}
 }
 
-// result.usage is authoritative for this execution, including discarded output
-// and recovery attempts. Assistant fragments can omit most of that output;
-// result.modelUsage instead accumulates across resumed conversations.
+type stepID struct{ parent, message string }
+
+type usageStep struct {
+	id    stepID
+	model string
+	usage usage
+}
+
+// result.usage covers this execution, including discarded output and recovery
+// attempts. result.modelUsage also includes prior resumed executions. Use the
+// current streams and assistant messages to attribute the execution total.
 func (t *turn) recordTurnUsage(result *frame) {
-	totals := map[string]llm.Usage{}
 	t.mu.Lock()
 	model := t.model
-	for _, m := range t.messages {
-		model := m.Model
-		if model == "" {
-			model = t.model
-		}
-		if model != "<synthetic>" {
-			totals[model] = addUsage(totals[model], reportedUsage(*m.Usage))
-		}
-	}
+	messages := t.messages
 	t.mu.Unlock()
+	var streams []usageStep
 	if t.streams != nil {
 		t.streams.mu.Lock()
 		if t.streams.mainModel != "" {
 			model = t.streams.mainModel
 		}
-		for name, u := range t.streams.usage {
-			if name == "" {
-				name = model
-			}
-			totals[name] = u
-		}
+		streams = slices.Clone(t.streams.usage)
 		t.streams.mu.Unlock()
 	}
-	if model == "" && len(totals) == 1 {
-		for name := range totals {
-			model = name
+	models := map[string]string{"": model}
+	for id, step := range messages {
+		if step.model != "" && step.model != "<synthetic>" {
+			models[id.parent] = first(models[id.parent], step.model)
 		}
+	}
+	for _, step := range streams {
+		models[step.id.parent] = first(models[step.id.parent], step.model)
+	}
+	model = models[""]
+	totals := make(map[string]llm.Usage)
+	var main, nested llm.Usage
+	var seenMain, seenNested bool
+	add := func(step usageStep) {
+		if step.model == "<synthetic>" {
+			return
+		}
+		u := reportedUsage(step.usage)
+		if !step.usage.inputReported {
+			u.Unknown = append(u.Unknown, llm.UsageInput)
+		}
+		if !step.usage.outputReported {
+			u.Unknown = append(u.Unknown, llm.UsageOutput)
+		}
+		totals[step.model] = addUsage(totals[step.model], u)
+		if step.id.parent == "" {
+			main = addUsage(main, u)
+			seenMain = true
+		} else {
+			nested = addUsage(nested, u)
+			seenNested = true
+		}
+	}
+	seen := make(map[stepID]bool)
+	anonymous := make(map[[2]string]bool)
+	for _, step := range streams {
+		step.model = first(step.model, messages[step.id].model, models[step.id.parent])
+		if step.id.message == "" {
+			anonymous[[2]string{step.id.parent, step.model}] = true
+		} else if seen[step.id] {
+			continue
+		} else {
+			seen[step.id] = true
+		}
+		add(step)
+	}
+	for id, step := range messages {
+		step.model = first(step.model, models[id.parent])
+		if !seen[id] && !anonymous[[2]string{id.parent, step.model}] {
+			add(step)
+		}
+	}
+	if !seenMain {
+		main = unknownUsage()
 	}
 	if result.Usage != nil {
 		u := reportedUsage(*result.Usage)
-		// Preserve native Agent model attribution, using complete streams when
-		// available. The main model receives the remainder of the SDK total.
-		main := u
-		for name, child := range totals {
-			if name != model {
-				main.InputTokens -= child.InputTokens
-				main.CachedInputTokens -= child.CachedInputTokens
-				main.CacheWriteInputTokens -= child.CacheWriteInputTokens
-				main.OutputTokens -= child.OutputTokens
-				if !slices.Contains(main.Unknown, llm.UsageReasoning) {
-					if slices.Contains(child.Unknown, llm.UsageReasoning) {
-						main.Unknown = append(main.Unknown, llm.UsageReasoning)
-						main.ReasoningTokens = 0
-					} else {
-						main.ReasoningTokens -= child.ReasoningTokens
-					}
+		// Reconcile the execution total with observed requests. Scope is
+		// independent of model name: an Agent can use the same model as main.
+		if !t.sawNested {
+			main = u
+		} else if seenNested {
+			main = remainingUsage(u, nested, main)
+		}
+		if !t.sawNested || seenNested {
+			var other llm.Usage
+			for name, measured := range totals {
+				if name != model {
+					other = addUsage(other, measured)
 				}
 			}
+			totals[model] = remainingUsage(u, other, totals[model])
 		}
-		totals[model] = main
-		// This is the same usage as provider_usage, at execution granularity.
-		// Consumers replace same-turn rows with it, never add it to them.
+		// The per-model rows are a breakdown of the execution, not extra usage.
 		t.recordActivity(llm.ActivityRecord{Kind: "claude_usage", ID: t.opt.Identity.TurnID, Provider: ProviderID, Model: model, EndedAt: t.now().UTC(), Usage: &u})
+		t.resultUsage = &main
+	} else if t.sawNested && seenMain {
+		t.resultUsage = &main
 	}
 	for model, u := range totals {
 		if model != "" && model != "<synthetic>" {
 			t.recordActivity(llm.ActivityRecord{Kind: "provider_usage", ID: t.opt.Identity.TurnID, Provider: ProviderID, Model: model, EndedAt: t.now().UTC(), Usage: &u})
 		}
 	}
+}
+
+func remainingUsage(total, used, measured llm.Usage) llm.Usage {
+	for _, field := range []struct {
+		name llm.UsageField
+		dst  *int64
+		used int64
+		min  int64
+	}{
+		{llm.UsageInput, &total.InputTokens, used.InputTokens, measured.InputTokens},
+		{llm.UsageCachedInput, &total.CachedInputTokens, used.CachedInputTokens, measured.CachedInputTokens},
+		{llm.UsageCacheWriteInput, &total.CacheWriteInputTokens, used.CacheWriteInputTokens, measured.CacheWriteInputTokens},
+		{llm.UsageOutput, &total.OutputTokens, used.OutputTokens, measured.OutputTokens},
+		{llm.UsageReasoning, &total.ReasoningTokens, used.ReasoningTokens, measured.ReasoningTokens},
+	} {
+		if slices.Contains(used.Unknown, field.name) {
+			if !slices.Contains(total.Unknown, field.name) {
+				total.Unknown = append(total.Unknown, field.name)
+			}
+			*field.dst = field.min
+			continue
+		}
+		*field.dst = max(field.min, *field.dst-field.used)
+	}
+	return total
 }
 
 func addUsage(a, b llm.Usage) llm.Usage {

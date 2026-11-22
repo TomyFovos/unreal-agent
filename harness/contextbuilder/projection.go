@@ -89,6 +89,7 @@ func (b *builder) SetHistoryItem(item sessionstore.Item) {
 		b.window = windowProjection{}
 		b.windowTurn = windowTurn{}
 		b.rebuildHistoricalWindow = false
+		b.selectionContinuation = false
 		clear(b.derived)
 		b.estimate = derivedEstimate{}
 	}
@@ -172,12 +173,13 @@ func (b *builder) addUnitChecked(item llm.Item, kind contextengine.Kind, class c
 
 func (b *builder) contextResponse(response llm.Response) {
 	limited := response.Stop == llm.StopMaxOutputTokens
-	if source, ok := b.source.Data.(sessionstore.ModelResponse); ok && source.WindowCache.Boundary == b.window.boundary {
+	nestedOnly := len(response.Output) != 0 && !slices.ContainsFunc(response.Output, func(item llm.Item) bool { return !b.toolScopes.Nested(item) })
+	if source, ok := b.source.Data.(sessionstore.ModelResponse); ok && !nestedOnly && source.WindowCache.Boundary == b.window.boundary {
 		b.window.firstRequest = false
 	}
 	var acknowledgeWindow bool
 	b.responseSerial++
-	if !limited && response.Failure == nil {
+	if !nestedOnly && !limited && response.Failure == nil {
 		if source, ok := b.source.Data.(sessionstore.ModelResponse); ok && b.windowPrompt != nil && b.historyProvider == b.provider {
 			_, acknowledgeWindow = b.turnBounds[source.TurnID]
 		}
@@ -213,6 +215,19 @@ func (b *builder) contextResponse(response llm.Response) {
 	hasToolCall := false
 	for index, item := range response.Output {
 		b.sourceOutputIndex = index
+		if b.toolScopes.Nested(item) {
+			// Keep the unit positions referenced by older window and receipt
+			// records, without a body or any model-facing continuation.
+			kind := contextengine.ModelMessage
+			if item.Type == llm.ItemToolCall {
+				kind = contextengine.ToolRequest
+			}
+			b.addOmittedUnit(kind)
+			if item.ParentCallID == "" {
+				b.filteredScopes = true
+			}
+			continue
+		}
 		if call, ok := item.Data.(llm.ToolCall); ok {
 			if call.Incomplete {
 				continue
@@ -300,11 +315,16 @@ func (b *builder) contextResponse(response llm.Response) {
 	if acknowledgeWindow {
 		b.window.deliveredThrough = b.lastUnit
 	}
-	if !limited && response.Failure == nil && !hasToolCall {
+	if !nestedOnly && !limited && response.Failure == nil && !hasToolCall {
 		if source, ok := b.source.Data.(sessionstore.ModelResponse); ok && source.TurnID == b.windowTurn.id {
 			b.windowTurn = windowTurn{}
 		}
 	}
+}
+
+func (b *builder) addOmittedUnit(kind contextengine.Kind) string {
+	b.lastUnit = b.engine.Add(contextengine.Unit{Kind: kind, Class: contextengine.Omit, Source: b.sourceRef(), Origin: b.historyProvider}, sourceKey(b.source))
+	return b.lastUnit
 }
 
 func (b *builder) omitResponseUnit(id string) {
@@ -314,6 +334,12 @@ func (b *builder) omitResponseUnit(id string) {
 }
 
 func (b *builder) contextReceipt(callID string, output []llm.ToolResultOutput, running bool, state llm.ToolResultState) {
+	if b.toolScopes.Parent(callID) != "" {
+		if !running {
+			b.addOmittedUnit(contextengine.ToolResult)
+		}
+		return
+	}
 	if status, ok := b.source.Data.(sessionstore.ToolCallStatus); ok {
 		info := toolReceiptInfo(status)
 		info.bounded = b.receiptAlreadyBounded()
@@ -363,6 +389,9 @@ func (b *builder) contextReceipt(callID string, output []llm.ToolResultOutput, r
 
 func (b *builder) appendReceipt(item llm.Item, running bool) string {
 	callID := item.Data.(llm.ToolResult).CallID
+	if b.toolScopes.Parent(callID) != "" {
+		return b.addOmittedUnit(contextengine.ToolResult)
+	}
 	group := b.callGroups[callID]
 	if group == "" {
 		group = b.callOrigins[callID] + ":" + b.sourceRef().TurnID + ":" + callID
@@ -562,6 +591,8 @@ func (b *builder) ApplyContext(r sessionstore.ContextRecord) {
 	switch r.Kind {
 	case sessionstore.ContextWindowStart, sessionstore.ContextWindowBoundary:
 		b.applyWindow(r)
+	case sessionstore.ContextSelectionContinuation:
+		b.selectionContinuation = true
 	case sessionstore.ContextWindowFallback, "summary", "summary_failed":
 		b.rebuildHistoricalWindow = true
 	case "provider_conversation":

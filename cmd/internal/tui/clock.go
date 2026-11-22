@@ -15,6 +15,10 @@ func nextRender(s Snapshot, u UIState, view ViewMode) time.Time {
 			deadline = next
 		}
 	}
+	consider(nextSubscriptionReset(s, u))
+	if u.Sheet != nil {
+		consider(u.Sheet.refreshAt)
+	}
 	if u.cache != nil {
 		u.index = u.cache.index
 	}

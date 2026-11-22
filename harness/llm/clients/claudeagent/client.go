@@ -405,9 +405,12 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		return llm.Response{}, failure
 	}
 	t.recordTurnUsage(result)
-	// The result's usage sums every model call. The last message_start
-	// reports the current context size.
-	if lastInput == nil && result.Usage != nil {
+	// The last main message reports the current context size. The CLI's
+	// execution total can also include queries made inside the Agent tool.
+	if lastInput == nil && t.sawNested {
+		lastInput = t.lastAssistantInput
+	}
+	if lastInput == nil && !t.sawNested && result.Usage != nil {
 		value := result.Usage.inputTokens()
 		lastInput = &value
 	}

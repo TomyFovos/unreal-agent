@@ -233,7 +233,7 @@ func (k ContextDimensions) public() ContextDimensions {
 	return k
 }
 
-var windowReasons = []string{"threshold", "over_budget", "header_change", "mid_turn", "provider_overflow", "historical_context"}
+var windowReasons = []string{"threshold", "over_budget", "header_change", "mid_turn", "selection_change", "provider_overflow", "historical_context"}
 
 var stateCommands = []string{"decide", "plan", "rule", "accept", "reject", "question"}
 

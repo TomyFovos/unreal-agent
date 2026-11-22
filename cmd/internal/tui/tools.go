@@ -22,12 +22,18 @@ type Receipt struct {
 	Operations                   []operation.ID
 	Status                       operation.Status
 	StartedAt, EndedAt           time.Time
+	NestedTools                  int
 }
 
 func newReceipt(c llm.ToolCall) Receipt {
 	r := Receipt{CallID: c.CallID, Name: clipBytes(c.Name, 128), Status: operation.StatusAwaiting}
 	r.Target = viewer.SafeToolTarget(c)
 	return r
+}
+
+func (r Receipt) nativeAgent() bool {
+	name, _ := displayTool(r.Name, r.Target)
+	return r.Name == "claude_code" && name == "Agent"
 }
 func terminalStatus(s operation.Status) bool {
 	return s == operation.StatusCompleted || s == operation.StatusFailed || s == operation.StatusCanceled
@@ -216,6 +222,7 @@ func toolTarget(name, target string, width int, t Theme) string {
 func receiptChip(r Receipt, d viewer.Duration, s Snapshot, u UIState, width int, rows []viewer.Row, marks map[session.ID]string) (line, string) {
 	state := toolVisualState(r, s)
 	name, target := displayTool(r.Name, r.Target)
+	agent := r.nativeAgent()
 	var badge line
 	spawned := false
 	if r.Name == "SubagentStart" {
@@ -239,7 +246,7 @@ func receiptChip(r Receipt, d viewer.Duration, s Snapshot, u UIState, width int,
 	if state == stateFailed {
 		role = chipBad
 	}
-	if !spawned {
+	if !spawned && !agent {
 		switch state {
 		case stateWorking:
 			if d.Known {
@@ -250,7 +257,22 @@ func receiptChip(r Receipt, d viewer.Duration, s Snapshot, u UIState, width int,
 			suffix = " " + word
 		}
 	}
-	room := max(0, min(40, width)-u.Theme.roleLine("  ", role).width())
+	limit := min(40, width)
+	if agent {
+		limit = width
+		if target != "" {
+			name += ":"
+		}
+		count := "tools"
+		if r.NestedTools == 1 {
+			count = "tool"
+		}
+		suffix = fmt.Sprintf(" · %d %s · %s", r.NestedTools, count, word)
+		if state == stateWorking && d.Known {
+			suffix += " " + coarseDuration(d.Value)
+		}
+	}
+	room := max(0, limit-u.Theme.roleLine("  ", role).width())
 	prefix := joined(textLine(mark+" ", color), badge)
 	if len(badge) > 0 {
 		prefix = joined(prefix, textLine(" ", normal))
@@ -293,7 +315,7 @@ func toolChips(e Entry, s Snapshot, u UIState, l layout) []bodyLine {
 	for i, raw := range e.Calls {
 		r, d := currentReceipt(raw, s, u)
 		calls[i] = call{r, d}
-		if toolVisualState(r, s) == stateCompleted && r.Name != "SubagentStart" {
+		if toolVisualState(r, s) == stateCompleted && r.Name != "SubagentStart" && !r.nativeAgent() {
 			name, _ := displayTool(r.Name, r.Target)
 			completed[name]++
 		}
@@ -312,7 +334,7 @@ func toolChips(e Entry, s Snapshot, u UIState, l layout) []bodyLine {
 	for _, c := range calls {
 		r := c.receipt
 		name, _ := displayTool(r.Name, r.Target)
-		if r.Name != "SubagentStart" && toolVisualState(r, s) == stateCompleted && completed[name] >= 3 {
+		if r.Name != "SubagentStart" && !r.nativeAgent() && toolVisualState(r, s) == stateCompleted && completed[name] >= 3 {
 			if grouped[name] {
 				continue
 			}

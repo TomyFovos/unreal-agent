@@ -49,6 +49,52 @@ func TestClaudeSubscriptionResetText(t *testing.T) {
 	}
 }
 
+func TestClaudeRecordsSeparateSubscriptionWindows(t *testing.T) {
+	fake := testclaude.New(t)
+	fake.Set(t, testclaude.Config{AgentReply: []jsontext.Value{
+		jsontext.Value(`{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1800000000,"rateLimitType":"five_hour","utilization":0.71}}`),
+		jsontext.Value(`{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1800600000,"rateLimitType":"seven_day","utilization":0.31}}`),
+		jsontext.Value(`{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"seven_day_opus"}}`),
+		jsontext.Value(`{"type":"result","subtype":"success","is_error":false,"result":"done"}`),
+	}})
+	client, err := NewClient(Config{Binary: fake.Binary, Directory: t.TempDir(), Results: observed.NewResults()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var windows []llm.SubscriptionUsage
+	_, err = client.Respond(t.Context(), llm.Request{Input: []llm.Item{user("work")}}, llm.RequestOptions{
+		Tools: func(context.Context, llm.Response) ([]llm.ToolOutcome, error) { return nil, nil },
+		RecordActivity: func(_ context.Context, a llm.ActivityRecord) error {
+			if a.Kind == llm.ActivitySubscriptionUsage {
+				if a.Provider != ProviderID || len(a.Subscription) != 1 {
+					t.Errorf("invalid Claude subscription observation: %+v", a)
+				}
+				windows = append(windows, a.Subscription...)
+			}
+			return nil
+		},
+	})
+	if err != nil || len(windows) != 3 {
+		t.Fatal("missed an independent Claude window", err, windows)
+	}
+	for i, want := range []struct {
+		window, status string
+		used           float64
+		reset          int64
+	}{
+		{"five_hour", "allowed", 71, 1800000000},
+		{"seven_day", "allowed_warning", 31, 1800600000},
+	} {
+		w := windows[i]
+		if w.Window != want.window || w.Status != want.status || w.UsedPercent == nil || *w.UsedPercent != want.used || w.ResetsAt.Unix() != want.reset {
+			t.Fatalf("wrong Claude window %d: %+v", i, w)
+		}
+	}
+	if w := windows[2]; w.Window != "seven_day_opus" || w.Status != "allowed" || w.UsedPercent != nil || !w.ResetsAt.IsZero() {
+		t.Fatalf("unreported fields gained a value: %+v", w)
+	}
+}
+
 func TestClaudeSubscriptionLimitStream(t *testing.T) {
 	fake := testclaude.New(t)
 	// The rejection and synthetic-assistant shapes come from the 2.1.x

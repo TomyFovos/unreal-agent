@@ -289,7 +289,15 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		if args[0] == "exec" {
 			return executeHeadless(ctx, *socket, gatewayConfig, session.ID(*sessionID), *promptFile, permission.Mode(*mode))
 		}
-		return gateway.ListenAndServe(ctx, *socket, gatewayConfig)
+		serving, stopServing := context.WithCancel(ctx)
+		defer stopServing()
+		gatewayConfig.Restart = func() {
+			// Keep the socket ownership lock until the Session writers are
+			// released. The replacement can then resume them immediately.
+			_ = owner.Close()
+			stopServing()
+		}
+		return gateway.ListenAndServe(serving, *socket, gatewayConfig)
 	case "attach":
 		id := flags.String("session", "", "session ID; optional with --mode create")
 		mode := flags.String("mode", "attach", "attach, create, or resume")

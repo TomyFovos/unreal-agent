@@ -5,10 +5,6 @@ import (
 	"encoding/json/v2"
 )
 
-// subagentLinePrefix indents a Claude Code Agent sub-agent's tool calls, so
-// they sit under Claude's own "› scope" lines instead of reading as its own.
-const subagentLinePrefix = "  ↳ "
-
 // agentInput is the Agent tool's input: the task it was given and the model it
 // runs on. approvalSubject's fields carry neither of them.
 type agentInput struct {

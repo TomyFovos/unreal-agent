@@ -128,6 +128,9 @@ func (b *builder) admissionFingerprint(header [32]byte) string {
 		// Older turns may have sent capped output even with the same header.
 		header = sha256.Sum256(append(header[:], "exclude-output-limit"...))
 	}
+	if b.filteredScopes {
+		header = sha256.Sum256(append(header[:], "exclude-nested-tools"...))
+	}
 	return fmt.Sprintf("%x", header)
 }
 

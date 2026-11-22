@@ -70,7 +70,11 @@ func (r ParentReader) treeChild(ctx context.Context, owner *host.Session, id ses
 		return subagent.ChildView{}, nil, fmt.Errorf("cyclic child lineage")
 	}
 	seen[id] = true
-	child, err := r.cache.treeChild(ctx, r.Directory, id, analysis)
+	mode := childReadHistory
+	if analysis {
+		mode = childReadAnalysis
+	}
+	child, err := r.cache.treeChild(ctx, r.Directory, id, mode)
 	if err != nil {
 		return subagent.ChildView{}, nil, err
 	}

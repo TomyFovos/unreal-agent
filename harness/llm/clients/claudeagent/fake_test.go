@@ -62,17 +62,6 @@ func (f *fake) toolUse(id, name string, input map[string]any) {
 	f.emit(map[string]any{"type": "assistant", "parent_tool_use_id": nil, "message": map[string]any{"id": "msg_" + id, "content": []any{map[string]any{"type": "tool_use", "id": id, "name": name, "input": input}}}})
 }
 
-// subagentToolUse emits a tool_use block made by the Agent sub-agent that the
-// parent_tool_use_id names, as Claude Code reports its own sub-agents' calls.
-func (f *fake) subagentToolUse(parent, id, name string, input map[string]any) {
-	f.emit(map[string]any{"type": "assistant", "parent_tool_use_id": parent, "message": map[string]any{"id": "msg_" + id, "content": []any{map[string]any{"type": "tool_use", "id": id, "name": name, "input": input}}}})
-}
-
-// subagentText emits text the sub-agent wrote: only Claude Code sees it.
-func (f *fake) subagentText(parent, text string) {
-	f.emit(map[string]any{"type": "assistant", "parent_tool_use_id": parent, "message": map[string]any{"id": "msg_sub", "content": []any{map[string]any{"type": "text", "text": text}}}})
-}
-
 func (f *fake) toolResult(id, content string, isError bool) {
 	f.emit(map[string]any{"type": "user", "parent_tool_use_id": nil, "message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "tool_use_id": id, "content": content, "is_error": isError}}}})
 }
@@ -264,17 +253,26 @@ func fakeCLI(scenario string, args []string) int {
 		f.text("msg_1", text)
 		f.result(text)
 	case "agent_progress":
-		// Claude hands work to its own Agent: the Agent call's progress line
-		// names the model and the task, the sub-agent's calls follow indented,
-		// and the sub-agent's text never reaches Unreal.
+		const parent = "toolu_agent"
 		input := map[string]any{"description": "Review the parser", "subagent_type": "general-purpose", "prompt": "Look at the parser and report the bugs you find."}
 		if model := os.Getenv("CLAUDEAGENT_AGENT_MODEL"); model != "" {
 			input["model"] = model
 		}
-		f.toolUse("toolu_agent", "Agent", input)
-		f.subagentText("toolu_agent", "I will read the parser now.")
-		f.subagentToolUse("toolu_agent", "toolu_read", "Read", map[string]any{"file_path": "/tmp/parser.go"})
-		f.batch("batch-agent", cwd, map[string]any{"tool_name": "Agent", "tool_input": input, "tool_use_id": "toolu_agent", "tool_response": "The parser reads one file twice."})
+		f.toolUse(parent, "Agent", input)
+		read := map[string]any{"file_path": "/tmp/parser.go"}
+		f.emit(map[string]any{"type": "assistant", "parent_tool_use_id": parent, "message": map[string]any{
+			"id": "msg_sub", "model": "claude-sonnet-5-5", "content": []any{
+				map[string]any{"type": "thinking", "thinking": "Start with the parser", "signature": "private-signature"},
+				map[string]any{"type": "text", "text": "I will read the parser now."},
+				map[string]any{"type": "tool_use", "id": "toolu_read", "name": "Read", "input": read},
+			},
+		}})
+		f.emit(map[string]any{"type": "user", "parent_tool_use_id": parent, "message": map[string]any{
+			"content": []any{map[string]any{"type": "tool_result", "tool_use_id": "toolu_read", "content": "Parser source", "is_error": true}},
+		}})
+		f.batch("batch-child", cwd, map[string]any{"tool_name": "Read", "tool_input": read, "tool_use_id": "toolu_read", "tool_response": "Hook result"})
+		f.toolResult(parent, "The parser reads one file twice.", false)
+		f.batch("batch-agent", cwd, map[string]any{"tool_name": "Agent", "tool_input": input, "tool_use_id": parent, "tool_response": "Hook result"})
 		f.text("msg_final", "Done.")
 		f.result("Done.")
 	case "gate":

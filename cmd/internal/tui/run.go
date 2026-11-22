@@ -238,6 +238,8 @@ func Run(ctx context.Context, c Config) error {
 	queued := make(chan Key, 1)
 	var permissionConnection permission.ControlConnection
 	var permissionGeneration string
+	var selectionGeneration string
+	var selectionRevision uint64
 	var cancelPermission context.CancelFunc
 	permissionEvents := make(chan permissionWatchResult, 2)
 	defer func() {
@@ -286,9 +288,25 @@ func Run(ctx context.Context, c Config) error {
 				viewerChanged = true
 			}
 			s := snapshot()
+			if s.Connected && s.Selection != nil && !u.Busy {
+				if s.Generation == selectionGeneration && s.Selection.Revision > selectionRevision {
+					notice("モデルを切り替えました  "+selectionLabel(*s.Selection, u.Theme), "")
+				}
+				selectionGeneration, selectionRevision = s.Generation, s.Selection.Revision
+			}
 			if u.Sheet != nil && u.Sheet.Analysis != "" {
-				if u.Sheet != analysisSheet || s.Version != analysisVersion || u.Viewer.Version != analysisViewerVersion || analysisShowsElapsed(u.Sheet) && viewerChanged {
-					u.Sheet.Lines = analysis.Lines(m.Analysis(u.Now, u.Viewer.Rows), u.Sheet.Analysis, u.Theme.ASCII)
+				reset := !u.Sheet.refreshAt.IsZero() && !u.Now.Before(u.Sheet.refreshAt)
+				if u.Sheet != analysisSheet || s.Version != analysisVersion || u.Viewer.Version != analysisViewerVersion || analysisShowsElapsed(u.Sheet) && viewerChanged || reset {
+					report := m.Analysis(u.Now, u.Viewer.Rows, u.Viewer.SubscriptionUsage)
+					u.Sheet.Lines = analysis.Lines(report, u.Sheet.Analysis, u.Theme.ASCII)
+					if u.Sheet.Analysis == analysis.SubscriptionUsageView {
+						u.Sheet.refreshAt = time.Time{}
+						for _, window := range report.SubscriptionUsage {
+							if window.ResetsAt.After(u.Now) && (u.Sheet.refreshAt.IsZero() || window.ResetsAt.Before(u.Sheet.refreshAt)) {
+								u.Sheet.refreshAt = window.ResetsAt
+							}
+						}
+					}
 					analysisSheet, analysisVersion, analysisViewerVersion = u.Sheet, s.Version, u.Viewer.Version
 				}
 			} else {
@@ -682,8 +700,8 @@ func Run(ctx context.Context, c Config) error {
 						selected := sessionstore.RuntimeSelection{Version: 1, RequestID: uuid.New().String(), Provider: p.Provider, Model: m.ID, Name: m.Name, Effort: effort, ContextWindow: m.ContextWindow, Fast: fast}
 						generation, revision := s.Generation, p.Revision
 						u.Picker = nil
-						start("changing model for the next turn", func(ctx context.Context) commandResult {
-							return commandResult{text: "モデルを変更しました: " + selectionLabel(selected, u.Theme) + "（次のターンから）", err: c.SelectModel(ctx, generation, revision, selected)}
+						start("モデルの選択を送信中", func(ctx context.Context) commandResult {
+							return commandResult{err: c.SelectModel(ctx, generation, revision, selected)}
 						})
 					}
 					if p.Kind == "copy" {
@@ -810,7 +828,7 @@ func Run(ctx context.Context, c Config) error {
 							notice("analysis export unavailable", "warning")
 							continue
 						}
-						report := m.Analysis(time.Now(), u.Viewer.Rows)
+						report := m.Analysis(time.Now(), u.Viewer.Rows, u.Viewer.SubscriptionUsage)
 						format := p.Options[p.Selection]
 						u.Picker = nil
 						start("exporting metadata/statistics only", func(ctx context.Context) commandResult {

@@ -24,9 +24,14 @@ type Prompt struct {
 // seen and what it has not: turns another model answered after Claude's last
 // turn, and the new user input at the end.
 func Plan(input []llm.Item) Prompt {
+	var scopes llm.ToolScopes
+	scopes.Observe(input)
 	last := -1
 	ownCalls := map[string]bool{}
 	for i, item := range input {
+		if scopes.Nested(item) {
+			continue
+		}
 		if item.ClaudeResumeBoundary || strings.HasPrefix(item.ProviderID, ItemPrefix) {
 			last = i
 			if call, ok := item.Data.(llm.ToolCall); ok {
@@ -55,6 +60,9 @@ func Plan(input []llm.Item) Prompt {
 	render := func(items []llm.Item) string {
 		var lines []string
 		for _, item := range items {
+			if scopes.Nested(item) {
+				continue
+			}
 			if line := transcriptLine(item, ownCalls); line != "" {
 				lines = append(lines, line)
 			}

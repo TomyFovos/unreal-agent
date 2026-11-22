@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"github.com/unreallabsai/unreal-agent/harness/host"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
@@ -15,12 +16,13 @@ import (
 )
 
 type ChildView struct {
-	View           host.View
-	Configuration  *ChildConfig
-	Finish         *sessionstore.FinishRecord
-	FinishLocator  record.Locator
-	End            *sessionstore.EndRecord
-	LastRecordedAt time.Time
+	View              host.View
+	Configuration     *ChildConfig
+	Finish            *sessionstore.FinishRecord
+	FinishLocator     record.Locator
+	End               *sessionstore.EndRecord
+	LastRecordedAt    time.Time
+	SubscriptionUsage llm.SubscriptionObservations
 }
 
 // ReadChild never acquires execution ownership. An empty generation means
@@ -95,6 +97,10 @@ func readChildSnapshot(ctx context.Context, directory string, id session.ID, ana
 		}
 		record := item.Data.(sessionstore.HostRecord)
 		switch record.Kind {
+		case sessionstore.HostActivity:
+			if record.Activity != nil {
+				result.SubscriptionUsage.Observe(*record.Activity, item.RecordedAt)
+			}
 		case "configuration":
 			var config ChildConfig
 			if json.Unmarshal(record.Configuration, &config) == nil && config.Validate() == nil && config.ChildID == id {

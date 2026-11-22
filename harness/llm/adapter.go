@@ -44,7 +44,7 @@ type RequestOptions struct {
 	// Steering supplies queued user and peer inputs in inbox order at a
 	// provider's tool-batch boundary. The response confirms their delivery.
 	Steering func(context.Context) ([]BatchInput, error)
-	// AfterToolBatch is the window-aware steering path. Input tokens are
+	// AfterToolBatch is the window-aware steering path for the main agent. Input tokens are
 	// measured for the last main model call, or zero if unavailable. A
 	// rotation leaves queued inputs for the first request of the new window.
 	AfterToolBatch func(ctx context.Context, inputTokens int64) (ToolBatchContinuation, error)

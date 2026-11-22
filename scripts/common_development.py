@@ -2,14 +2,20 @@
 """Install a common wrapper; native Unreal owns discovery, Host and execution."""
 
 import argparse
+from contextlib import closing
 from datetime import datetime
 import hashlib
+from http.client import HTTPException
 import json
 import os
 from pathlib import Path
 import re
+import select
 import shlex
 import shutil
+import signal
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -434,7 +440,8 @@ def repo_paths(home, workspace, instance="default"):
 
 
 def command_for(settings, workspace, paths, session):
-    command = [str(Path(settings["BinaryDirectory"]) / "unreal"),
+    binary_directory = paths.get("binary_directory", Path(settings["BinaryDirectory"]))
+    command = [str(binary_directory / "unreal"),
                "--state-directory", str(paths["state"]), "--socket", str(paths["socket"]),
                "--shared-state-directory", str(shared_state_directory(Path(settings["Home"])))]
     if paths.get("explicit_config"): command += ["--config", str(paths["config"])]
@@ -482,30 +489,138 @@ def provider_profile(settings):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def stop_old_host(paths):
-    """Stops the instance's Host if it runs an older build: the new launcher
-    starts its own build there, with the same Sessions."""
-    config = str(paths["config"])
-    pids = []
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
+class LiveHost(pilot.Gateway):
+    pid = None
+
+    def connect(self):
+        super().connect()
+        pid, uid, _ = struct.unpack("3i", self.sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        if uid != os.getuid() or pid <= 1 or self.pid not in (None, pid):
+            raise OSError("Host socket owner changed")
+        self.pid = pid
+
+    def installation(self, paths):
+        process = Path("/proc") / str(self.pid)
+        binary = Path(os.readlink(process / "exe"))
+        args = os.fsdecode((process / "cmdline").read_bytes()).split("\0")
+        if binary.name not in ("unreal", "unreal-agent") or args[1:2] != ["serve"]:
+            return None, False
+        expected = {"--config": paths["config"], "--socket": paths["socket"],
+                    "--session-directory": paths["state"] / "sessions"}
+        bound = True
+        for flag, value in expected.items():
+            assigned = [arg.partition("=")[2] for arg in args if arg.startswith(flag + "=")]
+            assigned.extend(arg for option, arg in zip(args, args[1:]) if option == flag)
+            if assigned != [str(value)]:
+                bound = False
+                break
+        return binary.parent, bound
+
+
+def legacy_workload(host, paths, session):
+    # The old gateway has only per-Session inspection. Use the existing name
+    # discovery for addresses and take every activity count from the gateway.
+    names = {name for _, name in main_session_files(paths["state"])}
+    work = {"ActiveSessions": 0, "Operations": 0, "Children": 0}
+    for name in sorted(names | {session}):
+        reply = host.call("inspect", {"ID": name, "Limit": 1}, allow_error=True)
+        if reply.get("Error") == "not_found":
             continue
+        view = reply.get("View")
+        if not isinstance(view, dict):
+            pilot.fail("common_host_workload_unavailable", "The running Host could not report its work.")
+        progress = view.get("Progress") or {}
+        active = view["Running"] and bool(progress) and not progress.get("Done")
+        for op in view.get("Operations") or ():
+            if op["Status"] in ("completed", "failed", "canceled"):
+                continue
+            active = True
+            kind = "Children" if op["Type"] == "remote_job" and op.get("ToolName") == "SubagentStart" else "Operations"
+            work[kind] += 1
+        work["ActiveSessions"] += int(active)
+    return work
+
+
+def confirm_restart(work, *, legacy=False):
+    impact = (f"{work['Children']} direct child agents, {work['Operations']} other operations, "
+              f"{work['ActiveSessions']} active Sessions")
+    scope = " (observed on the older Host)" if legacy else ""
+    try:
+        answer = input(f"Restart this workspace's Host and interrupt its work? {impact}{scope}. "
+                       "Child agents' descendants are affected too. [y/N] ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def restart_legacy_host(host, paths, session):
+    # Pin the socket owner before prompting so a PID reuse cannot turn this
+    # confirmation into a signal to another process.
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        pilot.fail("common_host_identity_unavailable", "Restarting this older Host requires Linux pidfd support.")
+    fd = os.pidfd_open(host.pid)
+    try:
+        work = legacy_workload(host, paths, session)
+        while confirm_restart(work, legacy=True):
+            current = legacy_workload(host, paths, session)
+            if current != work:
+                work = current
+                continue
+            signal.pidfd_send_signal(fd, signal.SIGTERM)
+            exited = select.poll()
+            exited.register(fd, select.POLLIN)
+            if not exited.poll(10_000):  # retain the existing shutdown grace period
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+                exited.poll()
+            return True
+        return False
+    finally:
+        os.close(fd)
+
+
+def select_host(settings, paths, session, *, updated, restart, restart_command):
+    installed = Path(settings["BinaryDirectory"])
+    host = LiveHost(paths["socket"])
+    try:
+        with closing(host):
+            host.connect()
+            directory, bound = host.installation(paths)
+    except (FileNotFoundError, ConnectionRefusedError):
+        return None
+    # Matching the installed directory covers both the revision and compiled
+    # features. A deferred attach uses the TUI from the socket owner's build.
+    if not updated and (directory is None or directory == installed) and not restart:
+        return None
+    legacy = False
+    if bound:
         try:
-            with open("/proc/" + entry + "/cmdline", "rb") as f:
-                args = f.read().split(b"\0")
-        except OSError:
-            continue
-        if b"serve" in args and os.fsencode(config) in args:
-            pids.append(int(entry))
-    for pid in pids:
-        try: os.kill(pid, 15)
-        except OSError: pass
-    for _ in range(100):
-        if not any(os.path.exists("/proc/%d" % pid) for pid in pids): return
-        import time; time.sleep(0.1)
-    for pid in pids:
-        try: os.kill(pid, 9)
-        except OSError: pass
+            reply = host.call("host/workload" if restart else "host/restart", {}, allow_error=True)
+            legacy = reply.get("Error") in ("not_found", "unknown_method")
+            if legacy and restart and restart_legacy_host(host, paths, session):
+                return None
+            while restart and "Workload" in reply and not reply.get("Restarting"):
+                work = reply["Workload"]
+                if any(work.values()) and not confirm_restart(work):
+                    break
+                reply = host.call("host/restart", {"Workload": work}, allow_error=True)
+            if reply.get("Restarting"):
+                print("Updated build/settings: restarting this workspace's Host; Sessions and settings carry on.", flush=True)
+                return None
+            if reply.get("Error") == "stopped":
+                return None  # native launcher waits for the retiring Host's socket lock
+        except (OSError, ValueError, HTTPException, pilot.PilotError):
+            if restart:
+                raise
+    elif restart:
+        pilot.fail("common_host_binding_mismatch", "The running Host does not match this workspace's config and socket.")
+
+    if updated or directory != installed:
+        if legacy:
+            hint = f"This Host cannot verify workspace-wide idle; run {restart_command} to switch."
+        else:
+            hint = f"Reopen when idle or run {restart_command} to switch now."
+        print(f"Updated build/settings are ready. Keeping the running Host. {hint}", flush=True)
+    return directory or installed
 
 
 def read_workspace_choice(path, workspace):
@@ -515,8 +630,22 @@ def read_workspace_choice(path, workspace):
     return value
 
 
-def select_repo(settings, workspace, instance, *, explicit_config=None):
+def select_repo(settings, workspace, instance, *, explicit_config=None, session=None, restart=False):
     home = Path(settings["Home"])
+    def select_launch_host(paths, updated=False):
+        if session is None:
+            return None
+        command = ["unreal", session, "--restart-host"]
+        if instance is not None:
+            command += ["--instance", instance]
+        if explicit_config is not None:
+            command += ["--config", str(paths["config"])]
+        directory = select_host(settings, paths, session, updated=updated, restart=restart,
+                                restart_command=shlex.join(command))
+        if directory is not None:
+            paths["binary_directory"] = directory
+        return directory
+
     # Explicit operator destinations never get rebound by common defaults.
     if instance is not None or explicit_config is not None:
         paths = prepare_repo(settings, workspace, instance or "default")
@@ -527,21 +656,22 @@ def select_repo(settings, workspace, instance, *, explicit_config=None):
                 pilot.fail("common_workspace_binding_mismatch", "Explicit config workspace differs; no rewrite or migration.")
             paths["config"] = config_path
             paths["explicit_config"] = True
+        select_launch_host(paths)
         return paths
     paths = prepare_repo(settings, workspace, "default")
     choice_path = paths["root"] / "current.json"
     with daily.locked(paths["root"]):
         old_bytes = files.read_owned(choice_path, private=True) if os.path.lexists(choice_path) else None
         choice = read_workspace_choice(choice_path, workspace) if old_bytes is not None else None
-        instance = choice["Instance"] if choice else "default"
-        selected = paths if instance == "default" else prepare_repo(settings, workspace, instance)
+        selected_instance = choice["Instance"] if choice else "default"
+        selected = paths if selected_instance == "default" else prepare_repo(settings, workspace, selected_instance)
         profile = provider_profile(settings)
-        if choice and (choice.get("Revision") != settings["Revision"]
-                       or choice.get("BinaryDirectory") != settings["BinaryDirectory"]
-                       or choice.get("Profile") != profile):
-            print("Updated build/settings: restarting this workspace's Host; Sessions and settings carry on.", flush=True)
-            stop_old_host(selected)
-        value = {"Version": 1, "Workspace": str(workspace), "Instance": instance, "Profile": profile,
+        updated = choice is not None and (choice.get("Revision") != settings["Revision"]
+                                        or choice.get("BinaryDirectory") != settings["BinaryDirectory"]
+                                        or choice.get("Profile") != profile)
+        if select_launch_host(selected, updated) is not None or updated and session is None:
+            return selected
+        value = {"Version": 1, "Workspace": str(workspace), "Instance": selected_instance, "Profile": profile,
                  "Revision": settings["Revision"], "BinaryDirectory": settings["BinaryDirectory"]}
         new_bytes = (json.dumps(value, ensure_ascii=True, indent=2) + "\n").encode()
         if old_bytes is not None:
@@ -568,6 +698,13 @@ def discover_workspaces(home):
     return bindings
 
 
+def main_session_files(state):
+    for path in (state / "sessions").glob("*.session.jsonl"):
+        name = path.name[:-len(".session.jsonl")]
+        if not name.startswith("child-") and re.fullmatch(r"[A-Za-z0-9-]+", name):
+            yield path, name
+
+
 def discover_sessions(home, bindings=None):
     """Build the main Session inventory from names, mtimes and workspace metadata."""
     if bindings is None:
@@ -584,10 +721,7 @@ def discover_sessions(home, bindings=None):
         base = base_match.group() if base_match else key
         instance = state.name[len(base) + 1:] if state.name != base else "default"
         current = bindings.get(base, binding)["instance"]
-        for path in (state / "sessions").glob("*.session.jsonl"):
-            name = path.name[:-len(".session.jsonl")]
-            if name.startswith("child-") or not re.fullmatch(r"[A-Za-z0-9-]+", name):
-                continue
+        for path, name in main_session_files(state):
             try:
                 if not path.is_file() or path.is_symlink():
                     continue
@@ -722,17 +856,18 @@ def launch(args, directory):
     if getattr(args, "where", None) is not None:
         print(workspace)
         return
-    installed = Path(settings["BinaryDirectory"])
     # Installer and launcher share the settings lock; instances keep their histories.
     with daily.locked(settings_path(daily.home()).parent):
-        paths = select_repo(settings, workspace, instance, explicit_config=getattr(args, "config", None))
+        paths = select_repo(settings, workspace, instance, explicit_config=getattr(args, "config", None),
+                            session=None if args.workspace_info else session, restart=getattr(args, "restart_host", False))
     if args.workspace_info:
         print("Workspace: " + str(workspace) + "\nConfig: " + str(paths["config"]) + "\nState: " + str(paths["state"]) + "\nSocket: " + str(paths["socket"]))
         return
     print("Unreal Agent - Quick Start\nEnter  メッセージ送信   /model  モデル変更\n/permissions  権限変更   Ctrl+D  detach\nFull Access は OS の隔離ではありません。", flush=True)
     env = dict(os.environ, XDG_CONFIG_HOME=str(paths["xdg"]))
     os.chdir(workspace)
-    os.execve(str(installed / "unreal"), command_for(settings, workspace, paths, session), env)
+    argv = command_for(settings, workspace, paths, session)
+    os.execve(argv[0], argv, env)
 
 
 def main(argv=None):
@@ -761,6 +896,7 @@ def main(argv=None):
     launch_args.add_argument("--where", metavar="NAME", help="Print the workspace of an existing main Session")
     launch_args.add_argument("--list", action="store_true", help="List main Sessions, newest first")
     launch_args.add_argument("--instance", default=None)
+    launch_args.add_argument("--restart-host", action="store_true", help="Restart the workspace Host, confirming before interrupting work")
     launch_args.add_argument("--config", default=None)
     launch_args.add_argument("--readme", action="store_true")
     launch_args.add_argument("--workspace-info", action="store_true")
@@ -770,7 +906,7 @@ def main(argv=None):
         directory = Path(__file__).resolve().parent
         if args.mode == "install": install(args, directory, package(directory))
         else: launch(args, directory)
-    except (pilot.PilotError, OSError, ValueError, TypeError, subprocess.SubprocessError) as err:
+    except (pilot.PilotError, OSError, ValueError, TypeError, HTTPException, subprocess.SubprocessError) as err:
         if isinstance(err, pilot.PilotError): print(str(err), file=sys.stderr)
         else: print(f"common launcher failed: {err}", file=sys.stderr)
         return 1

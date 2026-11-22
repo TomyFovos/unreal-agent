@@ -59,7 +59,7 @@ type streamActivities struct {
 	counts          map[string]map[string]int64
 	limits          map[string][]outputLimitHit
 	limitedMessages map[string]bool
-	usage           map[string]llm.Usage
+	usage           []usageStep
 	now             func() time.Time
 	record          func(llm.ActivityRecord)
 }
@@ -184,13 +184,13 @@ func (s *streamActivities) observe(f frame) {
 		}
 	case "message_stop":
 		if r != nil {
-			if r.input != nil && r.output != nil && r.model != "<synthetic>" {
-				if s.usage == nil {
-					s.usage = map[string]llm.Usage{}
-				}
+			if r.input != nil && r.reportedOutput != nil && r.model != "<synthetic>" {
 				u := *r.input
-				u.OutputTokens, u.ReasoningTokens = *r.output, r.reasoning
-				s.usage[r.model] = addUsage(s.usage[r.model], reportedUsage(u))
+				u.OutputTokens, u.outputReported = *r.reportedOutput, true
+				if r.reasoning != nil {
+					u.ReasoningTokens = r.reasoning
+				}
+				s.usage = append(s.usage, usageStep{id: stepID{scope, r.messageID}, model: r.model, usage: u})
 			}
 			observation := r.snapshot("message_stop")
 			observation.StopReason = r.stopReason

@@ -285,7 +285,7 @@ func TestGenerationHistoryEightSamplesReplayAndWaits(t *testing.T) {
 func TestStatusDockJapaneseAndPulseTools(t *testing.T) {
 	s, u := idleSnapshot(), plainUI()
 	s.PendingSelection = &sessionstore.RuntimeSelection{Provider: "claude-code", Model: "opus", Effort: "max"}
-	if got := plainRows(stateDock(s, u, makeLayout(160, 40))); !strings.Contains(got, "次のターンから: ") {
+	if got := plainRows(stateDock(s, u, makeLayout(160, 40))); !strings.Contains(got, "モデル切り替え待ち") || !strings.Contains(got, "opus") {
 		t.Fatal(got)
 	}
 	s.Operations = []operation.Operation{{ToolName: "Read", Status: operation.StatusReady}, {ToolName: "Write", Status: operation.StatusReady}}

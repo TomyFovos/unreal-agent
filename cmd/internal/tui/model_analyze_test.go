@@ -134,13 +134,25 @@ func TestRunModelAndAnalyzePickersCancelScrollConfirmExportAndLiveUpdates(t *tes
 			if choice.Model != "m11" || choice.Effort != llm.ReasoningEffortMax || !choice.Fast || choice.RequestID == "" {
 				t.Fatal(choice)
 			}
-			waitFor(t, func() bool { return strings.Contains(out.text(), "モデルを変更しました") })
 			choice.Revision = 1
 			f.mu.Lock()
 			f.view.Revision = 1
-			f.view.History.Items = append(f.view.History.Items, host.HistoryItem{Sequence: 2, Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostRuntimeSelection, Selection: &choice}}, host.HistoryItem{Sequence: 3, Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostRuntimeApplied, Selection: &choice}})
+			f.view.History.Items = append(f.view.History.Items, host.HistoryItem{Sequence: 2, Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostRuntimeSelection, Selection: &choice}})
 			f.mu.Unlock()
 			f.events <- host.Event{Generation: "g", Revision: 1, Kind: "item"}
+			waitFor(t, func() bool { return strings.Contains(out.text(), "モデル切り替え待ち") })
+			if strings.Contains(out.text(), "モデルを切り替えました") {
+				t.Fatal("reported a switch before activation")
+			}
+			f.mu.Lock()
+			f.view.Revision = 2
+			f.view.History.Items = append(f.view.History.Items, host.HistoryItem{Sequence: 3, Kind: sessionstore.ItemHostRecord, Data: sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostRuntimeApplied, Selection: &choice}})
+			f.mu.Unlock()
+			f.events <- host.Event{Generation: "g", Revision: 2, Kind: "item"}
+			waitFor(t, func() bool {
+				text := out.text()
+				return strings.Contains(text, "モデルを切り替えました") && !strings.Contains(text, "モデル切り替え待ち")
+			})
 			command("/analyze")
 			pick("Overview")
 			for _, view := range analysis.Views[1:] {
@@ -172,10 +184,10 @@ func TestRunModelAndAnalyzePickersCancelScrollConfirmExportAndLiveUpdates(t *tes
 			keys <- Key{Name: "enter"}
 			waitFor(t, func() bool { return strings.Contains(out.text(), "Analysis · Usage") })
 			f.mu.Lock()
-			f.view.Revision = 2
+			f.view.Revision = 3
 			f.view.History.Items = append(f.view.History.Items, host.HistoryItem{Sequence: 4, Kind: sessionstore.ItemTurn, Data: session.Turn{ID: "turn", RuntimeRevision: 1}}, host.HistoryItem{Sequence: 5, Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{Usage: llm.Usage{InputTokens: 7, OutputTokens: 2}}}})
 			f.mu.Unlock()
-			f.events <- host.Event{Generation: "g", Revision: 2, Kind: "item"}
+			f.events <- host.Event{Generation: "g", Revision: 3, Kind: "item"}
 			waitFor(t, func() bool { return strings.Contains(out.text(), "input         7") })
 			keys <- Key{Name: "escape"}
 			pick("Usage")

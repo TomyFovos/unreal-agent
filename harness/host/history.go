@@ -28,6 +28,7 @@ type HistoryState struct {
 	UsageResponses                               int
 	UsagePartial                                 bool
 	Generations                                  []llm.GenerationStatistics
+	SubscriptionUsage                            llm.SubscriptionObservations `json:",omitzero"`
 }
 
 // HistoryReceipt supplies the latest call linkage for calls in a backward
@@ -105,8 +106,11 @@ func (s *Session) indexHistory() {
 		case sessionstore.HostRecord:
 			switch d.Kind {
 			case sessionstore.HostActivity:
-				if d.Activity != nil && d.Activity.Kind == llm.ActivityModelFailure {
-					h.WaitingForModel = false
+				if d.Activity != nil {
+					h.SubscriptionUsage.Observe(*d.Activity, item.RecordedAt)
+					if d.Activity.Kind == llm.ActivityModelFailure {
+						h.WaitingForModel = false
+					}
 				}
 			case "configuration":
 				h.Configuration = projectConfiguration(d.Configuration)

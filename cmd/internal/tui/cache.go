@@ -47,6 +47,7 @@ type regionLineKey struct {
 	width      int
 	theme      Theme
 	clock      frameClock
+	reset      time.Time
 }
 type cachedRegionLine struct {
 	key   regionLineKey
@@ -69,7 +70,7 @@ func (c *bodyCache) header(s Snapshot, u UIState, l layout) line {
 }
 
 func (c *bodyCache) statistics(s Snapshot, u UIState, l layout) line {
-	k := regionLineKey{projection: renderProjection(s, u), width: l.width, theme: u.Theme}
+	k := regionLineKey{projection: renderProjection(s, u), width: l.width, theme: u.Theme, reset: nextSubscriptionReset(s, u)}
 	if !c.statisticsLine.valid || !k.projection.reusable() || c.statisticsLine.key != k {
 		c.statisticsLine = cachedRegionLine{key: k, value: statisticsBar(s, u, l), valid: true}
 	}
@@ -256,6 +257,7 @@ type frameCache struct {
 	ui                              UIState
 	width, height                   int
 	clock                           frameClock
+	reset                           time.Time
 	frame                           Frame
 	inputStart, inputRows, overflow int
 	valid                           bool
@@ -286,7 +288,7 @@ func (c *bodyCache) inputFrame(s Snapshot, u UIState, width, height int) (Frame,
 	v := &c.rendered
 	key := renderProjection(s, u)
 	ui, ok := composerCacheUI(u)
-	if !ok || !key.reusable() || !v.valid || key != v.key || width != v.width || height != v.height || renderClock(u) != v.clock || !reflect.DeepEqual(ui, v.ui) {
+	if !ok || !key.reusable() || !v.valid || key != v.key || width != v.width || height != v.height || renderClock(u) != v.clock || nextSubscriptionReset(s, u) != v.reset || !reflect.DeepEqual(ui, v.ui) {
 		return Frame{}, false
 	}
 	l := makeLayout(width, height)
@@ -308,7 +310,7 @@ func (c *bodyCache) inputFrame(s Snapshot, u UIState, width, height int) (Frame,
 
 func (c *bodyCache) rememberFrame(s Snapshot, u UIState, width, height int, f Frame, start, inputRows, overflow int) {
 	ui, ok := composerCacheUI(u)
-	c.rendered = frameCache{key: renderProjection(s, u), ui: ui, width: width, height: height, clock: renderClock(u), frame: f, inputStart: start, inputRows: inputRows, overflow: overflow, valid: ok && height >= 16}
+	c.rendered = frameCache{key: renderProjection(s, u), ui: ui, width: width, height: height, clock: renderClock(u), reset: nextSubscriptionReset(s, u), frame: f, inputStart: start, inputRows: inputRows, overflow: overflow, valid: ok && height >= 16}
 }
 
 func (c *bodyCache) begin(width int, ascii bool) {

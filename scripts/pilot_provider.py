@@ -204,7 +204,7 @@ class Gateway(http.client.HTTPConnection):
         self.sock.settimeout(self.timeout)
         self.sock.connect(self.path)
 
-    def call(self, method, payload):
+    def call(self, method, payload, *, allow_error=False):
         try:
             self.request("POST", "/v1/" + method, json.dumps(payload), {"Content-Type": "application/json"})
             response = self.getresponse()
@@ -212,7 +212,7 @@ class Gateway(http.client.HTTPConnection):
             if response.status != 200 or len(raw) > 4 << 20:
                 fail("gateway_protocol_failed", "Pilot gateway returned an invalid/bounded response; raw contents withheld.")
             result = decode(raw)
-            if not isinstance(result, dict) or result.get("Error"):
+            if not isinstance(result, dict) or (result.get("Error") and not allow_error):
                 fail("gateway_request_failed", "Pilot control request failed; inspect the matching Pilot Host, without retrying inference.")
             return result
         finally:

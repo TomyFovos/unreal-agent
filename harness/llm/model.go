@@ -24,12 +24,28 @@ type Item struct {
 	Type       ItemType
 	Data       any
 	Responses  *ItemEncoding `json:"-"`
+	// ToolObservations describe work inside a tool call. They are history only.
+	ToolObservations []ToolObservation `json:",omitzero"`
+	// ParentCallID scopes a Host-executed call to another tool's conversation.
+	ParentCallID string `json:",omitzero"`
 	// OutputLimit identifies output from a capped provider request inside a
 	// response that can also contain successful requests (Claude Code).
 	OutputLimit bool `json:",omitzero"`
 	// ClaudeResumeBoundary marks the verified prefix in Claude Code's private
 	// transcript, including hook inputs followed by an empty model response.
 	ClaudeResumeBoundary bool `json:"-"`
+}
+
+// ToolObservation records a message, reasoning, tool call or result inside a
+// tool's own conversation. The observations are not part of model input.
+type ToolObservation struct {
+	ParentCallID string
+	Type         ItemType
+	Model        string `json:",omitzero"`
+	CallID       string `json:",omitzero"`
+	Tool         string `json:",omitzero"`
+	Text         string `json:",omitzero"`
+	IsError      bool   `json:",omitzero"`
 }
 
 type Message struct {

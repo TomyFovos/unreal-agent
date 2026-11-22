@@ -36,8 +36,12 @@ type Dependencies struct {
 	// not append a canonical record or change scheduling/lifecycle decisions.
 	ContextBuilt func(contextengine.Diagnostics)
 	// BeforeTurn is owner composition, called only on the coordinator goroutine.
-	// boundary excludes an in-flight request and unfinished tool/operation loops.
+	// boundary excludes an in-flight request and unfinished tools in its batch.
 	BeforeTurn func(context.Context, bool) (uint64, error)
+	// RuntimeSelection reads the durable active and pending choices. The signal
+	// wakes a usage-limit wait when the owner records a new choice.
+	RuntimeSelection func() (active, pending *sessionstore.RuntimeSelection)
+	SelectionChanged <-chan struct{}
 	// BeforeGeneration refreshes only ephemeral owner-controlled guidance on the
 	// Coordinator goroutine. It must not apply a pending runtime selection.
 	BeforeGeneration func(context.Context) error
@@ -51,6 +55,9 @@ type Dependencies struct {
 	// OnIdle commits child completion only after all model/tool work and waking
 	// inputs have drained. The owner preserves an explicit parent-reply wait.
 	OnIdle func(context.Context, session.TurnID) error
+	// SetIdle publishes the decision loop's idle boundary to the Host. False
+	// on return means the Host has begun shutting down.
+	SetIdle func(bool) bool
 	// RestoredStop is a persisted stop whose effect was not completed.
 	RestoredStop          *inbox.ControlMessage
 	ToolHeartbeatInterval time.Duration

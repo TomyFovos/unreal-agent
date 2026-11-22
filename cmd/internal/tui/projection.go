@@ -66,6 +66,11 @@ func clipBytes(s string, bound int) string {
 }
 
 func entriesFor(item host.HistoryItem) []Entry {
+	var scopes llm.ToolScopes
+	return projectEntries(item, &scopes)
+}
+
+func projectEntries(item host.HistoryItem, scopes *llm.ToolScopes) []Entry {
 	var result []Entry
 	add := func(role, text, code string) {
 		safe := terminaltext.Clean(text)
@@ -135,7 +140,11 @@ func entriesFor(item host.HistoryItem) []Entry {
 		}
 	case sessionstore.ModelResponse:
 		var calls []Receipt
+		scopes.Observe(d.Response.Output)
 		for _, output := range d.Response.Output {
+			if scopes.Nested(output) {
+				continue
+			}
 			if msg, ok := output.Data.(llm.Message); ok {
 				if output.Type != llm.ItemMessage || msg.Role != "" && msg.Role != llm.RoleAssistant || msg.Phase != "" && msg.Phase != "commentary" && msg.Phase != "final" && msg.Phase != "final_answer" {
 					continue
@@ -144,7 +153,9 @@ func entriesFor(item host.HistoryItem) []Entry {
 				result[len(result)-1].TurnID = d.TurnID
 			}
 			if call, ok := output.Data.(llm.ToolCall); ok {
-				calls = append(calls, newReceipt(call))
+				r := newReceipt(call)
+				r.NestedTools = scopes.Count(call.CallID)
+				calls = append(calls, r)
 			}
 		}
 		if len(calls) > 0 {
@@ -160,6 +171,30 @@ func entriesFor(item host.HistoryItem) []Entry {
 		}
 	}
 	return result
+}
+
+// Older pages may supply the nested IDs and counts for receipts already shown.
+func updateToolScopes(entries []Entry, scopes *llm.ToolScopes) []Entry {
+	kept := entries[:0]
+	for _, entry := range entries {
+		if len(entry.Calls) != 0 {
+			calls := entry.Calls[:0]
+			for _, call := range entry.Calls {
+				if scopes.Parent(call.CallID) == "" {
+					call.NestedTools = scopes.Count(call.CallID)
+					calls = append(calls, call)
+				}
+			}
+			clear(entry.Calls[len(calls):])
+			entry.Calls = calls
+			if len(calls) == 0 && entry.Text == "" {
+				continue
+			}
+		}
+		kept = append(kept, entry)
+	}
+	clear(entries[len(kept):])
+	return kept
 }
 
 // The terminal retains a bounded page; older canonical data is loaded through

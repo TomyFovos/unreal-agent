@@ -113,7 +113,11 @@ func (s *Session) observeDisplay(item sessionstore.Item) {
 	case sessionstore.ModelResponse:
 		var messages []string
 		tools := 0
+		s.historyToolScopes.Observe(d.Response.Output)
 		for _, output := range d.Response.Output {
+			if s.historyToolScopes.Nested(output) {
+				continue
+			}
 			if message, ok := output.Data.(llm.Message); ok && output.Type == llm.ItemMessage && (message.Role == "" || message.Role == llm.RoleAssistant) && (message.Phase == "" || message.Phase == "commentary" || message.Phase == "final" || message.Phase == "final_answer") {
 				// The folded history uses only leading human-facing markers.
 				// A safe leading rune survives cleaning, so an ordinary message

@@ -5,6 +5,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +58,7 @@ type Snapshot struct {
 	Progress                          *host.Progress
 	LastGeneration                    *llm.GenerationStatistics
 	SpeedHistory                      []llm.GenerationStatistics
+	SubscriptionUsage                 llm.SubscriptionObservations
 	CacheLatest, CacheTotal           viewer.Usage
 	WaitingForModel                   bool
 	MainInterrupted                   bool
@@ -74,6 +76,7 @@ type Model struct {
 	seenEpoch             uint64
 	analysis              *analysis.Accumulator
 	analysisTree          *analysis.Tree
+	toolScopes            llm.ToolScopes
 	historyMore           bool
 	analysisFull          bool
 	createdAt             time.Time
@@ -93,12 +96,17 @@ func (m *Model) Version() uint64 {
 	defer m.mu.Unlock()
 	return m.state.Version
 }
-func (m *Model) Analysis(now time.Time, rows []viewer.Row) analysis.Report {
+func (m *Model) Analysis(now time.Time, rows []viewer.Row, descendantUsage ...llm.SubscriptionObservations) analysis.Report {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r := m.analysis.Snapshot(now, m.state.Connected, strings.Contains(m.state.Status, "resync"), rows, m.state.Operations)
 	if m.analysisTree != nil {
 		r.Tree = m.analysisTree.Snapshot(m.analysis)
+		latest := slices.Clone(m.state.SubscriptionUsage)
+		for _, observations := range descendantUsage {
+			latest.Merge(observations)
+		}
+		r.SubscriptionUsage = analysis.SubscriptionWindows(latest, now)
 	} else {
 		r.ContextMeasurements = m.analysis.ContextReport(!r.Partial)
 	}
@@ -167,6 +175,7 @@ func (m *Model) Snapshot() Snapshot {
 		s.SpeedHistory[i] = m.speedHistory[(m.speedNext-m.speedCount+i+len(m.speedHistory))%len(m.speedHistory)]
 	}
 	s.Entries = cloneEntries(s.Entries)
+	s.SubscriptionUsage = s.SubscriptionUsage.Clone()
 	s.Attention = append([]string(nil), s.Attention...)
 	if s.HistoryWorkPrefix != nil {
 		prefix := *s.HistoryWorkPrefix
@@ -257,8 +266,11 @@ func (m *Model) apply(v host.View) error {
 		case sessionstore.HostRecord:
 			switch data.Kind {
 			case sessionstore.HostActivity:
-				if data.Activity != nil && data.Activity.Kind == llm.ActivityModelFailure {
-					s.WaitingForModel = false
+				if data.Activity != nil {
+					s.SubscriptionUsage.Observe(*data.Activity, item.RecordedAt)
+					if data.Activity.Kind == llm.ActivityModelFailure {
+						s.WaitingForModel = false
+					}
 				}
 			case sessionstore.HostContext:
 				if data.Context != nil && data.Context.Usage != nil {
@@ -336,7 +348,7 @@ func (m *Model) apply(v host.View) error {
 				s.TailBackground = true
 			}
 		}
-		newEntries := entriesFor(item)
+		newEntries := projectEntries(item, &m.toolScopes)
 		for _, entry := range newEntries {
 			if entry.Role == "you" {
 				s.Attention = nil

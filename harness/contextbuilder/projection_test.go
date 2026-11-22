@@ -15,6 +15,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
 
 type contextFixture struct {
@@ -85,6 +86,98 @@ func requestText(r Result) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+func TestNestedToolActivityIsExcludedFromLayeredWindowAdmission(t *testing.T) {
+	const parent, child = "toolu_agent", "toolu_read"
+	private := strings.Repeat("nested-content ", 8_000)
+	for _, provider := range []string{claudeagent.ProviderID, "openai-codex"} {
+		t.Run(provider, func(t *testing.T) {
+			var baseline int64
+			for _, format := range []string{"clean", "legacy", "structured"} {
+				t.Run(format, func(t *testing.T) {
+					f := newContextFixture(t, provider, contextengine.Config{InputBudget: 8_000})
+					f.b.SetHistoryRuntime(claudeagent.ProviderID, "synthetic-model")
+					f.user(t, "task", "Review the parser")
+					f.item(t, sessionstore.ItemTurn, session.Turn{ID: "batch", Type: session.TurnRegular})
+					agent := llm.Item{Type: llm.ItemToolCall, ProviderID: "claude-code/" + parent,
+						Data: llm.ToolCall{CallID: parent, Name: "claude_code", Arguments: `{"tool":"Agent","input":{"description":"Review the parser"}}`}}
+					if format != "clean" {
+						nested := llm.Item{Type: llm.ItemToolCall, ProviderID: "claude-code/" + child,
+							Data: llm.ToolCall{CallID: child, Name: "claude_code", Arguments: `{"tool":"Read","input":{"file_path":"nested-file.go"}}`}}
+						output := []llm.Item{nested}
+						if format == "legacy" {
+							// A child PostToolBatch preceded the parent receipt in old logs.
+							output = append(output, llm.Item{Type: llm.ItemMessage, ProviderID: "claude-code/msg_child/native/1", Data: llm.Message{Role: llm.RoleAssistant,
+								Text: `[Claude Code Agent toolu_agent] {"model":"claude-sonnet-5-5","id":"msg_child","content":[{"type":"text","text":"` + private + `"},{"type":"tool_use","id":"toolu_read","name":"Read"}]}`}})
+						} else {
+							output[0].ParentCallID = parent // a delegated call the Host executed
+							agent.ToolObservations = []llm.ToolObservation{
+								{Type: llm.ItemMessage, ParentCallID: parent, Text: private},
+								{Type: llm.ItemToolResult, ParentCallID: parent, CallID: child, Text: private},
+							}
+						}
+						f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "batch", Response: llm.Response{Output: output}})
+						f.item(t, sessionstore.ItemToolCallStatus, sessionstore.ToolCallStatus{TurnID: "batch", CallID: child, Status: tool.CallStatus{Error: private}})
+						f.item(t, sessionstore.ItemTurn, session.Turn{ID: "outer", Type: session.TurnRegular, ToolContinuation: "batch"})
+					}
+					f.item(t, sessionstore.ItemModelResponse, sessionstore.ModelResponse{TurnID: "outer", Response: llm.Response{Output: []llm.Item{agent}}})
+					f.item(t, sessionstore.ItemToolCallStatus, sessionstore.ToolCallStatus{TurnID: "outer", CallID: parent, Status: tool.CallStatus{Error: "the final Agent result"}})
+					f.user(t, "next", "Continue with the result")
+
+					replay := newContextFixture(t, provider, f.b.contextConfig)
+					replay.b.SetHistoryRuntime(claudeagent.ProviderID, "synthetic-model")
+					for _, item := range f.history {
+						data, err := json.Marshal(item)
+						if err != nil {
+							t.Fatal(err)
+						}
+						var restored sessionstore.Item
+						if err := json.Unmarshal(data, &restored); err != nil {
+							t.Fatal(err)
+						}
+						replay.item(t, restored.Kind, restored.Data)
+					}
+					for _, b := range []*builder{f.b, replay.b} {
+						built, err := b.Build()
+						if err != nil {
+							t.Fatal(err)
+						}
+						text := requestText(built)
+						if strings.Contains(text, "nested-") || strings.Contains(text, "[Claude Code Agent ") || !strings.Contains(text, "the final Agent result") || !strings.Contains(text, "Review the parser") {
+							t.Fatalf("unexpected layered request: %.500s", text)
+						}
+						for _, item := range built.Request.Input {
+							if item.ParentCallID != "" || len(item.ToolObservations) != 0 {
+								t.Fatalf("history metadata entered model input: %+v", item)
+							}
+						}
+						d := built.Report.Context
+						if format == "clean" && baseline == 0 {
+							baseline = d.InputTokens
+						}
+						if d.InputTokens != baseline || d.EstimatedInputTokens != baseline {
+							t.Fatalf("nested activity affected admission: actual=%d estimated=%d baseline=%d", d.InputTokens, d.EstimatedInputTokens, baseline)
+						}
+					}
+					if provider == claudeagent.ProviderID {
+						var records []sessionstore.ContextRecord
+						if rotated, err := f.b.PrepareToolWindow(t.Context(), windowRecorder(t, f, &records), 12_000, nil); err != nil || !rotated {
+							t.Fatalf("fresh window not prepared: rotated=%v error=%v", rotated, err)
+						}
+						built, err := f.b.Build()
+						if err != nil {
+							t.Fatal(err)
+						}
+						prompt := claudeagent.WindowPrompt(built.Request.Input)
+						if strings.Contains(prompt, "nested-") || !strings.Contains(prompt, "the final Agent result") || records[0].Window.AfterTokens != built.Report.Context.EstimatedInputTokens {
+							t.Fatalf("unexpected fresh Claude window: %.500s, %+v", prompt, records[0].Window)
+						}
+					}
+				})
+			}
+		})
+	}
 }
 
 func TestPublicProjectionProviderSwitchNativeToolsAndPrivateReasoning(t *testing.T) {

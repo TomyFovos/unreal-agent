@@ -16,7 +16,18 @@ const (
 // content. Claude Code gets its usual system additions separately. The edge
 // whitespace in user messages is part of the original text.
 func WindowPrompt(items []llm.Item) string {
-	return llm.WindowPrompt(WindowPromptLine).Render(items)
+	return windowRenderer(items).Render(items)
+}
+
+func windowRenderer(items []llm.Item) llm.WindowPrompt {
+	var scopes llm.ToolScopes
+	scopes.Observe(items)
+	return func(item llm.Item) (string, bool) {
+		if scopes.Nested(item) {
+			return "", false
+		}
+		return WindowPromptLine(item)
+	}
 }
 
 func WindowPromptLine(item llm.Item) (string, bool) {
@@ -66,10 +77,11 @@ func (c *Client) planWindow(ctx context.Context, request llm.Request, opt llm.Re
 			return "", promptPlan{}, &Error{Code: "record_conversation_binding", Message: err.Error()}
 		}
 	}
-	full := WindowPrompt(request.Input)
+	render := windowRenderer(request.Input)
+	full := render.Render(request.Input)
 	delivered := window.DeliveredItems
 	if delivered > 0 && delivered <= len(request.Input) && (binding.ID == previous.ID || binding.ID == base) {
-		return binding.ID, promptPlan{resume: true, prompt: WindowPrompt(request.Input[delivered:]), full: full}, nil
+		return binding.ID, promptPlan{resume: true, prompt: render.Render(request.Input[delivered:]), full: full}, nil
 	}
 	return binding.ID, promptPlan{prompt: full, full: full}, nil
 }

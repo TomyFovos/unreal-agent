@@ -123,6 +123,7 @@ func (b *builder) applyWindow(r sessionstore.ContextRecord) {
 		return
 	}
 	b.rebuildHistoricalWindow = false
+	b.selectionContinuation = false
 	delivered := b.window.deliveredThrough
 	retained := slices.Clone(r.Retained)
 	slices.Sort(retained)
@@ -229,10 +230,11 @@ func (b *builder) prepareWindow(ctx context.Context, persist func(sessionstore.C
 		return false, err
 	}
 	headerChanged := b.window.header != "" && b.window.header != header
-	if !midTurn && b.window.midTurn && b.window.firstRequest && !overBudget && !providerOverflow && !headerChanged && !b.rebuildHistoricalWindow {
+	headerRebuild := headerChanged || b.selectionContinuation || b.rebuildHistoricalWindow
+	if !midTurn && b.window.midTurn && b.window.firstRequest && !overBudget && !providerOverflow && !headerRebuild {
 		return false, nil // use the just-committed tool boundary for its first request
 	}
-	if !atThreshold && !overBudget && !providerOverflow && !headerChanged && !b.rebuildHistoricalWindow {
+	if !atThreshold && !overBudget && !providerOverflow && !headerRebuild {
 		if midTurn || b.window.header != "" {
 			return false, nil
 		}
@@ -287,7 +289,7 @@ func (b *builder) prepareWindow(ctx context.Context, persist func(sessionstore.C
 				&contextengine.Error{Code: "required_context_exceeds_budget"}, budget.Input, headTokens, head-headTokens, requiredTail, after-head, after)
 		}
 	}
-	if after <= budget.Input && !overBudget && !midTurn && !headerChanged && !providerOverflow && !b.rebuildHistoricalWindow && b.window.minimumExceedsTarget && minimumExceedsTarget &&
+	if after <= budget.Input && !overBudget && !midTurn && !headerRebuild && !providerOverflow && b.window.minimumExceedsTarget && minimumExceedsTarget &&
 		after >= estimate && tail.through == b.window.through && slices.Equal(tail.retained, b.retainedWindowUnits(units)) {
 		return false, nil // another boundary cannot reduce the same required input
 	}
@@ -311,8 +313,11 @@ func (b *builder) prepareWindow(ctx context.Context, persist func(sessionstore.C
 	if providerOverflow {
 		causes = append(causes, "provider_overflow")
 	}
-	if midTurn {
+	if midTurn || b.selectionContinuation {
 		causes = append(causes, sessionstore.WindowCauseMidTurn)
+	}
+	if b.selectionContinuation {
+		causes = append(causes, sessionstore.WindowCauseSelectionChange)
 	}
 	if b.rebuildHistoricalWindow {
 		causes = append(causes, "historical_context")

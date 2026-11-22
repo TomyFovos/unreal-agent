@@ -67,7 +67,7 @@ func selectionSubmit(t *testing.T, s *Session, id string) {
 		t.Fatal(err)
 	}
 }
-func TestCanonicalRuntimeSelectionDefersToolLoopAndResumes(t *testing.T) {
+func TestCanonicalRuntimeSelectionAppliesAtToolBoundaryAndResumes(t *testing.T) {
 	requests, responses := make(chan llm.Request, 8), make(chan llm.Response, 8)
 	f := selectionFactory(requests, responses)
 	dir := t.TempDir()
@@ -94,11 +94,15 @@ func TestCanonicalRuntimeSelectionDefersToolLoopAndResumes(t *testing.T) {
 	if err = s.SelectRuntime(t.Context(), s.Generation, 0, conflict); !errors.Is(err, ErrConflict) {
 		t.Fatal("stale choice overwritten", err)
 	}
-	responses <- llm.Response{Output: []llm.Item{{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "call-1", Name: "unavailable", Arguments: "{}"}}}}
-	selectionRequest(t, requests, "model-a", llm.ReasoningEffortMedium)
 	active, pending := s.RuntimeSelection()
 	if active.Model != "model-a" || pending == nil || pending.Model != "model-b" {
-		t.Fatal("mid-loop activation", active, pending)
+		t.Fatal("selection applied during generation", active, pending)
+	}
+	responses <- llm.Response{Output: []llm.Item{{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "call-1", Name: "unavailable", Arguments: "{}"}}}}
+	selectionRequest(t, requests, "model-b", llm.ReasoningEffortHigh)
+	active, pending = s.RuntimeSelection()
+	if active.Model != "model-b" || pending != nil {
+		t.Fatal("selection did not apply at the tool boundary", active, pending)
 	}
 	responses <- llm.Response{Output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "done"}}}}
 	// The next input cannot interrupt a still executing old request: wait for
@@ -124,8 +128,8 @@ func TestCanonicalRuntimeSelectionDefersToolLoopAndResumes(t *testing.T) {
 			turns = append(turns, turn)
 		}
 	}
-	if len(turns) != 3 || turns[0].RuntimeRevision != 0 || turns[1].RuntimeRevision != 0 || turns[2].RuntimeRevision != 1 {
-		t.Fatal("prior turn selection rewritten", turns)
+	if len(turns) != 3 || turns[0].RuntimeRevision != 0 || turns[1].RuntimeRevision != 1 || turns[2].RuntimeRevision != 1 {
+		t.Fatal("wrong runtime revisions across the tool boundary", turns)
 	}
 	if err = h.Close(); err != nil {
 		t.Fatal(err)

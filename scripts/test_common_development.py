@@ -14,7 +14,7 @@ import tarfile
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import common_development as common
@@ -578,27 +578,132 @@ class CommonDevelopmentTests(unittest.TestCase):
                 self.assertNotIn("Previous", choice)
                 self.assertNotIn("ConfigHash", choice)
 
+    def upgrade_fixture(self):
+        old = self.configure(external=True)
+        workspace = self.repo()
+        paths = common.select_repo(old, workspace, None)
+        sessions = paths["state"] / "sessions"
+        sessions.mkdir()
+        (sessions / "dev.session.jsonl").write_bytes(b"only the name is used by the launcher")
+        new = dict(old, Revision="f" * 40, BinaryDirectory=str(self.home / "new-kit"))
+        return old, new, workspace, paths
+
+    def upgrade_launch(self, old, new, workspace, replies, flags=(), answers=()):
+        output = io.StringIO()
+        with (patch.dict(os.environ, self.env, clear=True),
+              patch.object(common, "read_settings", return_value=new),
+              patch.object(common, "validate_discovered_workspace"),
+              patch.object(common.LiveHost, "connect"),
+              patch.object(common.LiveHost, "installation", return_value=(Path(old["BinaryDirectory"]), True)),
+              patch.object(common.LiveHost, "call", side_effect=replies) as query,
+              patch.object(Path, "cwd", return_value=workspace),
+              patch.object(os, "chdir"),
+              patch.object(os, "execve") as execute,
+              patch("builtins.input", side_effect=answers) as prompt,
+              contextlib.redirect_stdout(output)):
+            self.assertEqual(common.main(["launch", "dev", *flags]), 0)
+        return execute, prompt, query, output.getvalue()
+
     @LINUX_ONLY
-    def test_build_update_keeps_the_instance_and_restarts_its_host(self):
-        settings=self.configure(external=True,trust=True);root=self.repo()
-        one=common.select_repo(settings,root,None)
-        route=settings.get("CodexRoute","docker" if settings["DockerOAuth"] else "external")
-        config={"Launcher":{"Version":1,"CodexDockerSandboxOAuth":settings["DockerOAuth"],"CodexAuto":route=="auto","CodexDisabled":route=="disabled",
-                            "ClaudeDisabled":settings.get("ClaudeDecision")=="disabled","ClaudeBinary":settings["ClaudeBinary"]},
-                "Runtime":{"Workspace":str(root),"Provider":{}},"Providers":{}}
-        one["config"].parent.mkdir(parents=True,exist_ok=True)
-        one["config"].write_text(json.dumps(config));one["config"].chmod(0o600)
-        self.assertEqual(common.select_repo(settings,root,None),one)
-        stopped=[]
-        original=common.stop_old_host;common.stop_old_host=lambda paths: stopped.append(paths["config"])
-        try:
-            updated=dict(settings,Revision="f"*40)
-            self.assertEqual(common.select_repo(updated,root,None),one)
-        finally:
-            common.stop_old_host=original
-        self.assertEqual(stopped,[one["config"]])
-        choice=common.read_workspace_choice(one["root"] / "current.json",root)
-        self.assertEqual(choice["Revision"],"f"*40)
+    def test_build_update_restarts_idle_host_without_prompt(self):
+        old, new, workspace, paths = self.upgrade_fixture()
+        work = {"ActiveSessions": 0, "Operations": 0, "Children": 0}
+        execute, prompt, query, output = self.upgrade_launch(old, new, workspace, [
+            {"Workload": work, "Restarting": True}
+        ])
+        prompt.assert_not_called()
+        query.assert_called_once_with("host/restart", {}, allow_error=True)
+        self.assertIn("restarting this workspace's Host", output)
+        executable, argv, _ = execute.call_args.args
+        self.assertEqual(executable, str(Path(new["BinaryDirectory"]) / "unreal"))
+        self.assertEqual(argv[argv.index("--socket") + 1], str(paths["socket"]))
+        self.assertEqual(argv[argv.index("--state-directory") + 1], str(paths["state"]))
+        self.assertEqual(argv[-1], "dev")
+        self.assertEqual(common.read_workspace_choice(paths["root"] / "current.json", workspace)["Revision"], new["Revision"])
+
+    @LINUX_ONLY
+    def test_build_update_attaches_matching_viewer_while_any_work_is_running(self):
+        old, new, workspace, paths = self.upgrade_fixture()
+        choice = paths["root"] / "current.json"
+        before = choice.read_bytes()
+        for operations, children in ((0, 5), (0, 0), (2, 0)):
+            with self.subTest(operations=operations, children=children):
+                work = {"ActiveSessions": 1, "Operations": operations, "Children": children}
+                execute, prompt, query, output = self.upgrade_launch(old, new, workspace, [{"Workload": work}])
+                prompt.assert_not_called()
+                query.assert_called_once_with("host/restart", {}, allow_error=True)
+                self.assertIn("Keeping the running Host. Reopen when idle", output)
+                self.assertIn("unreal dev --restart-host", output)
+                executable, argv, _ = execute.call_args.args
+                self.assertEqual(executable, str(Path(old["BinaryDirectory"]) / "unreal"))
+                self.assertEqual(argv[argv.index("--socket") + 1], str(paths["socket"]))
+                self.assertEqual(argv[-1], "dev")
+                self.assertEqual(choice.read_bytes(), before)
+
+        changed_settings = dict(old, ClaudeDecision="disabled")
+        execute, prompt, query, output = self.upgrade_launch(old, changed_settings, workspace, [
+            {"Workload": {"ActiveSessions": 1, "Operations": 0, "Children": 5}}
+        ])
+        prompt.assert_not_called()
+        query.assert_called_once_with("host/restart", {}, allow_error=True)
+        self.assertIn("Keeping the running Host", output)
+        self.assertEqual(execute.call_args.args[0], str(Path(old["BinaryDirectory"]) / "unreal"))
+        self.assertEqual(choice.read_bytes(), before)
+
+    @LINUX_ONLY
+    def test_explicit_restart_confirms_impact_and_rechecks_changed_counts(self):
+        old, new, workspace, _ = self.upgrade_fixture()
+        before = {"ActiveSessions": 1, "Operations": 2, "Children": 4}
+        after = dict(before, Children=5)
+        execute, prompt, query, _ = self.upgrade_launch(old, new, workspace, [
+            {"Workload": before}, {"Workload": after}, {"Workload": after, "Restarting": True},
+        ], flags=("--restart-host",), answers=("yes", "y"))
+        self.assertIn("4 direct child agents, 2 other operations", prompt.call_args_list[0].args[0])
+        self.assertIn("5 direct child agents, 2 other operations", prompt.call_args_list[1].args[0])
+        self.assertEqual(query.call_args_list, [
+            call("host/workload", {}, allow_error=True),
+            call("host/restart", {"Workload": before}, allow_error=True),
+            call("host/restart", {"Workload": after}, allow_error=True),
+        ])
+        self.assertEqual(execute.call_args.args[0], str(Path(new["BinaryDirectory"]) / "unreal"))
+
+    @LINUX_ONLY
+    def test_declining_restart_attaches_to_busy_host(self):
+        old, new, workspace, _ = self.upgrade_fixture()
+        work = {"ActiveSessions": 1, "Operations": 2, "Children": 5}
+        execute, prompt, query, _ = self.upgrade_launch(old, new, workspace, [{"Workload": work}],
+                                                         flags=("--restart-host",), answers=("n",))
+        prompt.assert_called_once()
+        query.assert_called_once_with("host/workload", {}, allow_error=True)
+        self.assertEqual(execute.call_args.args[0], str(Path(old["BinaryDirectory"]) / "unreal"))
+
+    @LINUX_ONLY
+    def test_legacy_host_keeps_matching_client_until_explicit_restart(self):
+        old, new, workspace, paths = self.upgrade_fixture()
+        unsupported = {"Error": "not_found"}
+        execute, prompt, _, output = self.upgrade_launch(old, new, workspace, [unsupported])
+        prompt.assert_not_called()
+        self.assertIn("cannot verify workspace-wide idle", output)
+        self.assertEqual(execute.call_args.args[0], str(Path(old["BinaryDirectory"]) / "unreal"))
+
+        (paths["state"] / "sessions/other.session.jsonl").write_bytes(b"unused")
+        idle = {"View": {"Running": True, "Operations": []}}
+        active = {"View": {"Running": True, "Operations": [
+            {"Type": "remote_job", "ToolName": "SubagentStart", "Status": "awaiting"},
+            {"Type": "remote_job", "ToolName": "SubagentStart", "Status": "completed"},
+            {"Type": "process", "Status": "ready"},
+        ]}}
+        with (patch.object(common.LiveHost, "pid", 42),
+              patch.object(os, "pidfd_open", side_effect=lambda pid: os.open("/dev/null", os.O_RDONLY)) as pin,
+              patch.object(common.signal, "pidfd_send_signal") as send):
+            execute, prompt, query, _ = self.upgrade_launch(old, new, workspace,
+                [unsupported, idle, active, idle, active], flags=("--restart-host",), answers=("y",))
+        query.assert_any_call("inspect", {"ID": "other", "Limit": 1}, allow_error=True)
+        self.assertIn("1 direct child agents, 1 other operations", prompt.call_args.args[0])
+        pin.assert_called_once_with(42)
+        send.assert_called_once()
+        self.assertEqual(send.call_args.args[1], common.signal.SIGTERM)
+        self.assertEqual(execute.call_args.args[0], str(Path(new["BinaryDirectory"]) / "unreal"))
 
     @LINUX_ONLY
     def test_workspace_profile_fresh_idempotent_and_availability_not_identity(self):
@@ -673,8 +778,7 @@ class CommonDevelopmentTests(unittest.TestCase):
             common.settings_path(self.home).write_text(json.dumps(old))
             restored = common.read_settings(self.home)
             self.assertEqual(restored["Version"], version)
-            with patch.object(common, "stop_old_host"):
-                self.assertEqual(common.select_repo(restored, root, None), paths)
+            self.assertEqual(common.select_repo(restored, root, None), paths)
             self.assertEqual(json.loads(paths["config"].read_bytes()), config)
         # Reformatting runtime.json never selects another history directory.
         paths["config"].write_text(json.dumps(config, indent=4))

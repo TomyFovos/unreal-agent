@@ -217,6 +217,7 @@ type Session struct {
 	historyWorkCurrent    *HistoryWork
 	historyWorkTurns      map[session.TurnID]bool
 	historyWorkReports    map[session.ID]bool
+	historyToolScopes     llm.ToolScopes
 	operations            map[operation.ID]operation.Operation
 	childReports          reporting.Index
 	archiveWake           chan struct{}
@@ -224,6 +225,8 @@ type Session struct {
 	operationRevision     uint64
 	observationOperations map[operation.ID]observationOperation
 	submissions           map[inbox.ID]*submission
+	pendingSubmissions    int
+	coordinatorIdle       bool
 	subscribers           map[uint64]chan Event
 	nextSubscriber        uint64
 	progress              *Progress
@@ -241,6 +244,7 @@ type Session struct {
 	err                   error
 	selection             *sessionstore.RuntimeSelection
 	pendingSelection      *sessionstore.RuntimeSelection
+	selectionChanged      chan struct{}
 	workspace             string
 }
 
@@ -384,7 +388,8 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	}
 	s := &Session{ID: o.ID, Generation: uuid.New().String(), ctx: cctx, cancel: cancel, lock: lock, store: raw,
 		snapshot: restored.Snapshot, operations: map[operation.ID]operation.Operation{}, submissions: map[inbox.ID]*submission{},
-		subscribers: map[uint64]chan Event{}, done: make(chan struct{}), running: true, archiveWake: make(chan struct{}, 1), workspace: o.Workspace}
+		subscribers: map[uint64]chan Event{}, done: make(chan struct{}), running: true, archiveWake: make(chan struct{}, 1),
+		selectionChanged: make(chan struct{}, 1), workspace: o.Workspace}
 	s.permissions = controller
 	if controller != nil {
 		controller.RecordApproval = s.recordApproval
@@ -532,6 +537,9 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		CompletedInput:     s.runtime.CompletedInput,
 		ContextBuilt:       s.contextBuilt,
 		BeforeTurn:         s.beginTurn,
+		RuntimeSelection:   s.RuntimeSelection,
+		SelectionChanged:   s.selectionChanged,
+		SetIdle:            s.setCoordinatorIdle,
 		BeforeGeneration:   s.runtime.BeforeGeneration,
 		Sessions:           &serializedStore{s}, ContextBuilder: s.runtime.Builder, LLM: s.runtime.LLM, Tools: s.runtime.Tools,
 		Finished: func() bool { return s.Finish() != nil }, Operations: s.runtime.Operations, ToolHeartbeatInterval: o.Heartbeat, RestoredStop: pending, InitialInputs: initial}
@@ -673,12 +681,13 @@ func (s *Session) register(input inbox.Input) (*submission, bool, error) {
 		}
 		return old, false, nil
 	}
-	if !s.running {
+	if !s.running || s.ctx.Err() != nil {
 		s.mu.Unlock()
 		return nil, false, ErrStopped
 	}
 	p := &submission{input: input, done: make(chan struct{})}
 	s.submissions[input.ID] = p
+	s.pendingSubmissions++
 	s.mu.Unlock()
 	return p, true, nil
 }
@@ -690,6 +699,11 @@ func (s *Session) enqueue(input inbox.Input) (*submission, error) {
 	input = p.input
 	if err = s.inbox.Submit(s.ctx, input); err != nil {
 		s.mu.Lock()
+		if p.committed {
+			s.mu.Unlock()
+			return p, nil
+		}
+		s.pendingSubmissions--
 		p.err = err
 		close(p.done)
 		s.mu.Unlock()
@@ -948,6 +962,8 @@ func (s *Session) rememberOwnedItem(item sessionstore.Item, notify bool) {
 		if p == nil {
 			p = &submission{input: input, done: make(chan struct{})}
 			s.submissions[input.ID] = p
+		} else if !p.committed && p.err == nil {
+			s.pendingSubmissions--
 		}
 		if !p.committed {
 			p.receipt = Receipt{ID: input.ID, Sequence: item.Sequence, Locator: inputLocator(s.ID, item.Sequence, input.Kind)}

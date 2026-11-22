@@ -109,9 +109,12 @@ TUI 内で `/analyze` を実行すると、セッションの稼働統計やト�
 | **Errors** | 記録されたエラーと秘匿処理済みのプロバイダ診断情報 |
 | **Layers** | Session ツリー全体のリクエストと作業者モデル別の比較 |
 | **Context metrics** | 3層の窓、予算に合わせた抜粋、旧要約方式の記録、窓ごとのキャッシュと L1/L2/L3、子のレビュー、作業時間あたりの質問数 |
-| **Export** | 文脈の計測表を含む分析結果を JSON または Markdown で保存 |
+| **Subscription usage** | ChatGPT と Claude の利用枠ごとの最新の残りと使用率、プロバイダの状態、リセット時刻、観測時刻 |
+| **Export** | サブスクリプション使用率と文脈の計測表を含む分析結果を JSON または Markdown で保存 |
 
 **Context metrics** はアーカイブ済みの子を含み、値を `measured`、`derived`、`unknown` で表示します。 [3層の文脈の計測](context-3layer.md#measuring)
+
+**Subscription usage** はメイン Session とアーカイブ済みを含むすべての子孫 Session から、利用枠ごとの最新記録を表示します。使用率はモデルへのリクエスト時に得られた記録を使います。利用枠ごとに別々に通知されるため、観測時刻は枠ごとに異なります。使用率が未報告なら `unknown` と表示します。リセット時刻を過ぎると、新しい観測が届くまで `reset since` と観測時刻を表示します。JSON は `State` に `unknown`、`reset_since`、`observed` を記録し、使用率が表示できない場合は `UsedPercent` を省きます。
 
 ### 数値を読む際のポイント
 

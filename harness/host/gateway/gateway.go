@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -40,8 +41,11 @@ type Config struct {
 	Extension http.Handler
 	// Workspace is where newly created sessions discover AGENTS.md.
 	Workspace string
+	// Restart drains the Host and ends serving after the restart reply.
+	Restart func()
 }
 type request struct {
+	Workload        *host.Workload             `json:",omitzero"`
 	Permission      *permission.ControlRequest `json:",omitzero"`
 	Context         *contextstate.Command      `json:",omitzero"`
 	ContextInputID  string                     `json:",omitzero"`
@@ -56,6 +60,8 @@ type request struct {
 	Secret          string `json:",omitzero"`
 }
 type frame struct {
+	Workload   *host.Workload           `json:",omitzero"`
+	Restarting bool                     `json:",omitzero"`
 	Version    *host.ObservationVersion `json:",omitzero"`
 	Context    *contextstate.Result     `json:",omitzero"`
 	Permission *permission.ControlReply `json:",omitzero"`
@@ -177,6 +183,10 @@ func Handler(c Config) http.Handler {
 			writeFrame(w, frame{Error: "invalid_request"})
 			return
 		}
+		if r.URL.Path == "/v1/host/workload" || r.URL.Path == "/v1/host/restart" {
+			serveHostWorkload(w, r, c, q.Workload)
+			return
+		}
 		if r.URL.Path == "/v1/observation" {
 			s, err := c.Host.Attach(q.ID)
 			if err == nil {
@@ -219,6 +229,32 @@ func Handler(c Config) http.Handler {
 		}
 	})
 }
+
+func serveHostWorkload(w http.ResponseWriter, r *http.Request, c Config, confirmed *host.Workload) {
+	if c.Restart == nil {
+		_ = writeFrame(w, frame{Error: "unknown_method"})
+		return
+	}
+	if !authenticated(r.Context()) {
+		_ = writeFrame(w, frame{Error: "unauthenticated_control"})
+		return
+	}
+	if c.Host.Stopping() {
+		_ = writeFrame(w, frame{Error: "stopped"})
+		return
+	}
+	if r.URL.Path == "/v1/host/workload" {
+		work := c.Host.Workload()
+		_ = writeFrame(w, frame{Workload: &work})
+		return
+	}
+	work, restarting := c.Host.PrepareRestart(r.Context(), confirmed)
+	_ = writeFrame(w, frame{Workload: &work, Restarting: restarting})
+	if restarting {
+		c.Restart()
+	}
+}
+
 func dispatch(ctx context.Context, c Config, path string, q request) (frame, *host.Subscription, error) {
 	if path == "/v1/version" {
 		s, err := c.Host.Attach(q.ID)
@@ -229,6 +265,9 @@ func dispatch(ctx context.Context, c Config, path string, q request) (frame, *ho
 		return frame{Version: &version}, nil, nil
 	}
 	if path == "/v1/auth/methods" {
+		if c.Host != nil && c.Host.Stopping() {
+			return frame{}, nil, host.ErrStopped
+		}
 		return frame{Methods: authflow.Matrix()}, nil, nil
 	}
 	if path == "/v1/auth/login" || path == "/v1/auth/logout" || path == "/v1/auth/list" {
@@ -292,6 +331,11 @@ func writeFrame(w http.ResponseWriter, f frame) error {
 	encoded, err := json.Marshal(f)
 	if err != nil {
 		return err
+	}
+	if f.Restarting {
+		// Let the client read the complete reply even if the server closes the
+		// connection before net/http finishes the handler's response.
+		w.Header().Set("Content-Length", strconv.Itoa(len(encoded)+1))
 	}
 	controller := http.NewResponseController(w)
 	_ = controller.SetWriteDeadline(time.Now().Add(5 * time.Second))

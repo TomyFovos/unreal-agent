@@ -1,7 +1,9 @@
 package analysis
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -30,6 +32,9 @@ func TelemetryLines(r Report, kinds ...string) []string {
 		return false
 	}
 	var lines []string
+	if include("provider_usage") {
+		lines = append(lines, modelUsageLines(r.Activities)...)
+	}
 	if include("context_redaction") {
 		for _, total := range redactionTotals(r.Activities) {
 			lines = append(lines, fmt.Sprintf("Context redaction %s: count=%d before_bytes=%d after_bytes=%d", total.Reason, total.Count, total.BeforeBytes, total.AfterBytes))
@@ -41,12 +46,14 @@ func TelemetryLines(r Report, kinds ...string) []string {
 		}
 		line := a.Kind + " " + viewer.SafeText(a.ID) + " start=" + timestamp(a.StartedAt)
 		switch a.Kind {
+		case "provider_usage":
+			continue // represented in the per-model breakdown
 		case "context_redaction":
 			if a.Redaction != nil {
 				line += fmt.Sprintf(" reason=%s call_id=%s before_bytes=%d after_bytes=%d", viewer.SafeText(a.Redaction.Reason), viewer.SafeText(a.Redaction.CallID), a.Redaction.BeforeBytes, a.Redaction.AfterBytes)
 			}
 		case "claude_usage":
-			lines = append(lines, "Claude Code turn usage "+viewer.SafeText(a.ID)+" at="+timestamp(a.EndedAt)+" (turn total; already included in response totals)")
+			lines = append(lines, "Claude Code turn usage "+viewer.SafeText(a.ID)+" at="+timestamp(a.EndedAt)+" (turn total)")
 			if a.Usage == nil {
 				lines = append(lines, "usage unknown")
 			} else {
@@ -112,6 +119,38 @@ func TelemetryLines(r Report, kinds ...string) []string {
 				lines = append(lines, usageLines(u)...)
 			}
 		}
+	}
+	return lines
+}
+
+func modelUsageLines(activities []llm.ActivityRecord) []string {
+	type model struct{ provider, id string }
+	totals := make(map[model]viewer.Usage)
+	var models []model
+	for _, a := range activities {
+		if a.Kind != "provider_usage" || a.Model == "" || a.Usage == nil {
+			continue
+		}
+		key := model{a.Provider, a.Model}
+		u, exists := totals[key]
+		if !exists {
+			models = append(models, key)
+		}
+		viewer.AddUsage(&u, *a.Usage)
+		totals[key] = u
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	slices.SortFunc(models, func(a, b model) int {
+		return cmp.Or(cmp.Compare(a.provider, b.provider), cmp.Compare(a.id, b.id))
+	})
+	lines := []string{"Execution usage by model"}
+	for _, m := range models {
+		u := totals[m]
+		lines = append(lines, fmt.Sprintf("%s / %s · input %s · cached %s · write %s · reasoning %s · output %s",
+			viewer.SafeText(m.provider), viewer.SafeText(m.id), value(u.Input, u, llm.UsageInput), value(u.CachedInput, u, llm.UsageCachedInput),
+			value(u.CacheWriteInput, u, llm.UsageCacheWriteInput), value(u.Reasoning, u, llm.UsageReasoning), value(u.Output, u, llm.UsageOutput)))
 	}
 	return lines
 }

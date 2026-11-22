@@ -93,7 +93,6 @@ type loopState struct {
 	grace             <-chan time.Time
 	graceToolCalls    map[toolCallKey]struct{}
 	instructionsBound bool
-	selectionBoundary bool
 	externalInputs    int
 
 	// interrupted holds the model after /stop main until the user's next
@@ -129,10 +128,9 @@ var _ Coordinator = (*coordinator)(nil)
 
 func newLoopState() loopState {
 	return loopState{
-		selectionBoundary: true,
-		toolCalls:         make(map[toolCallKey]toolCallState),
-		operations:        make(map[operation.ID]operation.Operation),
-		graceToolCalls:    make(map[toolCallKey]struct{}),
+		toolCalls:      make(map[toolCallKey]toolCallState),
+		operations:     make(map[operation.ID]operation.Operation),
+		graceToolCalls: make(map[toolCallKey]struct{}),
 	}
 }
 
@@ -272,8 +270,17 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 			return err
 		}
 	}
-	if current.stop.request.Mode == inbox.StopWhenIdle && current.isIdle() {
+	idle := current.isIdle()
+	if current.stop.request.Mode == inbox.StopWhenIdle && idle {
 		return nil
+	}
+	setIdle := current.dependencies.SetIdle
+	wake := func() bool {
+		if !idle {
+			return true
+		}
+		idle = false
+		return setIdle == nil || setIdle(false)
 	}
 	var heartbeat <-chan time.Time
 	for {
@@ -282,22 +289,37 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 		} else if heartbeat == nil && current.dependencies.ToolHeartbeatInterval > 0 {
 			heartbeat = time.After(current.dependencies.ToolHeartbeatInterval)
 		}
+		if idle && setIdle != nil && !setIdle(true) {
+			return ctx.Err()
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 
 		case <-current.idleDone:
+			if !wake() {
+				return ctx.Err()
+			}
 			current.cancelIdle = nil
 			current.idleDone = nil
 
 		case <-current.modelRetry:
+			if !wake() {
+				return ctx.Err()
+			}
 			current.modelRetry = nil
 			if err := current.clearUsageWait(ctx); err != nil {
 				return err
 			}
 			current.state.callModel = true
 
+		case <-current.dependencies.SelectionChanged:
+			// processEvents checks whether the pending choice ends a usage wait.
+
 		case received, open := <-inboxOutput:
+			if !wake() {
+				return ctx.Err()
+			}
 			if !open {
 				return closedInputError(ctx, "inbox output")
 			}
@@ -306,6 +328,9 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 			}
 
 		case received, open := <-operationUpdates:
+			if !wake() {
+				return ctx.Err()
+			}
 			if !open {
 				return closedInputError(ctx, "operation updates")
 			}
@@ -314,14 +339,23 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 			}
 
 		case <-heartbeat:
+			if !wake() {
+				return ctx.Err()
+			}
 			if err := current.postHeartbeat(ctx); err != nil {
 				return err
 			}
 
 		case <-current.state.grace:
+			if !wake() {
+				return ctx.Err()
+			}
 			current.clearToolGrace()
 
 		case received := <-current.bridgeRequests:
+			if !wake() {
+				return ctx.Err()
+			}
 			if err := current.acceptBridgeRequest(ctx, received); err != nil {
 				return err
 			}
@@ -329,6 +363,9 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 		case received := <-modelResponses:
 			if current.cancelModel == nil || received.turnID != current.modelOrigin {
 				continue
+			}
+			if !wake() {
+				return ctx.Err()
 			}
 			received.turnID = current.state.currentTurnID
 			if llm.IsContextOverflow(received.err, received.response) {
@@ -379,10 +416,11 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 			current.clearToolGrace()
 			// heartbeat is cleared immediately at the top of the loop, because now we're waiting for the model response
 		}
-		if current.stop.request.Mode == inbox.StopWhenIdle && current.isIdle() {
+		idle = current.isIdle()
+		if current.stop.request.Mode == inbox.StopWhenIdle && idle {
 			return ctx.Err()
 		}
-		if current.isIdle() && !current.held() && current.stop.request.Mode == "" {
+		if idle && !current.held() && current.stop.request.Mode == "" {
 			current.startIdle(modelContext)
 		}
 	}
@@ -453,6 +491,9 @@ func (current *coordinator) processEvents(ctx context.Context) (bool, error) {
 	}
 	if current.held() {
 		return false, nil
+	}
+	if err := current.resumeUsageWaitForSelection(ctx); err != nil {
+		return false, err
 	}
 	// Peer inputs are already durable. Keep accepting inputs while maintenance
 	// finishes; only user input or explicit control cancels it.
@@ -801,10 +842,18 @@ func (current *coordinator) requestModelResponse(
 
 	// Recheck the transport barrier after reconciliation, before context/Turn
 	// creation or network I/O.
-	if llm.RequiresToolBatch(current.dependencies.LLM) && len(current.state.toolCalls) != 0 {
+	if len(current.state.toolCalls) != 0 && llm.RequiresToolBatch(current.dependencies.LLM) {
 		return nil
 	}
-	boundary := current.state.selectionBoundary && current.cancelModel == nil && len(current.state.toolCalls) == 0 && !current.hasPendingOperations()
+	// A pending switch waits for the model's own tool batch. A running child
+	// can still send a question and receive an answer on the new selection.
+	boundary := current.cancelModel == nil
+	if boundary && current.waitingForOwnToolBatch() {
+		if current.pendingRuntimeChange() {
+			return nil
+		}
+		boundary = false
+	}
 	current.interruptModel()
 	var runtimeRevision uint64
 	if current.dependencies.BeforeTurn != nil {
@@ -908,7 +957,7 @@ func (current *coordinator) requestModelResponse(
 			Steering:   current.steeringRendezvous(requestContext, turn.ID),
 		}
 		if built.Request.Window != nil {
-			options.AfterToolBatch = current.toolBatchRendezvous(requestContext, turn.ID)
+			options.AfterToolBatch = current.toolBatchRendezvous(requestContext, turn.ID, true)
 		}
 		response, err := current.dependencies.LLM.Respond(requestContext, built.Request, options)
 		select {
@@ -1272,12 +1321,6 @@ func (current *coordinator) restore(ctx context.Context) error {
 			current.queueChildCompletion(value)
 		}
 	}
-	// There is no executing model call after restoration. When its previous
-	// attempt ended without a response and all effects are settled, an explicit
-	// pending selection can recover that request using the chosen provider.
-	if len(current.state.toolCalls) == 0 && !current.hasPendingOperations() {
-		current.state.selectionBoundary = true
-	}
 	return nil
 }
 
@@ -1451,8 +1494,9 @@ func (current *coordinator) applyItem(item sessionstore.Item, decodedPeer *inbox
 			}); ok {
 				b.ApplyContext(*r.Context)
 			}
-			if (r.Context.Kind == sessionstore.ContextWindowBoundary || r.Context.Kind == sessionstore.ContextWindowFallback) && r.Context.Window != nil &&
-				slices.Contains(r.Context.Window.Causes, sessionstore.WindowCauseMidTurn) {
+			if r.Context.Kind == sessionstore.ContextSelectionContinuation ||
+				(r.Context.Kind == sessionstore.ContextWindowBoundary || r.Context.Kind == sessionstore.ContextWindowFallback) && r.Context.Window != nil &&
+					slices.Contains(r.Context.Window.Causes, sessionstore.WindowCauseMidTurn) {
 				current.windowContinuation = true
 			}
 		}
@@ -1552,11 +1596,8 @@ func (current *coordinator) applyItem(item sessionstore.Item, decodedPeer *inbox
 			// Work a stop ended stays ended: after a restart, the model waits
 			// for the user's next input instead of resending the interrupted
 			// request (seen on devlore after /stop session and resume).
-			// The ended request is abandoned, so a pending /model choice
-			// applies to the next one.
 			if request.Mode == inbox.StopHard || request.Mode == inbox.InterruptAgent {
 				current.state.interrupted, current.state.interruptExternals = true, current.state.externalInputs
-				current.state.selectionBoundary = true
 			}
 			if request.Mode == inbox.DispatchOperation {
 				op, err := sessionstore.DecodeOperationIntent(input)
@@ -1591,9 +1632,6 @@ func (current *coordinator) applyItem(item sessionstore.Item, decodedPeer *inbox
 		}
 		current.state.currentTurnID = turn.ID
 		current.state.currentTurnType = turn.Type
-		if turn.Type == session.TurnRegular {
-			current.state.selectionBoundary = false
-		}
 		current.state.currentTurnInputs = current.state.availableInputs
 		if turn.Type == session.TurnRegular && turn.ToolContinuation == "" {
 			current.state.turnPeerInputs, current.state.turnQuietInputs = current.state.peerInputs, current.state.quietInputs
@@ -1645,8 +1683,6 @@ func (current *coordinator) applyItem(item sessionstore.Item, decodedPeer *inbox
 			current.state.peerInputs -= current.state.turnPeerInputs
 			current.state.quietInputs -= current.state.turnQuietInputs
 			current.state.turnPeerInputs, current.state.turnQuietInputs = 0, 0
-
-			current.state.selectionBoundary = true
 		}
 		current.addToolCallsToLocalState(response)
 
@@ -1684,9 +1720,6 @@ func (current *coordinator) addToolCallsToLocalState(response sessionstore.Model
 		call := output.Data.(llm.ToolCall)
 		if call.Incomplete {
 			continue
-		}
-		if response.TurnID == current.state.currentTurnID {
-			current.state.selectionBoundary = false
 		}
 		current.state.toolCalls[toolCallKey{
 			turnID: response.TurnID,

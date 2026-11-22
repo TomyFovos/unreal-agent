@@ -58,20 +58,32 @@ func cardModel(r viewer.Row) string {
 }
 
 // cardStats gives a child's latest context size, output speed and cache hit
-// as bare numbers; the footer keeps the main agent's.
+// as bare numbers; the footer keeps the main agent's. The cache hit rate keeps
+// one decimal because it matters most; the context size is rounded to fit.
 func cardStats(r viewer.Row) string {
 	var parts []string
 	u := r.LastUsage
 	if u.Known && u.Input > 0 && !slices.Contains(u.Unknown, llm.UsageInput) {
-		parts = append(parts, strings.ReplaceAll(strings.ReplaceAll(number(u.Input), ".0k", "k"), ".0m", "m"))
+		parts = append(parts, roundedNumber(u.Input))
 	}
 	if r.OutputTPSKnown || r.OutputTPS > 0 {
-		parts = append(parts, fmt.Sprintf("%.0f tok/s", r.OutputTPS))
+		parts = append(parts, fmt.Sprintf("%.0f t/s", r.OutputTPS))
 	}
 	if ratio, known := u.CacheRatio(); known {
-		parts = append(parts, fmt.Sprintf("%.0f%%", 100*ratio))
+		parts = append(parts, fmt.Sprintf("%.1f%%", 100*ratio))
 	}
 	return strings.Join(parts, " · ")
+}
+
+// roundedNumber is number without decimals: 83.4k → 83k, 1.2m → 1m.
+func roundedNumber(n int64) string {
+	switch {
+	case n >= 1000000:
+		return fmt.Sprintf("%.0fm", float64(n)/1000000)
+	case n >= 1000:
+		return fmt.Sprintf("%.0fk", float64(n)/1000)
+	}
+	return fmt.Sprint(n)
 }
 
 func currentChildOperation(r viewer.Row) string {

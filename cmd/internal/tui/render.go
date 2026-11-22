@@ -21,10 +21,11 @@ type Notification struct {
 	Until            time.Time
 }
 type Sheet struct {
-	Title    string
-	Lines    []string
-	Analysis string
-	Offset   int
+	Title     string
+	Lines     []string
+	Analysis  string
+	Offset    int
+	refreshAt time.Time
 }
 
 // UIState is disposable presentation state, owned by the terminal event loop.

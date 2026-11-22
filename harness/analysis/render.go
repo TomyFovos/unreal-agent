@@ -9,7 +9,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
 
-var Views = []string{"Overview", "Usage", "Turns", "Tools", "Agents", "Context", "Timeline", "Errors", "Layers", "Context metrics", "Export"}
+var Views = []string{"Overview", "Usage", "Turns", "Tools", "Agents", "Context", "Timeline", "Errors", "Layers", "Context metrics", SubscriptionUsageView, "Export"}
 
 func value(v int64, u viewer.Usage, field ...llm.UsageField) string {
 	if !u.Known || len(field) > 0 && slices.Contains(u.Unknown, field[0]) && v == 0 {
@@ -34,6 +34,8 @@ func Lines(r Report, view string, ascii bool) []string {
 		out = append(out, llm.UsageLimitWaiting(r.UsageRetryAt))
 	}
 	switch view {
+	case "subscription usage":
+		out = append(out, subscriptionLines(r)...)
 	case "context metrics":
 		out = append(out, contextLines(contextMeasurements(r))...)
 	case "layers":
@@ -79,7 +81,7 @@ func Lines(r Report, view string, ascii bool) []string {
 		out = append(out, fmt.Sprintf("Tools       %d calls · %d completed · %d failed · %d canceled", r.Tools.Calls, r.Tools.Completed, r.Tools.Failed, r.Tools.Canceled), fmt.Sprintf("Agents      %d discovered · %d observed", r.AgentCounts.Discovered, r.AgentCounts.Observed), fmt.Sprintf("            %d success · %d failed · %d canceled · %d finish unknown", r.AgentCounts.Success, r.AgentCounts.Failed, r.AgentCounts.Canceled, r.AgentCounts.UnknownFinish))
 		out = append(out, routingLines(r)...)
 	case "usage":
-		out = append(out, TelemetryLines(r, "claude_usage")...)
+		out = append(out, TelemetryLines(r, "provider_usage", "claude_usage")...)
 		out = append(out, cacheLines(r)...)
 		out = append(out, usageLines(r.Usage)...)
 		out = append(out, compactionLines(r)...)
@@ -110,6 +112,12 @@ func Lines(r Report, view string, ascii bool) []string {
 				}
 			}
 			out = append(out, fmt.Sprintf("%s: %d calls / %d done / %d failed / %d canceled; elapsed %s", tool.Name, tool.Calls, tool.Completed, tool.Failed, tool.Canceled, elapsed))
+		}
+		if len(r.NestedTools) != 0 {
+			out = append(out, "Tools run inside a tool call")
+			for _, tool := range r.NestedTools {
+				out = append(out, fmt.Sprintf("%s · %d", tool.Name, tool.Calls))
+			}
 		}
 	case "agents":
 		out = append(out, TelemetryLines(r, "child_start")...)

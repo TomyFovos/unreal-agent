@@ -5,7 +5,6 @@ import (
 	"encoding/json/v2"
 	"io"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -102,7 +101,7 @@ func TestNativeBashTimingRecordsActualHookBoundaries(t *testing.T) {
 	}
 }
 
-func TestNativeAgentTranscriptAndMessageUsageAreLinkedAndDeduplicated(t *testing.T) {
+func TestNativeAgentMessageUsageIsAttributedAndDeduplicated(t *testing.T) {
 	var activities []llm.ActivityRecord
 	round := newTurn(t.Context(), func() {}, llm.RequestOptions{Identity: llm.RequestIdentity{TurnID: "turn"}, RecordActivity: func(_ context.Context, r llm.ActivityRecord) error { activities = append(activities, r); return nil }}, &writer{w: io.Discard}, observed.NewResults(), &approver{}, t.TempDir(), "session")
 	parent := "agent-call"
@@ -127,8 +126,7 @@ func TestNativeAgentTranscriptAndMessageUsageAreLinkedAndDeduplicated(t *testing
 		t.Fatal("usage duplicated or native child lost", totals)
 	}
 	response := round.finish(&frame{})
-	encoded, _ := json.Marshal(response)
-	if !strings.Contains(string(encoded), "[Claude Code Agent agent-call]") || !strings.Contains(string(encoded), "child result") {
-		t.Fatal("native child not linked in public transcript")
+	if response.Usage.InputTokens != 10 || response.Usage.OutputTokens != 2 || len(response.Output) != 1 || response.Output[0].Data.(llm.Message).Text != "delegated" {
+		t.Fatalf("main response includes the child's output or usage: %+v", response)
 	}
 }

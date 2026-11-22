@@ -36,6 +36,7 @@ type Panel struct {
 	snapshotProblem      string
 	snapshotRetry        bool
 	snapshotTranscript   *host.HistoryPage
+	subscriptionUsage    llm.SubscriptionObservations
 	client               *Client
 	parent               session.ID
 	ctx                  context.Context
@@ -107,7 +108,8 @@ func (p *Panel) watchChildren() {
 		case <-next:
 			next = nil
 		}
-		if p.refreshChildren() {
+		pollChildren := p.refreshChildren()
+		if p.refreshSubscriptionUsage() || pollChildren {
 			next = time.After(time.Second)
 		}
 	}

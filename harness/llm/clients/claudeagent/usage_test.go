@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"fmt"
+	"io"
 	"testing"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/tool/observed"
 )
 
 func fakeUsageRecovery(f *fake, failed bool) int {
@@ -39,6 +42,49 @@ func fakeUsageRecovery(f *fake, failed bool) int {
 		"modelUsage": jsontext.Value(`{"claude-opus-5-5":{"inputTokens":999999,"outputTokens":999999}}`),
 	})
 	return 0
+}
+
+func TestNativeAgentUsageDeduplicatesStreamsAndKeepsMainScopeWithSameModel(t *testing.T) {
+	var modelUsage llm.Usage
+	opt := llm.RequestOptions{RecordActivity: func(_ context.Context, record llm.ActivityRecord) error {
+		if record.Kind == "provider_usage" && record.Model == "claude-opus-5-5" {
+			if modelUsage.InputTokens != 0 {
+				t.Fatal("repeated model total", record)
+			}
+			modelUsage = *record.Usage
+		}
+		return nil
+	}}
+	round := newTurn(t.Context(), func() {}, opt, &writer{w: io.Discard}, observed.NewResults(), &approver{}, t.TempDir(), "session")
+	round.model = "claude-opus-5-5"
+	streams, stop := round.observeStreams(time.Hour)
+	defer stop()
+	round.streams = streams
+	parent := "toolu_agent"
+	for _, raw := range []string{
+		`{"type":"message_start","message":{"id":"same-id","model":"claude-opus-5-5","usage":{"input_tokens":300}}}`,
+		`{"type":"message_delta","usage":{"output_tokens":35}}`,
+		`{"type":"message_stop"}`,
+	} {
+		f := frame{Type: "stream_event", ParentToolUseID: &parent, Event: jsontext.Value(raw)}
+		streams.observe(f)
+		round.handle(f)
+	}
+	for _, f := range []frame{
+		{Type: "assistant", Message: []byte(`{"id":"same-id","model":"claude-opus-5-5","usage":{"input_tokens":100,"output_tokens":10}}`)},
+		{Type: "assistant", ParentToolUseID: &parent, Message: []byte(`{"id":"same-id","model":"claude-opus-5-5","usage":{"output_tokens":3}}`)},
+		{Type: "assistant", ParentToolUseID: &parent, Message: []byte(`{"id":"assistant-only","model":"claude-opus-5-5","usage":{"input_tokens":150}}`)},
+		{Type: "assistant", ParentToolUseID: &parent, Message: []byte(`{"id":"assistant-only","model":"claude-opus-5-5","usage":{"output_tokens":15}}`)},
+	} {
+		round.handle(f)
+	}
+	result := &frame{Usage: &usage{InputTokens: 550, OutputTokens: 60}}
+	round.recordTurnUsage(result)
+	response := round.finish(result)
+	if modelUsage.InputTokens != 550 || modelUsage.OutputTokens != 60 || response.Usage.InputTokens != 100 || response.Usage.OutputTokens != 10 ||
+		round.lastAssistantInput == nil || *round.lastAssistantInput != 100 {
+		t.Fatalf("model=%+v main=%+v main context=%v", modelUsage, response.Usage, round.lastAssistantInput)
+	}
 }
 
 func TestExecutionUsageIncludesDiscardedOutputAndNativeModels(t *testing.T) {

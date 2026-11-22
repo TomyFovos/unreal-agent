@@ -105,9 +105,12 @@ Run `/analyze` in the TUI to inspect detailed Session diagnostics and token acco
 | **Errors** | Recorded errors and redacted provider diagnostics |
 | **Layers** | Request and worker-model comparisons across the Session tree |
 | **Context metrics** | Three-layer windows, excerpt fits, historical summary records, per-window cache and L1/L2/L3 measurements, child reviews, and user questions per work hour |
-| **Export** | Save the analysis views, including the context measurement tables, as JSON or Markdown |
+| **Subscription usage** | Latest observed remaining and used percentage, provider status, reset time, and observation time for each ChatGPT and Claude allowance window |
+| **Export** | Save the analysis views, including subscription usage and context measurements, as JSON or Markdown |
 
 **Context metrics** includes archived descendants and labels values `measured`, `derived`, or `unknown`. [Three-layer context measurements](context-3layer.md#measuring)
+
+**Subscription usage** uses the latest record for each window across the main Session and its descendants, including archived children. Unreal uses allowance data already captured during model requests. Providers can report windows independently, so observation times can differ. An unreported percentage is `unknown`. After the recorded reset time, the row shows `reset since` and the observation time until a new measurement arrives. JSON uses `State` to distinguish `unknown`, `reset_since`, and `observed`, and omits `UsedPercent` when unavailable.
 
 ### How Metrics Are Calculated
 

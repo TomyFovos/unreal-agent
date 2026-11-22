@@ -58,7 +58,11 @@ type turn struct {
 	stepStart           time.Time
 	stepUsage           usage
 	usageReported       bool
-	messages            map[string]message
+	messages            map[stepID]usageStep
+	lastAssistantInput  *int64
+	resultUsage         *llm.Usage
+	sawNested           bool // written by the stream reader
+	agents              agentTranscripts
 	toolStarts          map[string]time.Time
 	nativeTools         map[string]nativeToolActivity
 	// mark is when the next model request can start: Claude Code ready, the
@@ -123,10 +127,16 @@ func (t *turn) recordSubscriptionUsage(f frame, model llm.Model) {
 // handle acts on one frame. It returns the result frame when the turn ends.
 func (t *turn) handle(f frame) *frame {
 	t.recordStartup(f)
+	if f.ParentToolUseID != nil {
+		t.sawNested = true
+	}
 	switch f.Type {
 	case "system":
 		switch f.Subtype {
 		case "init":
+			if f.ParentToolUseID != nil {
+				return nil
+			}
 			t.mu.Lock()
 			t.model = f.Model
 			t.mark = t.now()
@@ -215,44 +225,55 @@ func (t *turn) handle(f frame) *frame {
 			if m.Usage != nil {
 				if inputTokens := m.Usage.inputTokens(); inputTokens > 0 {
 					t.batchInputTokens = inputTokens
+					t.lastAssistantInput = &inputTokens
 				}
 			}
 		}
 		limited := llm.IsOutputLimit(incoming.StopReason)
 		if m.ID != "" && m.Usage != nil {
 			if t.messages == nil {
-				t.messages = map[string]message{}
+				t.messages = map[stepID]usageStep{}
 			}
-			t.messages[m.ID] = message{Model: m.Model, Usage: m.Usage}
+			key := stepID{message: m.ID}
+			if f.ParentToolUseID != nil {
+				key.parent = *f.ParentToolUseID
+			}
+			step := t.messages[key]
+			step.id, step.model = key, first(m.Model, step.model)
+			step.usage = step.usage.merge(*m.Usage)
+			t.messages[key] = step
 		}
 		if f.ParentToolUseID != nil {
-			// The parent Agent tool call is the link to this native child's
-			// transcript. These are observations, never executable tool calls.
-			t.seq++
-			publicMessage, _ := json.Marshal(m)
-			t.text = append(t.text, llm.Item{ProviderID: itemPrefix + m.ID + "/native/" + strconv.Itoa(t.seq), Type: llm.ItemMessage, OutputLimit: limited, Data: llm.Message{Role: llm.RoleAssistant, Text: "[Claude Code Agent " + *f.ParentToolUseID + "] " + string(publicMessage)}})
+			t.agents.assistant(*f.ParentToolUseID, m)
+			t.mu.Unlock()
+			return nil
 		}
 		t.mu.Unlock()
 		for _, b := range m.Content {
-			if b.Type == "tool_use" && f.ParentToolUseID == nil && b.Name != "Bash" {
-				t.startNativeTool(b.ID, b.Name)
-			}
-			switch {
-			case b.Type == "text" && f.ParentToolUseID == nil && strings.TrimSpace(b.Text) != "":
+			switch b.Type {
+			case "text":
+				if strings.TrimSpace(b.Text) == "" {
+					continue
+				}
 				t.mu.Lock()
 				t.seq++
 				t.text = append(t.text, llm.Item{ProviderID: itemPrefix + m.ID + "/" + strconv.Itoa(t.seq), Type: llm.ItemMessage, OutputLimit: limited, Data: llm.Message{Role: llm.RoleAssistant, Text: b.Text}})
 				t.mu.Unlock()
-			case b.Type == "tool_use" && f.ParentToolUseID == nil && t.opt.Progress != nil:
-				t.opt.Progress(llm.Progress{Attempt: 1, Delta: "\n› " + t.callSubject(b.Name, b.Input) + "\n"})
-			case b.Type == "tool_use" && f.ParentToolUseID != nil && t.opt.Progress != nil:
-				// A sub-agent's own tool calls, indented under the Agent call
-				// that started them. Its text stays in the recorded observations.
-				t.opt.Progress(llm.Progress{Attempt: 1, Delta: "\n" + subagentLinePrefix + t.callSubject(b.Name, b.Input) + "\n"})
+			case "tool_use":
+				if b.Name != "Bash" {
+					t.startNativeTool(b.ID, b.Name)
+				}
+				if t.opt.Progress != nil {
+					subject := t.callSubject(b.Name, b.Input)
+					if b.Name == "Agent" {
+						subject += " · running"
+					}
+					t.opt.Progress(llm.Progress{Attempt: 1, Delta: "\n› " + subject + "\n"})
+				}
 			}
 		}
 	case "user":
-		if f.IsReplay {
+		if f.IsReplay && f.ParentToolUseID == nil {
 			t.mu.Lock()
 			t.echoed = true
 			t.mu.Unlock()
@@ -263,11 +284,23 @@ func (t *turn) handle(f frame) *frame {
 		}
 		for _, b := range m.Content {
 			if b.Type == "tool_result" && b.ToolUseID != "" {
+				t.mu.Lock()
+				parent := t.agents.parents[b.ToolUseID]
+				if f.ParentToolUseID != nil {
+					parent = *f.ParentToolUseID
+				}
+				if parent != "" {
+					t.agents.result(parent, b.ToolUseID, observed.Result{Content: observedText(b.Content), IsError: b.IsError}, true)
+				} else {
+					text := contentText(b.Content)
+					if t.nativeTools[b.ToolUseID].tool == "Agent" {
+						text = observedText(b.Content)
+					}
+					t.reported[b.ToolUseID] = observed.Result{Content: text, IsError: b.IsError}
+				}
+				t.mu.Unlock()
 				t.endNativeBash(b.ToolUseID, "")
 				t.endNativeTool(b.ToolUseID, "")
-				t.mu.Lock()
-				t.reported[b.ToolUseID] = observed.Result{Content: contentText(b.Content), IsError: b.IsError}
-				t.mu.Unlock()
 			}
 		}
 	case "control_request":
@@ -283,11 +316,17 @@ func (t *turn) handle(f frame) *frame {
 		case "hook_callback":
 			var in hookInput
 			_ = json.Unmarshal(req.Input, &in)
+			if f.ParentToolUseID != nil {
+				in.parent = *f.ParentToolUseID
+			}
 			t.workers.Go(func() { t.hook(id, req.CallbackID, in) })
 		default:
 			_ = t.out.fail(id, "unsupported request: "+req.Subtype)
 		}
 	case "result":
+		if f.ParentToolUseID != nil {
+			return nil
+		}
 		// Before Unreal's message is taken up, a result ends work Claude Code
 		// queued itself, such as a notice about a background command that an
 		// interrupted run left behind; the answer to Unreal's message follows.
@@ -361,6 +400,14 @@ func (t *turn) hook(id, callback string, in hookInput) {
 func (t *turn) batch(in hookInput) (answer map[string]any) {
 	t.record.Lock()
 	defer t.record.Unlock()
+	parents := make([]string, len(in.ToolCalls))
+	mainBatch := len(in.ToolCalls) == 0 && in.AgentID == "" && in.parent == ""
+	t.mu.Lock()
+	for i, call := range in.ToolCalls {
+		parents[i] = first(t.agents.parents[call.ToolUseID], in.parent)
+		mainBatch = mainBatch || parents[i] == "" && in.AgentID == ""
+	}
+	t.mu.Unlock()
 	var recordedInputTokens int64
 	// Even an empty batch can carry inbox inputs. Preserve any U22 result in
 	// the same additionalContext and acknowledge input only through the Host.
@@ -370,7 +417,7 @@ func (t *turn) batch(in hookInput) (answer map[string]any) {
 		}
 		var batch llm.ToolBatchContinuation
 		var err error
-		if t.opt.AfterToolBatch != nil {
+		if t.opt.AfterToolBatch != nil && mainBatch {
 			batch, err = t.opt.AfterToolBatch(t.ctx, recordedInputTokens)
 		} else if t.opt.Steering != nil {
 			batch.Inputs, err = t.opt.Steering(t.ctx)
@@ -434,17 +481,20 @@ func (t *turn) batch(in hookInput) (answer map[string]any) {
 		}
 	}
 	t.mu.Lock()
-	output, model := t.takeOutput(), t.model
-	steps := t.takeSteps()
+	model := t.model
+	var output []llm.Item
+	var steps stepStats
 	var inputTokens int64
-	if in.AgentID == "" {
+	if mainBatch {
+		output = t.takeOutput()
+		steps = t.takeSteps()
 		inputTokens, t.batchInputTokens = t.batchInputTokens, 0
 	}
 	t.mu.Unlock()
-	type handed struct{ id, command string }
+	type handed struct{ id, command, parent, scope string }
 	var executed []handed
 	var observedIDs []string
-	for _, call := range in.ToolCalls {
+	for i, call := range in.ToolCalls {
 		if call.ToolUseID == "" {
 			continue
 		}
@@ -456,28 +506,43 @@ func (t *turn) batch(in hookInput) (answer map[string]any) {
 		refused := t.refused[call.ToolUseID] && !t.denied[call.ToolUseID]
 		result, reported := t.reported[call.ToolUseID]
 		t.mu.Unlock()
+		parent := parents[i]
+		scope := first(parent, in.AgentID)
 		if command := inputFields(call.ToolInput).Command; refused && command != "" {
 			arguments, _ := json.Marshal(map[string]string{"command": inDirectory(in.Cwd, t.directory, command)})
-			output = append(output, llm.Item{ProviderID: itemPrefix + call.ToolUseID, Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: call.ToolUseID, Name: tool.BashName, Arguments: string(arguments)}})
-			executed = append(executed, handed{call.ToolUseID, command})
+			output = append(output, llm.Item{ProviderID: itemPrefix + call.ToolUseID, Type: llm.ItemToolCall, ParentCallID: scope,
+				Data: llm.ToolCall{CallID: call.ToolUseID, Name: tool.BashName, Arguments: string(arguments)}})
+			executed = append(executed, handed{call.ToolUseID, command, parent, scope})
+			continue
+		}
+		if scope != "" {
+			if len(call.ToolResponse) != 0 && call.ToolResponse.Kind() != jsontext.KindNull {
+				t.mu.Lock()
+				t.agents.result(first(t.agents.parents[call.ToolUseID], parent), call.ToolUseID, observed.Result{Content: observedText(call.ToolResponse)}, false)
+				t.mu.Unlock()
+			}
 			continue
 		}
 		if !reported {
 			result = observed.Result{Content: contentText(call.ToolResponse)}
-		}
-		if !result.IsError && (reported || call.ToolResponse.Kind() != jsontext.KindNull && len(call.ToolResponse) != 0) {
-			switch call.ToolName {
-			case "Write", "Edit", "MultiEdit", "NotebookEdit":
-				fields := inputFields(call.ToolInput)
-				if path := first(fields.FilePath, fields.NotebookPath); path != "" {
-					result.WrittenPaths = []string{path}
-				}
+			if call.ToolName == "Agent" {
+				result.Content = observedText(call.ToolResponse)
 			}
 		}
+		if !result.IsError && (reported || call.ToolResponse.Kind() != jsontext.KindNull && len(call.ToolResponse) != 0) {
+			if path := writtenPath(call.ToolName, call.ToolInput); path != "" {
+				result.WrittenPaths = []string{path}
+			}
+		}
+		t.mu.Lock()
+		observations, paths := t.agents.take(call.ToolUseID)
+		t.mu.Unlock()
+		result.WrittenPaths = append(result.WrittenPaths, paths...)
 		t.results.Put(call.ToolUseID, result)
 		observedIDs = append(observedIDs, call.ToolUseID)
 		arguments, _ := json.Marshal(observed.Arguments{Tool: call.ToolName, Input: call.ToolInput})
-		output = append(output, llm.Item{ProviderID: itemPrefix + call.ToolUseID, Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: call.ToolUseID, Name: tool.ClaudeCodeName, Arguments: string(arguments)}})
+		output = append(output, llm.Item{ProviderID: itemPrefix + call.ToolUseID, Type: llm.ItemToolCall, ToolObservations: observations,
+			Data: llm.ToolCall{CallID: call.ToolUseID, Name: tool.ClaudeCodeName, Arguments: string(arguments)}})
 	}
 	if len(executed)+len(observedIDs) == 0 {
 		t.mu.Lock()
@@ -486,11 +551,14 @@ func (t *turn) batch(in hookInput) (answer map[string]any) {
 		return map[string]any{}
 	}
 	usage, generation := steps.report(model)
-	t.mu.Lock()
-	t.usageReported = true
-	first := t.firstRequestUsage()
-	t.mu.Unlock()
-	outcomes, err := t.opt.Tools(t.ctx, llm.Response{ID: uuid.New().String(), Model: model, Stop: llm.StopComplete, Output: output, Usage: usage, Generation: generation, FirstRequestUsage: first})
+	var firstUsage *llm.Usage
+	if mainBatch {
+		t.mu.Lock()
+		t.usageReported = true
+		firstUsage = t.firstRequestUsage()
+		t.mu.Unlock()
+	}
+	outcomes, err := t.opt.Tools(t.ctx, llm.Response{ID: uuid.New().String(), Model: model, Stop: llm.StopComplete, Output: output, Usage: usage, Generation: generation, FirstRequestUsage: firstUsage})
 	t.mu.Lock()
 	t.mark = t.now() // tool runs and approvals are never generation time
 	t.mu.Unlock()
@@ -507,7 +575,8 @@ func (t *turn) batch(in hookInput) (answer map[string]any) {
 	var notes []string
 	for _, h := range executed {
 		var parts []string
-		for _, output := range byID[h.id].Result.Output {
+		outcome := byID[h.id]
+		for _, output := range outcome.Result.Output {
 			if output.Kind == llm.ToolResultText {
 				parts = append(parts, output.Value)
 			}
@@ -516,12 +585,26 @@ func (t *turn) batch(in hookInput) (answer map[string]any) {
 		if result == "" {
 			result = "(no output)"
 		}
+		if h.scope != "" {
+			t.mu.Lock()
+			t.agents.result(first(t.agents.parents[h.id], h.parent), h.id, observed.Result{Content: result, IsError: outcome.Failed}, true)
+			t.mu.Unlock()
+		}
 		notes = append(notes, fmt.Sprintf("%s `%s` in its own shell, because Claude Code refused it. Unreal Agent's result (approval and execution):\n%s", ranPrefix, h.command, result))
 	}
 	if len(notes) == 0 {
 		return map[string]any{}
 	}
 	return map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PostToolBatch", "additionalContext": strings.Join(notes, "\n\n")}}
+}
+
+func writtenPath(name string, input jsontext.Value) string {
+	switch name {
+	case "Write", "Edit", "MultiEdit", "NotebookEdit":
+		fields := inputFields(input)
+		return first(fields.FilePath, fields.NotebookPath)
+	}
+	return ""
 }
 
 // markDenied notes a call Unreal denied, before Claude Code reports it.
@@ -568,13 +651,17 @@ func (t *turn) finish(result *frame) llm.Response {
 	}
 	response := llm.Response{ID: uuid.New().String(), Model: t.model, Stop: llm.StopComplete, Output: output, FirstRequestUsage: t.firstRequestUsage()}
 	response.Usage, response.Generation = t.takeSteps().report(t.model)
-	if !t.usageReported && result.Usage != nil {
+	mainUsage := t.resultUsage
+	if mainUsage == nil && result.Usage != nil {
+		mainUsage = new(reportedUsage(*result.Usage))
+	}
+	if !t.usageReported && mainUsage != nil {
 		// A result may carry usage even if the CLI omitted stream events.
 		if response.Generation == nil {
-			response.Usage = reportedUsage(*result.Usage)
+			response.Usage = *mainUsage
 		}
-		if reasoning, known := result.Usage.reasoningTokens(); known {
-			response.Usage.ReasoningTokens = reasoning
+		if !slices.Contains(mainUsage.Unknown, llm.UsageReasoning) {
+			response.Usage.ReasoningTokens = mainUsage.ReasoningTokens
 			response.Usage.Unknown = slices.DeleteFunc(response.Usage.Unknown, func(f llm.UsageField) bool { return f == llm.UsageReasoning })
 		}
 	}

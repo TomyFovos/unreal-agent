@@ -109,6 +109,14 @@ type Tree struct {
 	partial    bool
 }
 
+func (t *Tree) SubscriptionObservations() llm.SubscriptionObservations {
+	var latest llm.SubscriptionObservations
+	for _, n := range t.nodes {
+		latest.Merge(n.acc.subscriptionUsage)
+	}
+	return latest.Clone()
+}
+
 // ReadTree traverses canonical start Operations, never the live-session list:
 // the same reader therefore includes archived children and grandchildren.
 // Missing descendants remain explicit unobserved nodes, not measured zeros.

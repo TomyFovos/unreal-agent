@@ -9,6 +9,7 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
@@ -23,6 +24,71 @@ func chatText(s Snapshot, u UIState, width int) string {
 		rows = append(rows, l.row(row).plain())
 	}
 	return strings.Join(rows, "\n")
+}
+
+func TestChatFoldsNativeAgentHistoryIntoOneToolLine(t *testing.T) {
+	const parent, child = "toolu_agent", "toolu_read"
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			m := NewModel("agent-chat")
+			v := host.View{Generation: "test", Running: true}
+			appendResponse := func(output ...llm.Item) {
+				v.History.Items = append(v.History.Items, host.HistoryItem{Sequence: sessionstore.Sequence(len(v.History.Items) + 1), Kind: sessionstore.ItemModelResponse,
+					Data: sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{Output: output}}})
+			}
+			agent := llm.Item{Type: llm.ItemToolCall, ProviderID: "claude-code/" + parent, Data: llm.ToolCall{CallID: parent, Name: "claude_code",
+				Arguments: `{"tool":"Agent","input":{"description":"Review the parser","prompt":"nested prompt"}}`}}
+			if legacy {
+				appendResponse(llm.Item{Type: llm.ItemMessage, ProviderID: "claude-code/msg_child/native/193", Data: llm.Message{Role: llm.RoleAssistant,
+					Text: `[Claude Code Agent toolu_agent] {"model":"claude-sonnet-5-5","id":"msg_child","content":[{"type":"thinking","text":"nested thinking"},{"type":"tool_use","name":"Read","id":"toolu_read"}]}`}})
+				appendResponse(llm.Item{Type: llm.ItemToolCall, ProviderID: "claude-code/" + child, Data: llm.ToolCall{CallID: child, Name: "claude_code",
+					Arguments: `{"tool":"Read","input":{"file_path":"nested-file.go"}}`}})
+				if err := m.apply(v); err != nil {
+					t.Fatal(err)
+				}
+				if len(m.Snapshot().Entries) != 0 || publicAgentText(v.History.Items[0].Data.(sessionstore.ModelResponse)) != "" {
+					t.Fatal("legacy child history entered the public conversation")
+				}
+			} else {
+				agent.ToolObservations = []llm.ToolObservation{
+					{ParentCallID: parent, Type: llm.ItemReasoning, Text: "nested thinking"},
+					{ParentCallID: parent, Type: llm.ItemToolCall, CallID: child, Tool: "Read"},
+					{ParentCallID: parent, Type: llm.ItemToolResult, CallID: child, Text: "nested result"},
+				}
+			}
+			appendResponse(agent)
+			v.History.Items = append(v.History.Items, host.HistoryItem{Sequence: sessionstore.Sequence(len(v.History.Items) + 1), Kind: sessionstore.ItemToolCallStatus,
+				Data: sessionstore.ToolCallStatus{CallID: parent}})
+			appendResponse(llm.Item{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleAssistant, Text: "Review complete."}})
+			if err := m.apply(v); err != nil {
+				t.Fatal(err)
+			}
+			got := chatText(m.Snapshot(), plainUI(), 100)
+			if strings.Count(got, "Agent: Review the parser · 1 tool · 完了") != 1 || !strings.Contains(got, "Review complete.") ||
+				strings.Contains(got, "nested") || strings.Contains(got, "toolu_") || strings.Contains(got, "\"content\"") || strings.Contains(got, "Read ") {
+				t.Fatalf("unexpected chat: %s", got)
+			}
+			if legacy {
+				f := lazyFixture(0)
+				f.view = v
+				resumed := NewModel("agent-chat")
+				tail, err := f.InspectBefore(t.Context(), resumed.state.ID, 0, 3)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := resumed.seedTail(tail); err != nil {
+					t.Fatal(err)
+				}
+				if err := resumed.LoadOlder(t.Context(), f); err != nil {
+					t.Fatal(err)
+				}
+				wantPage := "  ここが会話の始まり\n  \n" + got
+				if gotPage := chatText(resumed.Snapshot(), plainUI(), 100); gotPage != wantPage {
+					t.Fatalf("paged history differs from replay:\n%s\nwant:\n%s", gotPage, wantPage)
+				}
+			}
+		})
+	}
 }
 
 func TestChatToolChipsExpandGroupAndWrap(t *testing.T) {

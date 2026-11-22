@@ -46,6 +46,9 @@ func TestCodexRecordsSubscriptionHeadersSeparatelyFromUsage(t *testing.T) {
 		t.Fatal("invalid subscription observation", a)
 	}
 	p, s := a.Subscription[0], a.Subscription[1]
+	if a.Provider != "openai-codex" || p.Window != "primary" || s.Window != "secondary" {
+		t.Fatal("Codex window identity was lost", a)
+	}
 	if p.UsedPercent == nil || *p.UsedPercent != 0 || p.WindowMinutes == nil || *p.WindowMinutes != 300 || s.UsedPercent != nil || s.WindowMinutes != nil || s.ResetsAt.Unix() != 1800000000 {
 		t.Fatal("missing subscription field was reported as zero or known zero was lost", a.Subscription)
 	}

@@ -275,6 +275,7 @@ func cloneHistoryItem(item sessionstore.Item) sessionstore.Item {
 		}
 		r.Output = slices.Clone(r.Output)
 		for i, output := range r.Output {
+			r.Output[i].ToolObservations = slices.Clone(output.ToolObservations)
 			switch output.Data.(type) {
 			case llm.Message, llm.ToolCall:
 				if output.Responses == nil {

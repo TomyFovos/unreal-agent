@@ -18,6 +18,7 @@ var boundaryColumns = []contextColumn{
 	{"reason_over_budget", "Reason over_budget", ""},
 	{"reason_header_change", "Reason header_change", ""},
 	{"reason_mid_turn", "Reason mid_turn", ""},
+	{"reason_selection_change", "Reason selection_change", ""},
 	{"reason_provider_overflow", "Reason provider_overflow", ""},
 	{"reason_historical_context", "Reason historical_context", ""},
 	{"boundary_before_tokens", "Input before rebuild", " tokens"},

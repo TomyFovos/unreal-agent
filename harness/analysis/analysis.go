@@ -42,6 +42,10 @@ type Tool struct {
 	Name string
 	Counts
 }
+type NestedTool struct {
+	Name  string
+	Calls int
+}
 type Agent struct {
 	Selection     *Selection `json:",omitzero"`
 	ObservedModel string     `json:",omitzero"`
@@ -69,6 +73,7 @@ type Errors struct {
 type Report struct {
 	Tree                *TreeReport              `json:",omitzero"`
 	ContextMeasurements *ContextMeasurements     `json:",omitzero"`
+	SubscriptionUsage   []SubscriptionWindow     `json:",omitzero"`
 	Routing             []RoutingCount           `json:",omitzero"`
 	Activities          []llm.ActivityRecord     `json:",omitzero"`
 	Redactions          []RedactionTotals        `json:",omitzero"`
@@ -94,6 +99,7 @@ type Report struct {
 	Turns               []Turn
 	Tools               Counts
 	ByTool              []Tool
+	NestedTools         []NestedTool `json:",omitzero"`
 	Agents              []Agent
 	AgentCounts         AgentCounts
 	Context             []Turn
@@ -132,6 +138,7 @@ type Accumulator struct {
 	metrics             *sessionMetrics
 	context             contextReplay
 	activities          []llm.ActivityRecord
+	subscriptionUsage   llm.SubscriptionObservations
 	compactions         []llm.ConversationRecord
 	inputTokens         int64
 	inputTokenResponses int
@@ -147,6 +154,8 @@ type Accumulator struct {
 	toolBridgeEnabled   bool
 	toolBridgeMode      string
 	calls               map[string]*call
+	toolScopes          llm.ToolScopes
+	nestedTools         map[string]int
 	operations          map[operation.ID]operation.Operation
 	routingInputs       routingCounts
 	deliveredReports    map[operation.ID]bool
@@ -178,6 +187,7 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 		case sessionstore.HostActivity:
 			if v.Activity != nil {
 				a.activities = append(a.activities, *v.Activity)
+				a.subscriptionUsage.Observe(*v.Activity, item.RecordedAt)
 				e.Kind, e.Name = v.Activity.Kind, viewer.SafeText(v.Activity.ID)
 				switch v.Activity.Kind {
 				case "model_retry":
@@ -304,11 +314,23 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 			a.providerErrors++
 			a.addError(Event{At: item.RecordedAt, Kind: "provider", Name: "canonical model failure"})
 		}
+		a.toolScopes.Observe(v.Response.Output)
 		for _, out := range v.Response.Output {
+			if a.toolScopes.Nested(out) {
+				continue
+			}
 			if tc, ok := out.Data.(llm.ToolCall); ok {
 				key := string(v.TurnID) + "\x00" + tc.CallID
 				a.calls[key] = &call{name: viewer.SafeText(tc.Name), id: tc.CallID, turn: v.TurnID, start: item.RecordedAt}
 				a.addEvent(Event{At: item.RecordedAt, Kind: "tool call", Name: viewer.SafeText(tc.Name)})
+			}
+			for _, observation := range out.ToolObservations {
+				if observation.Type == llm.ItemToolCall && observation.Tool != "" {
+					if a.nestedTools == nil {
+						a.nestedTools = make(map[string]int)
+					}
+					a.nestedTools[viewer.SafeText(observation.Tool)]++
+				}
 			}
 		}
 	case sessionstore.ToolCallStatus:
@@ -405,6 +427,7 @@ func count(c *Counts, status string, d viewer.Duration) {
 func (a *Accumulator) Snapshot(now time.Time, _ bool, resync bool, rows []viewer.Row, ops []operation.Operation) Report {
 	r := Report{LatestUsage: a.latestUsage, Version: 1, Session: a.id, At: now, CreatedAt: a.created, Partial: a.partial || resync, Resync: resync, Selection: summarize(a.active), Pending: summarize(a.pending), Usage: a.usage, Turns: append([]Turn(nil), a.turns...), Timeline: append([]Event(nil), a.events...), Errors: Errors{Provider: a.providerErrors, Crashes: a.crashes, Recent: append([]Event(nil), a.errors...)}}
 	r.Activities = append([]llm.ActivityRecord(nil), a.activities...)
+	r.SubscriptionUsage = SubscriptionWindows(a.subscriptionUsage, now)
 	r.UsageRetryAt = a.metrics.waitRetryAt
 	r.Redactions = redactionTotals(r.Activities)
 	r.Compactions = append([]llm.ConversationRecord(nil), a.compactions...)
@@ -470,6 +493,10 @@ func (a *Accumulator) Snapshot(now time.Time, _ bool, resync bool, rows []viewer
 		r.ByTool = append(r.ByTool, *t)
 	}
 	sort.Slice(r.ByTool, func(i, j int) bool { return r.ByTool[i].Name < r.ByTool[j].Name })
+	for name, calls := range a.nestedTools {
+		r.NestedTools = append(r.NestedTools, NestedTool{Name: name, Calls: calls})
+	}
+	sort.Slice(r.NestedTools, func(i, j int) bool { return r.NestedTools[i].Name < r.NestedTools[j].Name })
 	for _, row := range rows {
 		if row.ID == a.id {
 			r.Elapsed = row.Elapsed

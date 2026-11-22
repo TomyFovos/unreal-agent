@@ -1,7 +1,10 @@
 package claudeagent
 
 import (
+	"context"
 	"encoding/json/jsontext"
+	"encoding/json/v2"
+	"slices"
 	"strings"
 	"testing"
 
@@ -10,10 +13,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
 
-// Claude Code's own Agent sub-agents show their tool calls in the progress
-// stream, indented under the Agent call. E3 retains their transcript as
-// observations; only the parent Agent call becomes an executable tool call.
-func TestSubagentCallsShowInTheProgressStream(t *testing.T) {
+func TestAgentProgressAndNestedTranscript(t *testing.T) {
 	for _, tc := range []struct{ name, in, chosen string }{
 		{"the call's own model", "haiku", "sonnet"},
 		{"the model chosen with subagent model", "", "opus"},
@@ -22,7 +22,16 @@ func TestSubagentCallsShowInTheProgressStream(t *testing.T) {
 			h := newHarness(t, "agent_progress", "CLAUDEAGENT_AGENT_MODEL="+tc.in)
 			h.client.config.Subagents = SubagentCLI{AgentModel: func() string { return tc.chosen }}
 			ctx, _, _ := withMode(t, permission.FullAccess)
-			response, err := h.respond(ctx)
+			var receipts []llm.ToolOutcome
+			response, err := h.client.Respond(ctx, llm.Request{Input: []llm.Item{user("Review the parser")}}, llm.RequestOptions{
+				Identity: llm.RequestIdentity{SessionID: "session-1"},
+				Tools: func(ctx context.Context, response llm.Response) ([]llm.ToolOutcome, error) {
+					outcomes, err := h.tools(ctx, response)
+					receipts = append(receipts, outcomes...)
+					return outcomes, err
+				},
+				Progress: func(p llm.Progress) { h.progress.WriteString(p.Delta) },
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -30,33 +39,37 @@ func TestSubagentCallsShowInTheProgressStream(t *testing.T) {
 			if model == "" {
 				model = tc.chosen
 			}
-			progress := h.progress.String()
-			for _, want := range []string{
-				"\n› Claude Code Agent · " + model + ": Review the parser\n",
-				"\n" + subagentLinePrefix + "Claude Code Read: /tmp/parser.go\n",
-			} {
-				if !strings.Contains(progress, want) {
-					t.Fatalf("progress lacks %q: %q", want, progress)
-				}
-			}
-			if strings.Contains(progress, "Look at the parser and report the bugs you find.") || strings.Contains(progress, "I will read the parser now.") {
-				t.Fatalf("progress shows the Agent input or the sub-agent's text: %q", progress)
+			wantProgress := "\n› Claude Code Agent · " + model + ": Review the parser · running\n"
+			if got := h.progress.String(); got != wantProgress {
+				t.Fatalf("progress = %q, want %q", got, wantProgress)
 			}
 			if len(h.responses) != 1 {
 				t.Fatalf("rounds = %d, want 1", len(h.responses))
 			}
 			recorded := h.responses[0].Output
-			if len(recorded) != 3 {
-				t.Fatalf("round = %+v, want two native observations and the Agent call", recorded)
+			if len(recorded) != 1 {
+				t.Fatalf("round = %+v, want just the Agent call", recorded)
 			}
-			for i, want := range []string{"I will read the parser now.", "toolu_read"} {
-				message, ok := recorded[i].Data.(llm.Message)
-				if !ok || recorded[i].Type != llm.ItemMessage || !strings.Contains(recorded[i].ProviderID, "/native/") || !strings.HasPrefix(message.Text, "[Claude Code Agent toolu_agent] ") || !strings.Contains(message.Text, want) {
-					t.Fatalf("native observation %d = %+v", i, recorded[i])
-				}
-			}
-			if call := recorded[2].Data.(llm.ToolCall); recorded[2].Type != llm.ItemToolCall || call.CallID != "toolu_agent" || call.Name != tool.ClaudeCodeName {
+			if call := recorded[0].Data.(llm.ToolCall); recorded[0].Type != llm.ItemToolCall || call.CallID != "toolu_agent" || call.Name != tool.ClaudeCodeName {
 				t.Fatalf("recorded call = %+v", call)
+			}
+			want := []llm.ToolObservation{
+				{ParentCallID: "toolu_agent", Type: llm.ItemReasoning, Model: "claude-sonnet-5-5", Text: "Start with the parser"},
+				{ParentCallID: "toolu_agent", Type: llm.ItemMessage, Model: "claude-sonnet-5-5", Text: "I will read the parser now."},
+				{ParentCallID: "toolu_agent", Type: llm.ItemToolCall, Model: "claude-sonnet-5-5", CallID: "toolu_read", Tool: "Read"},
+				{ParentCallID: "toolu_agent", Type: llm.ItemToolResult, CallID: "toolu_read", Text: "Parser source", IsError: true},
+			}
+			encoded, err := json.Marshal(recorded[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			var persisted llm.Item
+			if err := json.Unmarshal(encoded, &persisted); err != nil || !slices.Equal(persisted.ToolObservations, want) || strings.Contains(string(encoded), "private-signature") {
+				t.Fatalf("structured history = %s, observations = %+v, err = %v", encoded, persisted.ToolObservations, err)
+			}
+			if len(receipts) != 1 || receipts[0].Result.CallID != "toolu_agent" || receipts[0].Failed || !slices.Equal(receipts[0].Result.Output,
+				[]llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: "The parser reads one file twice."}}) {
+				t.Fatalf("parent receipt = %+v", receipts)
 			}
 			if len(response.Output) != 1 || response.Output[0].Data.(llm.Message).Text != "Done." {
 				t.Fatalf("final response = %+v", response.Output)

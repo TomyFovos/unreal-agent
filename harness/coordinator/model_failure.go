@@ -56,5 +56,4 @@ func (current *coordinator) noteModelFailure(turn session.TurnID, cause error) {
 	}
 	current.failedModel = &failedModelTurn{cause: cause, inputs: inputs - state.deliveredInputs, peers: peers, quiet: quiet}
 	state.callModel = false
-	state.selectionBoundary = true
 }

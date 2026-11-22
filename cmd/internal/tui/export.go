@@ -131,7 +131,7 @@ func publicAgentPart(output llm.Item) (llm.Message, bool) {
 	m, ok := output.Data.(llm.Message)
 	// Empty Role is the legacy public assistant shape already accepted by
 	// the transcript projection; explicit user/system/tool roles are not.
-	if !ok || output.Type != llm.ItemMessage || m.Role != llm.RoleAssistant && m.Role != "" || m.Text == "" {
+	if !ok || output.Type != llm.ItemMessage || m.Role != llm.RoleAssistant && m.Role != "" || m.Text == "" || llm.LegacyAgentMessage(output) {
 		return llm.Message{}, false
 	}
 	return m, m.Phase == "" || m.Phase == "commentary" || m.Phase == "final" || m.Phase == "final_answer"

@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"github.com/unreallabsai/unreal-agent/harness/host"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 )
@@ -27,10 +28,11 @@ type extensionRequest struct {
 	Display  string `json:",omitzero"` // view.set: chat, orchestration or split
 }
 type extensionReply struct {
-	View    *host.View    `json:",omitzero"`
-	Receipt *host.Receipt `json:",omitzero"`
-	Display string        `json:",omitzero"` // view.get
-	Error   string        `json:",omitzero"`
+	View              *host.View                   `json:",omitzero"`
+	Receipt           *host.Receipt                `json:",omitzero"`
+	SubscriptionUsage llm.SubscriptionObservations `json:",omitzero"`
+	Display           string                       `json:",omitzero"` // view.get
+	Error             string                       `json:",omitzero"`
 }
 type ExtensionError struct{ Code string }
 
@@ -105,6 +107,9 @@ func (h ExtensionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		out.Error = "invalid_request"
 	} else {
 		switch q.Action {
+		case "subscription_usage":
+			reader := ParentReader{Host: h.Host, ParentID: q.ParentID, Directory: h.Directory, cache: h.cache}
+			out.SubscriptionUsage, err = reader.DescendantSubscriptionUsage(r.Context())
 		case "inspect_tree", "inspect_topology":
 			reader := ParentReader{Host: h.Host, ParentID: q.ParentID, Directory: h.Directory, cache: h.cache}
 			inspect := reader.InspectTree

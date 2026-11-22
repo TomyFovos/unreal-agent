@@ -48,6 +48,7 @@ type builder struct {
 	stagedRunning             map[int]bool // Transient result lifecycle; never part of canonical history.
 	stagedOrigins             map[int]string
 	callOrigins               map[string]string
+	toolScopes                llm.ToolScopes
 	omittedCalls              map[string]bool
 	engine                    *contextengine.Engine
 	contextConfig             contextengine.Config
@@ -68,6 +69,7 @@ type builder struct {
 	lastUnit                  string
 	responseSerial            uint64
 	filteredOutput            bool
+	filteredScopes            bool
 	derived                   map[string][]llm.Item
 	estimate                  derivedEstimate
 	portableBefore            string
@@ -95,6 +97,7 @@ type builder struct {
 	window                  windowProjection
 	windowPrompt            llm.WindowPrompt
 	rebuildHistoricalWindow bool
+	selectionContinuation   bool
 	windowSource            windowSource
 	forkSequence            sessionstore.Sequence
 	lastHumanInput          windowRequest
@@ -282,6 +285,7 @@ func (current *builder) AddControlMessage(request inbox.ControlMessage) {
 	switch request.Mode {
 	case inbox.StopHard, inbox.InterruptAgent:
 		current.windowTurn = windowTurn{}
+		current.selectionContinuation = false
 	case inbox.UpdateSettings:
 		current.estimate.prefixValid = false
 		settings := request.Parameters.(inbox.Settings)
@@ -337,6 +341,7 @@ func (current *builder) renderSystem() {
 }
 
 func (current *builder) AddModelResponse(response llm.Response) {
+	current.toolScopes.Observe(response.Output)
 	if record, ok := current.source.Data.(sessionstore.ModelResponse); ok && current.batchInputTurn != "" && record.TurnID == current.batchInputTurn && response.Failure == nil {
 		if current.engine == nil {
 			current.committedPrefix[current.batchInputIndex].ClaudeResumeBoundary = true
@@ -350,6 +355,10 @@ func (current *builder) AddModelResponse(response llm.Response) {
 		return
 	}
 	for _, item := range response.Output {
+		if current.toolScopes.Nested(item) {
+			continue
+		}
+		item.ToolObservations = nil
 		omit := response.Stop == llm.StopMaxOutputTokens || item.OutputLimit
 		if c, ok := item.Data.(llm.ToolCall); ok {
 			if c.Incomplete {
@@ -411,6 +420,9 @@ func (current *builder) addToolResult(result llm.ToolResult, running bool) {
 	}
 	if current.engine != nil {
 		current.contextReceipt(callID, payload, running, result.State)
+		return
+	}
+	if current.toolScopes.Parent(callID) != "" {
 		return
 	}
 	var kept []llm.Item

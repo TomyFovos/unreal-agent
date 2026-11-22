@@ -75,8 +75,8 @@ func (s *Session) RuntimeSelection() (active, pending *sessionstore.RuntimeSelec
 	return
 }
 
-// SelectRuntime persists an idempotent, optimistic-concurrency intent. It never
-// touches an executing builder/client or submits an input to the model.
+// SelectRuntime persists an idempotent, optimistic-concurrency intent and
+// wakes the Coordinator to check any usage-limit wait.
 func (s *Session) SelectRuntime(ctx context.Context, generation string, expected uint64, choice sessionstore.RuntimeSelection) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -135,13 +135,20 @@ func (s *Session) SelectRuntime(ctx context.Context, generation string, expected
 		return ErrConflict
 	}
 	choice.Revision = revision + 1
-	return s.store.AppendHostRecord(ctx, s.ID, sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostRuntimeSelection, Selection: &choice})
+	if err := s.store.AppendHostRecord(ctx, s.ID, sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostRuntimeSelection, Selection: &choice}); err != nil {
+		return err
+	}
+	select {
+	case s.selectionChanged <- struct{}{}:
+	default:
+	}
+	return nil
 }
 
 func (s *Session) beginTurn(ctx context.Context, boundary bool) (uint64, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.runtime.ApplySelection == nil || s.selection == nil {
+		s.mu.Unlock()
 		return 0, nil
 	}
 	if boundary && s.pendingSelection != nil {
@@ -149,11 +156,14 @@ func (s *Session) beginTurn(ctx context.Context, boundary bool) (uint64, error) 
 		// Commit activation before effects. A crash here replays the activation
 		// before the next model request; no old turn is rewritten.
 		if err := s.store.AppendHostRecord(ctx, s.ID, sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostRuntimeApplied, Selection: &choice}); err != nil {
+			s.mu.Unlock()
 			return 0, err
 		}
 	}
-	if err := s.runtime.ApplySelection(*s.selection); err != nil {
+	choice := *s.selection
+	s.mu.Unlock()
+	if err := s.runtime.ApplySelection(choice); err != nil {
 		return 0, err
 	}
-	return s.selection.Revision, nil
+	return choice.Revision, nil
 }

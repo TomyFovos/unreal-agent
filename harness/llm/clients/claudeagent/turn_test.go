@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json/v2"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/tool"
 	"github.com/unreallabsai/unreal-agent/harness/tool/observed"
 )
 
@@ -65,17 +67,46 @@ func TestGenerationTimingExcludesToolAndApprovalWaits(t *testing.T) {
 	}
 }
 
+func TestNativeAgentShellFallbackKeepsCanonicalScope(t *testing.T) {
+	var output []llm.Item
+	opt := llm.RequestOptions{Tools: func(_ context.Context, response llm.Response) ([]llm.ToolOutcome, error) {
+		output = append(output, response.Output...)
+		return []llm.ToolOutcome{{Result: llm.ToolResult{CallID: "shell", Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: "workspace files"}}}}}, nil
+	}}
+	round := newTurn(t.Context(), func() {}, opt, &writer{w: io.Discard}, observed.NewResults(), &approver{}, t.TempDir(), "session")
+	parent := "agent"
+	round.handle(frame{Type: "assistant", ParentToolUseID: &parent, Message: []byte(`{"id":"msg_child","content":[{"type":"tool_use","id":"shell","name":"Bash","input":{"command":"ls"}}]}`)})
+	round.handle(frame{Type: "system", Subtype: "permission_denied", ToolName: "Bash", ToolUseID: "shell", DecisionReasonType: "rule"})
+	answer := round.batch(hookInput{AgentID: "child", ToolCalls: []batchCall{{ToolName: "Bash", ToolUseID: "shell", ToolInput: []byte(`{"command":"ls"}`)}}})
+	if !strings.Contains(hookOutput(answer, "additionalContext"), "workspace files") || len(output) != 1 || output[0].ParentCallID != parent || output[0].Data.(llm.ToolCall).Name != tool.BashName {
+		t.Fatalf("shell fallback lost scope or result: %v, %+v", answer, output)
+	}
+	round.batch(hookInput{ToolCalls: []batchCall{{ToolName: "Agent", ToolUseID: parent, ToolResponse: []byte(`"analysis complete"`)}}})
+	if len(output) != 2 || len(output[1].ToolObservations) != 2 || output[1].ToolObservations[1].Type != llm.ItemToolResult || output[1].ToolObservations[1].Text != "workspace files" {
+		t.Fatalf("Agent transcript lost the tool result: %+v", output)
+	}
+}
+
 func TestToolWindowReadsLatestMainAssistantUsageAfterToolRecording(t *testing.T) {
 	var batchesRecorded int
 	inputs := make([]int64, 0, 2)
 	opt := llm.RequestOptions{
-		Tools: func(_ context.Context, _ llm.Response) ([]llm.ToolOutcome, error) {
+		Tools: func(_ context.Context, r llm.Response) ([]llm.ToolOutcome, error) {
+			if len(r.Output) != 1 || r.Output[0].Data.(llm.ToolCall).CallID != "agent" {
+				t.Fatalf("unexpected main tool records: %+v", r.Output)
+			}
 			batchesRecorded++
 			return nil, nil
 		},
+		Steering: func(_ context.Context) ([]llm.BatchInput, error) {
+			if batchesRecorded != 0 || len(inputs) != 0 {
+				t.Fatalf("child batch changed main history or admission: %d batches and measurements %v", batchesRecorded, inputs)
+			}
+			return nil, nil
+		},
 		AfterToolBatch: func(_ context.Context, inputTokens int64) (llm.ToolBatchContinuation, error) {
-			if batchesRecorded != len(inputs)+1 {
-				t.Fatalf("checked the window before recording tool batch %d", len(inputs)+1)
+			if batchesRecorded != 1 {
+				t.Fatalf("checked the window before recording the main batch: %d", batchesRecorded)
 			}
 			inputs = append(inputs, inputTokens)
 			return llm.ToolBatchContinuation{RotateWindow: inputTokens >= 200_000}, nil
@@ -88,8 +119,8 @@ func TestToolWindowReadsLatestMainAssistantUsageAfterToolRecording(t *testing.T)
 	round.handle(frame{Type: "assistant", ParentToolUseID: &parent, Message: []byte(`{"id":"child","usage":{"input_tokens":900000}}`)})
 	child := round.batch(hookInput{AgentID: "child", ToolCalls: []batchCall{{ToolName: "Read", ToolUseID: "child-read"}}})
 	main := round.batch(hookInput{ToolCalls: []batchCall{{ToolName: "Agent", ToolUseID: parent}}})
-	if len(inputs) != 2 || inputs[0] != 0 || inputs[1] != 200_000 {
-		t.Fatalf("tool boundary measurements = %v, want [0 200000]", inputs)
+	if len(inputs) != 1 || inputs[0] != 200_000 {
+		t.Fatalf("main tool boundary measurements = %v, want [200000]", inputs)
 	}
 	reason, _ := main["stopReason"].(string)
 	if _, stopped := child["continue"]; stopped || main["continue"] != false || reason == "" {

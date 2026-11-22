@@ -59,14 +59,40 @@ func TestTelemetryAppearsInAnalyzeAndExports(t *testing.T) {
 func TestTurnTotalUsageIsVisibleWithoutDoubleCountingResponses(t *testing.T) {
 	a := New("turn-total")
 	a.Apply(host.HistoryItem{Data: sessionstore.ModelResponse{Response: llm.Response{Usage: llm.Usage{InputTokens: 100, OutputTokens: 20, Unknown: []llm.UsageField{llm.UsageReasoning}}}}})
-	a.Apply(host.HistoryItem{Data: sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostActivity, Activity: &llm.ActivityRecord{Kind: "claude_usage", Usage: &llm.Usage{InputTokens: 100, OutputTokens: 20, ReasoningTokens: 7}}}})
+	for _, row := range []llm.ActivityRecord{
+		{Kind: "claude_usage", Model: "claude-opus-5-5", Usage: &llm.Usage{InputTokens: 125, OutputTokens: 26, ReasoningTokens: 7}},
+		{Kind: "provider_usage", Model: "claude-opus-5-5", Usage: &llm.Usage{InputTokens: 100, OutputTokens: 20, ReasoningTokens: 3}},
+		{Kind: "provider_usage", Model: "claude-sonnet-5-5", Usage: &llm.Usage{InputTokens: 25, OutputTokens: 6, ReasoningTokens: 4}},
+	} {
+		row.Provider, row.ID = "claude-code", "turn"
+		a.Apply(host.HistoryItem{Data: sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostActivity, Activity: &row}})
+	}
 	r := a.Snapshot(time.Now(), false, false, nil, nil)
 	if r.Usage.Input != 100 || r.Usage.Output != 20 {
 		t.Fatal("turn total counted twice", r.Usage)
 	}
 	text := strings.Join(Lines(r, "usage", true), "\n")
-	if !strings.Contains(text, "turn total") || !strings.Contains(text, "reasoning     7") {
-		t.Fatal("result reasoning missing", text)
+	for _, want := range []string{"turn total", "reasoning     7", "claude-opus-5-5 / input 100 / cached 0 / write 0 / reasoning 3 / output 20", "claude-sonnet-5-5 / input 25 / cached 0 / write 0 / reasoning 4 / output 6"} {
+		if strings.Count(text, want) != 1 {
+			t.Fatalf("want %q once in:\n%s", want, text)
+		}
+	}
+}
+
+func TestAgentToolDetailsKeepNestedCallsOutOfTopLevelCounts(t *testing.T) {
+	a := New("agent-tools")
+	a.Apply(host.HistoryItem{Data: sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{Output: []llm.Item{{
+		Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "agent", Name: "claude_code"},
+		ToolObservations: []llm.ToolObservation{
+			{ParentCallID: "agent", Type: llm.ItemToolCall, Tool: "Read", CallID: "read"},
+			{ParentCallID: "agent", Type: llm.ItemToolResult, CallID: "read", Text: "private nested output"},
+		},
+	}}}}})
+	r := a.Snapshot(time.Now(), false, false, nil, nil)
+	text := strings.Join(Lines(r, "tools", true), "\n")
+	if r.Tools.Calls != 1 || len(r.NestedTools) != 1 || r.NestedTools[0] != (NestedTool{Name: "Read", Calls: 1}) ||
+		!strings.Contains(text, "Read / 1") || strings.Contains(text, "private nested output") {
+		t.Fatal(text)
 	}
 }
 

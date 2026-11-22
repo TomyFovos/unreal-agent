@@ -6,6 +6,7 @@ import (
 
 	"github.com/unreallabsai/unreal-agent/harness/analysis"
 	"github.com/unreallabsai/unreal-agent/harness/host"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
@@ -69,8 +70,9 @@ func loadTranscriptPage(ctx context.Context, r Reader, id session.ID, boundary, 
 	if older {
 		after, end = 0, boundary-1
 	}
+	var scopes llm.ToolScopes
 	err := readHistory(ctx, r, id, after, end, func(item host.HistoryItem) bool {
-		entries := entriesFor(item)
+		entries := projectEntries(item, &scopes)
 		update := item.Data
 		if status, ok := update.(sessionstore.ToolCallStatus); ok {
 			updateReceipts(p.Entries, status, item.RecordedAt)
@@ -148,6 +150,7 @@ func (m *Model) seedTail(v host.View) error {
 		s.LastUserAt = h.LastUserAt
 		s.Attention = append([]string(nil), h.Attention...)
 		s.WaitingForModel, s.MainInterrupted, s.TailBackground = h.WaitingForModel, h.MainInterrupted, h.Background
+		s.SubscriptionUsage.Merge(h.SubscriptionUsage)
 		s.CacheLatest, s.CacheTotal = viewer.Usage{}, viewer.Usage{}
 		if h.UsageResponses > 0 {
 			viewer.AddUsage(&s.CacheLatest, h.CacheLatest)
@@ -181,6 +184,11 @@ func (m *Model) LoadOlder(ctx context.Context, r BackwardReader) error {
 	if err != nil {
 		return err
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state.Generation != generation || m.state.HistoryFirst != first {
+		return nil
+	}
 	var entries []Entry
 	for _, item := range v.History.Items {
 		if item.Sequence >= first {
@@ -189,15 +197,10 @@ func (m *Model) LoadOlder(ctx context.Context, r BackwardReader) error {
 		if status, ok := item.Data.(sessionstore.ToolCallStatus); ok {
 			updateReceipts(entries, status, item.RecordedAt)
 		}
-		entries = append(entries, entriesFor(item)...)
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.state.Generation != generation || m.state.HistoryFirst != first {
-		return nil
+		entries = append(entries, projectEntries(item, &m.toolScopes)...)
 	}
 	applyHistoryReceipts(entries, v.HistoryReceipts)
-	m.state.Entries = append(entries, m.state.Entries...)
+	m.state.Entries = updateToolScopes(append(entries, m.state.Entries...), &m.toolScopes)
 	if len(v.History.Items) > 0 {
 		m.state.HistoryFirst = v.History.Items[0].Sequence
 	}
@@ -248,6 +251,7 @@ func (m *Model) LoadAnalysisTree(ctx context.Context, inspect analysis.InspectFu
 	}
 	m.mu.Lock()
 	m.analysisTree = tree
+	m.state.SubscriptionUsage.Merge(tree.SubscriptionObservations())
 	m.state.Version++
 	m.mu.Unlock()
 	return nil

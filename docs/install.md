@@ -152,7 +152,11 @@ If you use an existing Linux Docker Sandbox on Windows:
 2. Run the same installation block from [Step 2](#step-2-download-and-install-the-kit).
 3. Reopen your Session as usual (`unreal development`).
 
-When you launch a Session after updating, the wrapper detects the new build, restarts that workspace's background Host automatically, and **preserves your existing conversation history and settings**. Old versions are cleaned up automatically while keeping the current version, previous version, and any version attached to a live process.
+When you open a Session after updating, an idle workspace Host restarts onto the installed build and **preserves your conversation history and settings**. If any Session in that Host is running a model turn, an operation, or child agents, Unreal shows an update notice and attaches a TUI from the running build. Open the Session again once the Host is idle to apply the update.
+
+To switch immediately, run `unreal development --restart-host`. Before interrupting work, Unreal shows the number of direct child agents, other operations, and active Sessions and asks for confirmation. Descendants of those child agents are affected too. Hosts from before this change stay running until you use the confirmed restart because their socket API cannot verify that the whole workspace is idle.
+
+The installer keeps the current version, the previous version, and any version a live process uses.
 
 ### Optional Installer Flags (`development.sh`)
 

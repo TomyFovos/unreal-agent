@@ -61,7 +61,10 @@ func fixture(t *testing.T) (*host.Host, *Client, string, string) {
 	done := make(chan error, 1)
 	socket := filepath.Join(dir, "host.sock")
 	go func() {
-		done <- ListenAndServe(ctx, socket, Config{Host: owner, Policy: permission.Unrestricted(), Auth: authflow.New(credential.NewManager(backend))})
+		done <- ListenAndServe(ctx, socket, Config{Host: owner, Policy: permission.Unrestricted(), Auth: authflow.New(credential.NewManager(backend)), Restart: func() {
+			_ = owner.Close()
+			cancel()
+		}})
 	}()
 	client := NewClient(socket)
 	t.Cleanup(func() {
@@ -93,6 +96,36 @@ func bounded(t *testing.T) context.Context {
 	t.Cleanup(c)
 	return ctx
 }
+
+func TestGatewayHostRestartRepliesBeforeShutdown(t *testing.T) {
+	owner, client, _, _ := fixture(t)
+	// Use an unauthenticated HTTP request before reaching the real Unix socket.
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "http://localhost/v1/host/restart", strings.NewReader("{}"))
+	Handler(Config{Host: owner, Restart: func() { t.Error("unauthenticated restart") }}).ServeHTTP(w, r)
+	if !strings.Contains(w.Body.String(), "unauthenticated_control") {
+		t.Fatal(w.Body.String())
+	}
+
+	ctx := bounded(t)
+	status, err := client.call(ctx, "host/workload", request{})
+	if err != nil || status.Workload == nil || *status.Workload != (host.Workload{}) {
+		t.Fatal("idle workload", status, err)
+	}
+	response, _, err := client.connect(ctx, "host/restart", request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var reply frame
+	if err := json.UnmarshalRead(response.Body, &reply); err != nil || !reply.Restarting {
+		t.Fatal("complete restart response", reply, err)
+	}
+	if _, err := client.Methods(ctx); err == nil {
+		t.Fatal("retiring Host still reports ready")
+	}
+}
+
 func TestGatewayClientProcess(t *testing.T) {
 	if socket := os.Getenv("UA_TEST_GATEWAY"); socket != "" {
 		c := NewClient(socket)

@@ -298,8 +298,27 @@ func assertPeerBatchRequest(t *testing.T, request llm.Request) {
 }
 
 func TestResponsesAnswersPeerWhileChildStartIsRunning(t *testing.T) {
+	t.Run("unchanged", func(t *testing.T) { testResponsesAnswersPeerWhileChildStartIsRunning(t, false) })
+	t.Run("switch", func(t *testing.T) { testResponsesAnswersPeerWhileChildStartIsRunning(t, true) })
+}
+
+func testResponsesAnswersPeerWhileChildStartIsRunning(t *testing.T, switchModel bool) {
 	synctest.Test(t, func(t *testing.T) {
 		run := newToolGraceTestRun(t)
+		active := sessionstore.RuntimeSelection{Provider: "openai-codex", Model: "old"}
+		var pending *sessionstore.RuntimeSelection
+		builder := run.current.dependencies.ContextBuilder
+		builder.SetModel(llm.Model{ID: active.Model})
+		run.current.dependencies.RuntimeSelection = func() (*sessionstore.RuntimeSelection, *sessionstore.RuntimeSelection) {
+			return &active, pending
+		}
+		run.current.dependencies.BeforeTurn = func(_ context.Context, boundary bool) (uint64, error) {
+			if boundary && pending != nil {
+				active, pending = *pending, nil
+				builder.SetModel(llm.Model{ID: active.Model})
+			}
+			return active.Revision, nil
+		}
 		spec, err := operation.NewRemoteJobSpec(operation.RemoteJobPlan{Type: "subagent", Version: 1, Data: []byte(`{"Action":"start"}`)})
 		if err != nil {
 			t.Fatal(err)
@@ -308,11 +327,19 @@ func TestResponsesAnswersPeerWhileChildStartIsRunning(t *testing.T) {
 		run.start(t)
 		run.input(t, externalEvent(t, 0, "task", "delegate the check"))
 		run.respond(t, 0, toolGraceResponse("start-child"))
+		wantModel := "old"
+		if switchModel {
+			wantModel = "new"
+			pending = &sessionstore.RuntimeSelection{Provider: active.Provider, Model: wantModel, Revision: 1}
+		}
 		run.input(t, progressPeerInput(t, "question", "message", "Which branch should I check?"))
-		if run.modelCallCount() != 2 || !run.current.hasPendingOperations() {
+		if run.modelCallCount() != 2 || !run.current.hasPendingOperations() || len(run.operations.cancels) != 0 {
 			t.Fatal("parent could not answer a running child's question")
 		}
 		request := run.calls[1].request
+		if request.Model.ID != wantModel {
+			t.Fatalf("model for the child reply = %q, want %q", request.Model.ID, wantModel)
+		}
 		assertStopResult(t, request, "start-child", contextbuilder.ToolCallRunningPayload)
 		if !strings.Contains(requestDump(t, request), "Which branch should I check?") {
 			t.Fatal("next model request missed the child's question")

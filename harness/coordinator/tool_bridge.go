@@ -33,20 +33,21 @@ type bridgeRequest struct {
 	begin              bool
 	waitingForChildren bool
 	steering           bool
+	mainBatch          bool
 	inputTokens        int64
 }
 
 func (current *coordinator) steeringRendezvous(ctx context.Context, origin session.TurnID) func(context.Context) ([]llm.BatchInput, error) {
-	afterBatch := current.toolBatchRendezvous(ctx, origin)
+	afterBatch := current.toolBatchRendezvous(ctx, origin, false)
 	return func(callCtx context.Context) ([]llm.BatchInput, error) {
 		batch, err := afterBatch(callCtx, 0)
 		return batch.Inputs, err
 	}
 }
 
-func (current *coordinator) toolBatchRendezvous(ctx context.Context, origin session.TurnID) func(context.Context, int64) (llm.ToolBatchContinuation, error) {
+func (current *coordinator) toolBatchRendezvous(ctx context.Context, origin session.TurnID, mainBatch bool) func(context.Context, int64) (llm.ToolBatchContinuation, error) {
 	return func(callCtx context.Context, inputTokens int64) (llm.ToolBatchContinuation, error) {
-		request := bridgeRequest{ctx: callCtx, origin: origin, reply: make(chan bridgeReply, 1), steering: true, inputTokens: inputTokens}
+		request := bridgeRequest{ctx: callCtx, origin: origin, reply: make(chan bridgeReply, 1), steering: true, mainBatch: mainBatch, inputTokens: inputTokens}
 		select {
 		case current.bridgeRequests <- request:
 		case <-ctx.Done():
@@ -67,6 +68,15 @@ func (current *coordinator) toolBatchRendezvous(ctx context.Context, origin sess
 
 // The next model response acknowledges the watermark of this continuation.
 func (current *coordinator) deliverSteering(ctx context.Context, request bridgeRequest) error {
+	if request.mainBatch && current.pendingRuntimeChange() {
+		// The old client still owns the hook reply. Persist its handoff now and
+		// apply the latest selection when it exits, before building the window.
+		if err := current.persistContext(ctx, sessionstore.ContextRecord{Kind: sessionstore.ContextSelectionContinuation}); err != nil {
+			return err
+		}
+		request.reply <- bridgeReply{batch: llm.ToolBatchContinuation{RotateWindow: true}}
+		return nil
+	}
 	if b, ok := current.dependencies.ContextBuilder.(interface {
 		PrepareToolWindow(context.Context, func(sessionstore.ContextRecord) error, int64, func() error) (bool, error)
 	}); ok && request.inputTokens > 0 {
@@ -303,7 +313,7 @@ func (current *coordinator) acceptBridgeRequest(ctx context.Context, request bri
 		}
 		return err
 	}
-	current.state.selectionBoundary, current.state.callModel = false, false
+	current.state.callModel = false
 	return current.dispatchOperationsToManager(ctx)
 }
 

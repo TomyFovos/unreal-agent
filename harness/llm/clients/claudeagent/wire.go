@@ -120,6 +120,29 @@ func (u *usage) reportedOutput() *int64 {
 	return nil
 }
 
+// Assistant fragments can repeat the message ID and update only some counters.
+func (u usage) merge(next usage) usage {
+	if next.inputReported {
+		u.InputTokens, u.inputReported = next.InputTokens, true
+	}
+	if next.outputReported {
+		u.OutputTokens, u.outputReported = next.OutputTokens, true
+	}
+	if next.CacheReadInputTokens != nil {
+		u.CacheReadInputTokens = next.CacheReadInputTokens
+	}
+	if next.CacheCreationInputTokens != nil {
+		u.CacheCreationInputTokens = next.CacheCreationInputTokens
+	}
+	if next.ReasoningTokens != nil {
+		u.ReasoningTokens = next.ReasoningTokens
+	}
+	if next.ThinkingTokens != nil {
+		u.ThinkingTokens = next.ThinkingTokens
+	}
+	return u
+}
+
 func (u usage) reasoningTokens() (int64, bool) {
 	if u.ReasoningTokens != nil {
 		return *u.ReasoningTokens, true
@@ -155,6 +178,7 @@ type message struct {
 type block struct {
 	Type      string         `json:"type"`
 	Text      string         `json:"text"`
+	Thinking  string         `json:"thinking"`
 	ID        string         `json:"id"`
 	Name      string         `json:"name"`
 	Input     jsontext.Value `json:"input"`
@@ -204,6 +228,23 @@ type hookInput struct {
 	ToolInput     jsontext.Value `json:"tool_input"`
 	ToolUseID     string         `json:"tool_use_id"`
 	ToolCalls     []batchCall    `json:"tool_calls"`
+	parent        string
+}
+
+// observedText reads textual results, including the content envelope that the
+// Agent hook can report. Opaque objects are not transcript text.
+func observedText(value jsontext.Value) string {
+	if value.Kind() == jsontext.KindBeginObject {
+		var result struct {
+			Content jsontext.Value `json:"content"`
+		}
+		if json.Unmarshal(value, &result) != nil {
+			return ""
+		}
+		value = result.Content
+	}
+	text, _ := decodeContentText(value)
+	return text
 }
 
 type batchCall struct {
@@ -241,12 +282,16 @@ func (w *writer) fail(id, message string) error {
 // contentText flattens a tool_result content value, which is either a string
 // or a list of blocks, into the text the model read.
 func contentText(value jsontext.Value) string {
-	if len(value) == 0 {
-		return ""
+	if text, ok := decodeContentText(value); ok {
+		return text
 	}
+	return string(value)
+}
+
+func decodeContentText(value jsontext.Value) (string, bool) {
 	var text string
 	if json.Unmarshal(value, &text) == nil {
-		return text
+		return text, true
 	}
 	var blocks []block
 	if json.Unmarshal(value, &blocks) == nil {
@@ -259,7 +304,7 @@ func contentText(value jsontext.Value) string {
 				parts = append(parts, "[image]")
 			}
 		}
-		return strings.Join(parts, "\n")
+		return strings.Join(parts, "\n"), true
 	}
-	return string(value)
+	return "", false
 }

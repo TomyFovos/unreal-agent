@@ -142,7 +142,7 @@ func stateDock(s Snapshot, u UIState, l layout) []line {
 		return nil
 	}
 	if s.PendingSelection != nil {
-		text := "次のターンから: " + topologyText(selectionLabel(*s.PendingSelection, u.Theme), 256)
+		text := "モデル切り替え待ち  " + topologyText(selectionLabel(*s.PendingSelection, u.Theme), 256)
 		result = append(result, l.gutter("", "", textLine(tail(text, l.text, u.Theme), meta)))
 	}
 	return result

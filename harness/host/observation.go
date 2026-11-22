@@ -107,7 +107,12 @@ func observationItem(item sessionstore.Item) HistoryItem {
 			generation := *data.Response.Generation
 			response.Generation = &generation
 		}
+		var scopes llm.ToolScopes
+		scopes.Observe(data.Response.Output)
 		for _, output := range data.Response.Output {
+			if scopes.Nested(output) {
+				continue
+			}
 			switch value := output.Data.(type) {
 			case llm.Message:
 				if value.Role == llm.RoleAssistant {

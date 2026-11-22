@@ -59,6 +59,8 @@ The bottom bar displays three live metrics (`—` when unknown):
 - **Speed (`速度`):** Output generation speed in `tok/s`. A `~` prefix indicates client-clock timing (used for Claude). Tool execution and approval wait times are excluded.
 - **Cache (`キャッシュ`):** Prompt cache hit rate for the latest turn.
 
+The footer also shows the remaining ChatGPT and Claude subscription allowance from the Session tree, including archived children (for example `週 残り13%`; ASCII: `7d left 13%`). Common windows use short labels such as `5h` and `週` (weekly). Reset times use the terminal's local time. As space runs out, the footer drops reset times and optional fields. Open **Subscription usage** in `/analyze` for observation times and windows whose reset has passed.
+
 ---
 
 ## Keyboard Shortcuts & Text Input

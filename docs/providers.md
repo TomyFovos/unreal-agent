@@ -12,6 +12,10 @@ Unreal Agent supports Claude and ChatGPT subscription logins, optional OpenAI an
 2. Select a model from that connection's catalog, then choose any available reasoning effort and Fast mode options.
 3. After signing in later or updating an external CLI, run `/model refresh` to re-check authentication and reload models, then select the provider in `/model`. Reinstallation is unnecessary. An existing Session keeps its selected provider until you change it.
 
+Unreal applies the selected connection, model, effort, and Fast mode to the next request after the current tool batch completes. Claude Code ends its current CLI turn at that boundary and continues in a fresh conversation with the completed tool results and queued messages. A running generation and any tool approvals follow their normal course. The TUI shows the pending selection until it is applied, then confirms the switch. An idle Session uses the selection for its next request.
+
+During a usage-limit wait, choosing a different model or connection immediately resumes the pending work. Changes to effort or Fast mode on the same model and connection apply when the wait ends.
+
 > **Notes:**
 > - On first launch, Unreal prefers a ready Claude or ChatGPT login: **Claude** if both subscriptions are ready, or the ready one. Registering an API connection does not select it. Even with only API connections registered, open `/model` to choose one, or explicitly set `UNREAL_HARNESS_LLM_PROVIDER=openai` or `claude-api` for the initial selection. `UNREAL_HARNESS_LLM_MODEL` can also select its model.
 > - Unavailable providers remain listed with their status and login instructions so you can see why they are disabled.
@@ -41,7 +45,7 @@ Unreal Agent supports Claude and ChatGPT subscription logins, optional OpenAI an
 
 When Claude Code hits a session (5-hour), weekly, or model-specific subscription limit, Unreal shows the retry time in the TUI and `/analyze`. Unreal uses the reset timestamp from a rejected `rate_limit_event` when available. Claude Code can also report the reset in the error text, where a time without a timezone uses the local timezone. [Claude Code usage-limit messages](https://code.claude.com/docs/en/errors#usage-limits), [2.1.x stream-json reproduction](https://github.com/anthropics/claude-code/issues/103820)
 
-Child agents keep running and their reports are stored during the wait. At the reset, Unreal retries once with the queued reports and waits again if the limit still applies. When the provider gives no usable reset time, the existing usage-limit backoff determines the next retry.
+Child agents keep running and their reports are stored during the wait. At the reset, Unreal retries once with the queued reports and waits again if the limit still applies. A different model or connection selected in `/model` resumes the pending work and includes the queued reports. When the provider gives no usable reset time, the existing usage-limit backoff determines the next retry.
 
 ---
 
@@ -70,7 +74,7 @@ Child agents keep running and their reports are stored during the wait. At the r
 
 ### Fast mode
 
-In `/model`, choose **Fast mode** after effort when the ChatGPT subscription catalog advertises it. The selection applies from the next turn and survives Session resume. Fast is off by default. Codex CLI 0.169.1 sends `"service_tier": "priority"` in the Responses request for the selected model. Unreal uses the same field when on and omits it when off. Support comes from `service_tiers[].id` in the official cache or `serviceTiers[].id` in `model/list`. [Codex CLI picker](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/tui/src/chatwidget/service_tiers.rs#L75-L95), [request builder](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/core/src/client.rs#L1278-L1306), [Luna catalog entry](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/models-manager/models.json#L1197-L1207)
+In `/model`, choose **Fast mode** after effort when the ChatGPT subscription catalog advertises it. The selection applies at the next request boundary and survives Session resume. Fast is off by default. Codex CLI 0.169.1 sends `"service_tier": "priority"` in the Responses request for the selected model. Unreal uses the same field when on and omits it when off. Support comes from `service_tiers[].id` in the official cache or `serviceTiers[].id` in `model/list`. [Codex CLI picker](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/tui/src/chatwidget/service_tiers.rs#L75-L95), [request builder](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/core/src/client.rs#L1278-L1306), [Luna catalog entry](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/models-manager/models.json#L1197-L1207)
 
 On ChatGPT sign-in, GPT-6 Luna Fast uses **2.5×** the included subscription allowance and **2×** the purchased-credit or eligible enterprise pay-as-you-go rate for the same model at standard speed. Rates vary by model. [OpenAI speed guide](https://learn.chatgpt.com/docs/agent-configuration/speed#fast-mode), [OpenAI pricing](https://learn.chatgpt.com/docs/pricing?codex-pricing-speed=fast#speed-multipliers)
 

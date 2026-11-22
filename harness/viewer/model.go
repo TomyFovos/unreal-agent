@@ -761,3 +761,16 @@ func cloneRow(r Row) Row {
 }
 
 func (m *Model) Version() uint64 { m.mu.Lock(); defer m.mu.Unlock(); return m.version }
+
+func (m *Model) hasChildren(id session.ID) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p := m.sessions[id]; p != nil {
+		for _, c := range p.children {
+			if c.ok {
+				return true
+			}
+		}
+	}
+	return false
+}

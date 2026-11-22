@@ -141,13 +141,15 @@ func (r HostRecord) Validate() error {
 const HostContext = "context"
 const HostActivity = "activity"
 const (
-	ContextWindowStart         = "window_start"
-	ContextWindowBoundary      = "window_boundary"
-	ContextWindowFallback      = "window_fallback"
-	ContextConversationBinding = "provider_conversation_binding"
-	WindowFitExcerpted         = "excerpted"
-	WindowCauseMidTurn         = "mid_turn"
-	WindowFallbackL2OverBudget = "l2_over_budget"
+	ContextWindowStart           = "window_start"
+	ContextWindowBoundary        = "window_boundary"
+	ContextWindowFallback        = "window_fallback"
+	ContextSelectionContinuation = "selection_continuation"
+	ContextConversationBinding   = "provider_conversation_binding"
+	WindowFitExcerpted           = "excerpted"
+	WindowCauseMidTurn           = "mid_turn"
+	WindowCauseSelectionChange   = "selection_change"
+	WindowFallbackL2OverBudget   = "l2_over_budget"
 )
 
 // ContextRecord logs a model view change; original evidence is never replaced.

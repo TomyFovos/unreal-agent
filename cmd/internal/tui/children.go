@@ -145,8 +145,9 @@ func focusRows(r viewer.Row, rows []viewer.Row, s Snapshot, u UIState, l layout)
 			more = "続き: /child-next"
 		}
 		out[0] = l.gutter("子", u.Theme.symbol("›", "*"), textLine(tail(fmt.Sprintf("%s 履歴 %d件  %s", identity, len(page.Items), more), l.text, u.Theme), strong))
+		var scopes llm.ToolScopes
 		for _, item := range page.Items {
-			for _, entry := range entriesFor(item) {
+			for _, entry := range projectEntries(item, &scopes) {
 				if entry.Text != "" {
 					add(fmt.Sprint(item.Sequence), focusRole(entry.Role)+"  "+strings.Join(strings.Fields(entry.Text), " "), normal)
 				}

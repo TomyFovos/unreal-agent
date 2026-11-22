@@ -12,6 +12,10 @@ Unreal Agent は共通の `/model` で、Claude・ChatGPT のサブスク、任�
 2. その接続のモデル一覧からモデルを選び、対応する場合は推論の深さ（effort）と Fast モードを選択します。
 3. 後からログインした場合や外部 CLI を更新した場合は、`/model refresh` で認証状態とモデル一覧を再検出し、`/model` で選択します。インストールのやり直しは不要です。既存 Session のプロバイダは自分で選び直すまで維持されます。
 
+作業中に選んだ接続先、モデル、effort、Fast モードは、現在のツール一式が完了したあとのリクエストから適用します。Claude Code はその時点で CLI のターンを終え、ツール結果と届いたメッセージを新しい会話に引き継ぎます。実行中の生成とツール、承認は通常どおり進みます。TUI は適用まで「モデル切り替え待ち」と表示し、適用時に切り替えを知らせます。入力待ちの Session では次のリクエストから適用します。
+
+利用上限による待機中にモデルか接続先を変えると、進行中の作業をすぐに再開します。同じモデル・接続先で effort や Fast モードだけを変えた場合は、待機が終わると適用します。
+
 > **補足:**
 > - 初回起動時は利用できる Claude・ChatGPT のログインを優先し、両方使えれば **Claude**、片方ならその接続で始まります。API キーの登録だけではその接続を選択しません。API キーを使う接続しかなくても、起動後に `/model` で選ぶか、初期接続を `UNREAL_HARNESS_LLM_PROVIDER=openai`、`claude-api`、`opencode-go` で明示します。`UNREAL_HARNESS_LLM_MODEL` でモデルも指定できます。
 > - 未ログインのプロバイダもメニュー内に理由と準備手順付きで表示されます。
@@ -41,7 +45,7 @@ Unreal Agent は共通の `/model` で、Claude・ChatGPT のサブスク、任�
 
 Claude Code がセッション（5 時間）、週次、またはモデル別の利用上限に達すると、Unreal は TUI と `/analyze` に再試行時刻を表示します。`rate_limit_event` の拒否通知に解除時刻があれば、その値を優先します。エラー文に時刻だけがあり、タイムゾーンの指定がない場合はローカル時刻として扱います。[Claude Code の利用上限メッセージ](https://code.claude.com/docs/en/errors#usage-limits)、[2.1.x の stream-json 出力例](https://github.com/anthropics/claude-code/issues/103820)
 
-待機中も子エージェントは作業を続け、届いた報告は保存されます。解除時刻に報告を添えて 1 回再試行し、まだ上限に達していれば再び待機します。解除時刻を取得できない場合は、既存の利用上限バックオフで再試行時刻を決めます。
+待機中も子エージェントは作業を続け、届いた報告は保存されます。解除時刻に報告を添えて 1 回再試行し、まだ上限に達していれば再び待機します。`/model` でモデルか接続先を変えた場合は、届いた報告を添えてすぐに再開します。解除時刻を取得できない場合は、既存の利用上限バックオフで再試行時刻を決めます。
 
 ---
 
@@ -70,7 +74,7 @@ Claude Code がセッション（5 時間）、週次、またはモデル別の
 
 ### Fast モード
 
-ChatGPT サブスクのモデル一覧で Fast 対応が確認できると、`/model` の effort 選択後に **Fast mode** が出ます。既定は off です。変更は次のターンから適用し、Session の再開後も保持します。Codex CLI 0.169.1 は選択したモデルへの Responses リクエストに `"service_tier": "priority"` を付けます。Unreal も on のときだけ同じ項目を送ります。対応モデルは公式キャッシュの `service_tiers[].id` または `model/list` の `serviceTiers[].id` で確認します。[Codex CLI の選択処理](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/tui/src/chatwidget/service_tiers.rs#L75-L95)、[送信処理](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/core/src/client.rs#L1278-L1306)、[Luna のカタログ項目](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/models-manager/models.json#L1197-L1207)
+ChatGPT サブスクのモデル一覧で Fast 対応が確認できると、`/model` の effort 選択後に **Fast mode** が出ます。既定は off です。変更は次のリクエスト境界で適用し、Session の再開後も保持します。Codex CLI 0.169.1 は選択したモデルへの Responses リクエストに `"service_tier": "priority"` を付けます。Unreal も on のときだけ同じ項目を送ります。対応モデルは公式キャッシュの `service_tiers[].id` または `model/list` の `serviceTiers[].id` で確認します。[Codex CLI の選択処理](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/tui/src/chatwidget/service_tiers.rs#L75-L95)、[送信処理](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/core/src/client.rs#L1278-L1306)、[Luna のカタログ項目](https://github.com/openai/codex/blob/rust-v0.169.1/codex-rs/models-manager/models.json#L1197-L1207)
 
 ChatGPT ログイン時、GPT-6 Luna の Fast は同じモデルの標準速度に比べて、サブスクに含まれる利用枠を **2.5 倍**のペースで消費します。購入済みクレジットや対象の Enterprise 従量課金を使う場合は **2 倍**です。倍率はモデルによって異なります。[OpenAI の速度設定](https://learn.chatgpt.com/docs/agent-configuration/speed#fast-mode)、[OpenAI の料金表](https://learn.chatgpt.com/docs/pricing?codex-pricing-speed=fast#speed-multipliers)
 

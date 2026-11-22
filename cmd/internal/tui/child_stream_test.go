@@ -250,12 +250,12 @@ func TestOrchestrationDeepSeekWorkerStream(t *testing.T) {
 			leadLine = frame[i+1]
 		}
 	}
-	for _, want := range []string{u.Theme.spinner(u.Now.UnixMilli()) + " 生成中", fmt.Sprintf("%.0f tok/s · 99%%", recordedTPS)} {
+	for _, want := range []string{u.Theme.spinner(u.Now.UnixMilli()) + " 生成中", fmt.Sprintf("%.0f t/s · 99.3%%", recordedTPS)} {
 		if !strings.Contains(workerLine, want) {
 			t.Fatalf("worker card missing %q: %s", want, workerLine)
 		}
 	}
-	if strings.Contains(workerLine, "ephemeral worker draft") || !strings.Contains(leadLine, "tok/s · 90%") {
+	if strings.Contains(workerLine, "ephemeral worker draft") || !strings.Contains(leadLine, "t/s · 90.0%") {
 		t.Fatal("unexpected draft or Codex lead statistics", workerLine, leadLine)
 	}
 	close(complete)

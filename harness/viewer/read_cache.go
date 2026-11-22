@@ -25,7 +25,16 @@ type parentIdentity struct {
 type childObservation struct {
 	info  os.FileInfo
 	child subagent.ChildView
+	mode  childReadMode
 }
+
+type childReadMode int
+
+const (
+	childReadSubscription childReadMode = iota
+	childReadHistory
+	childReadAnalysis
+)
 
 // This cache belongs to the serving Host, never to a Session or its writer.
 // Every request still checks the owning parent and the child's configuration.
@@ -51,7 +60,7 @@ func (c *parentReadCache) inspect(ctx context.Context, owner *host.Session, pare
 	}
 	// id comes from the validated canonical Child plan above, not from an
 	// arbitrary path supplied by the gateway caller.
-	child, err := c.loadChild(ctx, directory, id, false)
+	child, err := c.loadChild(ctx, directory, id, childReadHistory)
 	if err != nil {
 		return host.View{}, err
 	}
@@ -119,7 +128,7 @@ func childPage(v host.View, after sessionstore.Sequence, limit int, analysis boo
 
 // Caller holds c.mu. Archive moves preserve the inode and do not invalidate
 // immutable snapshots; a resumed writer's append does invalidate them.
-func (c *parentReadCache) loadChild(ctx context.Context, directory string, id session.ID, analysis bool) (subagent.ChildView, error) {
+func (c *parentReadCache) loadChild(ctx context.Context, directory string, id session.ID, mode childReadMode) (subagent.ChildView, error) {
 	store, err := localfile.New(directory)
 	if err != nil {
 		return subagent.ChildView{}, err
@@ -130,9 +139,9 @@ func (c *parentReadCache) loadChild(ctx context.Context, directory string, id se
 		return subagent.ChildView{}, err
 	}
 	observed, ok := c.children[id]
-	if !ok || !os.SameFile(info, observed.info) || info.Size() != observed.info.Size() || !info.ModTime().Equal(observed.info.ModTime()) || analysis && observed.child.View.ContextFacts == nil {
+	if !ok || !os.SameFile(info, observed.info) || info.Size() != observed.info.Size() || !info.ModTime().Equal(observed.info.ModTime()) || mode > observed.mode {
 		read := subagent.ReadChildSnapshot
-		if analysis {
+		if mode == childReadAnalysis {
 			read = subagent.ReadAnalysisSnapshot
 		}
 		child, err := read(ctx, directory, id)
@@ -140,14 +149,17 @@ func (c *parentReadCache) loadChild(ctx context.Context, directory string, id se
 			delete(c.children, id)
 			return subagent.ChildView{}, err
 		}
-		observed = childObservation{info: info, child: child}
+		if mode == childReadSubscription {
+			child.View.History = host.HistoryPage{}
+		}
+		observed = childObservation{info: info, child: child, mode: mode}
 		c.children[id] = observed
 	}
 	return observed.child, nil
 }
 
-func (c *parentReadCache) treeChild(ctx context.Context, directory string, id session.ID, analysis bool) (subagent.ChildView, error) {
+func (c *parentReadCache) treeChild(ctx context.Context, directory string, id session.ID, mode childReadMode) (subagent.ChildView, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.loadChild(ctx, directory, id, analysis)
+	return c.loadChild(ctx, directory, id, mode)
 }

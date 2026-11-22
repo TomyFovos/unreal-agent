@@ -9,8 +9,6 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
 
-// The footer changes only with provider counters or canonical responses. No
-// rate timer runs through Operation/approval waits.
 func statisticsBar(s Snapshot, u UIState, l layout) line {
 	unknown := u.Theme.symbol("—", "-")
 	stats := currentStatistics(s)
@@ -52,16 +50,19 @@ func statisticsBar(s Snapshot, u UIState, l layout) line {
 		}
 		return out
 	}
-	if build().width() > l.width {
-		cache = nil
+	windows := subscriptionWindows(s, u)
+	compact := subscriptionBar(windows, u.Theme, math.MaxInt, 0)
+	for _, optional := range []*line{&cache, &speedBars, &contextBar} {
+		if build().width()+compact.width() > l.width {
+			*optional = nil
+		}
 	}
-	if build().width() > l.width {
-		speedBars = nil
+	out := build()
+	room := l.width - out.width()
+	if room != compact.width() {
+		compact = subscriptionBar(windows, u.Theme, room, room-compact.width())
 	}
-	if build().width() > l.width {
-		contextBar = nil
-	}
-	return build().clip(l.width)
+	return joined(out, compact).clip(l.width)
 }
 
 func currentStatistics(s Snapshot) *llm.GenerationStatistics {
