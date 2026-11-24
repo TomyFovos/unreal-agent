@@ -17,8 +17,9 @@ func (a *Accumulator) ContextReport(observed bool) *ContextMeasurements {
 }
 
 type windowMeasurements struct {
-	groups   contextGroups
-	requests []*contextRequest
+	groups    contextGroups
+	requests  []*contextRequest
+	firstRead CacheShare
 }
 
 type contextSessionResult struct {
@@ -26,6 +27,8 @@ type contextSessionResult struct {
 	groups   contextGroups
 	strategy contextGroups
 	reviews  reviewGroups
+	policy   *contextPolicyEvent
+	routes   []string
 }
 
 func (m *contextReplay) project(observed bool, facts *sessionstore.ContextFacts, calls map[string]*call, fallback ModelKey) contextSessionResult {
@@ -176,6 +179,7 @@ func (m *contextReplay) project(observed bool, facts *sessionstore.ContextFacts,
 				if cache.WriteKnown && usage.Write == nil {
 					usage.Write = &cache.Write
 				}
+				log.firstRead.add(usage.Input, usage.Read)
 			}
 			k := r.key
 			k.Strategy = w.key.Strategy
@@ -257,6 +261,7 @@ func (m *contextReplay) project(observed bool, facts *sessionstore.ContextFacts,
 		result.strategy.group(ContextDimensions{Strategy: key.Strategy}).merge("user_questions", c["user_questions"])
 	}
 	result.view.Subscription = slices.Clone(m.subscription)
+	result.view.PolicyPeriods, result.routes, result.policy = m.policyPeriods(windows, observed, fallback.Provider)
 	return result
 }
 
@@ -320,6 +325,9 @@ func measureBoundary(c contextCounts, w *contextWindowLog, observed bool) {
 	}
 	if b.ThresholdTokens > 0 {
 		c.add("threshold_tokens", float64(b.ThresholdTokens), "measured")
+	}
+	if b.RebuildTargetTokens > 0 {
+		c.add("rebuild_target_tokens", float64(b.RebuildTargetTokens), "measured")
 	}
 	if b.L2TargetTokens > 0 {
 		c.add("l2_target_tokens", float64(b.L2TargetTokens), "measured")
@@ -560,6 +568,7 @@ func (g reviewGroups) report() []ContextReview {
 
 func contextReport(results []contextSessionResult, partial bool) *ContextMeasurements {
 	report := &ContextMeasurements{PriceTable: PriceTableSource, Partial: partial}
+	report.ActivePolicies = activeContextPolicies(results)
 	groups, strategy, reviews := make(contextGroups), make(contextGroups), make(reviewGroups)
 	for _, r := range results {
 		groups.merge(r.groups)

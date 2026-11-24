@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -60,6 +61,13 @@ func TestSubagentCommandRuntimeOverrides(t *testing.T) {
 	defer server.Close()
 	auth := t.TempDir()
 	writeCodexAuth(t, filepath.Join(auth, "auth.json"), "runtime-test-token", "runtime-test-account")
+	cache := `{"models":[
+		{"slug":"template-model","visibility":"list","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"low"},{"effort":"high"},{"effort":"max"}]},
+		{"slug":"gpt-6-astra","visibility":"list","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"high"},{"effort":"max"}]}
+	]}`
+	if err := os.WriteFile(filepath.Join(auth, "models_cache.json"), []byte(cache), 0600); err != nil {
+		t.Fatal(err)
+	}
 	environment := testCLIEnvironment(t)
 	cfg := codexServeConfiguration(t.TempDir(), server.URL)
 	cfg.Runtime.Provider.Model.ID = "parent-model"
@@ -184,26 +192,12 @@ func TestSubagentCommandRuntimeOverrides(t *testing.T) {
 	if out, err := cli("start", "--template", "review", "--effort", "invented", "--task", "Review."); err == nil || !strings.Contains(out, `invalid effort "invented"`) {
 		t.Fatal("invalid effort was not explained", out, err)
 	}
-	if out, err := cli("start", "--template", "review", "--model", "claude-fable-5-1", "--task", "Review."); err == nil || !strings.Contains(out, "is a Claude model; subagent start runs its template's provider (ChatGPT)") {
+	if out, err := cli("start", "--template", "review", "--model", "claude-fable-5-1", "--task", "Review."); err == nil || !strings.Contains(out, "is not in any available provider catalog") {
 		t.Fatal("a Claude model on the Codex template was not explained", out, err)
 	}
 	select {
 	case got := <-requests:
 		t.Fatal("a refused override made an inference request", got)
 	default:
-	}
-}
-
-func TestClaudeModelNames(t *testing.T) {
-	t.Parallel()
-	for _, model := range []string{"fable", "Opus", "sonnet", "haiku", "claude-fable-5-1", "claude-opus-5-5"} {
-		if !claudeModel(model) {
-			t.Errorf("%q is a Claude model", model)
-		}
-	}
-	for _, model := range []string{"", "gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"} {
-		if claudeModel(model) {
-			t.Errorf("%q is not a Claude model", model)
-		}
 	}
 }

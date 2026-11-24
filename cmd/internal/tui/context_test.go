@@ -35,12 +35,11 @@ func TestContextAnalysisDerivedMetricsUnknownUsageAndResponsiveSheets(t *testing
 	}
 	for _, size := range [][2]int{{80, 24}, {60, 20}, {44, 14}, {130, 30}} {
 		for _, theme := range []Theme{{}, {NoColor: true}, {Plain: true}, {ASCII: true}} {
-			// Existing renderer tests also cover the shared sheet viewport and
-			// bottom composer; these lines use exactly that sheet path.
-			u := UIState{Theme: theme, Sheet: &Sheet{Title: "Analysis · Context", Analysis: "Context", Lines: analysis.Lines(r, "Context", theme.ASCII)}}
+			// Exercise the viewport independently of the live history reader.
+			u := UIState{Theme: theme, analysis: readyAnalysis(r, "Context", theme, size[0])}
 			frame := RenderFrame(m.Snapshot(), u, size[0], size[1])
-			if len(frame.Lines) != size[1] || frame.CursorY != size[1]-2 || !strings.Contains(frame.Lines[len(frame.Lines)-2], "Ask") {
-				t.Fatal("context sheet displaced bottom composer")
+			if len(frame.Lines) != size[1] || frame.CursorY != size[1]-1 || strings.Contains(frame.Lines[len(frame.Lines)-2], "Ask") {
+				t.Fatal("context sheet escaped the full-screen viewport")
 			}
 			for _, line := range frame.Lines {
 				if uniseg.StringWidth(sgrRE.ReplaceAllString(line, "")) >= size[0] {

@@ -25,21 +25,25 @@ func subscriptionBar(windows []analysis.SubscriptionWindow, theme Theme, width, 
 	var out line
 	var provider string
 	for _, w := range windows {
-		if w.UsedPercent == nil {
+		if w.UsedPercent == nil && w.State != "stale" {
 			continue
 		}
 		label := subscriptionWindowLabel(w, theme)
-		text := fmt.Sprintf("%s %s%.0f%%", label, theme.symbol("残り", "left "), remainingPercent(*w.UsedPercent))
+		text := label + " " + theme.symbol("—", "-")
+		if w.UsedPercent != nil {
+			text = fmt.Sprintf("%s %s%.0f%%", label, theme.symbol("残り", "left "), remainingPercent(*w.UsedPercent))
+		}
 		if w.Provider != provider {
 			text = analysis.SubscriptionProviderName(w.Provider) + " " + text
 		}
 		part := textLine(theme.symbol(" · ", " / ")+strings.Join(strings.Fields(text), " "), meta)
-		if resetSpace > 0 && !w.ResetsAt.IsZero() {
+		if resetSpace > 0 && w.UsedPercent != nil && !w.ResetsAt.IsZero() {
 			format := "01/02 15:04"
 			if label == "5h" {
 				format = "15:04"
 			}
-			reset := textLine(" ("+w.ResetsAt.Local().Format(format)+")", meta)
+			local := w.ResetsAt.Local()
+			reset := textLine(" ("+local.Format(format)+") "+displayZone(local), meta)
 			if reset.width() <= resetSpace {
 				part = append(part, reset...)
 				resetSpace -= reset.width()
@@ -92,7 +96,7 @@ func nextSubscriptionReset(s Snapshot, u UIState) time.Time {
 	var next time.Time
 	for _, observations := range []llm.SubscriptionObservations{s.SubscriptionUsage, u.Viewer.SubscriptionUsage} {
 		for _, o := range observations {
-			if o.UsedPercent != nil && o.ResetsAt.After(u.Now) && (next.IsZero() || o.ResetsAt.Before(next)) {
+			if (o.UsedPercent != nil || !o.PercentInvalidatedAt.IsZero()) && o.ResetsAt.After(u.Now) && (next.IsZero() || o.ResetsAt.Before(next)) {
 				next = o.ResetsAt
 			}
 		}

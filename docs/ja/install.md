@@ -57,7 +57,7 @@ bash development.sh --openai-api-key-file /absolute/openai.key --anthropic-api-k
    ```
 
 3. インストール完了後に表示される接続状態を確認します。
-   新規導入時は利用可能なサブスクを優先し、両方使えれば Claude、片方ならそのサブスクで始まります。API 接続は `/model` で明示的に選びます。Claude は Codex が使えれば GPT の子、使えなければ Claude Code の Agent（`haiku` / `sonnet`、`unreal-agent subagent model` で Claude を選んだ場合はそのモデル）を使います。`unreal-agent subagent model` が未指定の場合、OpenAI API を統括に選ぶと組み込みの GPT の子も API を使い、他の統括では Codex を維持します。メインエージェントが利用者の指示で `unreal-agent subagent model show/set` を使い、all または lead・worker・collector 別に設定・参照でき、明示した役割はその指定を優先します。worker の effort は全 worker に同じ値を選ぶこともできます。認証が使えなくても別接続へ切り替えません。
+   新規導入時は利用可能なサブスクを優先し、両方使えれば Claude、片方ならそのサブスクで始まります。API 接続は `/model` で明示的に選びます。委譲には Unreal の子 Session を使います。メインエージェントは利用者の指示で `unreal-agent subagent model show/set` を使い、`all` または `lead`・`worker`・`collector` ごとに接続先、モデル、effort を設定・参照できます。保存済み設定のない役割では、OpenAI API の親は GPT の子に同じ API 接続を使い、他の親は Codex のサブスクを使います。選択した接続が利用できない場合は復旧手順を案内します。
 4. 開発したいプロジェクトのディレクトリへ移動し、名前付きセッションを起動します。
 
    ```bash
@@ -142,6 +142,8 @@ Windows 上で既存の Linux Docker Sandbox を使っている場合は、以�
 
 3. Sandbox 内のプロジェクトディレクトリに移動し、`unreal development` を起動します。
 
+Sandbox が UTC の場合は、手順 2 の `development.sh` に `--time-zone Asia/Tokyo` を追加します。日本以外では現地の IANA タイムゾーン名を指定します。設定は更新後も引き継がれ、起動シェルで `TZ` を指定するとそちらが優先されます。
+
 > **参考:** 転送には Docker 公式の [`sbx cp`](https://docs.docker.com/reference/cli/sbx/cp/) と [`sbx exec`](https://docs.docker.com/reference/cli/sbx/exec/) を使用します（既存の Sandbox が対象であり、インストーラが Sandbox 自体を新規作成することはありません）。
 
 ---
@@ -164,6 +166,7 @@ Windows 上で既存の Linux Docker Sandbox を使っている場合は、以�
 
 | オプション | 内容 |
 | --- | --- |
+| `--time-zone <IANA-zone>` | Unreal の表示に使うタイムゾーンを保存する。日本の場合は `Asia/Tokyo` |
 | `--codex-auto` | 通常の Codex ログインと Docker Sandbox OAuth を自動判別（初回インストール時の既定値） |
 | `--external-codex` | 外部 Codex ログインを明示選択（`OPENAI_CODEX_AUTH_FILE`、`$CODEX_HOME/auth.json`、`~/.codex/auth.json` の順） |
 | `--docker-sandbox-oauth` | Docker Sandbox のホスト管理 OAuth プロキシ経路を明示選択 |
@@ -182,7 +185,7 @@ Windows 上で既存の Linux Docker Sandbox を使っている場合は、以�
 保存先は TUI の `/login` と同じ `~/.local/state/unreal-agent/credentials` です。
 `XDG_STATE_HOME` が設定されていれば `$XDG_STATE_HOME/unreal-agent/credentials` を使います。
 共通ランチャーはこの親ディレクトリを `--shared-state-directory` で渡し、同じ環境の全ワークスペース・instance で
-キーと `subagent-model.json` の役割別モデル選択を共有します。Mac のランチャーも同じ保存先です。
+キーと `subagent-model.json` のロール初期値を共有し、モデル選択は Session ごとに保存します。Mac のランチャーも同じ保存先です。
 旧リポジトリ別モデル設定は共有ファイルがないときに起動時に移行し、元ファイルを残します。
 共有済みの選択は上書きしません。Session・ログの保存先は従来どおりです。[詳細](../opencode-go.md#サブエージェントのモデルを選ぶ)。
 

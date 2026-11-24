@@ -12,10 +12,14 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
 
-// A child's card shows its own latest context size, output speed and cache
-// hit as bare numbers; unknown values are left out.
+// A child's card shows its latest context size and speed with its cumulative
+// cache read share.
 func TestCardStatsShowChildNumbersOnly(t *testing.T) {
-	r := viewer.Row{LastUsage: viewer.Usage{Known: true, Input: 120_000, CachedInput: 110_400}, OutputTPS: 45.3}
+	r := viewer.Row{
+		LastUsage: viewer.Usage{Known: true, Input: 120_000, CachedInput: 3_600},
+		Usage:     viewer.Usage{Known: true, Input: 1_600_000, CachedInput: 1_472_000},
+		OutputTPS: 45.3,
+	}
 	if got := cardStats(r); got != "120k · 45 t/s · 92.0%" {
 		t.Fatalf("stats = %q", got)
 	}
@@ -27,6 +31,7 @@ func TestCardStatsShowChildNumbersOnly(t *testing.T) {
 	}
 	// The cache hit rate keeps a decimal; the context size does not.
 	r = viewer.Row{LastUsage: viewer.Usage{Known: true, Input: 83_417, CachedInput: 82_816}, OutputTPS: 66.5}
+	r.Usage = r.LastUsage
 	if got := cardStats(r); got != "83k · 66 t/s · 99.3%" {
 		t.Fatalf("decimal placement = %q", got)
 	}

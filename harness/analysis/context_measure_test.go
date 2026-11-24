@@ -126,6 +126,86 @@ func TestContextMeasurementsExcerptedFit(t *testing.T) {
 	}
 }
 
+func TestContextPolicyPeriodsAttributeMetricsToRebuildingPolicy(t *testing.T) {
+	f := &measurementFixture{Accumulator: New("main")}
+	const provider, model = "opencode-go", "fixture"
+	f.add(0, sessionstore.HostRecord{Kind: sessionstore.HostRuntimeApplied, Selection: &sessionstore.RuntimeSelection{Provider: provider, Model: model}})
+	rebuild := func(second int, after int64, covered bool) {
+		t.Helper()
+		w := &sessionstore.WindowBoundary{AfterTokens: after, Estimator: "fixture"}
+		if covered {
+			w.Tail = &sessionstore.WindowTail{}
+		}
+		f.contextRecord(second, sessionstore.ContextRecord{Kind: sessionstore.ContextWindowBoundary, Provider: provider, Model: model, Window: w})
+	}
+	policy := func(second int, ratio float64, claudeW int64) {
+		t.Helper()
+		common := sessionstore.WindowPolicy{WindowThresholdTokens: 200_000, PostRebuildRatio: ratio, L2TargetTokens: 5000}
+		claude := common
+		claude.WindowThresholdTokens = claudeW
+		f.contextRecord(second, sessionstore.ContextRecord{Kind: sessionstore.ContextPolicyChanged, Provider: provider, Policy: &sessionstore.ContextPolicies{
+			Default: common, Routes: map[string]sessionstore.WindowPolicy{"claude": claude},
+		}})
+	}
+	request := func(second int, id string, input, read int64) {
+		t.Helper()
+		f.turn(second, id, contextengine.WindowThreeLayer)
+		f.respond(second+1, id, provider, model, "response", llm.Usage{InputTokens: input, CachedInputTokens: read})
+	}
+	read := func(second int, action string, after sessionstore.Sequence) {
+		t.Helper()
+		f.contextRecord(second, sessionstore.ContextRecord{Kind: "record_read", RecordRead: &sessionstore.RecordRead{Action: action, After: after}})
+	}
+	rebuild(1, 10_000, false) // from before policy recording
+	policy(2, 0.5, 170_000)
+	rebuild(3, 18_000, true)
+	request(4, "first", 1000, 100)
+	read(6, "show", f.seq)
+	policy(7, 0.5, 160_000) // the active route's effective settings are unchanged
+	rebuild(8, 22_000, true)
+	request(9, "second", 3000, 1800)
+	oldWindow := f.seq
+	policy(11, 0.6, 160_000)
+	rebuild(12, 12_000, true)
+	request(13, "third", 2000, 500)
+	read(15, "find", oldWindow) // read began in the previous window
+	read(16, "show", f.seq)
+	read(17, "show", f.seq)
+	policy(18, 0.5, 160_000) // returning to the old values opens a new period
+
+	report := f.ContextReport(true)
+	periods := report.Sessions[0].PolicyPeriods
+	if len(periods) != 4 || periods[0].Policy != nil || periods[1].Policy.PostRebuildRatio != 0.5 ||
+		periods[2].Policy.PostRebuildRatio != 0.6 || periods[3].Policy.PostRebuildRatio != 0.5 ||
+		!periods[1].Until.Equal(measurementEpoch.Add(11*time.Second)) || periods[3].Until != nil {
+		t.Fatalf("unexpected periods: %+v", periods)
+	}
+	measuredNumber(t, periods[0].Numbers, "rebuilds", 1, "measured", 0)
+	unknownNumber(t, periods[0].Numbers, "first_cache_read_share")
+	unknownNumber(t, periods[0].Numbers, "record_show_calls")
+	measuredNumber(t, periods[1].Numbers, "rebuilds", 2, "measured", 0)
+	measuredNumber(t, periods[1].Numbers, "boundary_after_tokens", 20_000, "derived", 0)
+	measuredNumber(t, periods[1].Numbers, "first_cache_read_share", 47.5, "derived", 0)
+	measuredNumber(t, periods[1].Numbers, "record_show_calls", 1, "measured", 0)
+	measuredNumber(t, periods[1].Numbers, "record_find_calls", 1, "measured", 0)
+	measuredNumber(t, periods[2].Numbers, "rebuilds", 1, "measured", 0)
+	measuredNumber(t, periods[2].Numbers, "boundary_after_tokens", 12_000, "derived", 0)
+	measuredNumber(t, periods[2].Numbers, "first_cache_read_share", 25, "derived", 0)
+	measuredNumber(t, periods[2].Numbers, "record_show_calls", 2, "measured", 0)
+	measuredNumber(t, periods[2].Numbers, "record_find_calls", 0, "measured", 0)
+	measuredNumber(t, periods[3].Numbers, "rebuilds", 0, "measured", 0)
+	unknownNumber(t, periods[3].Numbers, "boundary_after_tokens")
+	active := report.ActivePolicies
+	if len(active) != 3 || active[0].Provider != "" || active[1].Provider != "claude" ||
+		active[1].Policy.WindowThresholdTokens != 160_000 || active[2].Provider != provider || active[2].Policy.PostRebuildRatio != 0.5 {
+		t.Fatalf("active route policies = %+v", active)
+	}
+	markdown := strings.Join(contextLines(report), "\n")
+	if !strings.Contains(markdown, "Active context policy · claude") || !strings.Contains(markdown, "L3 find calls after rebuild  1 (measured)") {
+		t.Fatal("policy or period metrics missing from context export")
+	}
+}
+
 func TestContextMeasurementsWindowsAndExport(t *testing.T) {
 	f := &measurementFixture{Accumulator: New("main")}
 	const strategy = contextengine.WindowThreeLayer

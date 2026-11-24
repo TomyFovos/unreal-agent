@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/unreallabsai/unreal-agent/harness/analysis"
 	"github.com/unreallabsai/unreal-agent/harness/contextbuilder"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -28,6 +29,59 @@ type archiveAnalysisModel struct{}
 
 func (archiveAnalysisModel) Respond(context.Context, llm.Request, llm.RequestOptions) (llm.Response, error) {
 	return llm.Response{}, fmt.Errorf("fixture must not perform inference")
+}
+
+func TestAnalysisRestoresEndFromArchiveIndexWhenChildHasNoEndRecord(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "sessions")
+	id := testsession.WriteSettledChildren(t, dir, 3, 32)[2]
+	path := filepath.Join(dir, string(id)+".session.jsonl")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := 1 + bytes.LastIndexByte(bytes.TrimSuffix(raw, []byte("\n")), '\n')
+	if cut == 0 || !bytes.Contains(raw[cut:], []byte(`"Kind":"ended"`)) {
+		t.Fatal("fixture should have one final end record")
+	}
+	if err := os.WriteFile(path, raw[:cut], 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := localfile.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved, err := store.ArchiveChild(t.Context(), localfile.ArchiveEntry{
+		ChildID: id, ParentID: "main", OperationID: "spawn-0002", Status: operation.StatusCanceled,
+	})
+	if err != nil || !moved {
+		t.Fatal(moved, err)
+	}
+	entry, err := store.ArchiveIndex(id)
+	if err != nil || entry.EndedAt.IsZero() {
+		t.Fatal("archive has no end timestamp", entry, err)
+	}
+	h, err := host.New(t.Context(), host.Config{Directory: dir, Build: func(ctx context.Context, _ session.ID) (host.Runtime, error) {
+		return host.Runtime{Builder: contextbuilder.NewBuilder(), LLM: archiveAnalysisModel{}, Tools: tool.NewRegistry(tool.StaticTranslators{}), Operations: operation.NewLocalOperationManager(ctx)}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if _, err := h.Resume(t.Context(), host.Options{ID: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	reader := viewer.ParentReader{Host: h, ParentID: "main", Directory: dir}
+	tree, err := analysis.ReadTree(t.Context(), "main", reader.InspectTree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := tree.Report(entry.EndedAt.Add(time.Minute), nil)
+	for _, child := range report.Dashboard.Children {
+		if child.ID == id && child.End.Equal(entry.EndedAt) && child.Result == "canceled" {
+			return
+		}
+	}
+	t.Fatalf("archive end did not reach the child dashboard: %+v", report.Dashboard.Children)
 }
 
 func TestAnalyzeExportAndParentProjectionIdenticalAfterChildArchive(t *testing.T) {

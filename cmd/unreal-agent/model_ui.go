@@ -19,6 +19,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/opencodego"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
+	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
@@ -38,11 +39,13 @@ type modelRequest struct {
 	Provider       string                   `json:",omitzero"`
 	Role           string                   `json:",omitzero"`
 	FastOnly       bool                     `json:",omitzero"`
+	AllSessions    bool                     `json:",omitzero"`
 	InputID        inbox.ID                 `json:",omitzero"`
 	Template, Task string                   `json:",omitzero"`
 	Brief          subagent.BriefFields     `json:",omitzero"`
 	ChildRuntime   *subagent.RuntimeRequest `json:",omitzero"`
 	HostBinding    *launcherHostBinding     `json:",omitzero"`
+	Progress       bool                     `json:",omitzero"`
 }
 type modelReply struct {
 	Catalog      *modelcatalog.Catalog                `json:",omitzero"`
@@ -72,10 +75,9 @@ type modelUI struct {
 	policy      *permission.Policy
 
 	// openCodeGo reads the OpenCode Go model list when its key was stored.
-	openCodeGo *openCodeGoCatalog
-	// subagentModel is the file of subagent model's choice; empty without the
-	// launcher or with an operator's templates.
-	subagentModel string
+	openCodeGo    *openCodeGoCatalog
+	subagentModel subagentModelScope
+	childLayer    string
 }
 
 func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +88,12 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid local request", 400)
 		return
 	}
-	if peek.Action != "launcher.check" && peek.Action != "runtime.health" && peek.Action != "model.catalog" && peek.Action != "model.select" && peek.Action != "model.providers" && peek.Action != "child.start" && peek.Action != "subagent.providers" && peek.Action != "subagent.select" {
+	if h.childLayer != "" && peek.Action != "child.start" && peek.Action != "child.send-parent" {
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		h.next.ServeHTTP(w, r)
+		return
+	}
+	if peek.Action != "launcher.check" && peek.Action != "runtime.health" && peek.Action != "model.catalog" && peek.Action != "model.select" && peek.Action != "model.providers" && peek.Action != "child.start" && peek.Action != "child.send-parent" && peek.Action != "subagent.providers" && peek.Action != "subagent.select" {
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		h.next.ServeHTTP(w, r)
 		return
@@ -123,58 +130,12 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			out.Error = "session_unavailable"
 		} else {
 			if peek.Action == "child.start" {
-				templates := h.templates
-				chosen, _ := readSubagentModel(h.subagentModel)
-				layer := subagent.ResolveLayer(q.Template, "main")
-				roleChoice := chosen.choice(layer)
-				_, retry := s.OperationIntent(q.InputID)
-				if !retry && chosen.Roles == nil && h.runtime.BuiltinSubagents && q.ChildRuntime != nil && q.ChildRuntime.Provider == "" && roleChoice.Provider != opencodego.ProviderID && roleChoice.Provider != claudeagent.ProviderID {
-					templates = make(map[string]subagent.Template, len(h.templates))
-					for name, t := range h.templates {
-						templates[name] = t
-					}
-					if t, ok := templates[q.Template]; ok {
-						var err error
-						id := builtinGPTProvider(s)
-						if roleChoice.Provider == "openai-codex" {
-							id = roleChoice.Provider
-						}
-						templates[q.Template], err = builtinGPTTemplate(h.runtime, t, id)
-						if err != nil {
-							out.Error = err.Error()
-							h.writeReply(w, out)
-							return
-						}
-					}
-				}
-				resolve := childRuntimeResolverForLayer(h.runtime, h.subagentModel, "main", h.templates["lead"].Default)
-				if len(h.runtime.Backends) == 0 && h.runtime.Discovered == nil {
-					resolve = nil
-				}
-				// The resolver bounds the start by the Session's own capability;
-				// the gateway's read-only baseline would only narrow that, and the
-				// child then follows the Session's mode itself.
-				var receipt host.Receipt
-				e := subagentOverrideRefusal(h.subagentModel, h.templates[q.Template], q.ChildRuntime, retry, layer)
-				if e == nil && !retry && q.ChildRuntime != nil && q.ChildRuntime.Provider == "" && claudeModel(q.ChildRuntime.Model) {
-					selected := sessionstore.SelectionFromConfiguration(templates[q.Template].Runtime)
-					if selected != nil && (selected.Provider == "openai-codex" || selected.Provider == "openai") {
-						e = &subagent.RuntimeError{Code: "invalid_model", Hint: fmt.Sprintf("%q is a Claude model; subagent start runs its template's provider (ChatGPT). For a Claude model, use Claude Code's Agent tool with that model", q.ChildRuntime.Model)}
-					}
-				}
-				if e == nil {
-					receipt, e = subagent.StartChildWithBrief(r.Context(), s, q.Generation, q.InputID, q.Template, q.Task, q.Brief, templates, q.ChildRuntime, resolve, chosen.Roles != nil && h.runtime.BuiltinSubagents)
-				}
-				if e != nil {
-					out.Error = "child_start_failed"
-					var re *subagent.RuntimeError
-					if errors.As(e, &re) {
-						out.Error = re.Code
-						out.Hint = re.Hint
-					}
-				} else {
-					out.Receipt = &receipt
-				}
+				h.startChild(r.Context(), s, q, &out)
+				h.writeReply(w, out)
+				return
+			}
+			if peek.Action == "child.send-parent" {
+				h.sendToParent(r.Context(), s, q, &out)
 				h.writeReply(w, out)
 				return
 			}
@@ -290,9 +251,65 @@ func (h modelUI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.writeReply(w, out)
 }
 
+func (h modelUI) startChild(ctx context.Context, s *host.Session, q modelRequest, out *modelReply) {
+	templates := h.templates
+	layer := subagent.ResolveLayer(q.Template, h.childLayer)
+	if h.childLayer == "" && h.subagentModel.defaultFile != "" && len(templates) == 0 && slices.Contains(subagentRoleGroups, layer) {
+		chosen, err := h.subagentModel.read(ctx, s.ID)
+		if err != nil {
+			out.Error = "subagent_model_unreadable"
+			return
+		}
+		id := chosen.choice(layer).Provider
+		if id == "" {
+			id = builtinGPTProvider(s)
+		}
+		if buildfeatures.Disabled(id) {
+			out.Error, out.Hint = buildfeatures.OpenCodeGoDisabledCode, buildfeatures.OpenCodeGoChildDisabledMessage
+		} else if !subagentRoleAvailable(ctx, h.runtime, id) {
+			out.Error = "provider_unavailable"
+			out.Hint = providerGuidance(id, modelcatalog.AuthRequired.ProviderHint(id), "。ログイン後は /model refresh を実行してください")
+		} else {
+			out.Error, out.Hint = "invalid_template", "restart the Host to enable built-in child templates"
+		}
+		return
+	}
+	// The resolver bounds the start by the Session's own capability;
+	// the gateway's read-only baseline would only narrow that, and the
+	// child then follows the Session's mode itself.
+	receipt, e := subagent.StartChildWithBrief(ctx, s, q.Generation, q.InputID, q.Template, q.Task, q.Brief, templates, q.ChildRuntime, h.runtime.ResolveChildRuntime, true)
+	if e != nil {
+		out.Error = "child_start_failed"
+		var re *subagent.RuntimeError
+		if errors.As(e, &re) {
+			out.Error = re.Code
+			out.Hint = re.Hint
+		}
+	} else {
+		out.Receipt = &receipt
+	}
+}
+
+func (h modelUI) sendToParent(ctx context.Context, s *host.Session, q modelRequest, out *modelReply) {
+	if h.childLayer == "" || q.InputID == "" {
+		out.Error = "invalid_request"
+		return
+	}
+	spec, err := subagent.NewSpec(subagent.Plan{Version: 1, Action: "parent", ParentID: s.ID, Text: q.Task, Progress: q.Progress})
+	if err == nil {
+		receipt, e := s.SubmitOperation(ctx, q.Generation, q.InputID, operation.ID(q.InputID), "SendParent", spec)
+		if e == nil {
+			out.Receipt = &receipt
+			return
+		}
+		err = e
+	}
+	out.Error, out.Hint = "send_parent_failed", err.Error()
+}
+
 // subagentChoice reads or saves role settings through the owning Host/Session.
 func (h modelUI) subagentChoice(ctx context.Context, owner *host.Session, q modelRequest, out *modelReply) {
-	if h.subagentModel == "" {
+	if h.subagentModel.defaultFile == "" {
 		out.Error = "subagent_model_unavailable"
 		return
 	}
@@ -308,25 +325,27 @@ func (h modelUI) subagentChoice(ctx context.Context, owner *host.Session, q mode
 		out.Error = "stale_generation"
 		return
 	}
-	subagentModelMu.Lock()
-	defer subagentModelMu.Unlock()
-	chosen, err := readSubagentModel(h.subagentModel)
+	var chosen subagentModel
+	var err error
+	save := q.Action == "subagent.select"
+	if save {
+		chosen, err = h.subagentModel.update(owner.ID, q.AllSessions, func(model *subagentModel) bool {
+			return h.setSubagentChoice(ctx, q, role, model, out)
+		})
+		if out.Error != "" {
+			return
+		}
+		if err != nil && !errors.Is(err, errReadSubagentModels) {
+			out.Error = "subagent_model_unwritable"
+			return
+		}
+		out.Pending = len(h.templates) == 0
+	} else {
+		chosen, err = h.subagentModel.read(ctx, owner.ID)
+	}
 	if err != nil {
 		out.Error = "subagent_model_unreadable"
 		return
-	}
-	save := q.Action == "subagent.select"
-	if save {
-		if !h.setSubagentChoice(ctx, q, role, &chosen, out) {
-			return
-		}
-		if chosen.Version != 0 {
-			if err := writeSubagentModel(h.subagentModel, chosen); err != nil {
-				out.Error = "subagent_model_unwritable"
-				return
-			}
-		}
-		out.Pending = len(h.templates) == 0
 	}
 	out.Providers = h.subagentProviders(ctx)
 	if out.SubagentModel == nil {

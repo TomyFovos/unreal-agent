@@ -36,7 +36,6 @@ type turn struct {
 	directory string
 	session   string
 	echoed    bool // Claude Code took up Unreal's message
-	subagents SubagentCLI
 
 	usageLimit subscriptionLimit // observed and read by the stream reader
 
@@ -265,9 +264,6 @@ func (t *turn) handle(f frame) *frame {
 				}
 				if t.opt.Progress != nil {
 					subject := t.callSubject(b.Name, b.Input)
-					if b.Name == "Agent" {
-						subject += " · running"
-					}
 					t.opt.Progress(llm.Progress{Attempt: 1, Delta: "\n› " + subject + "\n"})
 				}
 			}
@@ -346,7 +342,7 @@ func (t *turn) handle(f frame) *frame {
 // keeps approvalSubject's text.
 func (t *turn) callSubject(name string, input jsontext.Value) string {
 	if name == "Agent" {
-		return agentCallSubject(input, t.subagents.agentModel)
+		return agentCallSubject(input)
 	}
 	_, scope := approvalSubject(name, input)
 	return scope

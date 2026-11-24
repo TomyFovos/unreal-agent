@@ -11,23 +11,7 @@ import (
 // 23,249 to 19,350 tokens (3,899 saved), exceeding the approved 2,000 cutoff.
 const enabledTools = "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,NotebookEdit,TodoWrite,ToolSearch,Skill"
 
-// Claude Code's own Agent tool runs Claude models: simple work without GPT
-// children, and Claude-model work (such as a review on Fable) with them. Its
-// tool calls still pass Unreal's gate, which also keeps it inside the turn.
-func launchTools(SubagentCLI) string {
-	return enabledTools + ",Agent"
-}
-
-// Each turn's process ends with the turn, so Agent work must finish inside it
-// rather than continue as a background task the process exit would cut off.
-func launchEnv(env []string, s SubagentCLI) []string {
-	if s.Binary == "" {
-		return append(env, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1")
-	}
-	return env
-}
-
-const claudeDelegationPrompt = "\n\nNo GPT children are available in this Session. Do the main work yourself. Hand simple, well-defined tasks (searching, reading or summarizing files and logs, routine checks, mechanical edits) to the Agent tool with model set to \"haiku\" for the simplest and \"sonnet\" for moderate ones, and review what they return before relying on it."
+const disallowedTools = "Agent,Task"
 
 // Claude Code reads the workspace's instructions itself. Only existing files
 // above that root are excluded; the user's global instructions remain enabled.

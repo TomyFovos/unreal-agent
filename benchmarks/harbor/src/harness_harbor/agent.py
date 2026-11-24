@@ -73,9 +73,9 @@ class UnrealAgent(RunnerAgent):
         self._model = self._model_id(selected, prefix)
         if configuration == "claude":
             self._child_model = (
-                self._model_id(child_model, "anthropic") if child_model else ""
+                self._model_id(child_model, "anthropic") if child_model else self._model
             )
-            self._child_effort = child_effort or ""
+            self._child_effort = child_effort or main_effort
         else:
             self._child_model = self._model_id(child_model or "gpt-6.2-sol", "openai")
             self._child_effort = child_effort or "max"
@@ -198,13 +198,6 @@ class UnrealAgent(RunnerAgent):
                 )
             else:
                 value["Claude"] = {"Binary": str(self._remote / "bin/claude")}
-                if self._configuration == "claude":
-                    value["Claude"].update(
-                        {
-                            "AgentModel": self._child_model,
-                            "AgentEffort": self._child_effort,
-                        }
-                    )
             return value
 
         main = "openai" if self._configuration == "gpt" else "claude-api"
@@ -240,14 +233,11 @@ class UnrealAgent(RunnerAgent):
             config["Providers"] = {
                 "openai": backend("openai", self._child_model, self._child_effort)
             }
-        if self._configuration == "claude":
-            config["DisableSubagents"] = True
-        else:
-            config["SubagentDefaults"] = {
-                "Provider": "openai",
-                "Model": self._child_model,
-                "Effort": self._child_effort,
-            }
+        config["SubagentDefaults"] = {
+            "Provider": "claude-api" if self._configuration == "claude" else "openai",
+            "Model": self._child_model,
+            "Effort": self._child_effort,
+        }
         return config
 
     @with_prompt_template

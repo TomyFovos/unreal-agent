@@ -5,7 +5,6 @@ package tui
 import (
 	"context"
 	"errors"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +74,7 @@ type Model struct {
 	hasCompletedEpoch     bool
 	seenEpoch             uint64
 	analysis              *analysis.Accumulator
+	analysisMu            sync.Mutex
 	analysisTree          *analysis.Tree
 	toolScopes            llm.ToolScopes
 	historyMore           bool
@@ -100,15 +100,46 @@ func (m *Model) Analysis(now time.Time, rows []viewer.Row, descendantUsage ...ll
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r := m.analysis.Snapshot(now, m.state.Connected, strings.Contains(m.state.Status, "resync"), rows, m.state.Operations)
-	if m.analysisTree != nil {
-		r.Tree = m.analysisTree.Snapshot(m.analysis)
-		latest := slices.Clone(m.state.SubscriptionUsage)
-		for _, observations := range descendantUsage {
-			latest.Merge(observations)
+	r.ContextMeasurements = m.analysis.ContextReport(!r.Partial)
+	m.analysis.DashboardReport(&r, rows)
+	m.enrichAnalysis(&r, descendantUsage...)
+	if m.historyMore || !m.analysisFull {
+		r.Partial = true
+		r.Usage.Partial = true
+		r.Errors.CrashesKnown = false
+	}
+	return r
+}
+
+// Caller holds the model lock. Keep history replay and report aggregation
+// outside this section so the event loop can keep reading the live snapshot.
+func (m *Model) enrichAnalysis(r *analysis.Report, descendantUsage ...llm.SubscriptionObservations) {
+	var latest llm.SubscriptionObservations
+	for _, w := range r.SubscriptionUsage {
+		if !w.ObservedAt.IsZero() {
+			latest = append(latest, w.SubscriptionObservation)
 		}
-		r.SubscriptionUsage = analysis.SubscriptionWindows(latest, now)
-	} else {
-		r.ContextMeasurements = m.analysis.ContextReport(!r.Partial)
+	}
+	latest.Merge(m.state.SubscriptionUsage)
+	for _, observations := range descendantUsage {
+		latest.Merge(observations)
+	}
+	r.SubscriptionUsage = analysis.SubscriptionWindows(latest, r.At)
+	r.Dashboard.State = runtime(m.state)
+	r.Dashboard.Approval = len(m.state.Permissions.Pending) > 0
+	if !r.Elapsed.Known && m.state.Connected && m.state.Running && !r.CreatedAt.IsZero() && !r.At.Before(r.CreatedAt) {
+		r.Elapsed = viewer.Duration{Known: true, Value: r.At.Sub(r.CreatedAt)}
+	}
+	if p := m.state.Progress; p != nil && p.Mode == "usage_limit_wait" {
+		r.UsageRetryAt = p.RetryAt
+		r.Dashboard.State = p.Mode
+	}
+	if m.state.Connected && m.state.Running {
+		r.Dashboard.Wall.IncludeLiveWaits(r.Dashboard.State == "usage_limit_wait" || r.UsageRetryAt.After(r.At), m.state.Permissions.Pending)
+	}
+	r.Resync = r.Resync || strings.Contains(m.state.Status, "resync")
+	if r.Resync {
+		r.Partial, r.Usage.Partial, r.Errors.CrashesKnown = true, true, false
 	}
 	if r.Selection != nil {
 		if c, ok := m.capabilities[r.Selection.Provider]; ok {
@@ -126,19 +157,27 @@ func (m *Model) Analysis(now time.Time, rows []viewer.Row, descendantUsage ...ll
 		d := *m.state.ContextPackage
 		r.ContextPackage = &d
 	}
-	if m.historyMore || !m.analysisFull {
-		r.Partial = true
-		r.Usage.Partial = true
-		r.Errors.CrashesKnown = false
-	}
+	start := len(r.Errors.Recent)
 	if m.state.Failure != "" && (len(m.diagnostics) == 0 || m.diagnostics[len(m.diagnostics)-1].Name != safeDiagnostic(m.state.Failure)) {
 		r.Errors.Recent = append(r.Errors.Recent, analysis.Event{At: m.state.LatestAt, Kind: "session", Name: safeDiagnostic(m.state.Failure)})
 	}
 	r.Errors.Recent = append(r.Errors.Recent, m.diagnostics...)
+	r.Dashboard.Failures = append(r.Dashboard.Failures, r.Errors.Recent[start:]...)
 	for _, pending := range m.state.Permissions.Pending {
 		r.Timeline = append(r.Timeline, analysis.Event{Kind: "pending approval", Name: safeDiagnostic(pending.Tool + " · Operation " + pending.ID)})
 	}
-	return r
+}
+
+func (m *Model) toolBridgeEnabled() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s := m.state.Selection; s != nil {
+		if c, ok := m.capabilities[s.Provider]; ok {
+			return c.Tools
+		}
+		return sessionstore.ToolBridgeEnabledFromConfiguration([]byte(s.Binding))
+	}
+	return false
 }
 
 func safeDiagnostic(text string) string {
@@ -273,10 +312,15 @@ func (m *Model) apply(v host.View) error {
 					}
 				}
 			case sessionstore.HostContext:
-				if data.Context != nil && data.Context.Usage != nil {
-					s.CacheLatest = viewer.Usage{}
-					viewer.AddUsage(&s.CacheLatest, *data.Context.Usage)
-					viewer.AddUsage(&s.CacheTotal, *data.Context.Usage)
+				if c := data.Context; c != nil {
+					if c.Conversation != nil && c.Conversation.Usage != nil {
+						viewer.AddUsage(&s.CacheTotal, *c.Conversation.Usage)
+					}
+					if c.Usage != nil {
+						s.CacheLatest = viewer.Usage{}
+						viewer.AddUsage(&s.CacheLatest, *c.Usage)
+						viewer.AddUsage(&s.CacheTotal, *c.Usage)
+					}
 				}
 			case "configuration":
 				s.Workspace = fileWorkspace(data.Configuration)
@@ -292,6 +336,7 @@ func (m *Model) apply(v host.View) error {
 				}
 			}
 		case sessionstore.ModelResponse:
+			data.ObserveSubscriptionSuccess(&s.SubscriptionUsage, s.Selection, item.RecordedAt)
 			s.CacheLatest = viewer.Usage{}
 			viewer.AddUsage(&s.CacheLatest, data.Response.Usage)
 			viewer.AddUsage(&s.CacheTotal, data.Response.Usage)

@@ -130,7 +130,9 @@ Running `/stop` opens a menu with four scopes (**Main agent** is focused by defa
 
 ## Delegated Background Work (Child Agents)
 
-The main agent can delegate implementation or research to configured child templates such as `lead`, `worker-*`, and `collector`. Tool-capable agents use `SubagentStart`. Claude Code can start Unreal children in Bash with `unreal-agent subagent start`.
+The main agent can delegate implementation or research to Unreal children using templates such as `lead`, `worker-*`, and `collector`. Claude Code calls `SubagentStart` through Bash with `unreal-agent subagent start`. The built-in `Agent` and `Task` tools are disabled. A Claude child sends questions with `unreal-agent subagent send-parent` and delivers its final reply as the completion report.
+
+For a single start, add `--model deepseek-v4.1-flash --effort max`. Add `--provider opencode-go` to choose that connection explicitly. Use `subagent model set` to save role choices for the calling Session and its future delegation. See [Choosing subagent models](providers.md#choosing-subagent-models).
 
 - **Automatic wake-up.** User input, a child completion notice, or a forwarded question or approval wakes an idle parent, including after a failed parent model turn. During a usage-limit wait, the parent picks up queued reports when the wait ends. Ready and progress notifications stay quiet.
 - **Compact chat display:** Routine parent-child coordination is folded into a single summary line (`┄ 裏の作業 ...`).

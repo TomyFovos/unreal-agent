@@ -41,9 +41,10 @@ const maxLine = 64 << 20
 
 // Config names the CLI. The Session's runtime fills in the rest per Session.
 type Config struct {
-	apiKey      credential.Secret   // request-time only, supplied by NewAPIClient
-	apiSource   credential.Source   // re-read before a deferred process starts
-	Binary      string              // absolute path of the claude CLI
+	apiKey    credential.Secret // request-time only, supplied by NewAPIClient
+	apiSource credential.Source // re-read before a deferred process starts
+	Binary    string            // absolute path of the claude CLI
+	// AgentModel and AgentEffort decode older Session identities.
 	AgentModel  string              `json:",omitzero"`
 	AgentEffort llm.ReasoningEffort `json:",omitzero"`
 	Directory   string              `json:"-"` // the workspace; Claude Code's working directory
@@ -61,19 +62,17 @@ type SubagentCLI struct {
 	// SettingsCommand remains available when no Unreal child provider is available.
 	SettingsCommand string `json:"-"`
 	// ContextCommand connects the main Session to its state and record CLI.
-	ContextCommand string   `json:"-"`
-	Binary         string   // stable kit launcher, or the executable for a source build
-	Socket         string   // the Host's gateway socket
-	Templates      []string // the child templates, for the prompt
-	LeadModel      string
-	LeadEffort     string
+	ContextCommand string `json:"-"`
+	// ChildCommand lets a child send messages to its parent through Bash.
+	ChildCommand string   `json:"-"`
+	Binary       string   // stable kit launcher, or the executable for a source build
+	Socket       string   // the Host's gateway socket
+	Templates    []string // the child templates, for the prompt
+	LeadModel    string
+	LeadEffort   string
 	// Models names what the templates run now; it is read for each turn, so a
 	// model chosen with subagent model shows from the next turn. Nil is GPT.
 	Models func() SubagentModels
-	// AgentModel names the model Claude's own Agent sub-agents run on, chosen
-	// with subagent model as "claude"; it is read for each turn. Nil or "" keeps
-	// Claude Code's own choice.
-	AgentModel func() string `json:"-"`
 	// Available checks the Host's existing provider health/catalog at each turn.
 	// Nil retains the explicitly configured CLI behavior.
 	Available func(context.Context) bool `json:"-"`
@@ -132,10 +131,13 @@ func NewClient(config Config) (*Client, error) {
 	if !filepath.IsAbs(config.Subagents.ContextCommand) || !filepath.IsAbs(config.Subagents.Socket) {
 		config.Subagents.ContextCommand = ""
 	}
-	if !filepath.IsAbs(config.Subagents.Binary) || !filepath.IsAbs(config.Subagents.Socket) {
-		config.Subagents = SubagentCLI{AgentModel: config.Subagents.AgentModel, Roles: config.Subagents.Roles, SettingsCommand: config.Subagents.SettingsCommand, ContextCommand: config.Subagents.ContextCommand, Socket: config.Subagents.Socket}
+	if !filepath.IsAbs(config.Subagents.ChildCommand) || !filepath.IsAbs(config.Subagents.Socket) {
+		config.Subagents.ChildCommand = ""
 	}
-	return &Client{config: config, approver: approver{cli: subagentCommandPath(config.Subagents), contextCLI: config.Subagents.ContextCommand, agentModel: config.AgentModel, agentEffort: config.AgentEffort}, activityInterval: streamActivityInterval}, nil
+	if !filepath.IsAbs(config.Subagents.Binary) || !filepath.IsAbs(config.Subagents.Socket) {
+		config.Subagents.Binary, config.Subagents.Templates = "", nil
+	}
+	return &Client{config: config, approver: approver{cli: subagentCommandPath(config.Subagents), contextCLI: config.Subagents.ContextCommand}, activityInterval: streamActivityInterval}, nil
 }
 
 func (c *Client) Close() error { return nil }
@@ -235,7 +237,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		}
 	}
 	env := authenticatedEnvironment(c.config.Environ(), key)
-	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--replay-user-messages", "--forward-subagent-text"}
+	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--replay-user-messages"}
 	subagents := c.config.Subagents
 	if subagents.Roles != nil {
 		subagents.RoleChoices = subagents.Roles(ctx)
@@ -243,7 +245,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	if len(subagents.RoleChoices) > 0 {
 		subagents.Templates = nil
 		for _, role := range subagents.RoleChoices {
-			if role.Available && role.Provider != ProviderID {
+			if role.Available {
 				subagents.Templates = append(subagents.Templates, role.Templates...)
 			}
 		}
@@ -251,16 +253,12 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 			subagents.Binary = ""
 		}
 	} else if subagents.Available != nil && !subagents.Available(ctx) {
-		subagents = SubagentCLI{AgentModel: subagents.AgentModel, SettingsCommand: subagents.SettingsCommand, ContextCommand: subagents.ContextCommand, Socket: subagents.Socket}
+		subagents.Binary, subagents.Templates = "", nil
 	}
 	if opt.Identity.SessionID == "" {
-		subagents = SubagentCLI{AgentModel: subagents.AgentModel}
+		subagents = SubagentCLI{}
 	}
-	// The measured allowlist omits Monitor and AskUserQuestion. Agent remains
-	// available for explicitly requested Claude work; slash commands stay enabled.
-	args = append(args, "--tools", launchTools(subagents))
-	env = launchEnv(env, subagents)
-	env = agentModelEnv(env, subagents)
+	args = append(args, "--tools", enabledTools, "--disallowedTools", disallowedTools)
 	windowed := request.Window != nil
 	if !windowed {
 		opt.AfterToolBatch = nil
@@ -312,7 +310,6 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	t := newTurn(ctx, cancel, opt, out, c.config.Results, &c.approver, c.config.Directory, session)
 	t.startup.process = started
 	t.measureFirstRequest = windowed
-	t.subagents = subagents
 	streams, stopStreams := t.observeStreams(c.activityInterval)
 	t.streams = streams
 	defer stopStreams()
@@ -509,7 +506,8 @@ func environment(env []string) []string {
 		"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true,
 		"CLAUDECODE": true, "CLAUDE_PID": true, "CLAUDE_EFFORT": true,
 		"CLAUDE_CODE_DISABLE_BUNDLED_SKILLS": true,
-		disableAutoCompactEnv:                true, disableCompactEnv: true,
+		"CLAUDE_CODE_SUBAGENT_MODEL":         true, "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": true,
+		disableAutoCompactEnv: true, disableCompactEnv: true,
 	}
 	var out []string
 	for _, kv := range env {

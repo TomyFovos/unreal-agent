@@ -19,6 +19,8 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
+from zoneinfo import ZoneInfo
 
 import daily_development as daily
 import devlore_launcher as files
@@ -280,6 +282,7 @@ def install(args, directory, meta):
             ord(c) < 32 or ord(c) == 127 for c in args.claude_binary)):
         pilot.fail("common_binding_invalid", "Invalid executable reference; value withheld.")
     previous = read_settings(home) if os.path.lexists(settings_path(home)) else None
+    zone = getattr(args, "time_zone", None) or (previous or {}).get("TimeZone")
     choices = provider_choices(args, previous)
     sources = api_key_sources(args, previous)
     content_id = hashlib.sha256(files.read_owned(directory / "SHA256SUMS", limit=4096)).hexdigest()[:16]
@@ -306,6 +309,8 @@ def install(args, directory, meta):
                     "ClaudeBinary": args.claude_binary or (previous["ClaudeBinary"] if previous else "")}
         if sources:
             settings["APIKeys"] = sources
+        if zone:
+            settings["TimeZone"] = zone
         if prior_version is not None:
             settings["PreviousBinaryDirectory"] = str(prior_version)
         old_settings = files.read_owned(settings_path(home), private=True) if previous else None
@@ -850,6 +855,9 @@ def launch(args, directory):
     if args.acceptance_fixture:
         os.chdir(create_fixture())
     settings = read_settings(daily.home())
+    if settings.get("TimeZone") and not os.environ.get("TZ"):
+        os.environ["TZ"] = settings["TimeZone"]
+        time.tzset()
     if getattr(args, "list", False):
         list_sessions(settings); return
     workspace, session, instance = resolve_session(settings, args)
@@ -870,11 +878,21 @@ def launch(args, directory):
     os.execve(argv[0], argv, env)
 
 
+def time_zone_name(value):
+    try:
+        ZoneInfo(value)
+    except (KeyError, ValueError) as err:
+        raise argparse.ArgumentTypeError("expected an IANA time zone such as Asia/Tokyo") from err
+    return value
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_subparsers(dest="mode", required=True)
     install_args = modes.add_parser("install")
     install_args.add_argument("--configure-providers", action="store_true")
+    install_args.add_argument("--time-zone", type=time_zone_name, metavar="IANA_ZONE",
+                              help="Save a time zone for Unreal, for example Asia/Tokyo")
     for prefix in ("openai", "anthropic"):
         install_args.add_argument("--" + prefix + "-api-key-file", default="", metavar="PATH")
         install_args.add_argument("--" + prefix + "-api-key-env", default="", metavar="NAME")

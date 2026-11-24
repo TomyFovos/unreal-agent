@@ -112,14 +112,13 @@ func (h ExtensionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			out.SubscriptionUsage, err = reader.DescendantSubscriptionUsage(r.Context())
 		case "inspect_tree", "inspect_topology":
 			reader := ParentReader{Host: h.Host, ParentID: q.ParentID, Directory: h.Directory, cache: h.cache}
-			inspect := reader.InspectTree
+			var v host.View
 			if q.Action == "inspect_topology" {
-				inspect = reader.InspectTopology
-			}
-			v, e := inspect(r.Context(), q.ID, q.After, q.Limit)
-			if e != nil {
-				err = e
+				v, err = reader.InspectTopology(r.Context(), q.ID, q.After, q.Limit)
 			} else {
+				v, err = reader.inspectTree(r.Context(), q.ID, q.After, q.Limit, true)
+			}
+			if err == nil {
 				out.View = &v
 			}
 		case "observe":

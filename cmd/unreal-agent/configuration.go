@@ -18,22 +18,12 @@ func readServeConfiguration(path string) (serveConfiguration, error) {
 	if err != nil {
 		return config, fmt.Errorf("read runtime configuration: %w", err)
 	}
-	// Retired keys are accepted only when loading the operator's file.
 	// Newly written configurations contain only the current policy.
-	type commonContext contextengine.Config
-	var windowStrategy jsontext.Value
+	var windowStrategy bool
 	legacyContext := json.UnmarshalFromFunc(func(dec *jsontext.Decoder, c *contextengine.Config) error {
-		var legacy struct {
-			commonContext
-			WindowStrategy               jsontext.Value
-			ClaudeCompactThresholdTokens int64
-		}
-		if err := json.UnmarshalDecode(dec, &legacy); err != nil {
-			return err
-		}
-		*c = contextengine.Config(legacy.commonContext)
-		windowStrategy = legacy.WindowStrategy
-		return nil
+		var err error
+		windowStrategy, err = c.DecodeJSON(dec)
+		return err
 	})
 	var compatible struct {
 		serveConfiguration
@@ -43,8 +33,11 @@ func readServeConfiguration(path string) (serveConfiguration, error) {
 		return config, fmt.Errorf("decode runtime configuration: %w", err)
 	}
 	config = compatible.serveConfiguration
-	if len(windowStrategy) != 0 {
+	if windowStrategy {
 		slog.Warn("Context.WindowStrategy is deprecated and ignored. Unreal uses three-layer context.")
+	}
+	if _, err := config.Context.Resolve(); err != nil {
+		return config, fmt.Errorf("runtime context: %w", err)
 	}
 	if config.PermissionModes != nil {
 		if err := config.PermissionModes.Validate(); err != nil {

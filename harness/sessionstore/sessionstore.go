@@ -57,6 +57,24 @@ type ModelResponse struct {
 	WindowCache  WindowCache `json:",omitzero"`
 }
 
+// ObserveSubscriptionSuccess projects a completed Claude response as evidence
+// that requests can proceed. Older responses can use the recorded selection.
+func (r ModelResponse) ObserveSubscriptionSuccess(latest *llm.SubscriptionObservations, active *RuntimeSelection, at time.Time) {
+	if r.AdapterError || r.Response.Failure != nil || r.Response.Stop != llm.StopComplete {
+		return
+	}
+	provider := r.Response.Provider
+	if provider == "" {
+		provider = r.Response.Usage.Provider
+	}
+	if provider == "" && active != nil {
+		provider = active.Provider
+	}
+	if provider == "claude" {
+		latest.ObserveClaudeSuccess(at)
+	}
+}
+
 // WindowCache reports cache usage from the first Turn in a rebuilt window.
 // The known flags distinguish reported zeroes from missing counters.
 type WindowCache struct {

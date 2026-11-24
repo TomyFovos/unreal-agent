@@ -185,11 +185,27 @@ func fakeCLI(scenario string, args []string) int {
 		f.result(mode + ":" + prompt)
 	case "login":
 		f.emit(map[string]any{"type": "result", "subtype": "success", "is_error": true, "result": "Not logged in · Please run /login"})
-	case "agent_model":
-		// The model and the force flag the Agent path reaches Claude Code with.
-		model := os.Getenv(claudeSubagentModelEnv) + " force:" + os.Getenv(claudeSubagentModelForceEnv)
-		f.text("msg_1", "model:"+model)
-		f.result("model:" + model)
+	case "delegation_denied":
+		if os.Getenv("CLAUDE_CODE_SUBAGENT_MODEL") != "" || os.Getenv("CLAUDE_CODE_SUBAGENT_MODEL_FORCE") != "" {
+			return 7
+		}
+		for _, name := range []string{"Agent", "Task"} {
+			id := "toolu_" + name
+			input := map[string]any{"prompt": "review the parser"}
+			f.toolUse(id, name, input)
+			hook := f.ask("gate-"+id, map[string]any{"subtype": "hook_callback", "callback_id": gateHook, "input": map[string]any{"hook_event_name": "PreToolUse", "tool_name": name, "tool_input": input, "tool_use_id": id}})
+			decision, _ := hook["hookSpecificOutput"].(map[string]any)
+			if decision["permissionDecision"] != "deny" || decision["permissionDecisionReason"] != delegationDenied {
+				return 8
+			}
+			permission := f.ask("perm-"+id, map[string]any{"subtype": "can_use_tool", "tool_name": name, "input": input, "tool_use_id": id})
+			if permission["behavior"] != "deny" || permission["message"] != delegationDenied {
+				return 9
+			}
+			f.toolResult(id, delegationDenied, true)
+			f.batch("batch-"+id, cwd, map[string]any{"tool_name": name, "tool_input": input, "tool_use_id": id, "tool_response": delegationDenied})
+		}
+		f.result("delegation blocked")
 	case "multiple_steps":
 		f.step(100, 1000, 10, 20, "First")
 		f.step(200, 2000, 20, 30, "Second")

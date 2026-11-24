@@ -112,20 +112,21 @@ print(json.dumps({"args": common.command_for(settings, workspace, paths, "dev")[
 					if err := command.model(ctx, []string{"show", "--role", "worker"}); err != nil {
 						t.Fatal(err)
 					}
-					wantEffort := "max"
-					if index == 0 {
-						wantEffort = "low"
-					} else if index >= 2 {
+					wantEffort := "low"
+					if index >= 2 {
 						wantEffort = "high"
 					}
 					if !strings.Contains(output.String(), "worker: provider=opencode-go model=deepseek-v4.1-flash effort="+wantEffort) {
-						t.Fatalf("saved role choice not shared: %s", output.String())
+						t.Fatalf("role choice in %s/%s = %s; want effort %s", target.workspace, target.instance, output.String(), wantEffort)
 					}
 					if index == 0 {
 						return command.model(ctx, []string{"set", "--role", "worker", "--provider", "opencode-go", "--model", "deepseek-v4.1-flash", "--effort", "max"})
 					}
 					if index == 1 {
-						return command.model(ctx, []string{"set", "--role", "worker", "--provider", "opencode-go", "--model", "deepseek-v4.1-flash", "--effort", "high"})
+						if data, err := os.ReadFile(filepath.Join(shared, "subagent-model.json")); err != nil || !bytes.Equal(data, legacyChoice) {
+							t.Fatal("a Session change modified the migrated default", err)
+						}
+						return command.model(ctx, []string{"set", "--all-sessions", "--role", "worker", "--provider", "opencode-go", "--model", "deepseek-v4.1-flash", "--effort", "high"})
 					}
 					return nil
 				}}
@@ -146,7 +147,7 @@ print(json.dumps({"args": common.command_for(settings, workspace, paths, "dev")[
 			}
 			choice, err := readSubagentModel(filepath.Join(shared, "subagent-model.json"))
 			if err != nil || choice.choice("worker").Effort != "high" {
-				t.Fatal("role update was not saved in shared state", err)
+				t.Fatal("explicit all-Sessions update was not saved as a default", err)
 			}
 		})
 	}

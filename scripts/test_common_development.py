@@ -481,6 +481,25 @@ class CommonDevelopmentTests(unittest.TestCase):
                 common.launch(args, self.package)
             execute.assert_not_called(); prompt.assert_not_called(); setattr(args, mode, False)
 
+    @LINUX_ONLY
+    def test_installed_timezone_survives_updates_and_reaches_native_launcher(self):
+        self.args.time_zone = common.time_zone_name("Asia/Tokyo")
+        self.assertEqual(self.install()["TimeZone"], "Asia/Tokyo")
+        del self.args.time_zone
+        self.assertEqual(self.install()["TimeZone"], "Asia/Tokyo")
+        with self.assertRaises(argparse.ArgumentTypeError):
+            common.time_zone_name("Unknown/City")
+        root = self.repo()
+        args = argparse.Namespace(session="dev", instance="default", readme=False,
+                                  workspace_info=False, acceptance_fixture=False)
+        for tz, expected in (("", "Asia/Tokyo"), ("Europe/Paris", "Europe/Paris")):
+            with self.subTest(tz=tz), patch.dict(os.environ, dict(self.env, TZ=tz), clear=True), \
+                    patch.object(daily, "git_root", return_value=root), patch.object(os, "chdir"), \
+                    patch.object(os, "execve") as execute, patch.object(common.time, "tzset"), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                common.launch(args, self.package)
+                self.assertEqual(execute.call_args.args[2]["TZ"], expected)
+
     def test_invalid_instance_and_package_io_report_causes(self):
         with self.assertRaises(pilot.PilotError): common.repo_paths(self.home, self.home / "repo", "../old")
         (self.package / "KIT.json").unlink()

@@ -52,6 +52,8 @@ type builder struct {
 	omittedCalls              map[string]bool
 	engine                    *contextengine.Engine
 	contextConfig             contextengine.Config
+	contextConfigFile         *contextengine.ConfigFile
+	recordedContextPolicy     *sessionstore.ContextPolicies
 	contextRuntime            contextengine.Runtime
 	constraints               contextengine.Constraints
 	source                    sessionstore.Item

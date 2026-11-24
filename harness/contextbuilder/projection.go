@@ -88,6 +88,7 @@ func (b *builder) SetHistoryItem(item sessionstore.Item) {
 		b.forkSequence = item.Sequence
 		b.window = windowProjection{}
 		b.windowTurn = windowTurn{}
+		b.recordedContextPolicy = nil
 		b.rebuildHistoricalWindow = false
 		b.selectionContinuation = false
 		clear(b.derived)
@@ -444,7 +445,7 @@ func (b *builder) deriveUnit(u contextengine.Unit) []llm.Item {
 	}
 	var fit *int
 	if u.ID <= b.window.fitThrough {
-		fit = b.window.fitExcerptChars
+		fit = windowFitForUnit(u, b.window.fitExcerptChars, b.window.fitPreserveInputs)
 	}
 	rendered := b.renderUnit(u, b.excerptChars(), fit)
 	for i := range rendered {
@@ -510,7 +511,7 @@ func (b *builder) buildDerived() (Result, error) {
 	}
 	runtime := b.contextRuntime
 	runtime.Provider, runtime.Model = b.provider, b.request.Model.ID
-	budget, err := b.contextConfig.BudgetFor(runtime, 0)
+	budget, err := b.contextConfig.ForProvider(runtime.Provider).BudgetFor(runtime, 0)
 	if err != nil {
 		return Result{}, err
 	}
@@ -588,6 +589,9 @@ func ContextDebug(r Result) []string {
 
 // ApplyContext replays a durable projection decision. Original units stay intact.
 func (b *builder) ApplyContext(r sessionstore.ContextRecord) {
+	if r.Policy != nil {
+		b.recordedContextPolicy = r.Policy
+	}
 	switch r.Kind {
 	case sessionstore.ContextWindowStart, sessionstore.ContextWindowBoundary:
 		b.applyWindow(r)

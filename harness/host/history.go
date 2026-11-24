@@ -150,6 +150,7 @@ func (s *Session) indexHistory() {
 				}
 			}
 		case sessionstore.ModelResponse:
+			d.ObserveSubscriptionSuccess(&h.SubscriptionUsage, h.Selection, item.RecordedAt)
 			addUsage(d.Response.Usage)
 			h.WaitingForModel = false
 			var stats *llm.GenerationStatistics

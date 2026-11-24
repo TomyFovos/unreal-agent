@@ -24,7 +24,8 @@ func TestUsageLimitTypeAndResetHintsAtExchangeBoundary(t *testing.T) {
 			status             int
 		}{
 			{"subscription-type", fmt.Sprintf(`{"error":{"type":"usage_limit_reached","message":"private","resets_at":%d}}`, until.Unix()), "", until, 429},
-			{"code", fmt.Sprintf(`{"error":{"code":"usage_limit_reached","resets_at":"%s"}}`, until.Format(time.RFC3339)), "", until, 429},
+			{"code", fmt.Sprintf(`{"error":{"code":"usage_limit_reached","resets_at":"%s"}}`, until.In(time.FixedZone("fixture", 9*60*60)).Format(time.RFC3339)), "", until, 429},
+			{"quoted-epoch", fmt.Sprintf(`{"error":{"code":"usage_limit_reached","resets_at":"%d"}}`, until.Unix()), "", until, 429},
 			{"relative-body", `{"error":{"type":"usage_limit_reached","resets_in_seconds":154800}}`, "", until, 429},
 			{"retry-after", `{"error":{"type":"usage_limit_reached"}}`, "154800", until, 429},
 			{"retry-after-date", `{"error":{"code":"usage_limit_reached"}}`, until.UTC().Format(http.TimeFormat), until, 429},
@@ -59,7 +60,7 @@ func TestUsageLimitTypeAndResetHintsAtExchangeBoundary(t *testing.T) {
 				if !errors.As(err, &limit) {
 					t.Fatal("reset lost", err)
 				}
-				if got, reached := limit.UsageLimitReset(); !reached || !got.Equal(tc.reset) {
+				if got, reached := limit.UsageLimitReset(); !reached || !got.Equal(tc.reset) || got.Location() != time.UTC {
 					t.Fatal("reset", got, tc.reset)
 				}
 			}()

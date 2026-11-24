@@ -15,10 +15,8 @@ import (
 )
 
 // RuntimeRequest contains no credentials, process flags or permission settings.
-// Complete provider selections go through the operator's registered resolver.
+// The Host's resolver binds selections to its registered backends.
 // Keep legacy aliases intact here: templates enter immutable Session identity.
-// An omitted Provider requests only Model/Effort overrides of the template;
-// omitted override fields keep the template's values (the CLI start path).
 type RuntimeRequest struct {
 	Provider string              `json:"provider"`
 	Model    string              `json:"model"`
@@ -40,12 +38,12 @@ type RuntimeResolver func(context.Context, *host.Session, string, Template, *Run
 
 // StartChild uses the same canonical SubagentStart Operation as model calls.
 // The stable input ID also gives operator starts their existing retry semantics.
-func StartChild(ctx context.Context, owner *host.Session, generation string, input inbox.ID, name, task string, templates map[string]Template, requested *RuntimeRequest, resolve RuntimeResolver, bindOverrides ...bool) (host.Receipt, error) {
-	return StartChildWithBrief(ctx, owner, generation, input, name, task, BriefFields{}, templates, requested, resolve, bindOverrides...)
+func StartChild(ctx context.Context, owner *host.Session, generation string, input inbox.ID, name, task string, templates map[string]Template, requested *RuntimeRequest, resolve RuntimeResolver, resolveOverrides ...bool) (host.Receipt, error) {
+	return StartChildWithBrief(ctx, owner, generation, input, name, task, BriefFields{}, templates, requested, resolve, resolveOverrides...)
 }
 
 // StartChildWithBrief commits an operator start with optional structured task fields.
-func StartChildWithBrief(ctx context.Context, owner *host.Session, generation string, input inbox.ID, name, task string, brief BriefFields, templates map[string]Template, requested *RuntimeRequest, resolve RuntimeResolver, bindOverrides ...bool) (host.Receipt, error) {
+func StartChildWithBrief(ctx context.Context, owner *host.Session, generation string, input inbox.ID, name, task string, brief BriefFields, templates map[string]Template, requested *RuntimeRequest, resolve RuntimeResolver, resolveOverrides ...bool) (host.Receipt, error) {
 	if owner == nil || generation != owner.Generation {
 		return host.Receipt{}, host.ErrStaleGeneration
 	}
@@ -56,8 +54,9 @@ func StartChildWithBrief(ctx context.Context, owner *host.Session, generation st
 	if input == "" {
 		return host.Receipt{}, &RuntimeError{Code: "invalid_request"}
 	}
+	useResolver := len(resolveOverrides) > 0 && resolveOverrides[0]
 	var override *RuntimeRequest
-	if requested != nil && requested.Provider == "" {
+	if requested != nil && (useResolver || requested.Provider == "") {
 		copy := *requested
 		copy.Effort = copy.Effort.Normalize()
 		override = &copy
@@ -73,30 +72,21 @@ func StartChildWithBrief(ctx context.Context, owner *host.Session, generation st
 			return host.Receipt{}, host.ErrConflict
 		}
 
-		if override != nil || plan.RuntimeOverride != nil {
-			if override == nil || plan.RuntimeOverride == nil || *override != *plan.RuntimeOverride {
+		if plan.RuntimeOverride != nil {
+			if override == nil || *override != *plan.RuntimeOverride {
 				return host.Receipt{}, host.ErrConflict
 			}
 		} else if requested != nil {
 			s := sessionstore.SelectionFromConfiguration(plan.Configuration.Runtime)
-			if s == nil || s.Provider != requested.Provider || s.Model != requested.Model || s.Effort != requested.Effort.Normalize() {
+			if s == nil || requested.Provider == "" || s.Provider != requested.Provider || s.Model != requested.Model || s.Effort != requested.Effort.Normalize() {
 				return host.Receipt{}, host.ErrConflict
 			}
 		}
 		return owner.SubmitOperation(ctx, generation, input, operation.ID(old.OperationID), old.ToolName, spec)
 	}
 	bound := false
-	if override != nil {
+	if override != nil && !useResolver {
 		var e error
-		// Role selections bind the template and its nested workers first.
-		// Legacy callers keep overrides independent of provider discovery.
-		if len(bindOverrides) > 0 && bindOverrides[0] && resolve != nil {
-			configured, e = resolve(ctx, owner, name, configured, nil)
-			if e != nil {
-				return host.Receipt{}, e
-			}
-			bound = true
-		}
 		configured, e = overrideRuntime(configured, *override)
 		if e != nil {
 			return host.Receipt{}, e

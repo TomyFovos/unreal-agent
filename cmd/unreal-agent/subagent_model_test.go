@@ -54,8 +54,8 @@ func TestSubagentRoleModelsSaveLoadAndLegacy(t *testing.T) {
 			t.Fatalf("%s: %+v", name, got)
 		}
 	}
-	if subagentAgentModel(path)() != "" {
-		t.Fatal("a mixed choice forced every Claude Agent to one model")
+	if got := restored.choice("collector"); got != (subagentModelChoice{Provider: claudeagent.ProviderID, Model: "sonnet"}) {
+		t.Fatalf("collector choice: %+v", got)
 	}
 	for _, invalid := range []string{
 		`{"Version":2,"Roles":{"worker":{"Model":"x"}}}`,
@@ -73,30 +73,6 @@ func TestSubagentRoleModelsSaveLoadAndLegacy(t *testing.T) {
 	}
 }
 
-func TestSubagentOverrideRefusalUsesRole(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "subagent-model.json")
-	m := subagentModel{Version: 1, Provider: "openai-codex"}
-	m.setRole("worker", subagentModelChoice{Provider: opencodego.ProviderID, Model: "deepseek-v4.1-flash", Effort: "max"})
-	m.setRole("collector", subagentModelChoice{Provider: claudeagent.ProviderID, Model: "sonnet"})
-	if err := writeSubagentModel(path, m); err != nil {
-		t.Fatal(err)
-	}
-	template := subagent.Template{Default: &subagent.RuntimeRequest{Provider: "openai-codex", Model: leadModel}}
-	for _, name := range []string{"lead", "worker-low", "worker-max", "collector"} {
-		err := subagentOverrideRefusal(path, template, &subagent.RuntimeRequest{Effort: "high"}, false, name)
-		if name == "lead" {
-			if err != nil {
-				t.Fatal(err)
-			}
-			continue
-		}
-		var refusal *subagent.RuntimeError
-		if !errors.As(err, &refusal) || refusal.Code != "override_unavailable" {
-			t.Fatalf("%s: %v", name, err)
-		}
-	}
-}
-
 func TestBoundWorkerRuntimeKeepsProviderBoundaries(t *testing.T) {
 	for _, id := range []string{"openai-codex", opencodego.ProviderID, claudeagent.ProviderID} {
 		cfg := codexServeConfiguration(t.TempDir(), "https://codex.invalid")
@@ -106,12 +82,7 @@ func TestBoundWorkerRuntimeKeepsProviderBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err = boundWorkerRuntime(t.Context(), nil, "collector", subagent.Template{Runtime: raw}, nil)
-		if id == claudeagent.ProviderID {
-			var refusal *subagent.RuntimeError
-			if !errors.As(err, &refusal) || refusal.Code != "provider_unavailable" || refusal.Hint != claudeChildrenRefusal {
-				t.Fatal("Claude role became an Unreal child", err)
-			}
-		} else if err != nil {
+		if err != nil {
 			t.Fatal(id, err)
 		}
 	}
@@ -228,15 +199,21 @@ func TestSubagentPromptsNameTheChosenModel(t *testing.T) {
 		}
 	}
 	path := filepath.Join(t.TempDir(), "subagent-model.json")
-	models := subagentModels(path)
-	if m := models(); m.Family != "" {
+	scope := subagentModelScope{defaultFile: path, sessionDirectory: t.TempDir(), parent: "first"}
+	first := subagentRoles(agentrunner.RuntimeConfig{}, scope, nil)
+	if m := first(t.Context()); len(m) != 0 {
 		t.Fatal("Claude is told of another model without a choice", m)
 	}
 	if err := writeSubagentModel(path, subagentModel{Version: 1, Provider: opencodego.ProviderID, Model: "deepseek-v4.1-flash"}); err != nil {
 		t.Fatal(err)
 	}
-	if m := models(); m.Family != "OpenCode Go" || m.Lead != "deepseek-v4.1-flash" || m.Collector != "" {
-		t.Fatal("Claude's prompt does not name the chosen model", m)
+	if m := first(t.Context()); len(m) != 0 {
+		t.Fatal("a changed default reached an existing Session's Claude prompt", m)
+	}
+	scope.parent = "second"
+	second := subagentRoles(agentrunner.RuntimeConfig{}, scope, nil)(t.Context())
+	if len(second) != len(subagentRoleGroups) || second[0].Role != "lead" || second[0].Provider != opencodego.ProviderID || second[0].Model != "deepseek-v4.1-flash" {
+		t.Fatal("Claude's prompt does not name the initial role choice", second)
 	}
 }
 
@@ -249,65 +226,17 @@ func TestSubagentModelRetargetsOperatorLeadPrompt(t *testing.T) {
 	}
 }
 
-func TestClaudeAgentModelWithoutUnrealTemplates(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "subagent-model.json")
+func TestUnavailableClaudeChoiceDoesNotUseCodex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "claude.json")
 	if err := writeSubagentModel(path, subagentModel{Version: 1, Provider: claudeagent.ProviderID, Model: "opus"}); err != nil {
 		t.Fatal(err)
 	}
-	cli, err := claudeSubagents(nil, "", path)
-	if err != nil || cli.Binary != "" || len(cli.Templates) != 0 || cli.AgentModel == nil || cli.AgentModel() != "opus" {
-		t.Fatal("a Host without Unreal templates lost its explicit Agent model", err)
+	chosen, err := readSubagentModel(path)
+	if err != nil || chosen.choice("lead").Provider != claudeagent.ProviderID {
+		t.Fatal("the provider on Claude", chosen, err)
 	}
-	if err := writeSubagentModel(path, subagentModel{Version: 1, Provider: claudeagent.ProviderID, Model: "sonnet"}); err != nil {
-		t.Fatal(err)
-	}
-	if cli.AgentModel() != "sonnet" {
-		t.Fatal("the Agent model did not follow the next saved choice")
-	}
-}
-
-// While subagent model chooses Claude, Claude works with Claude Code's own Agent
-// tool: no Unreal children, and the Agent runs the chosen Claude model.
-func TestSubagentModelClaudeChoice(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "claude.json")
-	if err := writeSubagentModel(path, subagentModel{Version: 1, Provider: claudeagent.ProviderID, Model: "opus"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := subagentProvider(path); got != claudeagent.ProviderID {
-		t.Fatal("the provider on Claude", got)
-	}
-	if subagentsAvailable(t.Context(), agentrunner.RuntimeConfig{}, path) {
-		t.Fatal("Claude was offered the Unreal children")
-	}
-	if got := subagentAgentModel(path)(); got != "opus" {
-		t.Fatal("the Agent model on Claude", got)
-	}
-	agentModel := subagentAgentModel(path)
-	if got := agentModel(); got != "opus" {
-		t.Fatal("the Agent model is not read afresh", got)
-	}
-	for _, tc := range []struct {
-		name  string
-		model subagentModel
-	}{{"codex", subagentModel{Version: 1, Provider: "openai-codex"}}, {"opencode go", subagentModel{Version: 1, Provider: opencodego.ProviderID, Model: "deepseek-v4.1-flash"}}} {
-		other := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "-")+".json")
-		if err := writeSubagentModel(other, tc.model); err != nil {
-			t.Fatal(err)
-		}
-		if model := subagentAgentModel(other)(); model != "" {
-			t.Fatalf("%s names an Agent model: %s", tc.name, model)
-		}
-	}
-	if model := subagentAgentModel(filepath.Join(dir, "none.json"))(); model != "" {
-		t.Fatal("no choice names an Agent model", model)
-	}
-	bad := filepath.Join(dir, "bad.json")
-	if err := os.WriteFile(bad, []byte("{"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if model := subagentAgentModel(bad)(); model != "" || subagentProvider(bad) != "openai-codex" {
-		t.Fatal("an unreadable choice named a model", model)
+	if subagentsAvailable(t.Context(), agentrunner.RuntimeConfig{}, chosen) {
+		t.Fatal("an unregistered Claude connection was advertised")
 	}
 }
 
@@ -339,65 +268,6 @@ func TestDefaultSubagentsOnOpenCodeGoWithoutCodex(t *testing.T) {
 	cfg.Providers = map[string]agentrunner.ProviderRuntime{opencodego.ProviderID: {Provider: route}}
 	if lead := defaultSubagents(cfg, subagentModel{Version: 1, Provider: opencodego.ProviderID, Model: "deepseek-v4.1-flash"})["lead"]; lead.Runtime.Provider.Endpoint != route.Endpoint {
 		t.Fatal("the registered route was not used", lead.Runtime.Provider)
-	}
-}
-
-// subagent start --model/--effort runs on a built-in template only while its
-// children run Codex; a complete runtime, a retry and an operator's
-// templates (no subagent model file) keep upstream's behavior.
-func TestSubagentOverrideRefusal(t *testing.T) {
-	dir := t.TempDir()
-	codexFile, goFile, claudeFile, badFile := filepath.Join(dir, "codex.json"), filepath.Join(dir, "go.json"), filepath.Join(dir, "claude.json"), filepath.Join(dir, "bad.json")
-	if err := writeSubagentModel(codexFile, subagentModel{Version: 1, Provider: "openai-codex"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeSubagentModel(goFile, subagentModel{Version: 1, Provider: opencodego.ProviderID, Model: "deepseek-v4.1-flash"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeSubagentModel(claudeFile, subagentModel{Version: 1, Provider: claudeagent.ProviderID, Model: "opus"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(badFile, []byte("{"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	codex := subagent.Template{Default: &subagent.RuntimeRequest{Provider: "openai-codex", Model: leadModel, Effort: "low"}}
-	onGo := subagent.Template{Default: &subagent.RuntimeRequest{Provider: opencodego.ProviderID, Model: "deepseek-v4.1-flash", Effort: "low"}}
-	override := &subagent.RuntimeRequest{Effort: "high"}
-	for _, tc := range []struct {
-		name      string
-		path      string
-		template  subagent.Template
-		requested *subagent.RuntimeRequest
-		retry     bool
-		want      string
-	}{
-		{"no override", goFile, codex, nil, false, ""},
-		{"complete runtime", goFile, codex, &subagent.RuntimeRequest{Provider: opencodego.ProviderID, Model: "deepseek-v4.1-flash", Effort: "high"}, false, ""},
-		{"operator templates", "", codex, override, false, ""},
-		{"no default", goFile, subagent.Template{}, override, false, ""},
-		{"retry", goFile, codex, override, true, ""},
-		{"no choice", filepath.Join(dir, "none.json"), codex, override, false, ""},
-		{"codex", codexFile, codex, override, false, ""},
-		{"opencode go", goFile, codex, override, false, "override_unavailable"},
-		{"claude", claudeFile, codex, override, false, "override_unavailable"},
-		{"templates on opencode go", codexFile, onGo, override, false, "override_unavailable"},
-		{"unreadable", badFile, codex, override, false, "subagent_model_unreadable"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := subagentOverrideRefusal(tc.path, tc.template, tc.requested, tc.retry)
-			var refusal *subagent.RuntimeError
-			if tc.want == "" && err != nil || tc.want != "" && (!errors.As(err, &refusal) || refusal.Code != tc.want) {
-				t.Fatalf("got %v, want %q", err, tc.want)
-			}
-			if tc.want == "override_unavailable" && refusal.Hint == "" {
-				t.Fatal("no hint")
-			}
-		})
-	}
-	// The Claude choice refuses the override with what it means.
-	var refusal *subagent.RuntimeError
-	if err := subagentOverrideRefusal(claudeFile, codex, override, false); !errors.As(err, &refusal) || refusal.Hint != "subagent model で Claude を選んでいる間は --model と --effort を使えません" {
-		t.Fatal("the Claude refusal", err)
 	}
 }
 

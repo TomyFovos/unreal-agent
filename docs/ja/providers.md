@@ -78,7 +78,7 @@ ChatGPT サブスクのモデル一覧で Fast 対応が確認できると、`/m
 
 ChatGPT ログイン時、GPT-6 Luna の Fast は同じモデルの標準速度に比べて、サブスクに含まれる利用枠を **2.5 倍**のペースで消費します。購入済みクレジットや対象の Enterprise 従量課金を使う場合は **2 倍**です。倍率はモデルによって異なります。[OpenAI の速度設定](https://learn.chatgpt.com/docs/agent-configuration/speed#fast-mode)、[OpenAI の料金表](https://learn.chatgpt.com/docs/pricing?codex-pricing-speed=fast#speed-multipliers)
 
-Fast を使えない場合は `fast unsupported for <model>` を表示します。保存後に対応情報がなくなった場合は、同じモデルに標準速度で送信し、この通知を表示します。`/analyze` の **Layers** ではリクエストに付けたモードごとに、トークン使用量と出力 tok/s を集計します。モードの記録がない旧 Codex 履歴は `fast unknown` と表示します。
+Fast を使えない場合は `fast unsupported for <model>` を表示します。保存後に対応情報がなくなった場合は、同じモデルに標準速度で送信し、この通知を表示します。`/analyze` の **書き出し（Export）** には、リクエストに付けたモードごとのトークン使用量と出力 tok/s が入ります。モードの記録がない旧 Codex 履歴は `fast unknown` と表示します。
 
 ---
 
@@ -170,7 +170,7 @@ Codex が設定済みか自動検出が有効、または OpenAI API が明示�
 
 `unreal-agent subagent model` の保存済み選択がない場合、**OpenAI API** を統括に選んだ Session では、組み込みの GPT の子とその作業者も `openai` を使います。それ以外の統括では、従来どおりサブスクの `openai-codex` を使います。可用性を理由に接続を切り替えません。API の子はテンプレートのモデルと設定された effort を保ちます。サブスクでは下表の effort を維持します。利用者が設定したテンプレートや既存の子は記録された接続を保ちます。
 
-Claude の統括は、役割ごとに選んだ接続の可用性を確認して子を案内します。Codex は認証とモデル一覧、Go は登録と保存キーを確認します。明示した役割が使えなければ復旧手順を案内し、別接続へは切り替えません。共有設定のない従来の構成では Codex が使えなければ Claude Code の Agent を使います。Claude を選んだ役割や Claude モデルを明示した作業にも Agent を使えます。
+Claude の統括は Unreal を通して委譲します。Unreal が起動する Claude Code は、親・子ともに組み込みの `Agent` と旧名の `Task` を無効にします。役割の接続が使えない場合は、その接続を維持して復旧手順を案内します。
 
 | テンプレート / 役割 | モデル・Effort | 主な用途 |
 | --- | --- | --- |
@@ -206,17 +206,20 @@ API キー接続は利用者が明示した場合だけ使い、利用不能な 
 
 対応する ChatGPT サブスクモデルなら、どの役割でも `--fast on` を選べます。モデルを設定するときに `--fast off` を指定するか、`--fast` を省略すると標準速度になります。モデルの保存後は `model set --role worker --fast off` で、provider・model・effort を保持したまま速度を変更できます。`model show` に保存済みのモードが表示されます。
 
-設定・参照は Host 経由で処理し、Session に記録します。選択は `~/.local/state/unreal-agent/subagent-model.json`
-（`XDG_STATE_HOME` 設定時は `$XDG_STATE_HOME/unreal-agent/subagent-model.json`）に保存し、
-全 Session・フォルダ・instance で共有して再起動後も保持します。
-旧リポジトリ別設定は共有ファイルがないときに起動時に移行し、元ファイルを残します。既存の共有設定は上書きしません。
-Version 1 の旧単一設定は全役割に適用し、役割別設定は Version 2 で保存します。
-変更しない役割は以前の一括設定を引き継ぎます。次の子から有効で、実行中の子とその配下は記録済みの選択を維持します。
-明示的な `Subagents`、`SubagentDefaults`、明示 runtime の `/children start` は影響を受けません。
+設定と参照は Host 経由で処理し、呼び出したトップレベルの Session に記録します。
+このバージョンで Session を初めて開くと、`~/.local/state/unreal-agent/subagent-model.json`
+（`XDG_STATE_HOME` 設定時は `$XDG_STATE_HOME/unreal-agent/subagent-model.json`）から初期値を取り込みます。
+Version 1 の単一設定は全役割に適用します。Session ごとの選択は resume や Host 再起動後も有効です。
 
-`subagent start --model ID --effort LEVEL` は対象役割が Go / Claude なら `override_unavailable` を返します。
-設定変更には `subagent model set` を使います。Claude への委譲案内・可用性確認も役割ごとに判断します。
-全役割が同じ Claude モデルなら Agent の FORCE 設定、混在時は役割別のモデル案内を使います。
+`subagent model set` の変更は呼び出した Session の次の子から有効です。実行中の lead が新しく起動する worker・collector にも適用し、起動済みの子は開始時の選択を使います。
+同じ初期値ファイルを使う保存済み Session と今後の Session にも反映するには、通常の `model set` の引数に `--all-sessions` を加えます。
+
+起動ごとに変更するには `subagent start --model ID [--provider ID] [--effort LEVEL]` を使います。
+モデル ID だけを指定すると、登録済みで利用可能な接続先のカタログから一致するモデルを探します。
+複数の接続先が一致した場合は候補の ID が表示されるので、`--provider` で指定します。別課金の API 接続を使うには明示選択が必要です。
+明示した接続先は利用可能で、指定モデルを提供している必要があります。
+メインと子の `SubagentStart` ツールも、任意の `model`、`provider`、`effort` フィールドを受け付けます。
+Claude を選んだ役割は、メインと同じ Claude Code 経路で Unreal の子 Session として起動します。役割のモデルと effort が適用され、オーケストラに表示されます。使用量は子 Session に記録し、承認要求は親に届きます。worker・collector の役割設定は lead 配下で適用され、lead 自身の接続先は別に選べます。
 テンプレートのない Host で設定した場合は、CLI が再起動後から有効と表示します。
 詳しい操作と effort の表は [OpenCode Go の手順](../opencode-go.md#サブエージェントのモデルを選ぶ)を参照してください。
 

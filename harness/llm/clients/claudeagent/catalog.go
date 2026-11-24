@@ -53,7 +53,7 @@ func discover(ctx context.Context, binary string, environ func() []string, key c
 	defer os.RemoveAll(dir)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-prompt-tool", "stdio", "--no-session-persistence")
+	cmd := exec.CommandContext(ctx, binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-prompt-tool", "stdio", "--no-session-persistence", "--disallowedTools", disallowedTools)
 	cmd.Dir, cmd.Env = dir, authenticatedEnvironment(environ(), key)
 	isolate(cmd)
 	stdin, err := cmd.StdinPipe()

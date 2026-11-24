@@ -141,11 +141,10 @@ unreal_run claude e2-claude-500 anthropic/opus --ak child_model=sonnet --ak chil
 | `main_model` | `-m` より優先。両方省略時は `anthropic/opus` または `openai/gpt-6.1-sol` |
 | `main_effort` | 既定 `max`。low / medium / high / xhigh / max |
 | `child_model`, `child_effort` | 混成・GPT：実装 lead の指定。既定 gpt-6.2-sol / max。worker は同じモデルと各 template の強度を使い、collector は製品どおり gpt-6-luna / medium |
-| Claude 単独の `child_model`, `child_effort` | native Agent のモデル・強度を任意指定し、Claude Code の hook で適用。省略時は製品 prompt どおり haiku / sonnet を使い分ける |
+| Claude 単独の `child_model`, `child_effort` | Claude API 接続を使う Unreal の子のモデルと effort。省略した項目はメインの設定を引き継ぐ |
 | `openai_key_file`, `anthropic_key_file` | ローカルの通常ファイル・0600。選択した構成に必要なキーだけを読む |
 
-GPT 単独も製品の GPT 子起動を維持します。Claude 単独は通常の Claude Code Agent ツールを使い、
-native の子のメッセージは親の Agent 呼び出しに紐づきます。
+どの構成でも Unreal の子 Session に委譲します。
 
 ## Terminal-Bench 4.0.0 の課題一覧・実行
 
@@ -222,11 +221,11 @@ baselines 500
 
 ## 記録・費用・公開
 
-`agent/trajectory.json` から GPT の子・孫の
+`agent/trajectory.json` から Unreal の子・孫の
 `agent/trajectory.<session-id>.json` を辿れます。
 `agent/sessions/*.session.jsonl` はマスク済みの監査用コピーで、resume 用データではありません。
 キーファイル・Provider の home・生の再送用データ・private なコマンド出力ファイルは収集しません。
-native Claude Agent のメッセージには `[Claude Code Agent <tool-call-id>]` の紐づけがあります。
+過去の Claude Agent のメッセージには `[Claude Code Agent <tool-call-id>]` の紐づけがあります。
 
 trajectory の合計と `AgentContext.metadata.usage_by_connection` に、
 `claude-api` と `openai` を分け、モデル別にも入力・キャッシュ読取・キャッシュ書込・出力・推論を記録します。

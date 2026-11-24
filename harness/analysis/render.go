@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
 
-var Views = []string{"Overview", "Usage", "Turns", "Tools", "Agents", "Context", "Timeline", "Errors", "Layers", "Context metrics", SubscriptionUsageView, "Export"}
+var Views = []string{"Overview", "Usage", SubscriptionUsageView, "Context", "Agents", "Tools", "Time", "Errors", "Turns", "Export"}
+
+var exportViews = []string{"Overview", "Usage", "Turns", "Tools", "Agents", "Context", "Timeline", "Errors", "Layers", "Context metrics", SubscriptionUsageView}
 
 func value(v int64, u viewer.Usage, field ...llm.UsageField) string {
 	if !u.Known || len(field) > 0 && slices.Contains(u.Unknown, field[0]) && v == 0 {
@@ -190,7 +193,7 @@ func Lines(r Report, view string, ascii bool) []string {
 			out = append(out, "no canonical timestamps")
 		}
 		for _, e := range r.Timeline {
-			out = append(out, e.At.Format("15:04:05")+" "+e.Kind+" "+e.Name)
+			out = append(out, e.At.Format(time.RFC3339)+" "+e.Kind+" "+e.Name)
 		}
 	case "errors":
 		crashes := fmt.Sprint(r.Errors.Crashes)
@@ -201,7 +204,7 @@ func Lines(r Report, view string, ascii bool) []string {
 		for _, e := range r.Errors.Recent {
 			at := "time unknown"
 			if !e.At.IsZero() {
-				at = e.At.Format("15:04:05")
+				at = e.At.Format(time.RFC3339)
 			}
 			out = append(out, at+" "+e.Kind+" "+e.Name)
 		}

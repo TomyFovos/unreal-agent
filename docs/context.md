@@ -44,6 +44,6 @@ Project instructions guide coding style and workflow. They never grant tool perm
 
 ## 4. Inspecting Context & Usage Metrics
 
-Run `/analyze` and open **Context metrics** to see window sizes, excerpt fits, cache totals and evidence reads. Older summary and compaction records appear as **historical summary**, including their reported usage and outcomes.
+Open `/analyze` → **Context** for the input chart, rebuilds and cache comparisons. **Export** includes excerpt fits, evidence reads and historical summary usage and outcomes.
 
 See [Troubleshooting — Read analysis and measurements](troubleshooting.md#read-analysis-and-measurements) for details on interpreting these numbers.

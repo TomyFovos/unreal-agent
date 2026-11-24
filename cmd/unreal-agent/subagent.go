@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/credential"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
@@ -51,8 +52,8 @@ func runtimeProviders(identity agentrunner.RuntimeIdentity) (*provider.Registry,
 
 // withParentSubagents gives the Host's Sessions the templates. Children read
 // the same credential sources as the Host; defaultCredentialDirectory is the
-// launcher's store for OpenCode Go's key. subagentModelFile is subagent model's
-// choice for built-in templates, empty for an operator's.
+// launcher's store for OpenCode Go's key. subagentModelFile supplies initial
+// role defaults for built-in templates.
 func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]childTemplate, parentPolicy *permission.Policy, credentialDirectory, defaultCredentialDirectory, codexAuthFile, subagentModelFile string) (agentrunner.RuntimeConfig, map[string]subagent.Template, error) {
 	if len(configured) == 0 {
 		return c, nil, nil
@@ -109,6 +110,15 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 		return c, nil, err
 	}
 	arguments := []string{"child", "--stdio"}
+	if c.ContextFile == nil {
+		contextConfig, err := json.Marshal(c.Context)
+		if err != nil {
+			return c, nil, err
+		}
+		if string(contextConfig) != "{}" {
+			arguments = append(arguments, "--context-config", string(contextConfig))
+		}
+	}
 	if c.BuiltinSubagents {
 		arguments = append(arguments, "--builtin-subagents")
 		if subagentModelFile != "" {
@@ -116,24 +126,26 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 			if err != nil {
 				return c, nil, err
 			}
-			// Registrations are nonsecret connection references. A running lead
-			// needs the same routes to bind a later saved worker selection.
-			backends := maps.Clone(c.Backends)
-			if backends == nil {
-				backends = map[string]agentrunner.ProviderRuntime{}
-			}
-			backends[c.Identity.Provider.Provider] = agentrunner.ProviderRuntime{Provider: c.Identity.Provider, ReasoningEffort: c.Identity.ReasoningEffort, Claude: c.Identity.Claude}
-			for _, id := range c.Discovered.IDs() {
-				if b, ok := c.Discovered.Lookup(id); ok {
-					backends[id] = b.Runtime
-				}
-			}
-			raw, err := json.Marshal(backends)
-			if err != nil {
-				return c, nil, err
-			}
-			arguments = append(arguments, "--subagent-model-file", modelFile, "--subagent-backends", string(raw))
+			arguments = append(arguments, "--subagent-model-file", modelFile)
 		}
+		// Pass the same registered, nonsecret connections to nested starts.
+		backends := maps.Clone(c.Backends)
+		if backends == nil {
+			backends = map[string]agentrunner.ProviderRuntime{}
+		}
+		if c.Identity.Provider.Provider != loginProvider {
+			backends[c.Identity.Provider.Provider] = agentrunner.ProviderRuntime{Provider: c.Identity.Provider, ReasoningEffort: c.Identity.ReasoningEffort, Claude: c.Identity.Claude}
+		}
+		for _, id := range c.Discovered.IDs() {
+			if b, ok := c.Discovered.Lookup(id); ok {
+				backends[id] = b.Runtime
+			}
+		}
+		raw, err := json.Marshal(backends)
+		if err != nil {
+			return c, nil, err
+		}
+		arguments = append(arguments, "--subagent-backends", string(raw))
 	}
 	arguments = append(arguments, apiKeyArguments(c.CredentialSources)...)
 	if credentialDirectory != "" {
@@ -154,12 +166,28 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 	}
 	// An explicit nonempty, nonsecret environment prevents os/exec's nil-env
 	// inheritance, including provider tokens, .env overlays and proxy credentials.
-	execution := subagent.Config{Directory: directory, Binary: binary, Arguments: arguments, Environment: childEnvironment(c), Templates: templates, ResolveRuntime: childRuntimeResolverForLayer(c, subagentModelFile, "main", templates["lead"].Default), ValidateTemplate: childTemplateValidator(c)}
-	if len(c.Backends) == 0 && c.Discovered == nil {
-		execution.ResolveRuntime = nil
-		execution.ValidateTemplate = nil
+	models := subagentModelScope{defaultFile: subagentModelFile, sessionDirectory: directory}
+	resolve := childRuntimeResolverForLayer(c, models, "main", templates["lead"].Default)
+	if !c.BuiltinSubagents && len(c.Backends) == 0 && c.Discovered == nil {
+		// Operator templates with a single Host connection previously ran
+		// their configured runtime verbatim. Bind only explicit requests.
+		configured := resolve
+		resolve = func(ctx context.Context, owner *host.Session, name string, template subagent.Template, requested *subagent.RuntimeRequest) (subagent.Template, error) {
+			if requested == nil {
+				return boundWorkerRuntime(ctx, owner, name, template, nil)
+			}
+			original := template.Default
+			if choice := sessionstore.SelectionFromConfiguration(template.Runtime); choice != nil {
+				template.Default = &subagent.RuntimeRequest{Provider: choice.Provider, Model: choice.Model, Effort: choice.Effort}
+			}
+			template, err := configured(ctx, owner, name, template, requested)
+			template.Default = original
+			return template, err
+		}
 	}
+	execution := subagent.Config{Directory: directory, Binary: binary, Arguments: arguments, ContextFile: c.ContextFile, Environment: childEnvironment(c), Templates: templates, ResolveRuntime: resolve, ValidateTemplate: childTemplateValidator(c)}
 	c.ControlTools = true
+	c.ResolveChildRuntime = resolve
 	c.NewTools = withSubagentTools(c.NewTools, execution, c.Identity.DisallowedTools)
 	return c, templates, nil
 }
@@ -257,8 +285,9 @@ func runChild(ctx context.Context, args []string, diagnostics io.Writer) error {
 	flags := flag.NewFlagSet("unreal-agent child", flag.ContinueOnError)
 	flags.SetOutput(diagnostics)
 	stdio := flags.Bool("stdio", false, "serve one parent-bound child protocol connection")
+	contextJSON := flags.String("context-config", "", "parent Host context configuration (internal)")
 	builtin := flags.Bool("builtin-subagents", false, "validate role selections of built-in worker templates (internal)")
-	modelFile := flags.String("subagent-model-file", "", "saved role selections read at each worker start (internal)")
+	modelFile := flags.String("subagent-model-file", "", "shared default for Session role selections (internal)")
 	backendsJSON := flags.String("subagent-backends", "", "nonsecret registered connections for worker starts (internal)")
 	directory := flags.String("credential-directory", "", "explicit managed credential store, never credential material")
 	defaultDirectory := flags.String("default-credential-directory", "", "the launcher's store OpenCode Go's key is read from, when it exists; never created")
@@ -270,6 +299,12 @@ func runChild(ctx context.Context, args []string, diagnostics io.Writer) error {
 	}
 	if !*stdio || flags.NArg() != 0 {
 		return errors.New("child requires --stdio")
+	}
+	var contextConfig contextengine.Config
+	if *contextJSON != "" {
+		if err := json.Unmarshal([]byte(*contextJSON), &contextConfig, json.RejectUnknownMembers(true)); err != nil {
+			return fmt.Errorf("decode child context configuration: %w", err)
+		}
 	}
 	sources, err := apiOptions.apiKeySources()
 	if err != nil {
@@ -285,7 +320,8 @@ func runChild(ctx context.Context, args []string, diagnostics io.Writer) error {
 			return err
 		}
 	}
-	return subagent.Serve(ctx, os.Stdin, os.Stdout, childFactory(credential.WithSources(resolver, sources, os.Getenv), *codexFile, *builtin, *modelFile, backends, sources))
+	base := agentrunner.RuntimeConfig{Context: contextConfig, Credentials: credential.WithSources(resolver, sources, os.Getenv)}
+	return subagent.Serve(ctx, os.Stdin, os.Stdout, childFactory(base, *codexFile, *builtin, *modelFile, backends, sources))
 }
 
 // childCredentials resolves a child's keys from the sources its Host passed.
@@ -318,13 +354,12 @@ func childCredentials(directory, defaultDirectory, codexFile string) (credential
 // (U17); a parent that stops ends it instead.
 const childApprovalTimeout = agentrunner.ChildApprovalTimeout
 
-func childFactory(resolver credential.Resolver, codexFile string, builtin bool, modelFile string, backends map[string]agentrunner.ProviderRuntime, sources map[string]credential.Source) subagent.ChildFactory {
-	base := agentrunner.RuntimeConfig{Credentials: resolver}
+func childFactory(base agentrunner.RuntimeConfig, codexFile string, builtin bool, modelFile string, backends map[string]agentrunner.ProviderRuntime, sources map[string]credential.Source) subagent.ChildFactory {
 	if builtin {
 		base.ResolveChildRuntime = boundWorkerRuntime
 	}
 	return agentrunner.NewChildFactory(base, func(c subagent.ChildConfig, runtime *agentrunner.RuntimeConfig) error {
-		if builtin && modelFile != "" {
+		if builtin && backends != nil {
 			runtime.BuiltinSubagents = true
 			runtime.Backends = maps.Clone(backends)
 			delete(runtime.Backends, runtime.Identity.Provider.Provider)
@@ -339,15 +374,17 @@ func childFactory(resolver credential.Resolver, codexFile string, builtin bool, 
 			read := codexCatalogReader(codexFile, isDockerSandboxCodex(runtime.Identity.Provider.Auth) || isDockerSandboxCodex(runtime.Backends["openai-codex"].Provider.Auth), os.Getenv)
 			runtime.Catalogs["openai-codex"] = func(ctx context.Context) (modelcatalog.Catalog, error) { return read(ctx, false) }
 		}
-		if builtin && modelFile != "" {
+		if runtime.BuiltinSubagents {
 			configureWorkerModels(runtime, modelFile, sources, c)
+		}
+		if claudeagent.IsProvider(runtime.Identity.Provider.Provider) {
+			return configureClaudeChildCommands(runtime, c, modelFile)
 		}
 		return nil
 	})
 }
 
-// Legacy/operator children without a shared role-model file keep their bound
-// templates. A Claude Agent role still cannot become an Unreal child.
+// Legacy and operator children can keep their bound templates.
 func boundWorkerRuntime(_ context.Context, _ *host.Session, _ string, template subagent.Template, requested *subagent.RuntimeRequest) (subagent.Template, error) {
 	if requested != nil {
 		return template, &subagent.RuntimeError{Code: "selection_unsupported"}
@@ -358,9 +395,6 @@ func boundWorkerRuntime(_ context.Context, _ *host.Session, _ string, template s
 	}
 	if buildfeatures.Disabled(choice.Provider) {
 		return template, disabledChildError()
-	}
-	if choice.Provider == claudeagent.ProviderID {
-		return template, &subagent.RuntimeError{Code: "provider_unavailable", Hint: claudeChildrenRefusal}
 	}
 	return template, nil
 }

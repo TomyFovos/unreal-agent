@@ -625,7 +625,7 @@ Keybarの直上に全幅1行。次の順で最初の1件を出す。
 
 #### 下段のゲージ
 
-入力欄の下に1行。メインのモデル名とeffortはヘッダー、子のモデル名とeffortはカードの1行目に出す。累計はゲージに出さず `/analyze` で見る。
+入力欄の下に1行。メインのモデル名とeffortはヘッダー、子のモデル名とeffortはカードの1行目に出す。累計トークン数は `/analyze` で見る。
 
 ```text
 文脈 ▕█████░░░░░░░▏394k (39%) · 速度 ▂▃▅▇▆▅ ~69.0 tok/s · キャッシュ ▕██████████▏98.37%
@@ -636,9 +636,9 @@ Keybarの直上に全幅1行。次の順で最初の1件を出す。
 | 文脈 | 今の入力トークン数を `394k (39%)` の形で出し、Selection.ContextWindowに対する割合を括弧に添える。12セルのバー。70%未満はs.main、70%以上90%未満はs.stall、90%以上はs.bad。Claudeでは最後のmessage_startのinput + cache_read + cache_creationを使い、区切りの間の入力合計にはしない |
 | 文脈の上限が不明 | ContextWindowが0ならバーを出さず `文脈 394k`。入力も不明なら `文脈 —` |
 | 速度 | 最大8件のOutputTPSを、表示中の最大値に対する比で7段階の棒にする。現在の値を小数1桁のtok/sで添える。provider_api以外には `~` |
-| キャッシュ | CacheLatestの割合を10セルのバーと小数第2位までの%（例: `キャッシュ 98.37%`）で出す。不明なら `キャッシュ —` |
+| キャッシュ | CacheTotalの読取割合を10セルのバーと小数第2位までの%（`キャッシュ 98.37%` など）で出す。不明なら `キャッシュ —` |
 
-- キャッシュ率と `/analyze` の累計は、区切りの間の呼び出しを合計したUsageを使う。文脈用の値とは分ける。
+- キャッシュ率は、各Sessionの入力トークン累計に占めるキャッシュ読取の割合。直近の割合は子の詳細表示で確認できる。
 - 現在の生成統計はProgress.Statisticsを優先し、なければLastGeneration。統計のない未完了Progressや、選択中モデルと統計のモデルが違う場合は数値を出さない。
 - 速度の履歴は新しいcanonical応答ごとに追加し、永続化しない。同じ計測値の別生成も別件として数える。Progressに統計があれば表示時に加え、直近8件に絞る。
 - Operation・承認を待つ時間を速度のタイマーに加えない。
@@ -1069,7 +1069,7 @@ UNREAL_AGENT_WRITE_VISUAL=1 go test ./cmd/internal/tui -run '^(TestVisualWorkPan
 | ドラフト・pulse | Snapshot.Progress / WaitingForModel / LatestAt | 一時表示 |
 | 文脈・速度 | Progress.Statistics、LastGenerationのContextInput()とOutputTPS() | Claudeは最後の呼び出しのContextTokensを優先し、不明な計測値を補わない |
 | 速度履歴 | TUI Modelの8件の環状バッファ、Snapshot.SpeedHistory | 新しいcanonical応答で追加。ページの再読では増やさず、永続化しない |
-| キャッシュ | Snapshot.CacheLatest | 直近の使用量 |
+| キャッシュ | Snapshot.CacheTotal / viewer.Row.Usage | メインと子それぞれのSession累計の読取割合 |
 | 承認待ち | Snapshot.Permissions.Pending | チップの判定と要確認の帯 |
 | 要確認 | 現在のSnapshot.Entries | 最後のあなたの発言以降の【要確認】 |
 | 選択中child・履歴 | viewer.PanelSnapshot.Selected / Transcript | `/child ID` / `/child-history` / `/child-next` |

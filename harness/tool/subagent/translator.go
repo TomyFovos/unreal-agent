@@ -21,12 +21,12 @@ import (
 type translator struct {
 	action    string
 	owner     session.ID
+	child     bool
 	templates map[string]runtime.Template
 	resolve   func(string, runtime.Template, *runtime.RuntimeRequest) (runtime.Template, error)
 }
 
-// BindRuntime adds optional, provider-neutral runtime arguments. Translation is
-// still inert: only the existing Operation Manager executes the resulting plan.
+// BindRuntime exposes model selection wherever the Host binds child runtimes.
 func BindRuntime(extensions []tool.Extension, ctx context.Context, owner *host.Session, resolve runtime.RuntimeResolver) {
 	if resolve == nil {
 		return
@@ -39,8 +39,18 @@ func BindRuntime(extensions []tool.Extension, ctx context.Context, owner *host.S
 		t.resolve = func(name string, base runtime.Template, r *runtime.RuntimeRequest) (runtime.Template, error) {
 			return resolve(ctx, owner, name, base, r)
 		}
-		params := extensions[i].Definition.Tool.Parameters
-		params["properties"].(map[string]any)["runtime"] = map[string]any{"type": "object", "properties": map[string]any{"provider": map[string]any{"type": "string"}, "model": map[string]any{"type": "string"}, "effort": map[string]any{"type": "string"}}, "required": []string{"provider", "model", "effort"}, "additionalProperties": false}
+		props := extensions[i].Definition.Tool.Parameters["properties"].(map[string]any)
+		props["model"] = map[string]any{"type": "string", "description": "Model ID in an available provider catalog. Omit to use the role's selection."}
+		props["provider"] = map[string]any{"type": "string", "description": "Registered provider ID. Required when multiple providers offer the model."}
+		props["effort"] = map[string]any{"type": "string", "description": "Reasoning effort offered by the selected model."}
+		if !t.child {
+			props["runtime"] = map[string]any{
+				"type":                 "object",
+				"properties":           map[string]any{"provider": map[string]any{"type": "string"}, "model": map[string]any{"type": "string"}, "effort": map[string]any{"type": "string"}},
+				"required":             []string{"provider", "model", "effort"},
+				"additionalProperties": false,
+			}
+		}
 	}
 }
 
@@ -81,7 +91,7 @@ func Extensions(owner session.ID, templates map[string]runtime.Template, child b
 	var result []tool.Extension
 	for _, d := range definitions {
 		enabled := d.isChild == child || !d.isChild && len(copied) > 0
-		result = append(result, tool.Extension{Definition: tool.Definition{Tool: llm.Tool{Type: llm.ToolFunction, Name: d.name, Description: d.description, Parameters: map[string]any{"type": "object", "properties": d.properties, "required": d.required, "additionalProperties": false}}}, Translator: &translator{action: d.action, owner: owner, templates: copied}, Enabled: enabled})
+		result = append(result, tool.Extension{Definition: tool.Definition{Tool: llm.Tool{Type: llm.ToolFunction, Name: d.name, Description: d.description, Parameters: map[string]any{"type": "object", "properties": d.properties, "required": d.required, "additionalProperties": false}}}, Translator: &translator{action: d.action, owner: owner, child: child, templates: copied}, Enabled: enabled})
 	}
 	return result, nil
 }
@@ -99,6 +109,9 @@ func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallSta
 		Tests        []string                `json:"tests"`
 		Blockers     []string                `json:"blockers"`
 		Runtime      *runtime.RuntimeRequest `json:"runtime"`
+		Provider     string                  `json:"provider"`
+		Model        string                  `json:"model"`
+		Effort       llm.ReasoningEffort     `json:"effort"`
 		Request      string                  `json:"request"`
 		Allow        bool                    `json:"allow"`
 		Decision     string                  `json:"decision"`
@@ -138,14 +151,26 @@ func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallSta
 			return tool.ErrorStatus("Unknown child template", 0)
 		}
 		p.Template = args.Template
+		request := args.Runtime
+		if t.child {
+			// Older nested calls used a removed runtime field. Keep their
+			// role-based behavior when replaying those calls.
+			request = nil
+		}
+		if args.Provider != "" || args.Model != "" || args.Effort != "" {
+			if args.Runtime != nil {
+				return tool.ErrorStatus("Use provider, model and effort fields or runtime, separately", 0)
+			}
+			request = &runtime.RuntimeRequest{Provider: args.Provider, Model: args.Model, Effort: args.Effort}
+		}
 		if t.resolve != nil {
 			var e error
-			config, e = t.resolve(args.Template, config, args.Runtime)
+			config, e = t.resolve(args.Template, config, request)
 			if e != nil {
 				return tool.ErrorStatus(e.Error(), 0)
 			}
 			p.RuntimeBound = true
-		} else if args.Runtime != nil {
+		} else if request != nil {
 			return tool.ErrorStatus("Child runtime selection unsupported", 0)
 		}
 		p.Configuration = &config

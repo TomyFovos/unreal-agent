@@ -15,13 +15,13 @@ All providers and agent roles use a conversation window (L1), a copy of current 
 
 `record show` writes the selected bytes directly. `--json` and `--page-bytes` return text or base64 and the continuation locator when present. `record find` returns JSON matches and supports `--kind`, `--handle`, `--from` and `--before`. Times use RFC3339.
 
-The processed counts in L2 link to `rec:<session>/context/<slot>`. The children index lists the Session's child handles, statuses, and canonical operation and report locators. Other indexes list source locators for the slot's evidence.
+The processed counts in L2 link to `rec:<session>/context/<slot>`. The children index lists the Session's child handles, statuses, and canonical operation and report locators. Other indexes list source locators for the slot's evidence. When the L2 copy uses its token budget, it links to `rec:<session>/context/state` for the full recorded state and its evidence locators. Use `record find` to locate specific source records, including older versions.
 
 The Host uses the Session's current read permissions for file-backed sources. Session history resolves through the same committed-log and archive readers used for inspection. Input receipts and observations carry source locators. A mid-turn continuation preserves the locators it offered, and a subsequent response still acknowledges delivery through the existing input watermark.
 
 ## Rebuild current state
 
-L2 has thirteen slots. They are `session`, `requests`, `rules`, `plan`, `decisions`, `children`, `approvals`, `waiting`, `questions_to_user`, `artifacts`, `issues`, `recent_events`, and `metrics`. Entries carry source locators. Active human requests carry the full original text, and mixed input retains its alias and provenance. Processed items keep a count and an L3 index locator.
+L2 has thirteen slots. They are `session`, `requests`, `rules`, `plan`, `decisions`, `children`, `approvals`, `waiting`, `questions_to_user`, `artifacts`, `issues`, `recent_events`, and `metrics`. Entries carry source locators. Active human requests retain their original text in the copy when they fit. Mixed input retains its alias and provenance. Processed items keep a count and an L3 index locator.
 
 S6 lists unfinished children and ended children whose review is pending. An explicit accept, reject, or cancellation settles a child. For an older child with no review, the projection settles it after the parent's request includes its terminal report and produces a recorded response. Delivery can come from a terminal peer notice, a child tool receipt, or a recorded show or wait result. A terminal operation checkpoint alone leaves the review pending. Children that ended during the current active human request keep their pending review even after the parent has seen the report. Settled children are counted by template, model, and ending. Explicit review statistics use the recorded reviews.
 
@@ -37,9 +37,9 @@ The log preserves unknown event versions and kinds for a future reader. The redu
 
 ## Rebuild the Responses request window
 
-The first rebuild can occur as soon as the complete input reaches W, including the first request after upgrading a long-running Session. Each rebuild fixes the system instructions, tool schemas, and a copy of L2 with evidence locators. The raw tail starts at the last human message when that fits. When it exceeds the rebuild target, the Host advances the cut to the newest boundary that preserves undelivered inputs, the in-flight turn, and whole tool call and receipt groups. The L2 copy keeps the active human request in `requests.current`, including its original whitespace and line endings. The L1 head gives the locator range for earlier conversation in L3, where `record show` and `record find` can retrieve it.
+The first rebuild can occur as soon as the complete input reaches W, including the first request after upgrading a long-running Session. Each rebuild fixes the system instructions, tool schemas, and a copy of L2 with evidence locators. Within the L2 budget, active requests, approvals, questions, waits and running children take priority. Entries that fall outside the copy remain in L3. The raw tail starts at the last human message when that fits. To recover headroom, the Host advances the cut to the in-flight turn and then displaces any of its already-delivered batches as needed. It keeps undelivered inputs and unacknowledged tool call and receipt groups. The L1 head gives the locator range for earlier conversation in L3.
 
-The rebuilt input targets fewer than W tokens. If the required minimum exceeds W and fits the input budget, the boundary records its size and keeps the full required projection. When the system instructions, tools, L2, and required tail exceed the input budget, Unreal reduces the character allowance for long tool outputs and messages in the required tail. It keeps head and tail excerpts with L3 locators. If the allowance reaches zero, shortened items retain their omission marker and locator. L2 and typed images keep their contents. If the smallest projection still exceeds the budget, the request fails before inference with the budget and the token counts for the header, L2, required tail, and smallest tail.
+The rebuilt input targets `max(1, floor(PostRebuildRatio × min(W, input budget)))` tokens. Long tool outputs and assistant messages can be excerpted to reach the target. This fit preserves incoming messages verbatim. Excerpted items keep head and tail text with L3 locators, or an omission marker and locator at zero allowance. If the required minimum exceeds the target, it can use the remaining input budget. The hard input budget can require excerpts of incoming messages as well. Typed images retain their bodies. If the smallest projection still exceeds the input budget, the request fails before inference with the header, L2, and tail measurements.
 
 After a rebuild, an estimated W tokens of growth triggers the next size-based rebuild. An input budget overflow or a header change can trigger one sooner. A provider overflow immediately rebuilds the window and retries the request once. Within a window, new entries append in recorded order. Large text tool results display a head and tail excerpt with locators for the original streams or receipt. Native image results retain their typed bodies. For a large source, `RecordShow` can return a byte range or page that fits the configured excerpt size.
 
@@ -49,13 +49,37 @@ These keys are under `Context` in `runtime.json`.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `WindowThresholdTokens` | `200000` | W for the first rebuild, the size target for rebuilt input, and the growth threshold after a rebuild. |
-| `L2TargetTokens` | `5000` | The target recorded alongside the actual copy size. All current state remains eligible above this target. |
+| `WindowThresholdTokens` | `200000` | Positive W for the first rebuild and growth between rebuilds. |
+| `PostRebuildRatio` | `0.5` | Fraction of W for the rebuilt input, strictly between 0 and 1. |
+| `L2TargetTokens` | `5000` | Token budget for the state copy within the rebuild target. Source-backed entries that exceed the budget remain available in L3. |
 | `RecentEventCount` | `0` | Use events since the previous boundary. At the first boundary, use events since the start of the active human request. A positive value selects the latest N for the copy. The full event history remains available. |
 | `ToolOutputExcerptChars` | `0` | Use the existing tool display allowance. A positive value sets the combined head and tail size in Unicode characters for each text part. |
 | `CacheRewarmMinutes` | `0` | Optional interval recorded for the PR7 cache comparison. Runtime requests remain driven by normal Session activity. |
 
-Existing `runtime.json` files can still contain `Context.WindowStrategy`. Unreal ignores that key and logs one deprecation line when loading the file. The old Claude compaction thresholds are also accepted for compatibility.
+Use `Context.Routes` to override these keys and `InputBudget`, `FallbackWindow`, `ResponseReserve`, or `ProtocolReserve` for specific provider IDs. Omitted fields inherit the common `Context` values. Each Session, including each child, uses the provider of its current selection. The common policy and every route must keep `L2TargetTokens` within the nominal rebuild target computed from W and the ratio. The builder further caps L2 when the model's input budget or request header leaves less room.
+
+For example, merge this `Context` object into the Host's runtime configuration.
+
+```json
+{
+  "Context": {
+    "WindowThresholdTokens": 200000,
+    "PostRebuildRatio": 0.5,
+    "L2TargetTokens": 5000,
+    "Routes": {
+      "claude": {"WindowThresholdTokens": 180000, "PostRebuildRatio": 0.6},
+      "opencode-go": {"L2TargetTokens": 3500},
+      "openai-codex": {"WindowThresholdTokens": 220000}
+    }
+  }
+}
+```
+
+### Tune a running Host
+
+Save the complete `runtime.json` used by the Host through an atomic file replacement. The Host and running children read `Context` before their next request and at Claude's tool batch checks. An invalid edit logs a warning and the process continues using the last valid settings. Resizing uses the new thresholds at the next check. The current projection is used until a rebuild is due. Each new Session records its initial policy with its first window and writes a `context_policy` event for each effective change. A Session resumed from an older log records its first applied policy at the next check.
+
+Existing `runtime.json` files can still contain `Context.WindowStrategy`. Unreal ignores that key and logs one deprecation line on startup. The old Claude compaction thresholds are also accepted for compatibility.
 
 ## Rebuild the Claude Code window
 
@@ -89,7 +113,9 @@ Both state review commands and `subagent review HANDLE accept|reject [--reason T
 
 ## Measuring
 
-Open `/analyze` → **Context metrics** for each Session and the full Session tree, including archived descendants. Rows group by context strategy (`three-layer` or `historical summary`) and provider, model, effort, and Fast mode. **Export** includes the same measurements in JSON and Markdown. A recorded counter or setting is `measured`, a calculation or estimate is `derived`, and unavailable data is `unknown`. JSON uses a `null` value with source `unknown` for unavailable measurements. A known total can also show how many observations were missing.
+Open `/analyze` → **Context** to compare request input with W and cache reads before and after rebuilds. **Export** contains detailed measurements in JSON and Markdown for the full Session tree, including archived descendants. Rows group by context strategy (`three-layer` or `historical summary`) and provider, model, effort, and Fast mode. A recorded counter or setting is `measured`, a calculation or estimate is `derived`, and unavailable data is `unknown`. JSON uses a `null` value with source `unknown` for unavailable measurements. A known total can also show how many observations were missing.
+
+The Context view shows the latest applied policy by route. Each change opens a new period for the affected Session and route. Compare rebuild counts, average input size just after rebuilding, cache read share on the first request, and L3 show and find calls. Each request and L3 count belongs to the policy that built its window, including calls that begin before the next rebuild and complete afterward. Rebuilds from before policy recording appear with an unknown policy.
 
 | Measurement | What to compare |
 | --- | --- |
@@ -103,3 +129,11 @@ Open `/analyze` → **Context metrics** for each Session and the full Session tr
 | User questions | Visible assistant messages starting with `【要確認】` per work hour by strategy. Work time is the union of known regular-turn and tool intervals within each Session. Tree totals sum Session hours, including concurrent child work. |
 
 Subscription utilisation shows provider-reported allowance windows, percentages, and reset times when available. Treat these as point-in-time account readings. The list-price table reports USD equivalents. [Codex rate-limit headers](https://github.com/openai/codex/blob/main/codex-rs/codex-api/src/rate_limits.rs) · [Claude Code rate-limit events](https://code.claude.com/docs/en/agent-sdk/typescript#sdkratelimitevent)
+
+### Replay a candidate offline
+
+```bash
+python3 scripts/context_replay.py ./session-copies --since 2026-11-24T00:00:00+09:00 --config ./candidate/runtime.json
+```
+
+Copy the Session logs before replaying. The `candidate` results include each route's effective policy and simulations for the full trace and the validation period. Optional `--request-csv` uses the same candidate. The existing `codex` and `deepseek` report groups resolve policy from `openai-codex` and `opencode-go`, respectively. Candidate sizing applies the configured W, ratio, L2 cap, and budgets. The simulator estimates rendered context sizes, cache behaviour, and costs from recorded request metadata.

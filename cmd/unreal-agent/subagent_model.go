@@ -9,23 +9,19 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/llm/clients/opencodego"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
-	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 )
 
-// subagentModel is the sub-agents' model chosen with subagent model.
-// The launcher keeps it in one file under shared STATE, so every conversation
-// and workspace shares it, and each child start reads it. Without a choice,
-// E1's GPT templates follow an API parent's explicit connection. Choosing Codex pins its route.
-// Claude names the model Claude Code's own Agent
-// sub-agents run on, instead of Unreal's children.
+// subagentModel holds a Session's role selections or the shared defaults.
+// With no choice, built-in GPT templates follow an API parent's explicit
+// connection. Choosing Codex pins its route.
 type subagentModel struct {
 	Version  int
 	Provider string
@@ -45,9 +41,6 @@ type subagentRoleModels struct {
 	Worker    *subagentModelChoice `json:"worker,omitzero"`
 	Collector *subagentModelChoice `json:"collector,omitzero"`
 }
-
-// Serialize read/modify/write of the shared choice across Session requests.
-var subagentModelMu sync.Mutex
 
 var subagentRoleGroups = []string{"lead", "worker", "collector"}
 
@@ -179,23 +172,29 @@ func migrateSubagentModel(legacy, shared string) error {
 // writeSubagentModel replaces the file whole, so a child start never reads a
 // partial choice.
 func writeSubagentModel(path string, m subagentModel) error {
-	data, err := json.Marshal(m)
+	temporary, err := prepareSubagentModel(path, m)
 	if err != nil {
 		return err
+	}
+	defer os.Remove(temporary)
+	return os.Rename(temporary, path)
+}
+
+func prepareSubagentModel(path string, m subagentModel) (string, error) {
+	data, err := json.Marshal(m)
+	if err != nil {
+		return "", err
 	}
 	f, err := os.CreateTemp(filepath.Dir(path), ".subagent-model-*")
 	if err != nil {
-		return err
+		return "", err
 	}
-	defer os.Remove(f.Name())
-	if _, err = f.Write(data); err != nil {
-		f.Close()
-		return err
+	_, err = f.Write(data)
+	if err = errors.Join(err, f.Close()); err != nil {
+		_ = os.Remove(f.Name())
+		return "", err
 	}
-	if err = f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), path)
+	return f.Name(), nil
 }
 
 // subagentEffort is the effort a built-in template runs at on the sub-agents'
@@ -276,99 +275,61 @@ func subagentCollectorPrompt(prompt string, collector agentrunner.RuntimeIdentit
 	return before + "collector template (" + label + "), never to a worker" + tail
 }
 
-// subagentProvider is the provider the built-in children run on: OpenCode Go
-// or Claude when subagent model chose it, otherwise Codex. An unreadable choice
-// counts as Codex here, as at Host start; each child start then reports it.
-// Claude has no built-in children: Claude's own Agent runs the sub-agents.
-func subagentProvider(path string, names ...string) string {
-	name := "lead"
-	if len(names) > 0 {
-		name = names[0]
-	}
-	if m, err := readSubagentModel(path); err == nil {
-		if c := m.choice(name); c.Provider != "" {
-			return c.Provider
-		}
-	}
-	return "openai-codex"
-}
-
-// subagentAgentModel names the Claude model chosen for Claude Code's Agent
-// tool, from the file at each turn; "" for another choice.
-func subagentAgentModel(path string) func() string {
-	return func() string {
-		m, err := readSubagentModel(path)
-		if err != nil {
-			return ""
-		}
-		model := m.choice("lead").Model
-		for _, role := range subagentRoleGroups {
-			c := m.choice(role)
-			if c.Provider != claudeagent.ProviderID || c.Model != model {
-				return ""
-			}
-		}
-		return model
-	}
-}
-
 // subagentsAvailable reports whether Claude is offered the built-in children
 // this turn: while the provider they run on is available. OpenCode Go counts
 // while it is registered and its saved key resolves. Its model list is a
 // network read that a Claude turn must not wait on, nor lose the children
-// over, and a child start reads the list itself. The Claude choice wants no
-// Unreal children: Claude's own Agent tool runs the sub-agents instead.
-func subagentsAvailable(ctx context.Context, runtime agentrunner.RuntimeConfig, path string) bool {
-	if m, err := readSubagentModel(path); err == nil && m.Roles != nil {
-		for _, role := range subagentRoleGroups {
-			id := m.choice(role).Provider
-			if id == "" {
-				id = "openai-codex"
-			}
-			if subagentRoleAvailable(ctx, runtime, id) {
-				return true
-			}
+// over, and a child start reads the list itself.
+func subagentsAvailable(ctx context.Context, runtime agentrunner.RuntimeConfig, m subagentModel) bool {
+	checked := make(map[string]bool)
+	for _, role := range subagentRoleGroups {
+		id := m.choice(role).Provider
+		if id == "" {
+			id = "openai-codex"
 		}
-		return false
+		if !checked[id] && subagentRoleAvailable(ctx, runtime, id) {
+			return true
+		}
+		checked[id] = true
 	}
-	id := subagentProvider(path)
-	return subagentRoleAvailable(ctx, runtime, id)
+	return false
 }
 
 func subagentRoleAvailable(ctx context.Context, runtime agentrunner.RuntimeConfig, id string) bool {
-	if id == claudeagent.ProviderID {
-		return false
-	}
 	if id == opencodego.ProviderID {
 		return runtime.CheckProvider(ctx, id) == nil
 	}
 	return providerAvailable(ctx, runtime, id)
 }
 
-func subagentRoles(runtime agentrunner.RuntimeConfig, path string, templates map[string]subagent.Template) func(context.Context) []claudeagent.SubagentRole {
+func subagentRoles(runtime agentrunner.RuntimeConfig, scope subagentModelScope, templates map[string]subagent.Template) func(context.Context) []claudeagent.SubagentRole {
 	return func(ctx context.Context) []claudeagent.SubagentRole {
-		m, err := readSubagentModel(path)
-		if err != nil || m.Roles == nil && (m.Provider == "" || m.Provider == claudeagent.ProviderID) {
+		m, err := scope.read(ctx, "")
+		if err != nil || scope.defaultFile != "" && m.Version == 0 {
 			return nil
 		}
 		roles := make([]claudeagent.SubagentRole, 0, len(subagentRoleGroups))
 		for _, group := range subagentRoleGroups {
+			var names []string
+			for name := range templates {
+				if subagentRole(name) == group {
+					names = append(names, name)
+				}
+			}
+			if len(names) == 0 && len(templates) > 0 {
+				continue
+			}
+			slices.Sort(names)
 			c := m.choice(group)
+			if scope.defaultFile == "" && len(names) > 0 {
+				if selected := sessionstore.SelectionFromConfiguration(templates[names[0]].Runtime); selected != nil {
+					c.Provider, c.Model, c.Effort = selected.Provider, selected.Model, selected.Effort
+				}
+			}
 			if c.Provider == "" {
 				c.Provider = "openai-codex"
 			}
-			role := claudeagent.SubagentRole{Role: group, Provider: c.Provider, Model: c.Model, Effort: string(c.Effort)}
-			for name := range templates {
-				if subagentRole(name) == group {
-					role.Templates = append(role.Templates, name)
-				}
-			}
-			slices.Sort(role.Templates)
-			if c.Provider == claudeagent.ProviderID {
-				role.Available = providerAvailable(ctx, runtime, c.Provider)
-			} else {
-				role.Available = len(role.Templates) > 0 && subagentRoleAvailable(ctx, runtime, c.Provider)
-			}
+			role := claudeagent.SubagentRole{Role: group, Provider: c.Provider, Model: c.Model, Effort: string(c.Effort), Templates: names, Available: len(names) > 0 && subagentRoleAvailable(ctx, runtime, c.Provider)}
 			if role.Model == "" {
 				if group == "collector" {
 					role.Model = collectorModel
@@ -388,66 +349,5 @@ func subagentRoles(runtime agentrunner.RuntimeConfig, path string, templates map
 			roles = append(roles, role)
 		}
 		return roles
-	}
-}
-
-// subagentOverrideRefusal refuses subagent start --model/--effort on a
-// built-in template unless its children run Codex. Upstream's override keeps
-// the template's provider and skips the subagent model binding, so under OpenCode
-// Go it would run Codex, or the model chosen at Host start; under Claude the
-// template would start a child Unreal must not start. A retry of a start
-// already accepted is left to StartChild.
-func subagentOverrideRefusal(path string, template subagent.Template, requested *subagent.RuntimeRequest, retry bool, names ...string) error {
-	name := "lead"
-	if len(names) > 0 {
-		name = names[0]
-	}
-	if !buildfeatures.OpenCodeGoEnabled && !retry {
-		if requested != nil && buildfeatures.Disabled(requested.Provider) {
-			return disabledChildError()
-		}
-		if requested == nil || requested.Provider == "" {
-			if template.Default != nil && buildfeatures.Disabled(template.Default.Provider) {
-				return disabledChildError()
-			}
-			if path != "" && template.Default != nil {
-				if m, err := readSubagentModel(path); err == nil && buildfeatures.Disabled(m.choice(name).Provider) {
-					return disabledChildError()
-				}
-			}
-		}
-	}
-	if requested == nil || requested.Provider != "" || path == "" || template.Default == nil || retry {
-		return nil
-	}
-	m, err := readSubagentModel(path)
-	if err != nil {
-		return &subagent.RuntimeError{Code: "subagent_model_unreadable"}
-	}
-	choice := m.choice(name)
-	if buildfeatures.Disabled(choice.Provider) {
-		return disabledChildError()
-	}
-	if choice.Provider == claudeagent.ProviderID {
-		return &subagent.RuntimeError{Code: "override_unavailable", Hint: "subagent model で Claude を選んでいる間は --model と --effort を使えません"}
-	}
-	if choice.Provider == opencodego.ProviderID {
-		return &subagent.RuntimeError{Code: "override_unavailable", Hint: "subagent model で OpenCode Go を選んでいる間は --model と --effort を使えません。子は subagent model のモデルを役割ごとの effort で使います。モデルを変えるには subagent model で選び直してください"}
-	}
-	if template.Default.Provider != "openai-codex" && !(m.Roles != nil && choice.Provider == "openai-codex") {
-		return &subagent.RuntimeError{Code: "override_unavailable", Hint: "この Host の組み込みテンプレートは Codex で作られていないため、--model と --effort を使えません"}
-	}
-	return nil
-}
-
-// subagentModels names the sub-agents' model for Claude's prompt, from the
-// file at each turn.
-func subagentModels(path string) func() claudeagent.SubagentModels {
-	return func() claudeagent.SubagentModels {
-		m, err := readSubagentModel(path)
-		if err != nil || m.Provider != opencodego.ProviderID {
-			return claudeagent.SubagentModels{}
-		}
-		return claudeagent.SubagentModels{Family: modelcatalog.ProviderName(m.Provider), Lead: m.Model}
 	}
 }

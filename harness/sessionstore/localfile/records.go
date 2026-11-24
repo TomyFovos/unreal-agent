@@ -56,8 +56,11 @@ func (s *Store) ReadRecordLog(ctx context.Context, id session.ID) (*RecordLog, e
 		context: state.ContextProjection.State}, nil
 }
 
-// ContextIndex links a compact L2 count to canonical sources in this log.
+// ContextIndex reads state or its source locators from the canonical log.
 func (l *RecordLog) ContextIndex(slot string) ([]byte, error) {
+	if slot == "state" {
+		return l.context.MarshalJSON()
+	}
 	if slot == "children" {
 		type child struct {
 			Handle  operation.ID

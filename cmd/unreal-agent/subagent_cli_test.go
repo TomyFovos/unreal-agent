@@ -24,6 +24,8 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/session"
+	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/internal/testclaude"
 )
 
@@ -41,6 +43,8 @@ type fakeGPT struct {
 	workerModels, workerTiers []string
 	collectorEfforts          []string
 	leadChildTemplate         string
+	leadChildRuntime          *subagent.RuntimeRequest
+	leadChildOverride         *subagent.RuntimeRequest
 	leadLastInput             string
 	refusedLead               bool
 	sawEmailInstruction       bool
@@ -133,7 +137,15 @@ func (g *fakeGPT) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if template == "" {
 				template = "worker-high"
 			}
-			output = call("lead-start-worker", "SubagentStart", map[string]string{"template": template, "task": "printf worker > " + g.workerMarker})
+			args := map[string]any{"template": template, "task": "printf worker > " + g.workerMarker}
+			if g.leadChildRuntime != nil {
+				args["runtime"] = g.leadChildRuntime
+				args["brief"] = subagent.BriefFields{Title: "Check delegation"}
+			}
+			if override := g.leadChildOverride; override != nil {
+				args["provider"], args["model"], args["effort"] = override.Provider, override.Model, override.Effort
+			}
+			output = call("lead-start-worker", "SubagentStart", args)
 		case !g.routingOnly && !calls["lead-approve"] && strings.Contains(all, "asks for approval of request"):
 			for _, text := range texts {
 				header, body, ok := strings.Cut(text, "\n")
@@ -210,11 +222,16 @@ func startGPTHost(t *testing.T, leadRuns bool) *gptHost {
 // designer opens the Session in Ask, holding the human's control lease.
 func (h *gptHost) designer(t *testing.T) host.View {
 	t.Helper()
-	view, err := h.client.Open(t.Context(), host.Create, "designer")
+	return h.openSession(t, host.Create, "designer")
+}
+
+func (h *gptHost) openSession(t *testing.T, mode host.Mode, id session.ID) host.View {
+	t.Helper()
+	view, err := h.client.Open(t.Context(), mode, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	control, err := h.client.WatchPermissions(t.Context(), "designer", view.Generation)
+	control, err := h.client.WatchPermissions(t.Context(), id, view.Generation)
 	if err != nil {
 		t.Fatal(err)
 	}

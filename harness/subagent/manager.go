@@ -9,6 +9,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -31,6 +32,7 @@ type Config struct {
 	Directory        string
 	Binary           string
 	Arguments        []string
+	ContextFile      *contextengine.ConfigFile
 	Environment      []string
 	Templates        map[string]Template
 	Child            *ChildConfig
@@ -483,7 +485,9 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 		if p.RuntimeBound && m.config.ValidateTemplate != nil {
 			selection := sessionstore.SelectionFromConfiguration(p.Configuration.Runtime)
 			override := p.RuntimeOverride
-			if selection == nil || override.Model != "" && selection.Model != override.Model || override.Effort != "" && selection.Effort != override.Effort.Normalize() {
+			if selection == nil || override.Provider != "" && selection.Provider != override.Provider ||
+				override.Model != "" && selection.Model != override.Model ||
+				override.Effort != "" && selection.Effort != override.Effort.Normalize() {
 				return operation.StatusFailed, fmt.Errorf("child template changed")
 			}
 			if err := m.config.ValidateTemplate(allowed, *p.Configuration); err != nil {

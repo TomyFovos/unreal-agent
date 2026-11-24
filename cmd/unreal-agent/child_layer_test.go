@@ -59,6 +59,7 @@ func TestChildRoleSelectionFollowsResolvedLayer(t *testing.T) {
 	if err := writeSubagentModel(path, saved); err != nil {
 		t.Fatal(err)
 	}
+	scope := subagentModelScope{defaultFile: path, sessionDirectory: c.SessionDirectory}
 	for _, parentLayer := range []string{"main", "lead", "worker", "collector"} {
 		for _, name := range []string{"worker-low", "worker-max", "collector"} {
 			t.Run(parentLayer+"/"+name, func(t *testing.T) {
@@ -72,7 +73,7 @@ func TestChildRoleSelectionFollowsResolvedLayer(t *testing.T) {
 					t.Fatal(err)
 				}
 				base := subagent.Template{Workspace: identity.Workspace, Runtime: runtime, Policy: permission.Config{Tools: []string{"Finish"}}, Default: &subagent.RuntimeRequest{Provider: "openai-codex", Model: collectorModel, Effort: "low"}}
-				resolve := childRuntimeResolverForLayer(c, path, parentLayer, nil)
+				resolve := childRuntimeResolverForLayer(c, scope, parentLayer, nil)
 				chosen, err := resolve(t.Context(), parent, name, base, nil)
 				if err != nil {
 					t.Fatal(err)
@@ -105,7 +106,7 @@ func TestChildRoleSelectionFollowsResolvedLayer(t *testing.T) {
 				// selection nor fall back to Codex below the lead.
 				unavailable := c
 				unavailable.Health = map[string]func(context.Context) error{opencodego.ProviderID: func(context.Context) error { return errors.New("worker disconnected") }}
-				resolved, err := childRuntimeResolverForLayer(unavailable, path, parentLayer, nil)(t.Context(), parent, name, base, nil)
+				resolved, err := childRuntimeResolverForLayer(unavailable, scope, parentLayer, nil)(t.Context(), parent, name, base, nil)
 				if parentLayer == "main" {
 					selection := sessionstore.SelectionFromConfiguration(resolved.Runtime)
 					if err != nil || selection == nil || selection.Provider != "openai-codex" || selection.Model != leadModel || selection.Effort != "max" {

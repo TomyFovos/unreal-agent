@@ -14,7 +14,7 @@ func Encode(r Report, format string) ([]byte, error) {
 	case "markdown":
 		var b strings.Builder
 		b.WriteString("# Session analysis\n\nMetadata and statistics only. JSON durations use nanoseconds.\n\n")
-		for _, view := range Views[:len(Views)-1] {
+		for _, view := range exportViews {
 			b.WriteString("## " + view + "\n\n")
 			if view == "Context metrics" {
 				writeContextMarkdown(&b, contextMeasurements(r))

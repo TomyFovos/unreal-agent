@@ -35,12 +35,11 @@ type launchOptions struct {
 	// folders launchers share the store /login names. It is not part of the
 	// Host binding: discovery rereads it, so saving a key needs no restart.
 	defaultCredentials string
-	// subagentModel is <sharedState or state>/subagent-model.json, the model
-	// choice for every conversation. Like defaultCredentials it is not part
-	// of the Host binding.
+	// subagentModel is <sharedState or state>/subagent-model.json, the initial
+	// default for Session role selections.
 	subagentModel string
 	// sharedState overrides where defaultCredentials and subagentModel live so
-	// every folder reads one login and one subagent model choice; empty keeps STATE.
+	// every folder reads one login and the same initial role defaults.
 	sharedState string
 }
 
@@ -184,7 +183,7 @@ func parseLaunchOptions(args []string, output io.Writer, getenv func(string) str
 	flags.StringVar(&o.sessions, "session-directory", "", "canonical sessions (default STATE/sessions)")
 	flags.StringVar(&o.socket, "socket", "", "private socket (default XDG_RUNTIME_DIR/unreal-agent/host.sock or STATE/run/host.sock)")
 	flags.StringVar(&o.credentials, "credential-directory", "", "optional managed API-key store")
-	flags.StringVar(&o.sharedState, "shared-state-directory", "", "share this directory's credentials and subagent-model.json (default STATE)")
+	flags.StringVar(&o.sharedState, "shared-state-directory", "", "share this directory's credentials and initial role defaults (default STATE)")
 	flags.StringVar(&o.codexFile, "codex-auth-file", "", "external Codex auth file; uses existing Codex discovery by default")
 	flags.BoolVar(&o.bootstrapCodexDisabled, "bootstrap-codex-disabled", false, "first-run discovery: operator declines Codex")
 	flags.BoolVar(&o.bootstrapClaudeDisabled, "bootstrap-claude-disabled", false, "first-run discovery: operator declines Claude")

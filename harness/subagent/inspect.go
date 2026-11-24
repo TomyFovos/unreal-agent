@@ -82,15 +82,20 @@ func readChildSnapshot(ctx context.Context, directory string, id session.ID, ana
 	page := sessionstore.Page{Items: items, NextAfter: sessionstore.Sequence(len(items))}
 	result := ChildView{View: host.View{Session: snapshot, History: host.ProjectHistoryPage(page), Operations: ops, ContextFacts: facts}, LastRecordedAt: snapshot.Session.CreatedAt}
 	var finishSequence sessionstore.Sequence
+	var active *sessionstore.RuntimeSelection
 	for _, item := range items {
 		if item.RecordedAt.After(result.LastRecordedAt) {
 			result.LastRecordedAt = item.RecordedAt
 		}
 		if item.Kind == sessionstore.ItemFork {
 			result.Configuration = nil
+			active = nil
 			result.Finish = nil
 			finishSequence = 0
 			result.End = nil
+		}
+		if response, ok := item.Data.(sessionstore.ModelResponse); ok {
+			response.ObserveSubscriptionSuccess(&result.SubscriptionUsage, active, item.RecordedAt)
 		}
 		if item.Kind != sessionstore.ItemHostRecord {
 			continue
@@ -102,10 +107,15 @@ func readChildSnapshot(ctx context.Context, directory string, id session.ID, ana
 				result.SubscriptionUsage.Observe(*record.Activity, item.RecordedAt)
 			}
 		case "configuration":
+			if active == nil {
+				active = sessionstore.SelectionFromConfiguration(record.Configuration)
+			}
 			var config ChildConfig
 			if json.Unmarshal(record.Configuration, &config) == nil && config.Validate() == nil && config.ChildID == id {
 				result.Configuration = &config
 			}
+		case sessionstore.HostRuntimeApplied:
+			active = record.Selection
 		case sessionstore.HostProjectInstructions:
 			metadata := record.ProjectInstructions.Metadata()
 			result.View.ProjectInstructions = &metadata

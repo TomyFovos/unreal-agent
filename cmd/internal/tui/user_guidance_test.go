@@ -176,7 +176,7 @@ func TestFailedTurnIsVisibleWhileSessionKeepsRunning(t *testing.T) {
 
 func TestCacheGaugeKeepsTwoDecimalPlaces(t *testing.T) {
 	s, u := idleSnapshot(), plainUI()
-	s.CacheLatest = viewer.Usage{Known: true, Input: 10000, CachedInput: 9837}
+	s.CacheTotal = viewer.Usage{Known: true, Input: 10000, CachedInput: 9837}
 	text := statisticsBar(s, u, makeLayout(160, 40)).plain()
 	if !strings.Contains(text, "キャッシュ ▕██████████▏98.37%") || strings.Contains(text, "cache ") {
 		t.Fatal(text)

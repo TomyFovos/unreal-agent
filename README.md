@@ -7,7 +7,7 @@ Unreal Agent is a terminal coding agent for day-to-day development with **Claude
 This repository is a personal-use fork of [unreallabsai/unreal-agent](https://github.com/unreallabsai/unreal-agent). It preserves Unreal's background Host/Session architecture and canonical Operation model while adding:
 - Subscription-based provider switching (`/model`) between Claude Code and Codex
 - Interactive permission modes (`Read Only`, `Ask for Approval`, `Full Access`)
-- Delegated GPT sub-agents (`lead`, `worker-*`, `collector`), or Claude Code's Agent (`haiku` / `sonnet`) when Claude cannot use Codex
+- Unreal child Sessions (`lead`, `worker-*`, `collector`) with role-specific connections and models, including Claude
 
 ## Key Characteristics
 

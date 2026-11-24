@@ -86,7 +86,7 @@ func TestClaudeRecordsSeparateSubscriptionWindows(t *testing.T) {
 		{"seven_day", "allowed_warning", 31, 1800600000},
 	} {
 		w := windows[i]
-		if w.Window != want.window || w.Status != want.status || w.UsedPercent == nil || *w.UsedPercent != want.used || w.ResetsAt.Unix() != want.reset {
+		if w.Window != want.window || w.Status != want.status || w.UsedPercent == nil || *w.UsedPercent != want.used || w.ResetsAt.Unix() != want.reset || w.ResetsAt.Location() != time.UTC {
 			t.Fatalf("wrong Claude window %d: %+v", i, w)
 		}
 	}

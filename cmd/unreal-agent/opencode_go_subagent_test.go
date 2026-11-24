@@ -192,6 +192,7 @@ func fakeCodexSource(t *testing.T, cfg *serveConfiguration, codex bool, responde
 	writeCodexAuth(t, filepath.Join(auth, "auth.json"), "gpt-token-sensitive", "gpt-account-sensitive")
 	cache := `{"models":[
 		{"slug":"gpt-6.2-sol","display_name":"GPT-6.2 Sol","visibility":"list","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"}]},
+		{"slug":"gpt-6-astra","visibility":"list","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"high"},{"effort":"max"}]},
 		{"slug":"gpt-6-luna","display_name":"GPT-6 Luna","visibility":"list","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"medium"},{"effort":"max"}],"service_tiers":[{"id":"priority","name":"Fast"}]}
 	]}`
 	if err := os.WriteFile(filepath.Join(auth, "models_cache.json"), []byte(cache), 0600); err != nil {
@@ -397,6 +398,94 @@ func TestSubagentRoleSelectionRoutingAndRestart(t *testing.T) {
 	}
 }
 
+func TestNestedStartUsesSavedRoleWithRecordedRuntimeArguments(t *testing.T) {
+	t.Parallel()
+	h := startOpenCodeGoChildren(t, true, false, true)
+	h.claude.Set(t, testclaude.Config{Catalog: claudeChildCatalog, AgentFinal: "worker done"})
+	h.designer(t)
+	const flash = "deepseek-v4.1-flash"
+	flashChoice := subagentModelChoice{Provider: opencodego.ProviderID, Model: flash, Effort: "max"}
+	flashArgument := subagent.RuntimeRequest{Provider: "deepseek", Model: flash, Effort: "max"}
+	for _, tc := range []struct {
+		name, template  string
+		parent, child   subagentModelChoice
+		runtimeArgument subagent.RuntimeRequest
+		override        bool
+	}{
+		{"sol", "collector", subagentModelChoice{Provider: "openai-codex", Model: leadModel, Effort: "high"},
+			subagentModelChoice{Provider: "openai-codex", Model: collectorModel, Effort: "medium"},
+			subagent.RuntimeRequest{Provider: "openai", Model: collectorModel, Effort: "medium"}, false},
+		{"luna", "collector", subagentModelChoice{Provider: "openai-codex", Model: collectorModel, Effort: "max"}, flashChoice, flashArgument, false},
+		{"flash-collector", "collector", flashChoice, flashChoice, flashArgument, false},
+		{"flash-worker", "worker-max", flashChoice, flashChoice, flashArgument, false},
+		{"sol-to-flash", "worker-max", subagentModelChoice{Provider: "openai-codex", Model: leadModel, Effort: "max"},
+			flashChoice, subagent.RuntimeRequest{Model: flash, Effort: "max"}, true},
+		{"flash-to-sol", "worker-max", flashChoice, subagentModelChoice{Provider: "openai-codex", Model: leadModel, Effort: "high"},
+			subagent.RuntimeRequest{Provider: "openai-codex", Model: leadModel, Effort: "high"}, true},
+		{"sol-to-sonnet", "worker-high", subagentModelChoice{Provider: "openai-codex", Model: leadModel, Effort: "max"},
+			subagentModelChoice{Provider: claudeagent.ProviderID, Model: "claude-sonnet-5-5", Effort: "high"},
+			subagent.RuntimeRequest{Model: "claude-sonnet-5-5", Effort: "high"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saved := subagentModel{}
+			saved.setRole("lead", tc.parent)
+			saved.setRole("collector", tc.child)
+			saved.setRole("worker", tc.child)
+			if tc.override {
+				saved.setRole("worker", tc.parent)
+			}
+			if err := writeSubagentModel(h.roleFile("designer"), saved); err != nil {
+				t.Fatal(err)
+			}
+			h.gpt.mu.Lock()
+			h.gpt.routingOnly, h.gpt.leadChildTemplate = true, tc.template
+			h.gpt.leadChildRuntime, h.gpt.leadChildOverride = nil, nil
+			if tc.override {
+				h.gpt.leadChildOverride = &tc.runtimeArgument
+			} else {
+				h.gpt.leadChildRuntime = &tc.runtimeArgument
+			}
+			h.gpt.mu.Unlock()
+			started := h.mustCLI(t, "Start a saved role from this child.", "start", "--template", "lead")
+			handle := childHandle.FindStringSubmatch(started)
+			if handle == nil {
+				t.Fatal(started)
+			}
+			dir := filepath.Join(h.directory, "sessions")
+			leadID := subagent.ChildID("designer", operation.ID(handle[1]))
+			var launched *subagent.ChildConfig
+			waitInteractiveContext(t, func(ctx context.Context) bool {
+				lead, err := subagent.ReadChildSnapshot(ctx, dir, leadID)
+				if err != nil {
+					return false
+				}
+				for _, item := range lead.View.History.Items {
+					if status, ok := item.Data.(sessionstore.ToolCallStatus); ok && status.CallID == "lead-start-worker" && status.Status.Error != "" {
+						t.Fatalf("SubagentStart returned %q", status.Status.Error)
+					}
+				}
+				for _, op := range lead.View.Operations {
+					if op.ToolName != "SubagentStart" {
+						continue
+					}
+					child, err := subagent.ReadChildSnapshot(ctx, dir, subagent.ChildID(leadID, op.ID))
+					if err == nil && child.Configuration != nil {
+						launched = child.Configuration
+						return true
+					}
+				}
+				return false
+			})
+			selection := sessionstore.SelectionFromConfiguration(launched.Runtime)
+			if launched.Layer != subagent.RoleGroup(tc.template) || selection == nil ||
+				selection.Provider != tc.child.Provider || selection.Model != tc.child.Model || selection.Effort != tc.child.Effort {
+				t.Fatalf("nested %s runtime = %+v (layer %s), want %+v", tc.template, selection, launched.Layer, tc.child)
+			}
+			h.waitReport(t, handle[1], "lead done")
+		})
+	}
+}
+
 func TestRunningLeadUsesCurrentRoleSelection(t *testing.T) {
 	t.Parallel()
 	for _, role := range []string{"worker", "collector"} {
@@ -566,7 +655,7 @@ func TestSubagentRoleClaudeGuidance(t *testing.T) {
 		"subagent model set --role lead|worker|collector|all",
 		"lead: openai-codex · gpt-6.2-sol · max effort · Templates: lead",
 		"worker: opencode-go · deepseek-v4.1-flash · max effort · Templates: worker-high, worker-low, worker-max, worker-medium, worker-xhigh",
-		`use Claude Code's Agent tool with model set to "claude-configured-a" for this role`,
+		"collector: claude · claude-configured-a · Templates: collector. Use these through a lead.",
 		"Worker and collector templates started directly by the main Session run on the lead model and effort",
 		"Send hands-on work through a lead",
 	} {
@@ -574,8 +663,8 @@ func TestSubagentRoleClaudeGuidance(t *testing.T) {
 			t.Fatalf("missing %q in guidance:\n%s", text, prompt)
 		}
 	}
-	if strings.Contains(prompt, "--template collector") {
-		t.Fatal("a Claude collector was advertised as an Unreal child")
+	if strings.Contains(prompt, "Claude Code's Agent tool") {
+		t.Fatal("the prompt advertised native delegation")
 	}
 	store, err := credential.OpenLocal(h.store)
 	if err != nil {
@@ -590,34 +679,49 @@ func TestSubagentRoleClaudeGuidance(t *testing.T) {
 	}
 }
 
-// start starts a Host in a new directory: the same configuration, key store
-// and subagent model file, as after a restart.
+// start opens the same Session store when restarting the Host.
 func (h *openCodeGoChildren) start(t *testing.T) {
 	t.Helper()
 	if h.started {
 		h.stop()
+	} else {
+		h.directory = privateCLIDirectory(t)
 	}
 	limit := h.limit
 	if limit == 0 {
 		limit = 4 * time.Minute
 	}
-	h.directory = privateCLIDirectory(t)
 	h.client, h.stop = startMultiChildCLIEnvironment(t, h.binary, h.cfg, h.directory, limit, h.environment, "--credential-directory", h.store, "--subagent-model-file", h.modelFile, "--codex-auth-file", h.codexAuth)
 	h.started = true
 }
 
 func (h *openCodeGoChildren) cli(t *testing.T, stdin string, args ...string) (string, error) {
 	t.Helper()
+	return h.cliFor(t, "designer", stdin, args...)
+}
+
+func (h *openCodeGoChildren) cliFor(t *testing.T, id session.ID, stdin string, args ...string) (string, error) {
+	t.Helper()
 	cmd := exec.CommandContext(t.Context(), h.binary, append([]string{"subagent"}, args...)...)
-	cmd.Env = append(slices.Clone(h.environment), "UNREAL_AGENT_SOCKET="+filepath.Join(h.directory, "host.sock"), "UNREAL_AGENT_SESSION=designer")
+	cmd.Env = append(slices.Clone(h.environment), subagentSocketEnv+"="+filepath.Join(h.directory, "host.sock"), subagentSessionEnv+"="+string(id))
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
+func (h *openCodeGoChildren) roleFile(id session.ID) string {
+	scope := subagentModelScope{defaultFile: h.modelFile, sessionDirectory: filepath.Join(h.directory, "sessions")}
+	return scope.file(id)
+}
+
 func (h *openCodeGoChildren) mustCLI(t *testing.T, stdin string, args ...string) string {
 	t.Helper()
-	out, err := h.cli(t, stdin, args...)
+	return h.mustCLIFor(t, "designer", stdin, args...)
+}
+
+func (h *openCodeGoChildren) mustCLIFor(t *testing.T, id session.ID, stdin string, args ...string) string {
+	t.Helper()
+	out, err := h.cliFor(t, id, stdin, args...)
 	if err != nil {
 		t.Fatalf("subagent %v: %v\n%s", args, err, out)
 	}
@@ -641,13 +745,18 @@ func (h *openCodeGoChildren) choose(t *testing.T, provider, model string) (model
 // waitReport waits until the child reports summary.
 func (h *openCodeGoChildren) waitReport(t *testing.T, handle, summary string) string {
 	t.Helper()
+	return h.waitReportFor(t, "designer", handle, summary)
+}
+
+func (h *openCodeGoChildren) waitReportFor(t *testing.T, id session.ID, handle, summary string) string {
+	t.Helper()
 	deadline := time.Now().Add(2 * time.Minute)
 	report := ""
 	for !strings.Contains(report, "summary: "+summary) {
 		if time.Now().After(deadline) {
 			t.Fatal("the child did not finish\n", report)
 		}
-		report = h.mustCLI(t, "", "wait", handle, "--timeout", "30s")
+		report = h.mustCLIFor(t, id, "", "wait", handle, "--timeout", "30s")
 		if strings.Contains(report, "  failed\n") || strings.Contains(report, "  canceled\n") {
 			t.Fatal("the child ended without its expected result\n", report)
 		}
@@ -779,20 +888,29 @@ func TestClaudeIsOfferedOpenCodeGoChildrenWhileTheKeyIsSaved(t *testing.T) {
 	}
 }
 
-// While subagent model chooses OpenCode Go, subagent start --model/--effort is
-// refused before anything is recorded or sent; on Codex it starts as
-// upstream's override does.
-func TestSubagentOverridesAreRefusedWhileOpenCodeGoIsChosen(t *testing.T) {
+func TestSubagentStartResolvesModelAcrossProviders(t *testing.T) {
 	t.Parallel()
-	h := startOpenCodeGoChildren(t, true, false)
+	h := startOpenCodeGoChildren(t, true, false, true)
+	h.gpt.mu.Lock()
+	h.gpt.routingOnly = true
+	h.gpt.mu.Unlock()
+	h.claude.Set(t, testclaude.Config{Catalog: claudeChildCatalog, AgentFinal: "Claude route"})
 	h.designer(t)
-	if _, err := h.choose(t, opencodego.ProviderID, "deepseek-v4.1-flash"); err != nil {
+	if _, err := h.chooseRole(t, "lead", "openai-codex", leadModel, "max"); err != nil {
 		t.Fatal(err)
 	}
-	for _, flags := range [][]string{{"--effort", "high"}, {"--model", "deepseek-v4-pro"}, {"--model", "gpt-6.2-sol", "--effort", "low"}} {
-		out, err := h.cli(t, "Write the worker marker.", append([]string{"start", "--template", "worker-low"}, flags...)...)
-		if err == nil || !strings.Contains(out, "override_unavailable: subagent model で OpenCode Go を選んでいる間は --model と --effort を使えません") {
-			t.Fatal("an override started on OpenCode Go", flags, err, out)
+	const flash = "deepseek-v4.1-flash"
+	for _, tc := range []struct {
+		flags []string
+		want  string
+	}{
+		{[]string{"--model", "missing-model"}, "not in any available provider catalog"},
+		{[]string{"--provider", "openai-codex", "--model", flash}, "is not in openai-codex's catalog"},
+		{[]string{"--model", flash, "--effort", "medium"}, "unsupported_effort"},
+	} {
+		out, err := h.cli(t, "Check provider selection.", append([]string{"start", "--template", "worker-low"}, tc.flags...)...)
+		if err == nil || !strings.Contains(out, tc.want) {
+			t.Fatalf("%v: %s %v; want %q", tc.flags, out, err, tc.want)
 		}
 	}
 	if list := h.mustCLI(t, "", "list", "--all"); !strings.Contains(list, "No children in this Session.") {
@@ -804,20 +922,64 @@ func TestSubagentOverridesAreRefusedWhileOpenCodeGoIsChosen(t *testing.T) {
 	if n := h.codexCalls.Load(); n != 0 || requests != 0 {
 		t.Fatal("a refused start sent requests", n, requests)
 	}
-	if _, err := h.choose(t, "openai-codex", leadModel); err != nil {
+	start := func(provider, model, effort, report string, flags ...string) {
+		t.Helper()
+		args := append([]string{"start", "--template", "worker-low", "--model", model, "--effort", effort}, flags...)
+		handle := childHandle.FindStringSubmatch(h.mustCLI(t, "Check provider selection.", args...))
+		if handle == nil {
+			t.Fatal("missing child handle")
+		}
+		h.waitReport(t, handle[1], report)
+		child, err := subagent.ReadChildSnapshot(t.Context(), filepath.Join(h.directory, "sessions"), subagent.ChildID("designer", operation.ID(handle[1])))
+		if err != nil || child.Configuration == nil {
+			t.Fatal("missing child configuration", err)
+		}
+		if got := sessionstore.SelectionFromConfiguration(child.Configuration.Runtime); got == nil || got.Provider != provider || got.Model != model || string(got.Effort) != effort {
+			t.Fatalf("child runtime = %+v; want %s/%s %s", got, provider, model, effort)
+		}
+	}
+	start(opencodego.ProviderID, flash, "max", "worker done")
+	if n := h.codexCalls.Load(); n != 0 {
+		t.Fatalf("model-only Flash start called Codex %d times", n)
+	}
+	start(claudeagent.ProviderID, "claude-sonnet-5-5", "high", "Claude route")
+	start("openai-codex", leadModel, "high", "worker done")
+
+	// Add the same model to the Codex fixture. The role's saved provider
+	// cannot break the tie. An explicit provider selects only that route.
+	cache := codexModelCache(h.codexAuth)
+	data, err := os.ReadFile(cache)
+	if err != nil {
 		t.Fatal(err)
 	}
-	started := h.mustCLI(t, "Write the worker marker.", "start", "--template", "worker-low", "--effort", "high")
-	if childHandle.FindStringSubmatch(started) == nil {
-		t.Fatal(started)
+	data = bytes.Replace(data, []byte(`"slug":"gpt-6-astra"`), []byte(`"slug":"deepseek-v4.1-flash"`), 1)
+	if err := os.WriteFile(cache, data, 0600); err != nil {
+		t.Fatal(err)
 	}
-	if list := h.mustCLI(t, "", "list", "--all"); !strings.Contains(list, "worker-low (gpt-6.2-sol high)") {
-		t.Fatal("the override on Codex", list)
+	codexCalls := h.codexCalls.Load()
+	if out, err := h.cli(t, "Check the overlap.", "start", "--template", "worker-low", "--model", flash, "--effort", "max"); err == nil ||
+		!strings.Contains(out, "ambiguous_model") || !strings.Contains(out, "openai-codex, opencode-go") || !strings.Contains(out, "--provider") {
+		t.Fatalf("overlap: %s %v", out, err)
+	}
+	start(opencodego.ProviderID, flash, "max", "worker done", "--provider", opencodego.ProviderID)
+	if h.codexCalls.Load() != codexCalls {
+		t.Fatal("an ambiguous or explicit Go start contacted Codex")
+	}
+	h.server.check(t)
+	store, err := credential.OpenLocal(h.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authflow.New(credential.NewManager(store)).Logout(t.Context(), openCodeGoKey); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := h.cli(t, "Disconnected Go.", "start", "--template", "worker-low", "--provider", opencodego.ProviderID, "--model", flash); err == nil ||
+		!strings.Contains(out, "provider_unavailable") || h.codexCalls.Load() != codexCalls {
+		t.Fatalf("explicit Go start on an unavailable route: %s %v", out, err)
 	}
 }
 
-// Without Codex there are no sub-agents until OpenCode Go is chosen; the
-// choice says so, and the next Host runs a worker on Flash.
+// A Host without Codex uses the Session's OpenCode Go choice after resume.
 func TestOpenCodeGoSubagentsWithoutCodexAfterHostRestart(t *testing.T) {
 	t.Parallel()
 	h := startOpenCodeGoChildren(t, false, false)
@@ -830,12 +992,12 @@ func TestOpenCodeGoSubagentsWithoutCodexAfterHostRestart(t *testing.T) {
 		t.Fatal("a worker started without sub-agents", out)
 	}
 	chosen, err := h.choose(t, opencodego.ProviderID, "deepseek-v4.1-flash")
-	if err != nil || !chosen.Pending {
-		t.Fatal("the choice did not say it waits for the next Host", chosen, err)
+	if err != nil || chosen.Pending {
+		t.Fatal("choosing a role without Codex must be available immediately", chosen, err)
 	}
 
 	h.start(t)
-	h.designer(t)
+	h.openSession(t, host.Resume, "designer")
 	started := h.mustCLI(t, "Write the worker marker.", "start", "--template", "worker-low")
 	handle := childHandle.FindStringSubmatch(started)
 	if handle == nil {
@@ -863,9 +1025,8 @@ func TestOpenCodeGoSubagentsWithoutCodexAfterHostRestart(t *testing.T) {
 	}
 }
 
-// subagent model offers Claude last on a Claude parent, and saves the chosen
-// Claude model for Claude Code's own Agent sub-agents.
-func TestClaudeIsOfferedAndSavedForClaudeCodeAgent(t *testing.T) {
+// subagent model offers Claude and saves the selection for Unreal children.
+func TestClaudeIsOfferedAndSavedForUnrealChildren(t *testing.T) {
 	t.Parallel()
 	h := startOpenCodeGoChildren(t, true, false)
 	h.designer(t)
@@ -884,37 +1045,11 @@ func TestClaudeIsOfferedAndSavedForClaudeCodeAgent(t *testing.T) {
 	if err != nil || chosen.SubagentModel == nil || chosen.SubagentModel.Provider != claudeagent.ProviderID || chosen.SubagentModel.Model != "claude-configured-a" || chosen.SubagentModel.Name != "Discovered A" {
 		t.Fatal("choosing the Claude model", chosen, err)
 	}
-	saved, err := os.ReadFile(h.modelFile)
+	saved, err := os.ReadFile(h.roleFile("designer"))
 	if err != nil || string(saved) != `{"Version":1,"Provider":"claude","Model":"claude-configured-a"}` {
 		t.Fatal("the saved choice", string(saved), err)
 	}
 	if listed := h.providers(t); listed.SubagentModel.Provider != claudeagent.ProviderID || listed.SubagentModel.Model != "claude-configured-a" {
 		t.Fatal("the Claude choice is not read back", listed.SubagentModel)
-	}
-}
-
-// While subagent model chooses Claude, Claude works through Claude Code's own
-// Agent tool: a built-in child template is refused with what to do instead,
-// and nothing starts.
-func TestClaudeChoiceRefusesBuiltInChildStarts(t *testing.T) {
-	t.Parallel()
-	h := startOpenCodeGoChildren(t, true, false)
-	h.designer(t)
-	if _, err := h.choose(t, claudeagent.ProviderID, "claude-configured-a"); err != nil {
-		t.Fatal("choosing the Claude model", err)
-	}
-	out, err := h.cli(t, "Write the worker marker.", "start", "--template", "worker-low")
-	if err == nil || !strings.Contains(out, "provider_unavailable: subagent model で Claude を選んでいる間は子を起動できません。子を使うには subagent model で OpenAI Codex か OpenCode Go を選んでください") {
-		t.Fatalf("a child start on Claude: %v\n%s", err, out)
-	}
-	if list := h.mustCLI(t, "", "list", "--all"); !strings.Contains(list, "No children in this Session.") {
-		t.Fatal("a child started on Claude\n", list)
-	}
-	// Unreal's own override is refused too, saying what stays unavailable.
-	if out, err := h.cli(t, "Write the worker marker.", "start", "--template", "worker-low", "--model", "claude-configured-a"); err == nil || !strings.Contains(out, "override_unavailable: subagent model で Claude を選んでいる間は --model と --effort を使えません") {
-		t.Fatalf("an override on Claude: %v\n%s", err, out)
-	}
-	if list := h.mustCLI(t, "", "list", "--all"); !strings.Contains(list, "No children in this Session.") {
-		t.Fatal("a child started on Claude\n", list)
 	}
 }

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/rivo/uniseg"
-	"github.com/unreallabsai/unreal-agent/harness/analysis"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
@@ -35,10 +34,10 @@ func TestNormalRuntimeCapabilityProjectionDoesNotRewriteDesiredConfiguration(t *
 		}
 		for _, size := range [][2]int{{44, 14}, {60, 20}, {80, 24}, {130, 30}} {
 			for _, theme := range []Theme{{}, {NoColor: true}, {Plain: true}, {ASCII: true}} {
-				u := UIState{Theme: theme, Sheet: &Sheet{Title: "Analysis · Overview", Analysis: "Overview", Lines: analysis.Lines(r, "Overview", theme.ASCII)}}
+				u := UIState{Theme: theme, analysis: readyAnalysis(r, "Overview", theme, size[0])}
 				frame := RenderFrame(m.Snapshot(), u, size[0], size[1])
-				if frame.CursorY != size[1]-2 {
-					t.Fatal("health moved composer")
+				if frame.CursorY != size[1]-1 {
+					t.Fatal("health moved the pager cursor")
 				}
 				for _, line := range frame.Lines {
 					if uniseg.StringWidth(sgrRE.ReplaceAllString(line, "")) >= size[0] {

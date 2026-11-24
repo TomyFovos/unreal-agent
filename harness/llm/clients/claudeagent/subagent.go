@@ -142,6 +142,9 @@ func subagentCommandPath(s SubagentCLI) string {
 	if s.Binary != "" {
 		return s.Binary
 	}
+	if s.ChildCommand != "" {
+		return s.ChildCommand
+	}
 	return s.SettingsCommand
 }
 
@@ -151,11 +154,17 @@ func sessionCommandAvailable(s SubagentCLI) bool {
 
 func subagentPrompt(s SubagentCLI) string {
 	prompt := subagentWorkPrompt(s)
+	if cli := s.ChildCommand; cli != "" {
+		if !literalCLI(cli) {
+			cli = "'" + cli + "'"
+		}
+		prompt += fmt.Sprintf("\n\nYou own the task from your parent. To use SendParent, run %s subagent send-parent --text 'MESSAGE' in Bash; add --progress for an update that should not wake the parent. End your turn after asking a question or while waiting for children. When all work is done, your final reply is your Finish report. Include changed files, tests and blockers in the reply. If the task failed, start the reply with the line Status: failed.", cli)
+	}
 	if cli := s.SettingsCommand; cli != "" {
 		if !literalCLI(cli) {
 			cli = "'" + cli + "'"
 		}
-		prompt += fmt.Sprintf("\nOn the user's instruction, read settings with %[1]s subagent model show; set the next child's provider/model/effort with %[1]s subagent model set --role lead|worker|collector|all --provider ID --model ID [--effort LEVEL]. The Host validates and records the choice. Use API-key providers only when the user explicitly chooses them; never substitute another provider.", cli)
+		prompt += fmt.Sprintf("\nOn the user's instruction, read this Session's role settings with %[1]s subagent model show. Set them with %[1]s subagent model set --role lead|worker|collector|all --provider ID --model ID [--effort LEVEL]. The Host validates and records the choice. Use API-key providers only when the user explicitly chooses them; never substitute another provider.", cli)
 	}
 	if cli := s.ContextCommand; cli != "" {
 		if !literalCLI(cli) {
@@ -170,19 +179,24 @@ func subagentWorkPrompt(s SubagentCLI) string {
 	if len(s.RoleChoices) > 0 {
 		return roleSubagentPrompt(s)
 	}
+	if s.ChildCommand != "" {
+		if s.Binary == "" {
+			return ""
+		}
+		return fmt.Sprintf("\n\nDelegate with Unreal's SubagentStart through Bash. Templates: %s.\n", strings.Join(s.Templates, ", ")) + roleSubagentCommands(s.Binary)
+	}
 	if s.Binary == "" {
-		return claudeDelegationPromptFor(s)
+		return "\n\nUse Unreal's SubagentStart for all delegation. If the requested role is unavailable, report the connection problem. Check /login, then run /model refresh after signing in."
 	}
 	cli := s.Binary
 	if !literalCLI(cli) {
 		cli = "'" + cli + "'"
 	}
 	m := SubagentModels{Family: "GPT", Lead: "gpt-6.2-sol", Collector: "gpt-6-luna"}
-	overrides := " Add --model ID and --effort LEVEL to subagent start to override a template's model and reasoning effort."
+	overrides := " Add --model ID to choose a model for this start, --provider ID to select its connection when needed, and --effort LEVEL to set its reasoning effort."
 	if s.Models != nil {
 		if chosen := s.Models(); chosen.Family != "" && chosen.Lead != "" {
-			// The model chosen with subagent model refuses those overrides.
-			m, overrides = chosen, ""
+			m = chosen
 		}
 	}
 	collector := "the collector template (" + m.Collector + ") and never to a " + m.Lead + " worker"
@@ -192,7 +206,7 @@ func subagentWorkPrompt(s SubagentCLI) string {
 	prompt := fmt.Sprintf("\n\nYour role in this Session is to run the project: you design, decide, keep the work moving and talk with the user; %[3]s does the work, because %[3]s models cost less than you. Keep your own reasoning to design and verification planning; do not solve the task yourself, including calculations, search, algorithm trials or substantial code. Delegate that work to the lead or a worker. Review what %[3]s delivers before accepting it, especially for over-implementation: limits, checks, abstractions or features nobody asked for, and changes beyond the task. Send back what goes beyond the specification, and keep the project moving rather than redoing %[3]s's work yourself.\n"+
 		"For implementation work, give your design to the implementation lead, which runs %[4]s at max effort and works through its own %[3]s workers in parallel (worker-low through worker-max). Each %[3]s agent reads the whole AGENTS.md again. Worker and collector templates started directly by the main Session run on the lead model and effort. Send hands-on work through a lead, which delegates to workers and collectors and reviews their results before reporting to you.\n"+
 		"Collector tasks, which must go to %[5]s: fetching a URL or API (curl, gh api, gh pr/issue/run view) and reporting fields; checking CI or run status and pulling the failing log lines; listing or searching files (ls, find, rg, grep) and reporting matches; reading files or logs to extract specific values, counts or sections; read-only git summaries (status, log, diff, show); disk, process and environment checks (df, du, ps); summarizing an existing report or document. Give one collector several such questions at once. A single read-only command that answers your question directly you may still run yourself; do not split such a step off.\n"+
-		"Use unreal-agent subagent for parallel work and waits. Claude Code Monitor is unavailable. %[3]s children stay the default for implementation, investigation and review. Use Claude Code's Agent tool only when a Claude model is wanted for the task (for example a review the user asks to run on Fable). Set its model, and it finishes within your turn. Continue independent work while children run. Their questions, approval requests and reports arrive at your next tool-batch boundary. If you are idle, their messages start a new turn. While children work, the user can talk to you.\n"+
+		"Use unreal-agent subagent for all delegation and waits. Claude Code Monitor is unavailable. To delegate to another model, use the selected Unreal role or set its connection and model on the user's instruction. Continue independent work while children run. Their questions, approval requests and reports arrive at your next tool-batch boundary. If you are idle, their messages start a new turn. While children work, the user can talk to you.\n"+
 		"Turns that children's messages start run in the background: the user sees only their first line. Handle there what you can decide within the design and the permission mode: answer questions, approve or deny requests, send follow-up instructions, review results and have problems fixed. You decide; children do the work. Hand investigations, data analysis, log and file reading beyond the few files a decision needs, GitHub checks, builds and tests, writing documents and commits to the lead or a worker, and review what they report. In background turns, run yourself only commands that need no approval (reading files, read-only commands such as git diff), since your own other commands would stop the user for approval. Address the user only for what needs them, and start that message with 【報告】 (the work the user asked for is done, or failed in a way you cannot resolve) or 【要確認】 (a decision or approval beyond your authority, a change of requirements or design direction, publishing, or anything you are unsure about). When the user writes while a background turn runs, their message comes first.\n"+
 		"Set --title to a one-line title for the child view, or put the title on the first line of the task text.\n"+
 		"Always use the command path shown below, including after an update; ignore versioned command paths in older messages. Run these commands with Bash exactly in these forms. Unreal Agent approves them itself in every permission mode, Read Only included; the children follow the mode, so in Read Only they read files and run read-only commands such as git log, git show or rg, which is enough for investigations:\n"+
@@ -212,11 +226,13 @@ func subagentWorkPrompt(s SubagentCLI) string {
 }
 
 // Role guidance names only the templates available on each selected provider.
-// A missing route is an error for that role, never a reason to use Agent or
-// another provider instead.
+// A missing route is an error for that role.
 func roleSubagentPrompt(s SubagentCLI) string {
 	var p strings.Builder
-	p.WriteString("\n\nRun the project: design, decide, communicate with the user, delegate work and review the results for correctness and unrequested changes. The user selected these subagent roles:\n")
+	if s.ChildCommand == "" {
+		p.WriteString("\n\nRun the project: design, decide, communicate with the user, delegate work and review the results for correctness and unrequested changes.")
+	}
+	p.WriteString("\n\nUse Unreal's SubagentStart for these roles:\n")
 	cli := s.Binary
 	if cli != "" && !literalCLI(cli) {
 		cli = "'" + cli + "'"
@@ -227,13 +243,9 @@ func roleSubagentPrompt(s SubagentCLI) string {
 			fmt.Fprintf(&p, " · %s effort", role.Effort)
 		}
 		if !role.Available {
-			p.WriteString(" · unavailable; report provider_unavailable for this role and ask the user to restore its connection or change subagent model. Do not substitute another provider.\n")
-		} else if role.Provider == ProviderID {
-			if s.AgentModel != nil && s.AgentModel() != "" {
-				fmt.Fprintf(&p, " · use Claude Code's Agent tool, which is forced to run %s; finish within this turn.\n", role.Model)
-			} else {
-				fmt.Fprintf(&p, " · use Claude Code's Agent tool with model set to %q for this role; finish within this turn.\n", role.Model)
-			}
+			p.WriteString(" · unavailable; report provider_unavailable for this role. Use /login for recovery and /model refresh after signing in. Change providers only on the user's instruction.\n")
+		} else if s.ChildCommand == "" && role.Role != "lead" {
+			fmt.Fprintf(&p, " · Templates: %s. Use these through a lead.\n", strings.Join(role.Templates, ", "))
 		} else {
 			fmt.Fprintf(&p, " · Templates: %s. Start with %s subagent start --template %s <<'EOF' (task instructions, then EOF).", strings.Join(role.Templates, ", "), cli, role.Templates[0])
 			if role.Provider == "openai-codex" {
@@ -243,13 +255,22 @@ func roleSubagentPrompt(s SubagentCLI) string {
 		}
 	}
 	p.WriteString("Use lead for implementation ownership, workers for hands-on implementation, investigation and tests, and collector for URL/API retrieval, CI/log checks, file searches and extraction, read-only git summaries and document summaries. Roles may use different providers; do not assume the lead's workers use its provider or model.\n")
-	p.WriteString("Worker and collector templates started directly by the main Session run on the lead model and effort. Worker and collector role selections apply only below a lead, including deeper descendants. Send hands-on work through a lead, which delegates and reviews results before reporting to you.\n")
+	if s.ChildCommand == "" {
+		p.WriteString("Worker and collector templates started directly by the main Session run on the lead model and effort. Worker and collector role selections apply only below a lead, including deeper descendants. Send hands-on work through a lead, which delegates and reviews results before reporting to you.\n")
+	}
 	if cli != "" {
 		p.WriteString("For Unreal children, start accepts optional --title, --purpose, --inputs, --outputs, --verification and --acceptance-criteria. Task instructions can go in --task or a quoted heredoc. The command prints the brief the child receives. The ended notice includes the completion report.\n")
 		fmt.Fprintf(&p, "Optionally record your assessment with %s subagent review HANDLE accept|reject [--reason TEXT]; reason is optional. This supports /analyze. Reuse the task title for rework, and report how you verified the result.\n", cli)
-		fmt.Fprintf(&p, "Use exactly %s subagent for Unreal children. Begin each task with a one-line title. Continue independent work while children run. Their questions, approval requests and reports arrive at your next tool-batch boundary or wake you when idle. Claude Code Monitor is unavailable. Do not wait unless the result is due within tens of seconds. Use at most --timeout 60s.\nAnswer child approvals yourself with %[1]s subagent approve HANDLE REQUEST allow|deny. Send instructions with %[1]s subagent send HANDLE <<'EOF' (text, then EOF). Inspect with %[1]s subagent list or %[1]s subagent show HANDLE. Cancel with %[1]s subagent cancel HANDLE. Children follow the Session's permission mode and ask you for approvals.\n", cli)
+		p.WriteString(roleSubagentCommands(s.Binary))
 	}
 	return p.String()
+}
+
+func roleSubagentCommands(cli string) string {
+	if !literalCLI(cli) {
+		cli = "'" + cli + "'"
+	}
+	return fmt.Sprintf("Use exactly %s subagent for Unreal children. Start with %[1]s subagent start --template NAME <<'EOF' (task instructions, then EOF). Use --model ID to choose a model for this start, --provider ID when the model has multiple connections, and --effort LEVEL to set its reasoning effort. Begin each task with a one-line title. Continue independent work while children run. Their questions, approval requests and reports arrive at your next tool-batch boundary or wake you when idle. Claude Code Monitor is unavailable. Do not wait unless the result is due within tens of seconds. Use at most --timeout 60s.\nAnswer child approvals with %[1]s subagent approve HANDLE REQUEST allow|deny. Send instructions with %[1]s subagent send HANDLE <<'EOF' (text, then EOF). Inspect with %[1]s subagent list or %[1]s subagent show HANDLE. Cancel with %[1]s subagent cancel HANDLE. Children follow the Session's permission mode and ask you for approvals.\n", cli)
 }
 
 func literalCLI(path string) bool {

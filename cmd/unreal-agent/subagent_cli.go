@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"flag"
 	"fmt"
@@ -40,10 +41,10 @@ const defaultWait = 9 * time.Minute
 
 const subagentUsage = `usage: unreal-agent subagent COMMAND
   model show [--role lead|worker|collector|all]  show saved subagent settings
-  model set --role ROLE --provider ID --model ID [--effort LEVEL] [--fast on|off]
-  model set --role ROLE --fast on|off           change Fast for a saved model
-                                         save settings for the next child start
-  start [--template lead] [--model ID] [--effort LEVEL] [--task TEXT]
+  model set --role ROLE --provider ID --model ID [--effort LEVEL] [--fast on|off] [--all-sessions]
+  model set --role ROLE --fast on|off [--all-sessions]
+                                         save settings for the calling Session
+  start [--template lead] [--provider ID] [--model ID] [--effort LEVEL] [--task TEXT]
         [--title TEXT] [--purpose TEXT] [--inputs TEXT] [--outputs TEXT]
         [--verification TEXT] [--acceptance-criteria TEXT]
                                          start a child and display its brief
@@ -53,6 +54,7 @@ const subagentUsage = `usage: unreal-agent subagent COMMAND
   review HANDLE accept|reject [--reason TEXT]
                                          optionally record the parent's assessment
   send HANDLE [--text TEXT]               send a child more instructions (stdin without --text)
+  send-parent [--text TEXT] [--progress]  send a message from a child to its parent
   cancel HANDLE                           stop a child
   list [--all]                            show active children and ended counts; --all shows every child
   show HANDLE [--task]                    show a child's report; --task includes its instructions`
@@ -90,14 +92,15 @@ func runSubagentCLI(ctx context.Context, args []string, stdin io.Reader, out io.
 		flags.StringVar(&brief.Outputs, "outputs", "", "artifacts and destinations")
 		flags.StringVar(&brief.Verification, "verification", "", "checks and expected results")
 		flags.StringVar(&brief.AcceptanceCriteria, "acceptance-criteria", "", "what to check before accepting")
-		model := flags.String("model", "", "override the template's model ID")
+		provider := flags.String("provider", "", "registered provider ID for the requested model")
+		model := flags.String("model", "", "model ID in an available provider catalog")
 		effort := flags.String("effort", "", "override reasoning effort: low, medium, high, xhigh, max")
 		if rest, err := parseAll(flags, args[1:]); err != nil || len(rest) != 0 {
 			return errors.New(subagentUsage)
 		}
 		var runtime *subagent.RuntimeRequest
-		if *model != "" || *effort != "" {
-			runtime = &subagent.RuntimeRequest{Model: *model, Effort: llm.ReasoningEffort(*effort).Normalize()}
+		if *provider != "" || *model != "" || *effort != "" {
+			runtime = &subagent.RuntimeRequest{Provider: *provider, Model: *model, Effort: llm.ReasoningEffort(*effort).Normalize()}
 			if runtime.Effort != "" && !runtime.Effort.Valid() {
 				return fmt.Errorf("invalid effort %q; use low, medium, high, xhigh or max", *effort)
 			}
@@ -140,6 +143,18 @@ func runSubagentCLI(ctx context.Context, args []string, stdin io.Reader, out io.
 			return err
 		}
 		return c.control(ctx, "send", handle[0], viewer.ControlRequest{Text: message})
+	case "send-parent":
+		text := flags.String("text", "", "message; read from stdin when empty")
+		progress := flags.Bool("progress", false, "send progress without waking the parent")
+		rest, err := parseAll(flags, args[1:])
+		if err != nil || len(rest) != 0 {
+			return errors.New(subagentUsage)
+		}
+		message, err := textArgument(*text, stdin)
+		if err != nil {
+			return err
+		}
+		return c.sendParent(ctx, message, *progress)
 	case "cancel":
 		if len(args) != 2 {
 			return errors.New(subagentUsage)
@@ -230,10 +245,11 @@ func (c subagentCLI) model(ctx context.Context, args []string) error {
 	flags.SetOutput(c.out)
 	role := flags.String("role", "all", "role: lead, worker, collector or all")
 	var selection sessionstore.RuntimeSelection
-	var fastSet bool
+	var fastSet, allSessions bool
 	if args[0] == "set" {
 		flags.StringVar(&selection.Provider, "provider", "", "registered provider ID")
 		flags.StringVar(&selection.Model, "model", "", "model ID in the provider's catalog")
+		flags.BoolVar(&allSessions, "all-sessions", false, "update saved Sessions sharing these defaults, and future Sessions")
 		flags.Func("effort", "reasoning effort offered by the model", func(value string) error {
 			selection.Effort = llm.ReasoningEffort(value)
 			if !slices.Contains(workerEfforts, selection.Effort) {
@@ -271,7 +287,7 @@ func (c subagentCLI) model(ctx context.Context, args []string) error {
 	if args[0] == "set" {
 		action = "subagent.select"
 	}
-	reply, err := modelExchange(ctx, c.client.Extension, modelRequest{Action: action, ID: c.parent, Generation: view.Generation, Role: *role, Selection: selection, FastOnly: fastOnly})
+	reply, err := modelExchange(ctx, c.client.Extension, modelRequest{Action: action, ID: c.parent, Generation: view.Generation, Role: *role, Selection: selection, FastOnly: fastOnly, AllSessions: allSessions})
 	if err != nil {
 		return err
 	}
@@ -296,6 +312,8 @@ func (c subagentCLI) model(ctx context.Context, args []string) error {
 	if args[0] == "set" {
 		if reply.Pending {
 			fmt.Fprintln(c.out, "Saved. This Host has no built-in children; restart the Host to enable them.")
+		} else if allSessions {
+			fmt.Fprintln(c.out, "Saved for all Sessions. Applies to the next child start.")
 		} else {
 			fmt.Fprintln(c.out, "Saved. Applies to the next child start.")
 		}
@@ -398,6 +416,52 @@ func (c subagentCLI) start(ctx context.Context, template, task string, brief sub
 		fmt.Fprintln(c.out, child.brief.Render(child.task))
 	}
 	return nil
+}
+
+func (c subagentCLI) sendParent(ctx context.Context, message string, progress bool) error {
+	view, err := c.client.Inspect(ctx, c.parent, 0, 1)
+	if err != nil {
+		return err
+	}
+	id := inbox.ID("cli-parent-" + uuid.New().String())
+	if _, err = modelExchange(ctx, c.client.Extension, modelRequest{Action: "child.send-parent", ID: c.parent, Generation: view.Generation, InputID: id, Task: message, Progress: progress}); err != nil {
+		return err
+	}
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		view, err = c.client.Inspect(ctx, c.parent, 0, 1)
+		if err != nil {
+			return err
+		}
+		for _, op := range view.Operations {
+			if op.ID != operation.ID(id) {
+				continue
+			}
+			switch op.Status {
+			case operation.StatusCompleted:
+				state, err := operation.DecodeRemoteJobState(op)
+				if err != nil {
+					return err
+				}
+				var receipt subagent.ParentMessageReceipt
+				if json.Unmarshal(state.Handle, &receipt) == nil && receipt.Answer != "" {
+					fmt.Fprintln(c.out, receipt.Answer)
+				} else {
+					fmt.Fprintln(c.out, "Message sent to parent.")
+				}
+				return nil
+			case operation.StatusFailed, operation.StatusCanceled:
+				state, _ := operation.DecodeRemoteJobState(op)
+				return fmt.Errorf("SendParent %s: %s", op.Status, state.TerminalError)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
 }
 
 // wait returns when a watched child finishes or asks for approval, or when
@@ -586,7 +650,7 @@ func firstLine(text string) string {
 
 // claudeSubagents tells the Claude route how its Bash reaches this Host's
 // children: this executable's subagent command and the gateway socket, and
-// the model chosen with subagent model when modelFile is set.
+// access to role settings when modelFile is set.
 func claudeSubagents(templates map[string]subagent.Template, socket, modelFile string) (claudeagent.SubagentCLI, error) {
 	binary, err := os.Executable()
 	if err != nil {
@@ -612,10 +676,6 @@ func claudeSubagents(templates map[string]subagent.Template, socket, modelFile s
 	if lead, ok := templates["lead"]; ok && lead.Default != nil {
 		cli.LeadModel, cli.LeadEffort = lead.Default.Model, string(lead.Default.Effort)
 	}
-	if modelFile != "" {
-		cli.Models = subagentModels(modelFile)
-		cli.AgentModel = subagentAgentModel(modelFile)
-	}
 	return cli, nil
 }
 
@@ -630,15 +690,4 @@ func subagentCLIPath(binary, home string) string {
 		}
 	}
 	return binary
-}
-
-// claudeModel recognizes Claude model names and aliases. The Host checks the
-// template's provider before refusing a Claude model on a GPT connection.
-func claudeModel(model string) bool {
-	model = strings.ToLower(strings.TrimSpace(model))
-	switch model {
-	case "fable", "opus", "sonnet", "haiku":
-		return true
-	}
-	return strings.HasPrefix(model, "claude-") || strings.HasPrefix(model, "claude.")
 }

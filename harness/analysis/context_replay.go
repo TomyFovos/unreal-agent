@@ -41,6 +41,7 @@ func (p contextPosition) dimensions() ContextDimensions {
 type contextWindowLog struct {
 	key        ContextDimensions
 	at         time.Time
+	sequence   sessionstore.Sequence
 	open       string
 	boundary   *sessionstore.WindowBoundary
 	pending    *contextstate.PendingCounts
@@ -107,6 +108,7 @@ type contextReplay struct {
 	questions     []contextQuestionCount
 	childStarts   map[string]sessionstore.Sequence
 	subscription  []ContextSubscription
+	policies      []contextPolicyEvent
 }
 
 func newContextReplay(id session.ID) contextReplay {
@@ -120,7 +122,7 @@ func newContextReplay(id session.ID) contextReplay {
 func (m *contextReplay) window() *contextWindowLog { return m.windows[len(m.windows)-1] }
 
 func (m *contextReplay) startWindow(at time.Time, seq sessionstore.Sequence, key ContextDimensions, kind string) *contextWindowLog {
-	w := &contextWindowLog{key: key, at: at, open: kind}
+	w := &contextWindowLog{key: key, at: at, sequence: seq, open: kind}
 	m.windows = append(m.windows, w)
 	m.boundaries[seq] = w
 	m.currentReq = nil
@@ -272,6 +274,9 @@ func (m *contextReplay) contextRecord(seq sessionstore.Sequence, at time.Time, k
 	if c.Model != "" {
 		key.Model = viewer.SafeText(c.Model)
 	}
+	if c.Policy != nil {
+		m.policies = append(m.policies, contextPolicyEvent{seq, at, key.Provider, c.Policy})
+	}
 	switch c.Kind {
 	case sessionstore.ContextWindowStart:
 		key.Strategy = contextengine.WindowThreeLayer
@@ -290,7 +295,9 @@ func (m *contextReplay) contextRecord(seq sessionstore.Sequence, at time.Time, k
 		w.l3Covered = c.Window != nil && c.Window.Tail != nil
 		_, raw, ok := strings.Cut(c.Text, "\n")
 		var state contextstate.State
-		if ok && json.Unmarshal([]byte(raw), &state) == nil && state.Version == contextstate.Version {
+		if c.Window != nil && c.Window.Pending != nil {
+			w.pending = c.Window.Pending
+		} else if ok && json.Unmarshal([]byte(raw), &state) == nil && state.Version == contextstate.Version {
 			w.pending = new(state.PendingCounts())
 		}
 	case sessionstore.ContextWindowFallback:
@@ -436,6 +443,9 @@ func (m *contextReplay) response(seq sessionstore.Sequence, at time.Time, v sess
 			contextPosition: contextPosition{after: t.after, window: t.window}, key: t.key,
 			at: t.at, usage: responseRequestUsage(v.Response.Usage),
 			countKnown: v.Response.ID != "" || llm.ReportedTokens(v.Response.Usage).InputKnown,
+		}
+		if t.single.at.IsZero() {
+			t.single.at = at
 		}
 		m.requests = append(m.requests, t.single)
 	}

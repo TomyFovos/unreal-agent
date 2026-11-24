@@ -7,7 +7,7 @@ Unreal Agent は、1つのターミナル上で **Claude だけ・ChatGPT（Code
 本リポジトリは [unreallabsai/unreal-agent](https://github.com/unreallabsai/unreal-agent) の個人開発向けフォークです。オリジナルのバックグラウンド Host / Session 構造と Operation モデルを維持しつつ、以下の機能を追加しています。
 - サブスクリプション認証による **Claude Code / Codex の切り替え** (`/model`)
 - 対話的な **権限モード切替** (`Read Only` / `Ask for Approval` / `Full Access`)
-- **GPT サブエージェントへの作業委譲** (`lead`, `worker-*`, `collector`)。Claude から Codex を使えない場合は Claude Code の Agent（`haiku` / `sonnet`）を使用
+- **Unreal の子 Session への委譲**（`lead`、`worker-*`、`collector`）。Claude を含め、役割ごとに接続先とモデルを設定できます。
 
 ## 主な特徴
 

@@ -12,6 +12,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
@@ -69,7 +70,7 @@ func StartupLogs(tb testing.TB, directory string, configuration any) map[string]
 				raw, _ := json.Marshal(spec)
 				payload, _ := json.Marshal(inbox.ControlMessage{Mode: inbox.DispatchOperation, Parameters: inbox.OperationIntent{OperationID: string(opID), ToolName: "SubagentStart", Spec: raw}})
 				item(sessionstore.ItemInput, inbox.Input{ID: inbox.ID(opID), Kind: inbox.InputControl, Payload: payload})
-				line("operation", struct{ Operation operation.Operation }{operation.Operation{ID: opID, ToolName: "SubagentStart", Type: spec.Type, Version: spec.Version, State: spec.State, Status: operation.StatusCompleted}})
+				line("operation", struct{ Operation operation.Operation }{operation.Operation{ID: opID, ToolName: "SubagentStart", Type: spec.Type, Version: spec.Version, State: spec.State, MaxOutputLength: spec.MaxOutputLength, Status: operation.StatusCompleted}})
 			}
 			item(sessionstore.ItemInput, inbox.Input{ID: "tail-input", Kind: inbox.InputExternal, Payload: []byte(`"tail input"`)})
 			item(sessionstore.ItemTurn, session.Turn{ID: "tail-turn", PreviousTurnID: previous})
@@ -81,7 +82,7 @@ func StartupLogs(tb testing.TB, directory string, configuration any) map[string]
 	for i := range 200 {
 		opID := operation.ID(fmt.Sprintf("spawn-%03d", i))
 		id := subagent.ChildID("main", opID)
-		config := subagent.ChildConfig{Version: 1, ParentID: "main", ChildID: id, OperationID: opID, SessionDirectory: directory, Workspace: directory, Runtime: []byte(`{}`), ReadyID: inbox.ID("ready:" + string(opID)), Task: "synthetic child"}
+		config := subagent.ChildConfig{Version: 1, ParentID: "main", ChildID: id, OperationID: opID, SessionDirectory: directory, Workspace: directory, Runtime: []byte(`{}`), ReadyID: inbox.ID("ready:" + string(opID)), Task: "synthetic child", Policy: permission.Config{Tools: []string{"Finish"}}}
 		logs[string(id)+".session.jsonl"] = encode(id, 50, 1000, config, false)
 	}
 	return logs

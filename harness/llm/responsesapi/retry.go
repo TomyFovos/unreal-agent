@@ -51,7 +51,7 @@ func usageResetBody(body []byte, now time.Time) time.Time {
 	if reset.IsZero() && fields.ResetsInSeconds > 0 && fields.ResetsInSeconds < float64((1<<63-1)/time.Second) {
 		reset = now.Add(time.Duration(fields.ResetsInSeconds * float64(time.Second)))
 	}
-	return reset
+	return reset.UTC()
 }
 
 func usageResetHint(err *APIError, headers http.Header, now time.Time) {
@@ -77,7 +77,7 @@ func usageResetHint(err *APIError, headers http.Header, now time.Time) {
 		}
 	}
 	if delay > 0 && now.Add(delay).After(err.ResetAt) {
-		err.ResetAt = now.Add(delay)
+		err.ResetAt = now.Add(delay).UTC()
 	}
 }
 

@@ -12,31 +12,16 @@ type agentInput struct {
 	Model       string `json:"model"`
 }
 
-// agentCallSubject is the progress subject for an Agent call: the model and
-// the task description, not the whole JSON input. chosen names the model
-// picked with subagent model, used when the call itself names none.
-func agentCallSubject(input jsontext.Value, chosen func() string) string {
+// agentCallSubject formats legacy Agent calls and denied attempts.
+func agentCallSubject(input jsontext.Value) string {
 	var in agentInput
 	_ = json.Unmarshal(input, &in)
-	model := in.Model
-	if model == "" && chosen != nil {
-		model = chosen()
-	}
 	subject := "Claude Code Agent"
-	if model != "" {
-		subject += " · " + model
+	if in.Model != "" {
+		subject += " · " + in.Model
 	}
 	if in.Description != "" {
 		subject += ": " + in.Description
 	}
 	return clip(subject, 512)
-}
-
-// agentModel is the model Claude's own Agent sub-agents run on, or "" when the
-// choice is unset.
-func (s SubagentCLI) agentModel() string {
-	if s.AgentModel == nil {
-		return ""
-	}
-	return s.AgentModel()
 }

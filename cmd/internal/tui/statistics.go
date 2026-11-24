@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
-	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
 
 func statisticsBar(s Snapshot, u UIState, l layout) line {
@@ -38,9 +37,8 @@ func statisticsBar(s Snapshot, u UIState, l layout) line {
 		}
 	}
 	speedBars = generationBars(s, u.Theme)
-	if label := viewer.CacheLabel(s.CacheLatest); label != "cache -" {
-		ratio := float64(s.CacheLatest.CachedInput) / float64(s.CacheLatest.Input)
-		cache = joined(textLine("キャッシュ ", meta), gaugeBar(ratio, 10, stateDone, u.Theme), textLine(strings.TrimPrefix(label, "cache "), meta))
+	if ratio, known := s.CacheTotal.CacheRatio(); known {
+		cache = joined(textLine("キャッシュ ", meta), gaugeBar(ratio, 10, stateDone, u.Theme), textLine(fmt.Sprintf("%.2f%%", 100*ratio), meta))
 	}
 	build := func() line {
 		out := textLine("コンテキスト ", meta)

@@ -21,6 +21,7 @@ func TestCodexRecordsSubscriptionHeadersSeparatelyFromUsage(t *testing.T) {
 		header.Set("Content-Type", "text/event-stream")
 		header.Set("X-Codex-Primary-Used-Percent", "0")
 		header.Set("X-Codex-Primary-Window-Minutes", "300")
+		header.Set("X-Codex-Primary-Reset-At", "2026-11-24T07:55:12+09:00")
 		header.Set("X-Codex-Secondary-Reset-At", "1800000000")
 		header.Set("X-Codex-Secondary-Used-Percent", "not a number")
 		body := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"served\",\"status\":\"completed\",\"output\":[]}}\n\n"
@@ -52,6 +53,20 @@ func TestCodexRecordsSubscriptionHeadersSeparatelyFromUsage(t *testing.T) {
 	if p.UsedPercent == nil || *p.UsedPercent != 0 || p.WindowMinutes == nil || *p.WindowMinutes != 300 || s.UsedPercent != nil || s.WindowMinutes != nil || s.ResetsAt.Unix() != 1800000000 {
 		t.Fatal("missing subscription field was reported as zero or known zero was lost", a.Subscription)
 	}
+	if want := "2026-11-23T22:55:12Z"; p.ResetsAt.Format(time.RFC3339) != want || p.ResetsAt.Location() != time.UTC || s.ResetsAt.Location() != time.UTC {
+		t.Fatalf("offset string and epoch should both be stored in UTC: %s, %s", p.ResetsAt, s.ResetsAt)
+	}
+}
+
+func TestCodexSkipsPercentageForWindowWithoutPeriodOrReset(t *testing.T) {
+	header := make(http.Header)
+	header.Set("X-Codex-Secondary-Used-Percent", "0")
+	observeSubscriptionUsage(t.Context(), llm.Model{}, llm.RequestOptions{
+		RecordActivity: func(_ context.Context, a llm.ActivityRecord) error {
+			t.Fatalf("placeholder was recorded as an allowance: %+v", a)
+			return nil
+		},
+	}, header)
 }
 
 func TestCodexRetryableFailureThenSuccess(t *testing.T) {

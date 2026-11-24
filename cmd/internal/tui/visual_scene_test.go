@@ -36,7 +36,7 @@ func visualWorkScene() (Snapshot, UIState) {
 		s.SpeedHistory = append(s.SpeedHistory, stats)
 	}
 	s.Progress = &host.Progress{Mode: "streaming", Statistics: s.LastGeneration}
-	s.CacheLatest = viewer.Usage{Known: true, Input: 394_000, CachedInput: 386_120}
+	s.CacheTotal = viewer.Usage{Known: true, Input: 394_000, CachedInput: 386_120}
 	s.Permissions.Enabled, s.Permissions.Mode = true, permission.FullAccess
 	s.Entries = []Entry{{Role: "you", At: u.Now.Add(-10 * time.Minute), Text: "決定を反映して、実装とレビューを進めて"}, {Role: "agent", Text: "実装担当と調査担当に作業を渡しました。"}}
 	u.Viewer = viewer.PanelSnapshot{ParentID: s.ID, Selected: s.ID}

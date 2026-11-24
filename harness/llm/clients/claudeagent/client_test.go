@@ -692,19 +692,21 @@ func TestSubagentSandboxIsAbsentWithoutTheCLI(t *testing.T) {
 	}
 }
 
-// A turn without available children drops Unreal's subagent CLI but keeps the
-// Claude model chosen with subagent model and its force flag, so Claude's own
-// Agent runs every sub-agent, Explore and Plan included, on it.
-func TestAgentModelSurvivesATurnWithoutChildren(t *testing.T) {
+func TestNativeDelegationDeniedByBothClaudeCallbacks(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, "agent_model")
-	h.client.config.Subagents = SubagentCLI{AgentModel: func() string { return "opus" }, Available: func(context.Context) bool { return false }}
-	response, err := h.respond(t.Context())
+	h := newHarness(t, "delegation_denied", "CLAUDE_CODE_SUBAGENT_MODEL=opus", "CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1")
+	ctx, _, _ := withMode(t, permission.FullAccess)
+	response, err := h.respond(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := response.Output[len(response.Output)-1].Data.(llm.Message).Text; got != "model:opus force:1" {
-		t.Fatalf("the Agent path got %q, want the chosen model forced on every sub-agent", got)
+	if got := response.Output[len(response.Output)-1].Data.(llm.Message).Text; got != "delegation blocked" {
+		t.Fatalf("blocked delegation response = %q", got)
+	}
+	for _, name := range []string{"Agent", "Task"} {
+		if !slices.Contains(strings.Split(gateMatcher, "|"), name) {
+			t.Fatalf("%s would bypass the PreToolUse matcher", name)
+		}
 	}
 }
 

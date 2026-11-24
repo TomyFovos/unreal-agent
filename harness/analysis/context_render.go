@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/contextengine"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
 
@@ -165,8 +166,30 @@ func contextTables(r *ContextMeasurements) []contextTable {
 	if r == nil {
 		return []contextTable{{title: "Context measurements unknown"}}
 	}
-	var tables []contextTable
+	tables := scopeTables("Session tree", r.Totals)
+	for _, route := range r.ActivePolicies {
+		name := "default"
+		if route.Provider != "" {
+			name = textOrUnknown(route.Provider)
+		}
+		tables = append(tables, contextTable{title: "Active context policy · " + name, rows: policyRows(route.Policy)})
+	}
 	for _, s := range r.Sessions {
+		for _, period := range s.PolicyPeriods {
+			t := contextTable{title: "Session " + string(s.Session) + " · Policy period · " + textOrUnknown(period.Provider) + " · " + contextTime(period.From)}
+			if period.Until != nil {
+				t.rows = append(t.rows, [2]string{"Until", contextTime(period.Until)})
+			}
+			if period.Policy != nil {
+				t.rows = append(t.rows, policyRows(*period.Policy)...)
+			}
+			t.add(period.Numbers, "", []contextColumn{
+				{"rebuilds", "Rebuilds", ""}, {"boundary_after_tokens", "Mean size after rebuild", " tokens"},
+				{"first_cache_read_share", "Cache read share on first request", "%"},
+				{"record_show_calls", "L3 show calls after rebuild", ""}, {"record_find_calls", "L3 find calls after rebuild", ""},
+			})
+			tables = append(tables, t)
+		}
 		tables = append(tables, scopeTables("Session "+string(s.Session), s.ContextScope)...)
 		for _, w := range s.Windows {
 			heading := "Session " + string(s.Session) + " · " + w.OpenedBy + " · " + contextTime(&w.At)
@@ -185,7 +208,16 @@ func contextTables(r *ContextMeasurements) []contextTable {
 			tables = append(tables, t)
 		}
 	}
-	return append(scopeTables("Session tree", r.Totals), tables...)
+	return tables
+}
+
+func policyRows(p sessionstore.WindowPolicy) [][2]string {
+	return [][2]string{
+		{"W", fmt.Sprint(p.WindowThresholdTokens)}, {"Post-rebuild ratio", fmt.Sprint(p.PostRebuildRatio)}, {"L2 target", fmt.Sprint(p.L2TargetTokens)},
+		{"Recent events", fmt.Sprint(p.RecentEventCount)}, {"Tool excerpt characters", fmt.Sprint(p.ToolOutputExcerptChars)},
+		{"Cache rewarm minutes", fmt.Sprint(p.CacheRewarmMinutes)}, {"Input cap", fmt.Sprint(p.InputBudget)}, {"Fallback window", fmt.Sprint(p.FallbackWindow)},
+		{"Response reserve", fmt.Sprint(p.ResponseReserve)}, {"Protocol reserve", fmt.Sprint(p.ProtocolReserve)},
+	}
 }
 
 func scopeTables(title string, scope ContextScope) []contextTable {

@@ -29,13 +29,17 @@ func assertClaudeDelegation(t *testing.T, cli *testclaude.Fixture, gpt bool) {
 	if index < 0 || index+1 >= len(call.Arguments) {
 		t.Fatal("missing tool allowlist")
 	}
-	agent := slices.Contains(strings.Split(call.Arguments[index+1], ","), "Agent")
-	// Agent is always offered; GPT children appear only while Codex is usable.
-	if !agent || strings.Contains(strings.Join(call.Arguments, "\n"), "Templates:") != gpt {
-		t.Fatalf("gpt=%t Agent=%t args=%v", gpt, agent, call.Arguments)
+	allowed := strings.Split(call.Arguments[index+1], ",")
+	cliArgument(t, call, "--disallowedTools", "Agent,Task")
+	if slices.Contains(allowed, "Agent") || slices.Contains(allowed, "Task") {
+		t.Fatal("native delegation is in the tool allowlist")
 	}
-	if !gpt && !slices.Contains(call.Environment, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1") {
-		t.Fatal("Claude Agent work could outlive its turn")
+	prompt := claudeCallOption(call, "--append-system-prompt")
+	if strings.Contains(prompt, "Templates:") != gpt || strings.Contains(prompt, "Claude Code's Agent tool") {
+		t.Fatalf("Unreal children available=%t, prompt=%s", gpt, prompt)
+	}
+	if !gpt && (!strings.Contains(prompt, "/login") || !strings.Contains(prompt, "/model refresh")) {
+		t.Fatal("missing connection recovery steps")
 	}
 }
 

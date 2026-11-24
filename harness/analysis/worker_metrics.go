@@ -11,6 +11,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/tool"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
 
@@ -70,6 +71,8 @@ type RequestMetric struct {
 	// TimedOutput is only the tokens paired with Duration, never all output
 	// divided by the subset of responses that happened to have timing.
 	TimedOutput int64
+	turn        session.TurnID
+	toolBatch   bool // Claude Code's in-flight tool rendezvous
 }
 
 type childStart struct {
@@ -99,6 +102,7 @@ type sessionMetrics struct {
 	waitStart       time.Time
 	waitRetryAt     time.Time
 	waitSource      string
+	waitSpans       []workSpan
 	responseRuntime llm.ActivityRecord
 }
 
@@ -200,7 +204,14 @@ func (m *sessionMetrics) apply(item host.HistoryItem, active *sessionstore.Runti
 	case sessionstore.ModelResponse:
 		key, source := m.responseModel(v.Response, active)
 		m.addRequest(v.Response.Usage, v.Response.Generation, key, item.RecordedAt, "response")
-		m.requests[len(m.requests)-1].SelectionSource = source
+		req := &m.requests[len(m.requests)-1]
+		req.SelectionSource, req.turn = source, v.TurnID
+		for _, out := range v.Response.Output {
+			if call, ok := out.Data.(llm.ToolCall); ok && (call.Name == tool.ClaudeCodeName || key.Provider == "claude" || key.Provider == "claude-code") {
+				req.toolBatch = true
+				break
+			}
+		}
 	case sessionstore.ToolCallStatus:
 		for _, op := range v.Operations {
 			t := m.times[op.ID]
@@ -292,6 +303,7 @@ func (m *sessionMetrics) addWait(start, end time.Time, source string) {
 		return
 	}
 	m.wait.add(end.Sub(start).Seconds(), source)
+	m.waitSpans = append(m.waitSpans, workSpan{start, end})
 }
 
 func (m *sessionMetrics) waitMetric(complete bool) Metric {

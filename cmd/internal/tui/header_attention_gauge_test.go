@@ -152,7 +152,7 @@ func TestGaugeContextRateColorsAndOmission(t *testing.T) {
 	s.LastGeneration.Tokens.Output = 138
 	s.LastGeneration.Source = "client_clock"
 	s.Selection.ContextWindow = 1_000_000
-	s.CacheLatest = viewer.Usage{Known: true, Input: 100, CachedInput: 98}
+	s.CacheTotal = viewer.Usage{Known: true, Input: 100, CachedInput: 98}
 	u.Parent = &viewer.Row{Usage: viewer.Usage{Known: true, Input: 144_400_000, Output: 738_800}}
 	for _, rate := range []int64{0, 23, 46, 69, 92, 115, 138, 138} {
 		stats := *s.LastGeneration
@@ -212,7 +212,7 @@ func TestGaugeUsesLastContextAndSummedCacheUsage(t *testing.T) {
 	s.LastGeneration.Tokens.Input = 700_000
 	s.LastGeneration.ContextTokens, s.LastGeneration.ContextKnown = 394_000, true
 	s.Selection.ContextWindow = 1_000_000
-	s.CacheLatest = viewer.Usage{Known: true, Input: 700_000, CachedInput: 350_000}
+	s.CacheTotal = viewer.Usage{Known: true, Input: 700_000, CachedInput: 350_000}
 	for _, progress := range []bool{false, true} {
 		if progress {
 			s.Progress = &host.Progress{Mode: "streaming", Statistics: s.LastGeneration}

@@ -1,15 +1,61 @@
 package subagent
 
 import (
+	"context"
 	"encoding/json/v2"
 	"slices"
 	"strings"
 
+	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	runtime "github.com/unreallabsai/unreal-agent/harness/subagent"
 	"testing"
 )
+
+func TestSubagentStartRuntimeArgumentFollowsOwner(t *testing.T) {
+	for _, child := range []bool{false, true} {
+		extensions, err := Extensions("owner", map[string]runtime.Template{"worker": {Workspace: t.TempDir(), Runtime: []byte(`{}`)}}, child)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var requested *runtime.RuntimeRequest
+		BindRuntime(extensions, t.Context(), nil, func(_ context.Context, _ *host.Session, _ string, template runtime.Template, selection *runtime.RuntimeRequest) (runtime.Template, error) {
+			requested = selection
+			return template, nil
+		})
+		for _, extension := range extensions {
+			if extension.Definition.Tool.Name != "SubagentStart" {
+				continue
+			}
+			_, advertised := extension.Definition.Tool.Parameters["properties"].(map[string]any)["runtime"]
+			c := &ctx{}
+			result := extension.Translator.Translate(c, llm.ToolCall{Name: "SubagentStart", Arguments: `{"template":"worker","task":"check","runtime":{"provider":"openai","model":"gpt-6-luna","effort":"medium"}}`})
+			if result.Error != "" || len(c.specs) != 1 || advertised == child || (requested != nil) == child {
+				t.Fatalf("child=%t: advertised=%t, requested=%+v, status=%+v", child, advertised, requested, result)
+			}
+			for _, tc := range []struct {
+				args string
+				want runtime.RuntimeRequest
+			}{
+				{`{"template":"worker","model":"deepseek-v4.1-flash","effort":"max"}`, runtime.RuntimeRequest{Model: "deepseek-v4.1-flash", Effort: "max"}},
+				{`{"template":"worker","provider":"opencode-go","model":"deepseek-v4.1-flash"}`, runtime.RuntimeRequest{Provider: "opencode-go", Model: "deepseek-v4.1-flash"}},
+			} {
+				props := extension.Definition.Tool.Parameters["properties"].(map[string]any)
+				for _, name := range []string{"provider", "model", "effort"} {
+					if _, ok := props[name]; !ok || slices.Contains(extension.Definition.Tool.Parameters["required"].([]string), name) {
+						t.Fatalf("child=%t: missing optional %s argument", child, name)
+					}
+				}
+				c := &ctx{}
+				result := extension.Translator.Translate(c, llm.ToolCall{Name: "SubagentStart", Arguments: tc.args})
+				if result.Error != "" || len(c.specs) != 1 || requested == nil || *requested != tc.want {
+					t.Fatalf("child=%t: requested=%+v, want %+v; status=%+v", child, requested, tc.want, result)
+				}
+			}
+		}
+	}
+}
 
 func TestSubagentStartKeepsOptionalBriefAndPreviewsChildText(t *testing.T) {
 	template := runtime.Template{Workspace: t.TempDir(), Runtime: []byte(`{}`)}

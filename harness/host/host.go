@@ -80,6 +80,9 @@ const (
 
 type Options struct {
 	TextOnlyChild bool
+	// ChildReportFromReply uses a complete final reply as the report for a
+	// tool-capable child after its operations and parent replies have drained.
+	ChildReportFromReply bool
 	// Policy is an explicit immutable execution capability set. Nil denies all.
 	// Its owner closes it after Host execution has stopped.
 	Policy *permission.Policy
@@ -160,6 +163,7 @@ type View struct {
 	Permissions     permission.ModeSnapshot
 	Context         *contextengine.Diagnostics `json:",omitzero"`
 	ContextFacts    *sessionstore.ContextFacts `json:",omitzero"` // populated by the explicit analysis reader
+	ArchivedEndedAt time.Time                  `json:",omitzero"` // fallback for analysis of archived descendants
 	Progress        *Progress                  `json:",omitzero"`
 	ModelPhase      ModelPhase                 `json:",omitzero"` // scoped child observation
 	Session         sessionstore.Snapshot
@@ -544,7 +548,9 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		Sessions:           &serializedStore{s}, ContextBuilder: s.runtime.Builder, LLM: s.runtime.LLM, Tools: s.runtime.Tools,
 		Finished: func() bool { return s.Finish() != nil }, Operations: s.runtime.Operations, ToolHeartbeatInterval: o.Heartbeat, RestoredStop: pending, InitialInputs: initial}
 	if o.Lifecycle == "child" && !o.TextOnlyChild {
-		dependencies.OnIdle = s.commitUnreportedFinish
+		dependencies.OnIdle = func(ctx context.Context, turn session.TurnID) error {
+			return s.commitUnreportedFinish(ctx, turn, o.ChildReportFromReply)
+		}
 	}
 	if o.TextOnlyChild {
 		if o.Lifecycle != "child" {

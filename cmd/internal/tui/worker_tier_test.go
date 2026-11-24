@@ -64,10 +64,10 @@ func TestWorkerTierTUIReadsArchivedGrandchildrenWithoutResuming(t *testing.T) {
 		handler.ServeHTTP(out, req)
 		return jsontext.Value(out.Body.Bytes()), nil
 	}}
-	if err := m.LoadAnalysisTree(t.Context(), remote.InspectTree); err != nil {
+	report, err := m.readAnalysisTree(t.Context(), remote.InspectTree, time.Now(), nil, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	report := m.Analysis(time.Now(), nil)
 	if report.Tree == nil || report.Tree.Partial || len(report.Tree.Sessions) != 8 || len(report.Tree.Workers) != 2 {
 		t.Fatal("TUI omitted grandchildren", report.Tree)
 	}

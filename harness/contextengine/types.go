@@ -132,16 +132,27 @@ func IsBudgetError(err error) bool {
 // Config controls the three-layer window. Retired sizing fields remain
 // decodable for existing configurations.
 type Config struct {
-	Version                                                       int    `json:",omitzero"`
-	Mode                                                          string `json:",omitzero"`
-	FallbackWindow, InputBudget, ResponseReserve, ProtocolReserve int64  `json:",omitzero"`
-	RecentReserve                                                 int64  `json:",omitzero"`
-	RetrievalReserve                                              int64  `json:",omitzero"`
-	RetrievalLimit, CheckpointThreshold                           int    `json:",omitzero"`
-	LargeToolTokens                                               int64  `json:",omitzero"`
-	ToolResultKeepTokens, ToolResultMinPruneTokens                int64  `json:",omitzero"`
-	WindowThresholdTokens, L2TargetTokens                         int64  `json:",omitzero"`
-	RecentEventCount, ToolOutputExcerptChars, CacheRewarmMinutes  int    `json:",omitzero"`
+	Version                                                       int                    `json:",omitzero"`
+	Mode                                                          string                 `json:",omitzero"`
+	FallbackWindow, InputBudget, ResponseReserve, ProtocolReserve int64                  `json:",omitzero"`
+	RecentReserve                                                 int64                  `json:",omitzero"`
+	RetrievalReserve                                              int64                  `json:",omitzero"`
+	RetrievalLimit, CheckpointThreshold                           int                    `json:",omitzero"`
+	LargeToolTokens                                               int64                  `json:",omitzero"`
+	ToolResultKeepTokens, ToolResultMinPruneTokens                int64                  `json:",omitzero"`
+	WindowThresholdTokens, L2TargetTokens                         int64                  `json:",omitzero"`
+	PostRebuildRatio                                              float64                `json:",omitzero"`
+	RecentEventCount, ToolOutputExcerptChars, CacheRewarmMinutes  int                    `json:",omitzero"`
+	Routes                                                        map[string]RouteConfig `json:",omitempty"`
+}
+
+// RouteConfig overrides the common policy for a provider ID. A nil field
+// inherits the common value, including when another field explicitly uses zero.
+type RouteConfig struct {
+	FallbackWindow, InputBudget, ResponseReserve, ProtocolReserve *int64   `json:",omitzero"`
+	WindowThresholdTokens, L2TargetTokens                         *int64   `json:",omitzero"`
+	PostRebuildRatio                                              *float64 `json:",omitzero"`
+	RecentEventCount, ToolOutputExcerptChars, CacheRewarmMinutes  *int     `json:",omitzero"`
 }
 
 const WindowThreeLayer = "three-layer"
@@ -158,11 +169,11 @@ func (c Config) Resolve() (Config, error) {
 	if c.Version != Version || c.Mode != "bounded" && c.Mode != "legacy" {
 		return c, &Error{"unsupported_strategy"}
 	}
-	if c.WindowThresholdTokens < 0 || c.L2TargetTokens < 0 || c.RecentEventCount < 0 || c.ToolOutputExcerptChars < 0 || c.CacheRewarmMinutes < 0 {
-		return c, &Error{"invalid_configuration"}
-	}
 	if c.WindowThresholdTokens == 0 {
 		c.WindowThresholdTokens = DefaultWindowThresholdTokens
+	}
+	if c.PostRebuildRatio == 0 {
+		c.PostRebuildRatio = 0.5
 	}
 	if c.L2TargetTokens == 0 {
 		c.L2TargetTokens = 5000
@@ -187,8 +198,13 @@ func (c Config) Resolve() (Config, error) {
 	if c.ProtocolReserve == 0 {
 		c.ProtocolReserve = 1024
 	}
-	if c.FallbackWindow <= c.ResponseReserve+c.ProtocolReserve {
-		return c, &Error{"invalid_budget"}
+	if err := c.validatePolicy(); err != nil {
+		return c, err
+	}
+	for provider := range c.Routes {
+		if err := c.ForProvider(provider).validatePolicy(); err != nil {
+			return c, fmt.Errorf("Routes[%q]: %w", provider, err)
+		}
 	}
 	return c, nil
 }

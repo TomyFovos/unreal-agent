@@ -21,11 +21,9 @@ type Notification struct {
 	Until            time.Time
 }
 type Sheet struct {
-	Title     string
-	Lines     []string
-	Analysis  string
-	Offset    int
-	refreshAt time.Time
+	Title  string
+	Lines  []string
+	Offset int
 }
 
 // UIState is disposable presentation state, owned by the terminal event loop.
@@ -53,6 +51,7 @@ type UIState struct {
 	Viewer                viewer.PanelSnapshot
 	View                  ViewMode
 	OrchestrationScroll   int
+	analysis              *analysisScreen
 	cache                 *bodyCache
 	index                 *renderIndex
 	collect               *conversationCache
@@ -558,8 +557,6 @@ func rule(u UIState, l layout, overflow int, label string) line {
 		if u.Picker.Kind == "file" {
 			value = "files; Enter/Tab inserts path; Esc closes"
 		}
-	case u.Sheet != nil && u.Sheet.Analysis != "":
-		value = "PgUp/PgDn scroll  Esc/Enter back  ^D detach"
 	case u.Pasted:
 		value = "pasted: Enter submits; registered commands run"
 	case label == "cmd":
@@ -609,8 +606,6 @@ func keybar(s Snapshot, u UIState, l layout, label string) line {
 		if u.Picker.Kind == "file" {
 			value = u.Theme.symbol("↑↓", "up/down") + " select  Enter/Tab insert  Esc close  ^D detach"
 		}
-	case u.Sheet != nil && u.Sheet.Analysis != "":
-		value = "PgUp/PgDn scroll  Esc/Enter back  ^D detach"
 	case u.Busy:
 		value = "^C cancel waiting   ^D detach"
 	case label == "cmd":
@@ -647,6 +642,9 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 	l := makeLayout(width, height)
 	if u.Now.IsZero() {
 		u.Now = time.Now()
+	}
+	if u.analysis != nil {
+		return renderAnalysisScreen(u, l, u.View.effective(width))
 	}
 	if u.cache != nil {
 		if f, ok := u.cache.inputFrame(s, u, width, height); ok {
@@ -789,7 +787,7 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 	if f.View != ViewChat {
 		dock = nil
 	}
-	if u.Picker != nil || u.Sheet != nil && u.Sheet.Analysis != "" {
+	if u.Picker != nil {
 		dock = nil
 	}
 	childBudget := available
@@ -814,35 +812,17 @@ func RenderFrame(s Snapshot, u UIState, width, height int) Frame {
 		if u.Theme.ASCII {
 			title = strings.ReplaceAll(title, " · ", " / ")
 		}
-		if u.Sheet.Analysis != "" {
-			budget := max(0, available-len(dock))
-			if budget > 0 {
-				extra = append(extra, l.gutter("", "", textLine(title, strong).clip(l.text)))
+		limit := max(3, min(10, l.height/3))
+		limit = min(limit, max(0, available-len(dock)))
+		f.SheetHeight = limit
+		start := min(u.Sheet.Offset, max(0, len(u.Sheet.Lines)-max(1, limit)))
+		f.SheetOffset = start
+		for i, v := range u.Sheet.Lines[start:min(len(u.Sheet.Lines), start+limit)] {
+			role := ""
+			if i == 0 {
+				role = title
 			}
-			limit := max(0, budget-1)
-			f.SheetHeight = limit
-			var wrapped []string
-			for _, v := range u.Sheet.Lines {
-				wrapped = append(wrapped, Wrap(v, l.text)...)
-			}
-			start := min(u.Sheet.Offset, max(0, len(wrapped)-max(1, limit)))
-			f.SheetOffset = start
-			for _, v := range wrapped[start:min(len(wrapped), start+limit)] {
-				extra = append(extra, l.gutter("", "", textLine(v, normal).clip(l.text)))
-			}
-		} else {
-			limit := max(3, min(10, l.height/3))
-			limit = min(limit, max(0, available-len(dock)))
-			f.SheetHeight = limit
-			start := min(u.Sheet.Offset, max(0, len(u.Sheet.Lines)-max(1, limit)))
-			f.SheetOffset = start
-			for i, v := range u.Sheet.Lines[start:min(len(u.Sheet.Lines), start+limit)] {
-				role := ""
-				if i == 0 {
-					role = title
-				}
-				extra = append(extra, l.gutter(role, "", textLine(v, normal)))
-			}
+			extra = append(extra, l.gutter(role, "", textLine(v, normal)))
 		}
 	}
 	dock = append(dock, clipDock(extra, max(0, available-len(dock)), title)...)

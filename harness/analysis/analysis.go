@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/contextengine"
+	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -64,6 +65,7 @@ type AgentCounts struct {
 type Event struct {
 	At         time.Time
 	Kind, Name string
+	Question   string `json:"-"` // question heading for the expanded TUI timeline
 }
 type Errors struct {
 	Provider, Tools, Children, Crashes int
@@ -71,6 +73,7 @@ type Errors struct {
 	Recent                             []Event
 }
 type Report struct {
+	Dashboard           *Dashboard               `json:"-"`
 	Tree                *TreeReport              `json:",omitzero"`
 	ContextMeasurements *ContextMeasurements     `json:",omitzero"`
 	SubscriptionUsage   []SubscriptionWindow     `json:",omitzero"`
@@ -133,6 +136,7 @@ type call struct {
 	turn       session.TurnID
 	start, end time.Time
 	status     *sessionstore.ToolCallStatus
+	childWait  bool
 }
 type Accumulator struct {
 	metrics             *sessionMetrics
@@ -149,6 +153,7 @@ type Accumulator struct {
 	latestUsage         viewer.Usage
 	turns               []Turn
 	turnIndex           map[session.TurnID]int
+	continuations       map[session.TurnID]session.TurnID
 	active, pending     *sessionstore.RuntimeSelection
 	managedPolicyMode   string
 	toolBridgeEnabled   bool
@@ -161,8 +166,12 @@ type Accumulator struct {
 	deliveredReports    map[operation.ID]bool
 	events, errors      []Event
 	providerErrors      int
+	providerOK          []time.Time
 	crashes             int
 	partial             bool
+	lastActivity        time.Time
+	approvalStarts      map[string]time.Time
+	approvalSpans       []workSpan
 }
 
 func New(id session.ID) *Accumulator {
@@ -180,6 +189,9 @@ func summarize(s *sessionstore.RuntimeSelection) *Selection {
 }
 func (a *Accumulator) Created(at time.Time) { a.created = at; a.metrics.created = at }
 func (a *Accumulator) Apply(item host.HistoryItem) {
+	if item.RecordedAt.After(a.lastActivity) {
+		a.lastActivity = item.RecordedAt
+	}
 	e := Event{At: item.RecordedAt}
 	switch v := item.Data.(type) {
 	case sessionstore.HostRecord:
@@ -255,6 +267,12 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 			if v.Selection != nil {
 				e.Name = viewer.SafeText(v.Selection.Model)
 			}
+		case sessionstore.HostApproval:
+			a.observeApproval(v, item.RecordedAt)
+			e.Kind = "approval requested"
+			if v.Approval != nil && v.Approval.Decision != "" {
+				e.Kind = "approval resolved"
+			}
 		case "finish":
 			e.Kind = "canonical finish"
 		}
@@ -287,6 +305,16 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 			}
 		}
 	case session.Turn:
+		if v.ToolContinuation != "" {
+			if a.continuations == nil {
+				a.continuations = make(map[session.TurnID]session.TurnID)
+			}
+			origin := v.ToolContinuation
+			if previous := a.continuations[origin]; previous != "" {
+				origin = previous
+			}
+			a.continuations[v.ID] = origin
+		}
 		if v.Type == session.TurnCompaction {
 			e.Kind = "historical Unreal compaction"
 		}
@@ -299,6 +327,7 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 		a.turnIndex[v.ID] = len(a.turns)
 		a.turns = append(a.turns, t)
 	case sessionstore.ModelResponse:
+		v.ObserveSubscriptionSuccess(&a.subscriptionUsage, a.active, item.RecordedAt)
 		a.observeInputTokens(v.Response.Usage)
 		viewer.AddUsage(&a.usage, v.Response.Usage)
 		a.latestUsage = viewer.Usage{}
@@ -313,6 +342,8 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 		if v.Response.Failure != nil {
 			a.providerErrors++
 			a.addError(Event{At: item.RecordedAt, Kind: "provider", Name: "canonical model failure"})
+		} else {
+			a.providerOK = append(a.providerOK, item.RecordedAt)
 		}
 		a.toolScopes.Observe(v.Response.Output)
 		for _, out := range v.Response.Output {
@@ -321,7 +352,7 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 			}
 			if tc, ok := out.Data.(llm.ToolCall); ok {
 				key := string(v.TurnID) + "\x00" + tc.CallID
-				a.calls[key] = &call{name: viewer.SafeText(tc.Name), id: tc.CallID, turn: v.TurnID, start: item.RecordedAt}
+				a.calls[key] = &call{name: viewer.SafeText(tc.Name), id: tc.CallID, turn: v.TurnID, start: item.RecordedAt, childWait: toolWaitsForChildren(tc)}
 				a.addEvent(Event{At: item.RecordedAt, Kind: "tool call", Name: viewer.SafeText(tc.Name)})
 			}
 			for _, observation := range out.ToolObservations {
@@ -331,6 +362,13 @@ func (a *Accumulator) Apply(item host.HistoryItem) {
 					}
 					a.nestedTools[viewer.SafeText(observation.Tool)]++
 				}
+			}
+		}
+	case contextstate.Event:
+		if v.Kind == contextstate.QuestionChanged && v.Version == contextstate.Version {
+			var q contextstate.Question
+			if json.Unmarshal(v.Data, &q) == nil {
+				e.Kind, e.Name, e.Question = string(v.Kind), viewer.SafeText(string(q.Status)), q.FirstLine
 			}
 		}
 	case sessionstore.ToolCallStatus:
@@ -567,4 +605,10 @@ func (a *Accumulator) Snapshot(now time.Time, _ bool, resync bool, rows []viewer
 	r.Errors.CrashesKnown = !r.Partial
 	r.Usage.Partial = r.Usage.Partial || r.Partial
 	return r
+}
+
+// DashboardReport enriches a single-Session snapshot with the terminal's
+// series and phase intervals.
+func (a *Accumulator) DashboardReport(r *Report, rows []viewer.Row) {
+	r.Dashboard = a.dashboard(r, nil, rows)
 }

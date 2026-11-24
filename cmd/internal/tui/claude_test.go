@@ -2,7 +2,6 @@ package tui
 
 import (
 	"github.com/rivo/uniseg"
-	"github.com/unreallabsai/unreal-agent/harness/analysis"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
@@ -53,19 +52,19 @@ func TestClaudeTrustedPolicyAnalysisKeepsLiveDockResponsive(t *testing.T) {
 	}
 	for _, size := range [][2]int{{44, 14}, {60, 20}, {80, 24}, {130, 30}} {
 		for _, theme := range []Theme{{}, {NoColor: true}, {Plain: true}, {ASCII: true}} {
-			u := UIState{Theme: theme, Sheet: &Sheet{Title: "Analysis · Overview", Analysis: "Overview", Lines: analysis.Lines(r, "Overview", theme.ASCII)}}
+			u := UIState{Theme: theme, analysis: readyAnalysis(r, "Overview", theme, size[0])}
 			f := RenderFrame(m.Snapshot(), u, size[0], size[1])
-			if len(f.Lines) != size[1] || f.CursorY != size[1]-2 || !strings.Contains(f.Lines[len(f.Lines)-2], "Ask") {
-				t.Fatal("trust metadata displaced bottom composer", size)
+			if len(f.Lines) != size[1] || f.CursorY != size[1]-1 || strings.Contains(f.Lines[len(f.Lines)-2], "Ask") {
+				t.Fatal("trust metadata escaped the full-screen viewport", size)
 			}
 			for _, line := range f.Lines {
 				if uniseg.StringWidth(sgrRE.ReplaceAllString(line, "")) >= size[0] || theme.Plain && strings.Contains(line, "\x1b") {
 					t.Fatal("trust overview broke bounded/plain rendering", size)
 				}
 			}
-			u.Sheet.Offset = 1_000_000
-			if end := RenderFrame(m.Snapshot(), u, size[0], size[1]); end.CursorY != size[1]-2 {
-				t.Fatal("scrolling overview moved composer")
+			u.analysis.offset = 1_000_000
+			if end := RenderFrame(m.Snapshot(), u, size[0], size[1]); end.CursorY != size[1]-1 {
+				t.Fatal("scrolling overview moved the pager cursor")
 			}
 		}
 	}

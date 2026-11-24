@@ -28,6 +28,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/tool/observed"
 	"github.com/unreallabsai/unreal-agent/harness/tool/viewimage"
 	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -57,16 +58,19 @@ type RuntimeConfig struct {
 	ValidateChildTemplate func(subagent.Template, subagent.Template) error
 	// Context is a versioned, disposable projection strategy. It is deliberately
 	// outside immutable runtime/auth identity, so old histories need no migration.
-	Context contextengine.Config
+	Context     contextengine.Config
+	ContextFile *contextengine.ConfigFile
 	// ClaudeSubagents lets the Claude route drive this Host's child templates
 	// through Bash (U21); zero when there are none.
-	ClaudeSubagents  claudeagent.SubagentCLI
-	TaskInput        inbox.ID
-	Identity         RuntimeIdentity
-	SessionDirectory string
-	Providers        *provider.Registry
-	Credentials      credential.Resolver
-	HTTPClient       *http.Client
+	ClaudeSubagents claudeagent.SubagentCLI
+	// ServeChildCommands binds the process-owned CLI gateway before a child starts.
+	ServeChildCommands func(context.Context, *host.Host) (io.Closer, error)
+	TaskInput          inbox.ID
+	Identity           RuntimeIdentity
+	SessionDirectory   string
+	Providers          *provider.Registry
+	Credentials        credential.Resolver
+	HTTPClient         *http.Client
 	// Borrowed read-only discovery/cache; never part of RuntimeIdentity.
 	ModelCatalog func(context.Context) (modelcatalog.Catalog, error)
 	Discovered   *DiscoveredBackends
@@ -320,6 +324,9 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 			closeRuntime()
 			return host.Runtime{}, e
 		}
+		builder.(interface {
+			SetContextConfigFile(*contextengine.ConfigFile)
+		}).SetContextConfigFile(c.ContextFile)
 		registry := &selectedTools{Registry: configured.Registry}
 		refreshPermission := func(context.Context) error {
 			updated := constraints

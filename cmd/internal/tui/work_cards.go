@@ -57,19 +57,18 @@ func cardModel(r viewer.Row) string {
 	return safeCardText(value)
 }
 
-// cardStats gives a child's latest context size, output speed and cache hit
-// as bare numbers; the footer keeps the main agent's. The cache hit rate keeps
-// one decimal because it matters most; the context size is rounded to fit.
+// cardStats displays the child's latest context size and output speed, and
+// its Session's cumulative cache read share.
 func cardStats(r viewer.Row) string {
 	var parts []string
-	u := r.LastUsage
-	if u.Known && u.Input > 0 && !slices.Contains(u.Unknown, llm.UsageInput) {
-		parts = append(parts, roundedNumber(u.Input))
+	latest := r.LastUsage
+	if latest.Known && latest.Input > 0 && !slices.Contains(latest.Unknown, llm.UsageInput) {
+		parts = append(parts, roundedNumber(latest.Input))
 	}
 	if r.OutputTPSKnown || r.OutputTPS > 0 {
 		parts = append(parts, fmt.Sprintf("%.0f t/s", r.OutputTPS))
 	}
-	if ratio, known := u.CacheRatio(); known {
+	if ratio, known := r.Usage.CacheRatio(); known {
 		parts = append(parts, fmt.Sprintf("%.1f%%", 100*ratio))
 	}
 	return strings.Join(parts, " · ")

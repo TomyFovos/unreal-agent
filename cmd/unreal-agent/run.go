@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"sync"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
@@ -25,7 +24,6 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
-	"github.com/unreallabsai/unreal-agent/harness/tool"
 	"github.com/unreallabsai/unreal-agent/internal/buildfeatures"
 )
 
@@ -70,7 +68,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		promptFile := flags.String("prompt-file", "", "exec: UTF-8 task input file")
 		sessionID := flags.String("session", "", "exec: new Session ID")
 		mode := flags.String("permission-mode", "full_access", "exec: permission mode selected by the operator")
-		subagentModelFile := flags.String("subagent-model-file", "", "the sub-agents' model chosen with subagent model, shared by every Session and read at each child start (internal launcher option)")
+		subagentModelFile := flags.String("subagent-model-file", "", "shared initial default for Session role selections (internal launcher option)")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -81,6 +79,10 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			return errors.New("exec requires --prompt-file, --session and a valid --permission-mode")
 		}
 		config, err := readServeConfiguration(*path)
+		if err != nil {
+			return err
+		}
+		contextFile, err := contextengine.NewConfigFile(*path, config.Context)
 		if err != nil {
 			return err
 		}
@@ -101,18 +103,18 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		subagentModelPath := ""
 		if len(config.Subagents) == 0 {
 			if config.SubagentDefaults == nil {
-				subagentModelPath = *subagentModelFile
+				subagentModelPath = absolutePath(*subagentModelFile)
 			}
 			// An unreadable choice counts as Codex here; each start then
 			// reports it rather than running another model.
 			chosen, _ := readSubagentModel(subagentModelPath)
-			if defaults := defaultSubagents(config, chosen); defaults != nil {
+			if defaults := defaultSubagents(config, chosen, subagentModelPath != ""); defaults != nil {
 				maximum := withChildTools(*config.PermissionModes.Maximum)
 				config.PermissionModes.Maximum = &maximum
 				config.Subagents, builtinSubagents = defaults, config.SubagentDefaults == nil
 			}
 		}
-		policy, err := permission.New(withClaudeCodeRecord(config.Permissions))
+		policy, err := permission.New(agentrunner.WithClaudeCodeRecord(config.Permissions))
 		if err != nil {
 			return err
 		}
@@ -124,7 +126,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 				return err
 			}
 			if config.PermissionModes.Enabled {
-				modeMaximum, err = permission.New(withClaudeCodeRecord(*config.PermissionModes.Maximum))
+				modeMaximum, err = permission.New(agentrunner.WithClaudeCodeRecord(*config.PermissionModes.Maximum))
 				if err != nil {
 					return err
 				}
@@ -208,24 +210,29 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			childDefaultCredentials = *defaultCredentials
 			discovered = &agentrunner.DiscoveredBackends{}
 		}
-		runtimeConfig, templates, err := withParentSubagents(agentrunner.RuntimeConfig{CredentialSources: config.apiKeySources(), BuiltinSubagents: builtinSubagents, Context: config.Context, Identity: config.Runtime, SessionDirectory: *directory, Providers: registry, Credentials: resolver, LanguageTools: languageTools, DebugAdapters: config.DebugAdapters, Backends: config.Providers, Health: health, Catalogs: catalogs, Discovered: discovered}, config.Subagents, capabilityPolicy, *credentials, childDefaultCredentials, codexPath, subagentModelPath)
+		runtimeConfig, templates, err := withParentSubagents(agentrunner.RuntimeConfig{CredentialSources: config.apiKeySources(), BuiltinSubagents: builtinSubagents, Context: config.Context, ContextFile: contextFile, Identity: config.Runtime, SessionDirectory: *directory, Providers: registry, Credentials: resolver, LanguageTools: languageTools, DebugAdapters: config.DebugAdapters, Backends: config.Providers, Health: health, Catalogs: catalogs, Discovered: discovered}, config.Subagents, capabilityPolicy, *credentials, childDefaultCredentials, codexPath, subagentModelPath)
 		if err != nil {
 			return err
 		}
 		if runtimeConfig.ClaudeSubagents, err = claudeSubagents(templates, *socket, subagentModelPath); err != nil {
 			return err
 		}
+		roleModels := subagentModelScope{defaultFile: subagentModelPath, sessionDirectory: *directory}
 		if subagentModelPath != "" {
-			runtimeConfig.ClaudeSubagents.Roles = subagentRoles(runtimeConfig, subagentModelPath, templates)
+			runtimeConfig.ClaudeSubagents.Roles = subagentRoles(runtimeConfig, roleModels, templates)
+		} else if config.SubagentDefaults != nil && claudeagent.IsProvider(config.SubagentDefaults.Provider) {
+			runtimeConfig.ClaudeSubagents.Roles = subagentRoles(runtimeConfig, roleModels, templates)
 		}
-		// Claude is told about the children while the provider they run on is
-		// available: Codex, or OpenCode Go when subagent model chose it.
+		// Advertise children only while their configured connection is available.
 		runtimeConfig.ClaudeSubagents.Available = func(ctx context.Context) bool {
-			chosen, _ := readSubagentModel(subagentModelPath)
+			chosen, err := roleModels.read(ctx, "")
+			if err != nil {
+				return false
+			}
 			if chosen.Provider == "" && config.SubagentDefaults != nil {
 				return providerAvailable(ctx, runtimeConfig, config.SubagentDefaults.Provider)
 			}
-			return subagentsAvailable(ctx, runtimeConfig, subagentModelPath)
+			return subagentsAvailable(ctx, runtimeConfig, chosen)
 		}
 		if normalMode {
 			runtimeConfig.ProviderProcess = true
@@ -247,6 +254,18 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		factory, identity, err := agentrunner.NewRuntimeFactory(runtimeConfig)
 		if err != nil {
 			return err
+		}
+		if subagentModelPath != "" {
+			build := factory
+			factory = func(ctx context.Context, id session.ID) (host.Runtime, error) {
+				runtime, err := build(ctx, id)
+				if err == nil {
+					// Seed new and pre-upgrade Sessions on open. Role commands
+					// report a read error without preventing the main Session.
+					_, _ = roleModels.read(ctx, id)
+				}
+				return runtime, err
+			}
 		}
 		if normalMode {
 			build := factory
@@ -284,7 +303,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		}
 		gatewayConfig := withViewer(gateway.Config{Host: owner, Policy: policy, Configuration: identity, Auth: auth, Workspace: workspace}, *directory)
 		binding := launcherHostBinding{Configuration: absolutePath(*path), Sessions: absolutePath(*directory), Credentials: absolutePath(*credentials), CodexFile: absolutePath(*codexFile), Normal: *normal, OpenCodeGoDisabled: !buildfeatures.OpenCodeGoEnabled}
-		models := modelUI{apiReads: apiReads, rediscover: rediscover, supported: config.providerStatuses, binding: &binding, owner: owner, runtime: runtimeConfig, templates: templates, policy: policy, codexRead: codexRead, claudeAgent: claudeAgent, openCodeGo: openCodeGoModels, subagentModel: subagentModelPath, next: gatewayConfig.Extension}
+		models := modelUI{apiReads: apiReads, rediscover: rediscover, supported: config.providerStatuses, binding: &binding, owner: owner, runtime: runtimeConfig, templates: templates, policy: policy, codexRead: codexRead, claudeAgent: claudeAgent, openCodeGo: openCodeGoModels, subagentModel: roleModels, next: gatewayConfig.Extension}
 		gatewayConfig.Extension = models
 		if args[0] == "exec" {
 			return executeHeadless(ctx, *socket, gatewayConfig, session.ID(*sessionID), *promptFile, permission.Mode(*mode))
@@ -334,15 +353,4 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	default:
 		return errors.New("unsupported command: expected serve or attach")
 	}
-}
-
-// withClaudeCodeRecord lets every policy, the Read Only baseline included, keep
-// claude_code receipts. They only record calls Claude Code already ran after
-// Unreal's mode approved them (U21) and grant nothing, so a policy saved
-// before the route existed covers them too.
-func withClaudeCodeRecord(c permission.Config) permission.Config {
-	if !slices.Contains(c.Tools, tool.ClaudeCodeName) {
-		c.Tools = append(slices.Clone(c.Tools), tool.ClaudeCodeName)
-	}
-	return c
 }

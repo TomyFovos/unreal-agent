@@ -57,7 +57,7 @@ Settings store only the file paths, never key values. Files without permissions 
    ```
 
 3. Check the printed connection summary.
-   Among ready subscriptions, a new installation starts with Claude when both are ready, or the ready subscription. API connections require explicit selection in `/model`. Claude uses GPT children when Codex is available, otherwise Claude Code's Agent (`haiku` / `sonnet`, or the Claude model chosen with `unreal-agent subagent model`). Without a saved `unreal-agent subagent model` choice, an OpenAI API parent uses its API connection for built-in GPT children; other parents retain Codex. On the user’s instruction, the main agent uses `unreal-agent subagent model show/set` to read or change `lead`, `worker`, `collector`, or `all`; an explicit role setting takes priority. Unavailable authentication never triggers a connection switch.
+   Among ready subscriptions, a new installation starts with Claude when both are ready, or the ready subscription. API connections require explicit selection in `/model`. Delegation always uses Unreal child Sessions. On the user's instruction, the main agent uses `unreal-agent subagent model show/set` to read or change the connection, model, or effort for `lead`, `worker`, `collector`, or `all`. Without a saved choice, an OpenAI API parent uses its API connection for built-in GPT children. Other parents use the Codex subscription. If a role's connection is unavailable, Unreal reports the recovery steps.
 4. Navigate to your project directory and start a named Session:
 
    ```bash
@@ -100,7 +100,7 @@ unreal --where NAME     # print the folder(s) that have Session NAME
 
 (`unreal-agent folders ...` is the same subcommand without the wrapper.)
 
-The folder is the Git worktree root containing the current directory (the directory itself outside Git), with symlinks resolved. One Host runs per folder, with its own configuration `~/.config/unreal-agent/folders/<ID>/runtime.json` and state `~/.local/state/unreal-agent/folders/<ID>/` (`<ID>` is `r-` plus the first 16 hex characters of the SHA-256 of the folder path). The default folder — `Runtime.Workspace` in `~/.config/unreal-agent/runtime.json` — keeps that file and `~/.local/state/unreal-agent` and launches with no extra flags. The Claude login, the OpenCode Go API key and the `unreal-agent subagent model` choice are shared by every folder; the Claude sandbox allows only that Host's socket, so the subagent CLI keeps working.
+The folder is the Git worktree root containing the current directory (the directory itself outside Git), with symlinks resolved. One Host runs per folder, with its own configuration `~/.config/unreal-agent/folders/<ID>/runtime.json` and state `~/.local/state/unreal-agent/folders/<ID>/` (`<ID>` is `r-` plus the first 16 hex characters of the SHA-256 of the folder path). The default folder — `Runtime.Workspace` in `~/.config/unreal-agent/runtime.json` — keeps that file and `~/.local/state/unreal-agent` and launches with no extra flags. Folders share the Claude login, the OpenCode Go API key, and the initial subagent role defaults. Each Session saves its own role choices. The Claude sandbox allows the Session's Host socket so the subagent CLI can reach it.
 
 Roll back with an older revision: `make mac-install REV=<older commit>`.
 
@@ -142,6 +142,8 @@ If you use an existing Linux Docker Sandbox on Windows:
 
 3. Change to your project directory inside the Sandbox and run `unreal development`.
 
+For a Sandbox that uses UTC, add `--time-zone Asia/Tokyo` to the `development.sh` command in step 2, replacing `Asia/Tokyo` with your IANA time zone. The setting survives updates. A `TZ` value set in your launch shell takes precedence.
+
 > **Reference:** Uses Docker's [`sbx cp`](https://docs.docker.com/reference/cli/sbx/cp/) and [`sbx exec`](https://docs.docker.com/reference/cli/sbx/exec/) commands against an existing Sandbox.
 
 ---
@@ -164,6 +166,7 @@ Pass these flags to `bash development.sh` during installation or update (not to 
 
 | Flag | Description |
 | --- | --- |
+| `--time-zone <IANA-zone>` | Save the time zone used by Unreal in this installation, for example `Asia/Tokyo` |
 | `--codex-auto` | Automatically detect external Codex login or Docker Sandbox OAuth (default on fresh install) |
 | `--external-codex` | Select external Codex login (`OPENAI_CODEX_AUTH_FILE`, then `$CODEX_HOME/auth.json`, then `~/.codex/auth.json`) |
 | `--docker-sandbox-oauth` | Require Docker Sandbox host-managed OAuth proxy routing |

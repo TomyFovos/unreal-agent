@@ -85,40 +85,26 @@ Check `host.log` around the timestamp of any failure.
 
 ## Read analysis and measurements
 
-Run `/analyze` in the TUI to inspect detailed Session diagnostics and token accounting.
+Run `/analyze` to open the full-screen view list. Use ↑/↓ and **Enter** to open a view. Scroll with ↑/↓ or **PgUp/PgDn**. **Esc** or **Enter** returns from a view to the list. **Esc** from the list returns to chat. The list opens while history loads.
 
-1. Run `/analyze` to open the view picker.
-2. Select a view (`Enter` or `Esc` returns to the picker).
-3. Select **Export** to save the analysis report as JSON or Markdown (or use `/export all` for the full conversation with statistics).
+| View | Question | How to read it |
+| --- | --- | --- |
+| **Overview** | Is this Session healthy right now? | Check the running or wait state, compare the last hour's cache read share with the Session, then check token use, remaining allowances, recent failures and active children by model. |
+| **Usage** | What consumed tokens, and where is waste? | Models and roles are ranked by weighted tokens and show their share of the Session. Stacks split cache reads, writes, uncached input and output. Compare writes on the first request after a rebuild with other requests. Scroll for the five highest-usage children and each model's hourly chart. |
+| **Subscription usage** | When will each allowance run out? | Compare each remaining gauge with its reset. The chart shows observed used percentage and a dotted forecast to exhaustion or reset, whichever comes first. The projected time is labelled before, at or after reset. |
+| **Context** | Is the 3-layer window healthy and cheap? | Compare request input with the latest recorded W threshold. Ticks mark rebuilds. A rebuild can have several causes. Compare cache reads immediately after a rebuild with steady state and read the recorded proportions of the latest window. Extended history in L3 has no recorded token size. [Three-layer context measurements](context-3layer.md#measuring) |
+| **Agents** | Which children cost the most, which failed, which are stuck? | Scan the weighted-token ranking for each child's result and cache share. Duration is relative to the longest child. Time since last activity is highlighted above 15 minutes and again above 45 minutes for running children. |
+| **Tools** | Where does tool time go and what fails? | Compare each tool's share of timed calls and its failure rate among completed or failed calls. The longest five calls have their own bars. |
+| **Time** | Where did wall-clock time go? | Check the main Session's total and hourly stacks. Overlapping intervals count once, with approval and usage-limit waits first, then recorded child waits, tools and generation. Unattributed time marks gaps in phase evidence. Identical consecutive hours are grouped. Press **E** to toggle raw events. |
+| **Errors** | What is failing now? | Compare the last hour with the Session total by error kind. The newest recorded failures are first. |
+| **Turns** | Which turns used the most input and output? | Each bar splits cached input, other input and output. Lengths are relative to the largest turn. |
+| **Export** | How can I save analysis data? | Save metadata and statistics as JSON or Markdown. The exports retain detailed measurements for archived children and historical summary strategies. |
 
-### `/analyze` Views
+**Tokens.** Weighted use adds uncached input, cache writes and output. Cache reads have their own series. Weights rank token use without pricing it. Usage and Agents include recorded descendants at any depth. Claude's per-model usage breakdown replaces the corresponding turn totals when available. The last 12 hourly buckets feed the token chart. The current incomplete hour is plotted separately from the EMA. The EMA uses alpha **0.35** per completed hour, starts again after gaps, and projects the latest smoothed rate for the next **3 hours** as a dotted line.
 
-| View | What It Shows |
-| --- | --- |
-| **Overview** | Active provider/model, response & tool counts, elapsed time, and Host commit/build metadata |
-| **Usage** | Input tokens, cached input tokens, reasoning/output tokens, and Claude turn-total observations |
-| **Turns** | Per-turn provider, model, effort, and token usage |
-| **Tools** | Tool operation outcomes and Claude Bash hook durations (`native_bash`) |
-| **Agents** | Child agents, final statuses, and `child_start` template/model/effort records |
-| **Context** | Context window size, average input tokens and historical compaction observations |
-| **Timeline** | Chronological event log and activity durations |
-| **Errors** | Recorded errors and redacted provider diagnostics |
-| **Layers** | Request and worker-model comparisons across the Session tree |
-| **Context metrics** | Three-layer windows, excerpt fits, historical summary records, per-window cache and L1/L2/L3 measurements, child reviews, and user questions per work hour |
-| **Subscription usage** | Latest observed remaining and used percentage, provider status, reset time, and observation time for each ChatGPT and Claude allowance window |
-| **Export** | Save the analysis views, including subscription usage and context measurements, as JSON or Markdown |
+**Allowances.** Unreal uses observations from the main Session and its descendants, including archived ones. These percentages describe the provider account. The burn rate is in percentage points per hour, using up to **3 hours** of observations up to the latest observation in the same reset cycle. Its EMA uses alpha **0.35** for a one-hour interval, adjusted for the time between observations. The estimate starts at the latest observation. After reset, the gauge is `—` until a new observation arrives.
 
-**Context metrics** includes archived descendants and labels values `measured`, `derived`, or `unknown`. [Three-layer context measurements](context-3layer.md#measuring)
-
-**Subscription usage** uses the latest record for each window across the main Session and its descendants, including archived children. Unreal uses allowance data already captured during model requests. Providers can report windows independently, so observation times can differ. An unreported percentage is `unknown`. After the recorded reset time, the row shows `reset since` and the observation time until a new measurement arrives. JSON uses `State` to distinguish `unknown`, `reset_since`, and `observed`, and omits `UsedPercent` when unavailable.
-
-### How Metrics Are Calculated
-
-- **Cache percentage:** `cached_input / input` across reported usage.
-- **Footer context vs. Average input:** The TUI footer shows the **latest request's** context size (not the sum of a multi-step tool loop). Average input in `/analyze` averages across all reported model calls (including calls recorded under the historical summary strategy).
-- **Generation speed (`tok/s`):** Calculated from reported output tokens and generation time. A `~` prefix indicates client-clock timing. Claude Bash elapsed time measures from the pre-tool hook to completion.
-- **Claude turn-total usage:** Already included in response totals—do not add it a second time.
-- **Unknown vs. Zero:** If a provider does not report token usage, Unreal displays it as **unknown** (`—`), never as `0`. Labels like `partial/incomplete history` or `resync` indicate that statistics reflect only the observed portion of history.
+**Signals.** Cache read share is OK at **90%** or higher, warning at **75%** to below **90%**, and bad below **75%**. Allowance warnings begin at **20%** remaining and turn bad at **10%**. Failure rate warns at **5%** and turns bad at **15%**. These are display thresholds. `—` means the value is unavailable. `~` marks an observed subtotal or a comparison with incomplete coverage. On narrow screens, rows keep their bars on one line and shorter table columns may be omitted.
 
 ### Context budget errors
 

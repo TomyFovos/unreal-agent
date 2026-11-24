@@ -16,6 +16,7 @@ import (
 )
 
 func TestRunModelAndAnalyzePickersCancelScrollConfirmExportAndLiveUpdates(t *testing.T) {
+	t.Setenv("LC_ALL", "C.UTF-8")
 	for _, size := range [][2]int{{80, 24}, {60, 20}, {44, 14}} {
 		t.Run(fmt.Sprint(size), func(t *testing.T) {
 			f := newFake()
@@ -188,7 +189,7 @@ func TestRunModelAndAnalyzePickersCancelScrollConfirmExportAndLiveUpdates(t *tes
 			f.view.History.Items = append(f.view.History.Items, host.HistoryItem{Sequence: 4, Kind: sessionstore.ItemTurn, Data: session.Turn{ID: "turn", RuntimeRevision: 1}}, host.HistoryItem{Sequence: 5, Kind: sessionstore.ItemModelResponse, Data: sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{Usage: llm.Usage{InputTokens: 7, OutputTokens: 2}}}})
 			f.mu.Unlock()
 			f.events <- host.Event{Generation: "g", Revision: 3, Kind: "item"}
-			waitFor(t, func() bool { return strings.Contains(out.text(), "input         7") })
+			waitFor(t, func() bool { return strings.Contains(out.text(), "R 0  W 0  U 7  O 2") })
 			keys <- Key{Name: "escape"}
 			pick("Usage")
 			keys <- Key{Name: "escape"}

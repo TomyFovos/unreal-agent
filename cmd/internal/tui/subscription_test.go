@@ -111,10 +111,10 @@ func TestSubscriptionUsageAcrossSessionTree(t *testing.T) {
 	if err := m.EnsureAnalysis(t.Context(), reader); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.LoadAnalysisTree(t.Context(), remote.InspectTree); err != nil {
+	report, err := m.readAnalysisTree(t.Context(), remote.InspectTree, u.Now, u.Viewer.Rows, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	report := m.Analysis(u.Now, u.Viewer.Rows)
 	if report.Tree == nil || report.Tree.Partial || len(report.SubscriptionUsage) != 7 {
 		t.Fatal("incomplete subscription analysis", report.SubscriptionUsage)
 	}
@@ -179,6 +179,143 @@ func TestSubscriptionUsageAcrossSessionTree(t *testing.T) {
 	report = m.Analysis(u.Now, u.Viewer.Rows, u.Viewer.SubscriptionUsage)
 	if lines := strings.Join(analysis.Lines(report, analysis.SubscriptionUsageView, true), "\n"); !strings.Contains(lines, "Claude seven_day / 68% left / used 32%") {
 		t.Fatal("open analysis missed the live weekly update", lines)
+	}
+
+	awaitWeekly := func(label string) {
+		t.Helper()
+		waitFor(t, func() bool {
+			u.Viewer = panel.Snapshot(u.Now)
+			return strings.Contains(statisticsBar(m.Snapshot(), u, makeLayout(160, 40)).plain(), "週 "+label)
+		})
+	}
+	checkStaleWeekly := func(status string) {
+		t.Helper()
+		awaitWeekly("—")
+		report, err := m.readAnalysisTree(t.Context(), remote.InspectTree, u.Now, u.Viewer.Rows, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, w := range report.SubscriptionUsage {
+			if w.Provider == "claude" && w.Window == "seven_day" {
+				if w.State != "stale" || w.UsedPercent != nil || w.Status != status {
+					t.Fatalf("stale allowance displayed as current: %+v", w)
+				}
+				return
+			}
+		}
+		t.Fatal("missing stale Claude weekly window")
+	}
+	rejection := llm.SubscriptionUsage{Window: "seven_day", Status: "rejected", UsedPercent: new(99.0), ResetsAt: weekReset}
+	appendUsage(f.Lead, "claude", rejection)
+	awaitWeekly("残り1%")
+	appendUsage(f.Lead, "claude", llm.SubscriptionUsage{Window: rejection.Window, Status: "allowed", ResetsAt: weekReset})
+	checkStaleWeekly("allowed")
+
+	appendUsage(f.Lead, "claude", rejection)
+	awaitWeekly("残り1%")
+	child := f.Workers["flash-first"]
+	turn := session.Turn{ID: "claude-recovery", PreviousTurnID: "turn", Type: session.TurnRegular}
+	if err := store.AppendTurn(t.Context(), child, turn); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendModelResponse(t.Context(), child, sessionstore.ModelResponse{
+		TurnID: turn.ID, Response: llm.Response{Provider: "claude", Stop: llm.StopComplete},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	checkStaleWeekly("")
+	appendUsage(f.Lead, "claude", llm.SubscriptionUsage{Window: rejection.Window, Status: "allowed", UsedPercent: new(2.0), ResetsAt: weekReset})
+	awaitWeekly("残り98%")
+}
+
+func TestSubscriptionUsesLastPercentageFromSameCycle(t *testing.T) {
+	now := time.Date(2026, 11, 23, 4, 0, 0, 0, time.UTC)
+	reset := now.Add(24 * time.Hour)
+	var latest llm.SubscriptionObservations
+	latest.Observe(llm.ActivityRecord{Kind: llm.ActivitySubscriptionUsage, Provider: "claude", Subscription: []llm.SubscriptionUsage{
+		{Window: "seven_day", Status: "rejected", ResetsAt: reset.Add(time.Second)},
+	}}, now)
+	// A different descendant can supply the earlier percentage after the
+	// newer status has already been merged.
+	var other llm.SubscriptionObservations
+	other.Observe(llm.ActivityRecord{Kind: llm.ActivitySubscriptionUsage, Provider: "claude", Subscription: []llm.SubscriptionUsage{
+		{Window: "seven_day", Status: "allowed_warning", UsedPercent: new(99.0), ResetsAt: reset},
+	}}, now.Add(-time.Minute))
+	latest.Merge(other)
+	latest.Observe(llm.ActivityRecord{Kind: llm.ActivitySubscriptionUsage, Provider: "openai-codex", Subscription: []llm.SubscriptionUsage{
+		{Window: "secondary", UsedPercent: new(0.0)},
+	}}, now)
+	windows := analysis.SubscriptionWindows(latest, now)
+	var weekly, secondary analysis.SubscriptionWindow
+	for _, w := range windows {
+		switch w.Window {
+		case "seven_day":
+			weekly = w
+		case "secondary":
+			secondary = w
+		}
+	}
+	if weekly.UsedPercent == nil || *weekly.UsedPercent != 99 || weekly.Status != "rejected" ||
+		!weekly.ObservedAt.Equal(now) || !weekly.PercentTime().Equal(now.Add(-time.Minute)) {
+		t.Fatalf("status and percentage came from different cycles or lost their timestamps: %+v", weekly)
+	}
+	if secondary.UsedPercent != nil || secondary.State != "unknown" {
+		t.Fatalf("legacy placeholder became a full window: %+v", secondary)
+	}
+	r := analysis.Report{At: now, SubscriptionUsage: []analysis.SubscriptionWindow{weekly, secondary}}
+	output := analysisText(r, analysis.SubscriptionUsageView, 99, false)
+	_, secondaryRow, _ := strings.Cut(output, "ChatGPT secondary")
+	if !strings.Contains(output, "used 99.0%  rejected") || !strings.Contains(secondaryRow, "—") ||
+		strings.Contains(secondaryRow, "100.0%") || strings.Contains(secondaryRow, "steady") {
+		t.Fatal("subscription status or placeholder was rendered incorrectly", output)
+	}
+	nextCycle := reset.AddDate(0, 0, 7)
+	latest.Observe(llm.ActivityRecord{Kind: llm.ActivitySubscriptionUsage, Provider: "claude", Subscription: []llm.SubscriptionUsage{
+		{Window: "seven_day", Status: "allowed", ResetsAt: nextCycle},
+	}}, reset.Add(time.Minute))
+	for _, w := range latest {
+		if w.Window == "seven_day" && (w.UsedPercent != nil || !w.ResetsAt.Equal(nextCycle)) {
+			t.Fatalf("percentage crossed a reset: %+v", w)
+		}
+	}
+}
+
+func TestSubscriptionResponseRecoveryUsesRecordedRuntime(t *testing.T) {
+	now := time.Date(2026, 11, 23, 4, 0, 0, 0, time.UTC)
+	m := NewModel("main")
+	v := host.View{}
+	appendItem := func(kind sessionstore.ItemKind, data any) {
+		t.Helper()
+		page := &v.History
+		page.NextAfter++
+		at := now.Add(time.Duration(page.NextAfter) * time.Second)
+		page.Items = append(page.Items, host.HistoryItem{Sequence: page.NextAfter, RecordedAt: at, Kind: kind, Data: data})
+		if err := m.apply(v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendItem(sessionstore.ItemHostRecord, sessionstore.HostRecord{Kind: "configuration",
+		Configuration: []byte(`{"Provider":{"provider":"claude","model":{"id":"claude-test"}}}`)})
+	appendItem(sessionstore.ItemHostRecord, sessionstore.HostRecord{Kind: sessionstore.HostActivity, Activity: &llm.ActivityRecord{
+		Kind: llm.ActivitySubscriptionUsage, Provider: "claude", Subscription: []llm.SubscriptionUsage{
+			{Window: "seven_day", Status: "rejected", UsedPercent: new(99.0), ResetsAt: now.Add(time.Hour)},
+			{Window: "five_hour", Status: "allowed_warning", UsedPercent: new(90.0), ResetsAt: now.Add(time.Hour)},
+		},
+	}})
+	appendItem(sessionstore.ItemModelResponse, sessionstore.ModelResponse{
+		Response: llm.Response{Provider: "openai-codex", Stop: llm.StopComplete},
+	})
+	appendItem(sessionstore.ItemModelResponse, sessionstore.ModelResponse{
+		AdapterError: true, Response: llm.Response{Stop: llm.StopComplete},
+	})
+	u := UIState{Now: now.Add(time.Minute), Theme: Theme{Plain: true}}
+	footer := func() string { return statisticsBar(m.Snapshot(), u, makeLayout(160, 40)).plain() }
+	if got := footer(); !strings.Contains(got, "週 残り1%") {
+		t.Fatal("an unrelated response cleared the percentage", got)
+	}
+	appendItem(sessionstore.ItemModelResponse, sessionstore.ModelResponse{Response: llm.Response{Stop: llm.StopComplete}})
+	if got := footer(); !strings.Contains(got, "週 —") || !strings.Contains(got, "5h 残り10%") {
+		t.Fatal("a successful response did not retire just the rejected percentage", got)
 	}
 }
 

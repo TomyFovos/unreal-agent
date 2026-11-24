@@ -64,7 +64,6 @@ type Config struct {
 	ProviderCatalog     func(context.Context, string, bool) (modelcatalog.Catalog, error)
 	RuntimeCapabilities func(context.Context) (map[string]modelcatalog.Capabilities, error)
 	ExportAnalysis      func(context.Context, analysis.Report, string) (string, error)
-	PrepareAnalysis     func(context.Context) error
 	AnalysisInspect     analysis.InspectFunc
 	// Empty uses the standard private state export directory. No subprocess
 	// backend is used for public conversation exports.
@@ -102,6 +101,10 @@ func Run(ctx context.Context, c Config) error {
 		defer c.ViewChanged(ViewChat)
 	}
 	m := NewModel(c.ID)
+	inspectAnalysis := c.AnalysisInspect
+	if inspectAnalysis == nil {
+		inspectAnalysis = rootAnalysisInspector(c.Client, c.ID)
+	}
 	var current Snapshot
 	snapshot := func() Snapshot {
 		if current.Version != m.Version() {
@@ -190,6 +193,24 @@ func Run(ctx context.Context, c Config) error {
 			u.Notification.Until = time.Now().Add(8 * time.Second)
 		}
 	}
+	exportAnalysis := func(format string) {
+		p := u.analysis
+		if c.ExportAnalysis == nil {
+			p.problem = "Analysis export unavailable"
+			return
+		}
+		if p.report == nil {
+			p.exportFormat = format
+			return
+		}
+		report := *p.report
+		p.cancel()
+		u.analysis = nil
+		start("exporting metadata/statistics only", func(ctx context.Context) commandResult {
+			path, err := c.ExportAnalysis(ctx, report, format)
+			return commandResult{text: "Analysis exported: " + path, err: err}
+		})
+	}
 	stopSession := func(modes ...inbox.ControlMode) {
 		inputs := make([]inbox.Input, len(modes))
 		for i, mode := range modes {
@@ -225,8 +246,7 @@ func Run(ctx context.Context, c Config) error {
 	dirty := true
 	viewerDirty := true
 	viewerSecond := int64(0)
-	var analysisSheet *Sheet
-	var analysisVersion, analysisViewerVersion uint64
+	analysisUpdates := make(chan analysisUpdate, 1)
 	width, height := 80, 24
 	previousWidth, previousHeight, previousRows := 0, 0, 0
 	previousConversationHeight := 0
@@ -274,7 +294,6 @@ func Run(ctx context.Context, c Config) error {
 					u.Picker = viewPicker(selected, width)
 				}
 			}
-			viewerChanged := false
 			if c.Viewer != nil && (viewerDirty || viewerSecond != u.Now.Unix()) {
 				u.Viewer = c.Viewer(u.Now)
 				viewerDirty, viewerSecond = false, u.Now.Unix()
@@ -285,7 +304,6 @@ func Run(ctx context.Context, c Config) error {
 						break
 					}
 				}
-				viewerChanged = true
 			}
 			s := snapshot()
 			if s.Connected && s.Selection != nil && !u.Busy {
@@ -294,23 +312,8 @@ func Run(ctx context.Context, c Config) error {
 				}
 				selectionGeneration, selectionRevision = s.Generation, s.Selection.Revision
 			}
-			if u.Sheet != nil && u.Sheet.Analysis != "" {
-				reset := !u.Sheet.refreshAt.IsZero() && !u.Now.Before(u.Sheet.refreshAt)
-				if u.Sheet != analysisSheet || s.Version != analysisVersion || u.Viewer.Version != analysisViewerVersion || analysisShowsElapsed(u.Sheet) && viewerChanged || reset {
-					report := m.Analysis(u.Now, u.Viewer.Rows, u.Viewer.SubscriptionUsage)
-					u.Sheet.Lines = analysis.Lines(report, u.Sheet.Analysis, u.Theme.ASCII)
-					if u.Sheet.Analysis == analysis.SubscriptionUsageView {
-						u.Sheet.refreshAt = time.Time{}
-						for _, window := range report.SubscriptionUsage {
-							if window.ResetsAt.After(u.Now) && (u.Sheet.refreshAt.IsZero() || window.ResetsAt.Before(u.Sheet.refreshAt)) {
-								u.Sheet.refreshAt = window.ResetsAt
-							}
-						}
-					}
-					analysisSheet, analysisVersion, analysisViewerVersion = u.Sheet, s.Version, u.Viewer.Version
-				}
-			} else {
-				analysisSheet = nil
+			if u.analysis != nil {
+				u.analysis.request(m, inspectAnalysis, s, u.Viewer, u.Theme, u.Now, makeLayout(width, height).width, analysisUpdates)
 			}
 			if c.WatchPermissions != nil && s.Connected && s.Generation != "" && permissionGeneration != s.Generation {
 				if cancelPermission != nil {
@@ -359,13 +362,13 @@ func Run(ctx context.Context, c Config) error {
 					}
 				}()
 			}
-			if s.Permissions.Enabled && len(s.Permissions.Pending) > 0 && s.Permissions.Pending[0].ID != u.PermissionDismissed && u.Picker == nil && u.Sheet == nil && !u.Busy && strings.TrimSpace(editor.Text()) == "" {
+			if u.analysis == nil && s.Permissions.Enabled && len(s.Permissions.Pending) > 0 && s.Permissions.Pending[0].ID != u.PermissionDismissed && u.Picker == nil && u.Sheet == nil && !u.Busy && strings.TrimSpace(editor.Text()) == "" {
 				u.Picker = operationPermissionConfirmation(s, s.Permissions.Pending[0])
 			}
 			files.sync(s, &u, &editor)
 			streaming := s.Progress != nil && s.Progress.Mode == "streaming" && !s.Progress.Done
 			frame = RenderFrame(s, u, width, height)
-			if u.HistoryTop && frame.View != ViewOrchestration {
+			if u.analysis == nil && u.HistoryTop && frame.View != ViewOrchestration {
 				u.Scroll = frame.ScrollMax
 				frame = RenderFrame(s, u, width, height)
 			}
@@ -384,22 +387,32 @@ func Run(ctx context.Context, c Config) error {
 			if u.Sheet != nil {
 				u.Sheet.Offset = frame.SheetOffset
 			}
-			if !u.HistoryTop && frame.View != ViewOrchestration && previousView == frame.View && u.Scroll > 0 && previousWidth == width && previousHeight == height && (previousRows != frame.ConversationRows || previousStreaming != streaming) {
+			if u.analysis == nil && !u.HistoryTop && frame.View != ViewOrchestration && previousView == frame.View && u.Scroll > 0 && previousWidth == width && previousHeight == height && (previousRows != frame.ConversationRows || previousStreaming != streaming) {
 				// Preserve the first visible canonical row when incoming data or
 				// the streaming pulse changes the available transcript height.
 				// Resize keeps the user's bottom-relative offset instead.
 				u.Scroll = max(0, u.Scroll+frame.ConversationRows-previousRows-frame.ConversationHeight+previousConversationHeight)
 				frame = RenderFrame(s, u, width, height)
 			}
-			if frame.View != ViewOrchestration {
+			if u.analysis == nil && frame.View != ViewOrchestration {
 				u.Scroll = min(u.Scroll, frame.ScrollMax)
 			}
-			if frame.View == ViewOrchestration {
+			if u.analysis == nil && frame.View == ViewOrchestration {
 				u.OrchestrationScroll = frame.OrchestrationOffset
 			}
 			u.MenuOffset = frame.MenuOffset
-			previousWidth, previousHeight, previousRows = width, height, frame.ConversationRows
-			previousConversationHeight, previousStreaming = frame.ConversationHeight, streaming
+			if u.analysis != nil {
+				if frame.SheetHeight > 0 {
+					u.analysis.offset = frame.SheetOffset
+				}
+				if u.analysis.picker != nil {
+					u.analysis.picker.Offset = frame.PickerOffset
+				}
+				previousWidth = -1
+			} else {
+				previousWidth, previousHeight, previousRows = width, height, frame.ConversationRows
+				previousConversationHeight, previousStreaming = frame.ConversationHeight, streaming
+			}
 			previousView = frame.View
 			if output := renderer.Draw(frame); output != "" {
 				if _, err := io.WriteString(c.Output, output); err != nil {
@@ -458,6 +471,15 @@ func Run(ctx context.Context, c Config) error {
 				c.Updates = nil
 			}
 			dirty = true
+		case result := <-analysisUpdates:
+			if u.analysis == result.screen {
+				p := u.analysis
+				p.accept(result, time.Now())
+				if p.report != nil && p.exportFormat != "" {
+					exportAnalysis(p.exportFormat)
+				}
+				dirty = true
+			}
 		case result := <-results:
 			u.HistoryLoading = false
 			u.Busy = false
@@ -543,6 +565,17 @@ func Run(ctx context.Context, c Config) error {
 				return nil
 			}
 			dirty = true
+			if p := u.analysis; p != nil {
+				format, close := p.key(key, frame)
+				switch {
+				case close:
+					p.cancel()
+					u.analysis = nil
+				case format != "":
+					exportAnalysis(format)
+				}
+				continue
+			}
 			s := snapshot()
 			u.Input, u.Pasted = editor.Text(), editor.Pasted
 			files.sync(s, &u, &editor)
@@ -597,7 +630,7 @@ func Run(ctx context.Context, c Config) error {
 			if files.key(key, &u, &editor, width, height) {
 				continue
 			}
-			if !key.Paste && u.Sheet != nil && u.Sheet.Analysis == "" {
+			if !key.Paste && u.Sheet != nil {
 				if key.Name == "escape" {
 					u.Sheet = nil
 					continue
@@ -605,24 +638,6 @@ func Run(ctx context.Context, c Config) error {
 				if key.Name == "pageup" || key.Name == "pagedown" {
 					delta := max(1, frame.SheetHeight)
 					if key.Name == "pageup" {
-						delta = -delta
-					}
-					u.Sheet.Offset = max(0, u.Sheet.Offset+delta)
-					continue
-				}
-			}
-			if !key.Paste && u.Sheet != nil && u.Sheet.Analysis != "" && !u.Busy {
-				switch key.Name {
-				case "escape", "enter":
-					u.Picker = analyzePicker(u.Sheet.Analysis)
-					u.Sheet = nil
-					continue
-				case "pageup", "pagedown", "up", "down":
-					delta := max(1, height/3-1)
-					if key.Name == "up" || key.Name == "down" {
-						delta = 1
-					}
-					if key.Name == "pageup" || key.Name == "up" {
 						delta = -delta
 					}
 					u.Sheet.Offset = max(0, u.Sheet.Offset+delta)
@@ -668,8 +683,6 @@ func Run(ctx context.Context, c Config) error {
 					} else if p.Kind == "model" && len(p.Providers) > 1 {
 						u.Picker = providerPicker(p.Providers, s.Selection)
 						u.Picker.Revision = p.Revision
-					} else if p.Kind == "export" {
-						u.Picker = analyzePicker("Export")
 					} else {
 						u.Picker = nil
 					}
@@ -811,30 +824,6 @@ func Run(ctx context.Context, c Config) error {
 							continue
 						}
 						u.Picker = p.effort(s.Selection)
-						continue
-					}
-					if p.Kind == "analyze" {
-						view := p.Options[p.Selection]
-						if view == "Export" {
-							u.Picker = &Picker{Kind: "export", Title: "Export · metadata/statistics only", Options: []string{"JSON", "Markdown"}}
-						} else {
-							u.Sheet = &Sheet{Title: "Analysis · " + view, Analysis: view}
-							u.Picker = nil
-						}
-						continue
-					}
-					if p.Kind == "export" {
-						if c.ExportAnalysis == nil {
-							notice("analysis export unavailable", "warning")
-							continue
-						}
-						report := m.Analysis(time.Now(), u.Viewer.Rows, u.Viewer.SubscriptionUsage)
-						format := p.Options[p.Selection]
-						u.Picker = nil
-						start("exporting metadata/statistics only", func(ctx context.Context) commandResult {
-							path, err := c.ExportAnalysis(ctx, report, format)
-							return commandResult{text: "Analysis exported: " + path, err: err}
-						})
 						continue
 					}
 					if p.Kind == "response-export" {
@@ -1200,7 +1189,7 @@ func Run(ctx context.Context, c Config) error {
 					if !catalog.Available && catalog.ProblemCode != "" {
 						m.diagnostic(errors.New("catalog_unavailable: " + catalog.ProblemCode))
 					}
-					p := modelPicker(catalog, current, m.Analysis(time.Now(), nil).ToolBridgeEnabled)
+					p := modelPicker(catalog, current, m.toolBridgeEnabled())
 					if c.ProviderCatalogs != nil {
 						providers, e := c.ProviderCatalogs(ctx)
 						if e != nil {
@@ -1223,16 +1212,7 @@ func Run(ctx context.Context, c Config) error {
 					return result
 				})
 			case "/analyze":
-				start("loading full history for analysis", func(ctx context.Context) commandResult {
-					err := m.EnsureAnalysis(ctx, c.Client)
-					if err == nil && c.PrepareAnalysis != nil {
-						err = c.PrepareAnalysis(ctx)
-					}
-					if err == nil && c.AnalysisInspect != nil {
-						err = m.LoadAnalysisTree(ctx, c.AnalysisInspect)
-					}
-					return commandResult{picker: analyzePicker(""), err: err}
-				})
+				u.analysis = openAnalysis(ctx)
 			case "/detach":
 				return nil
 			case "/retry":

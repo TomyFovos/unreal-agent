@@ -94,6 +94,7 @@ type TreeReport struct {
 
 type treeNode struct {
 	acc             *Accumulator
+	after           sessionstore.Sequence
 	parent          session.ID
 	handle          operation.ID
 	template, title string
@@ -102,6 +103,8 @@ type treeNode struct {
 	status          operation.Status
 	observed        bool
 	facts           *sessionstore.ContextFacts
+	operations      []operation.Operation
+	archivedEnd     time.Time
 }
 type Tree struct {
 	nodes      []*treeNode
@@ -122,72 +125,51 @@ func (t *Tree) SubscriptionObservations() llm.SubscriptionObservations {
 // Missing descendants remain explicit unobserved nodes, not measured zeros.
 func ReadTree(ctx context.Context, root session.ID, inspect InspectFunc) (*Tree, error) {
 	tree := &Tree{}
-	queue := []*treeNode{{acc: New(root)}}
+	if err := tree.Refresh(ctx, root, inspect); err != nil {
+		return nil, err
+	}
+	return tree, nil
+}
+
+// Refresh reuses canonical prefixes, including those of archived descendants.
+// Callers serialize Refresh and report projection on this tree.
+func (t *Tree) Refresh(ctx context.Context, root session.ID, inspect InspectFunc) error {
+	cached := make(map[session.ID]*treeNode, len(t.nodes))
+	if len(t.nodes) > 0 && t.nodes[0].acc.id == root {
+		for _, n := range t.nodes {
+			cached[n.acc.id] = n
+		}
+	}
+	reuse := func(id session.ID) *treeNode {
+		if n := cached[id]; n != nil {
+			return n
+		}
+		return &treeNode{acc: New(id)}
+	}
+	queue := []*treeNode{reuse(root)}
 	seen := map[session.ID]bool{root: true}
+	var nodes []*treeNode
+	partial := false
 	for len(queue) > 0 {
 		n := queue[0]
 		queue = queue[1:]
-		var after sessionstore.Sequence
-		var latest host.View
-		var readErr error
-		for {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			v, err := inspect(ctx, n.acc.id, after, 256)
-			if err != nil {
-				readErr = err
-				break
-			}
-			latest = v
-			start := after
-			n.acc.Created(v.Session.Session.CreatedAt)
-			for _, item := range v.History.Items {
-				if item.Sequence != after+1 {
-					readErr = viewer.ErrInvalidPage
-					break
-				}
-				n.acc.Apply(item)
-				after = item.Sequence
-			}
-			if readErr != nil {
-				break
-			}
-			if v.History.NextAfter != after || v.History.More && len(v.History.Items) == 0 {
-				readErr = viewer.ErrInvalidPage
-				break
-			}
-			if facts := v.ContextFacts; facts != nil && facts.Through == after {
-				if start == 0 {
-					n.facts = &sessionstore.ContextFacts{}
-				}
-				if n.facts != nil && n.facts.Through == start {
-					n.facts.Through = after
-					n.facts.Rows = append(n.facts.Rows, facts.Rows...)
-				}
-			}
-			if !v.History.More {
-				n.observed = true
-				break
-			}
-		}
-		if readErr != nil {
+		err := n.read(ctx, inspect)
+		n.observed = err == nil
+		if err != nil {
 			if ctx.Err() != nil {
-				return nil, ctx.Err()
+				return ctx.Err()
 			}
-			if n.parent == "" {
-				return nil, readErr
+			if len(nodes) == 0 {
+				return err
 			}
-			tree.partial = true
+			partial = true
 		}
-		tree.nodes = append(tree.nodes, n)
-		sort.Slice(latest.Operations, func(i, j int) bool { return latest.Operations[i].ID < latest.Operations[j].ID })
-		for _, op := range latest.Operations {
-			n.acc.operations[op.ID] = op
+		nodes = append(nodes, n)
+		for _, op := range n.operations {
 			p, err := subagent.DecodePlan(op)
 			if err != nil {
 				if state, e := operation.DecodeRemoteJobState(op); e == nil && state.Plan.Type == subagent.PlanType {
-					tree.partial = true
+					partial = true
 				}
 				continue
 			}
@@ -195,15 +177,109 @@ func ReadTree(ctx context.Context, root session.ID, inspect InspectFunc) (*Tree,
 				continue
 			}
 			if seen[p.ChildID] {
-				tree.partial = true
+				partial = true
 				continue
 			}
 			seen[p.ChildID] = true
-			queue = append(queue, &treeNode{acc: New(p.ChildID), parent: n.acc.id, handle: op.ID, template: p.Template, layer: p.Configuration.Layer, title: taskTitle(p.Title()), selection: sessionstore.SelectionFromConfiguration(p.Configuration.Runtime), status: op.Status})
+			child := reuse(p.ChildID)
+			child.parent, child.handle, child.status = n.acc.id, op.ID, op.Status
+			child.template, child.layer, child.title = p.Template, p.Configuration.Layer, taskTitle(p.Title())
+			child.selection = sessionstore.SelectionFromConfiguration(p.Configuration.Runtime)
+			queue = append(queue, child)
 		}
 	}
-	tree.observedAt = time.Now().UTC()
-	return tree, nil
+	t.nodes, t.partial, t.observedAt = nodes, partial, time.Now().UTC()
+	return nil
+}
+
+func (n *treeNode) read(ctx context.Context, inspect InspectFunc) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		v, err := inspect(ctx, n.acc.id, n.after, 256)
+		if err != nil {
+			return err
+		}
+		page := v.History
+		if id := v.Session.Session.ID; id != "" && id != n.acc.id {
+			return viewer.ErrInvalidPage
+		}
+		if page.NextAfter != n.after+sessionstore.Sequence(len(page.Items)) || page.More && len(page.Items) == 0 {
+			return viewer.ErrInvalidPage
+		}
+		for i, item := range page.Items {
+			if item.Sequence != n.after+sessionstore.Sequence(i)+1 {
+				return viewer.ErrInvalidPage
+			}
+		}
+		n.acc.Created(v.Session.Session.CreatedAt)
+		for _, item := range page.Items {
+			n.acc.Apply(item)
+		}
+		if facts := v.ContextFacts; facts != nil && facts.Through == page.NextAfter {
+			if n.after == 0 {
+				n.facts = &sessionstore.ContextFacts{}
+			}
+			if n.facts != nil && n.facts.Through == n.after {
+				n.facts.Through = page.NextAfter
+				n.facts.Rows = append(n.facts.Rows, facts.Rows...)
+			}
+		}
+		n.after = page.NextAfter
+		n.operations = slices.Clone(v.Operations)
+		sort.Slice(n.operations, func(i, j int) bool { return n.operations[i].ID < n.operations[j].ID })
+		for _, op := range n.operations {
+			n.acc.operations[op.ID] = op
+		}
+		if !page.More {
+			n.archivedEnd = v.ArchivedEndedAt
+			return nil
+		}
+	}
+}
+
+// Report projects the same root prefix as the tree. Canonical child usage and
+// results, including archived children, need no separate transcript reads.
+func (t *Tree) Report(now time.Time, rows []viewer.Row) Report {
+	root := t.nodes[0]
+	tree := t.Snapshot(nil)
+	live := make(map[session.ID]viewer.Row, len(rows))
+	for _, row := range rows {
+		live[row.ID] = row
+	}
+	direct := make([]viewer.Row, 0, len(tree.Sessions))
+	for i, s := range tree.Sessions {
+		n := t.nodes[i]
+		if n.parent != root.acc.id && n != root {
+			continue
+		}
+		row := viewer.Row{ID: s.ID, ParentID: n.parent, ParentOperationStatus: n.status, Cursor: n.after,
+			More: !n.observed, Runtime: live[s.ID].Runtime, Usage: n.acc.usage, Selection: n.acc.active}
+		if row.Runtime == "" {
+			row.Runtime = viewer.RuntimeUnknown
+		}
+		if s.Finish != "" {
+			row.Finish = &viewer.Finish{Status: s.Finish, RecordedAt: s.EndedAt}
+			row.Runtime = viewer.RuntimeStopped
+		}
+		end := s.EndedAt
+		if end.IsZero() && row.Runtime == viewer.RuntimeRunning {
+			end = now
+		}
+		if !s.StartedAt.IsZero() && !end.IsZero() && !end.Before(s.StartedAt) {
+			row.Elapsed = viewer.Duration{Known: true, Value: end.Sub(s.StartedAt)}
+		}
+		if len(n.acc.turns) > 0 {
+			row.ObservedModel = n.acc.turns[len(n.acc.turns)-1].ObservedModel
+		}
+		row.Operations = make([]viewer.OperationRow, len(n.operations))
+		direct = append(direct, row)
+	}
+	r := root.acc.Snapshot(now, false, false, direct, nil)
+	r.Tree = tree
+	r.Dashboard = root.acc.dashboard(&r, t, rows)
+	return r
 }
 
 func taskTitle(text string) string {
@@ -283,6 +359,9 @@ func (t *Tree) Snapshot(root *Accumulator) *TreeReport {
 					source = "derived"
 				}
 			}
+		}
+		if s.EndedAt.IsZero() && !n.archivedEnd.IsZero() {
+			s.EndedAt, source = n.archivedEnd, "derived"
 		}
 		if n.status == operation.StatusCanceled {
 			s.Finish = "canceled"

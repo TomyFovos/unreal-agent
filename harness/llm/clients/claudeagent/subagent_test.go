@@ -118,7 +118,7 @@ func TestSubagentWaitMarksTheExistingRendezvousInterruptible(t *testing.T) {
 }
 
 func TestSubagentPromptNamesTheCommandAndRoles(t *testing.T) {
-	if got := subagentPrompt(SubagentCLI{}); got != claudeDelegationPrompt || !strings.Contains(got, `"haiku"`) || !strings.Contains(got, `"sonnet"`) {
+	if got := subagentPrompt(SubagentCLI{}); !strings.Contains(got, "Unreal's SubagentStart") || !strings.Contains(got, "/login") || strings.Contains(got, "haiku") || strings.Contains(got, "sonnet") {
 		t.Fatal("prompt without subagents", got)
 	}
 	prompt := subagentPrompt(SubagentCLI{Binary: "/opt/unreal/bin/unreal", Socket: "/run/host.sock", Templates: []string{"lead", "worker-high"}})
@@ -130,7 +130,7 @@ func TestSubagentPromptNamesTheCommandAndRoles(t *testing.T) {
 	if strings.Contains(prompt, "ultra") {
 		t.Fatal("prompt advertises disabled effort", prompt)
 	}
-	for _, want := range []string{"run the project", "GPT does the work", "over-implementation", "collector template (gpt-6-luna)", "never to a gpt-6.2-sol worker", "/opt/unreal/bin/unreal subagent start --template lead <<'EOF'", "/opt/unreal/bin/unreal subagent wait HANDLE --timeout 60s", "Continue independent work while children run", "arrive at your next tool-batch boundary", "If you are idle, their messages start a new turn", "Monitor is unavailable", "Agent tool only when a Claude model is wanted", "You decide; children do the work", "writing documents and commits", "within tens of seconds", "at most --timeout 60s", "ignore versioned command paths", "【報告】", "【要確認】", "one-line title", "subagent approve HANDLE REQUEST allow|deny", "gpt-6.2-sol at max effort", "worker-low through worker-max", "lead, worker-high", "every permission mode, Read Only included"} {
+	for _, want := range []string{"run the project", "GPT does the work", "over-implementation", "collector template (gpt-6-luna)", "never to a gpt-6.2-sol worker", "/opt/unreal/bin/unreal subagent start --template lead <<'EOF'", "/opt/unreal/bin/unreal subagent wait HANDLE --timeout 60s", "Continue independent work while children run", "arrive at your next tool-batch boundary", "If you are idle, their messages start a new turn", "Monitor is unavailable", "Use unreal-agent subagent for all delegation", "You decide; children do the work", "writing documents and commits", "within tens of seconds", "at most --timeout 60s", "ignore versioned command paths", "【報告】", "【要確認】", "one-line title", "subagent approve HANDLE REQUEST allow|deny", "gpt-6.2-sol at max effort", "worker-low through worker-max", "lead, worker-high", "every permission mode, Read Only included"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt lacks %q", want)
 		}
@@ -159,9 +159,12 @@ func TestSubagentPromptNamesTheChosenModel(t *testing.T) {
 	if strings.Contains(prompt, "GPT") || strings.Contains(prompt, "gpt-6") {
 		t.Fatal("the prompt still names GPT", prompt)
 	}
-	// Overrides are offered only on GPT; the chosen model refuses them.
-	if !strings.Contains(gpt, "Add --model ID and --effort LEVEL to subagent start") || strings.Contains(prompt, "--model") || strings.Contains(prompt, "--effort") {
-		t.Fatal("the override line", prompt)
+	for _, guidance := range []string{gpt, prompt} {
+		for _, flag := range []string{"--model ID", "--provider ID", "--effort LEVEL"} {
+			if !strings.Contains(guidance, flag) {
+				t.Fatalf("no %s guidance: %s", flag, guidance)
+			}
+		}
 	}
 }
 
@@ -214,16 +217,5 @@ func TestCurrentSubagentCommandRewritesOtherUnrealPaths(t *testing.T) {
 	updated, _ := out["updatedInput"].(map[string]any)
 	if out["permissionDecision"] != "allow" || updated["command"] != cli+" subagent list" || updated["description"] != "list" {
 		t.Fatalf("gate answer = %v", answer)
-	}
-}
-
-func TestNativeAgentUsesExplicitOperatorModelAndEffort(t *testing.T) {
-	a := approver{agentModel: "sonnet", agentEffort: "high"}
-	input := hookInput{ToolName: "Agent", ToolInput: []byte(`{"prompt":"review","model":"haiku","effort":"low","run_in_background":false}`)}
-	answer := a.gate(t.Context(), input)
-	output := answer["hookSpecificOutput"].(map[string]any)
-	updated := output["updatedInput"].(map[string]any)
-	if updated["model"] != "sonnet" || updated["effort"] != "high" || updated["run_in_background"] != false || updated["prompt"] != "review" {
-		t.Fatal("native selection changed", updated)
 	}
 }

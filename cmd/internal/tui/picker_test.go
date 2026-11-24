@@ -107,15 +107,15 @@ func TestAnalysisViewsResponsiveSanitizedScrolledAndCurrentHeader(t *testing.T) 
 		r.Context = append(r.Context, r.Turns[i])
 		r.ByTool = append(r.ByTool, analysis.Tool{Name: fmt.Sprintf("tool-%d", i), Counts: analysis.Counts{Calls: 1}})
 	}
-	r.ByTool[len(r.ByTool)-1].Name = strings.Repeat("資料e\u0301👩🏽‍💻", 12) + " FINAL_TOOL\x1b[2J\x1b]52;bad\a"
+	r.ByTool[len(r.ByTool)-1].Name = "zz FINAL_TOOL " + strings.Repeat("資料e\u0301👩🏽‍💻", 12) + "\x1b[2J\x1b]52;bad\a"
 	s := Snapshot{ID: "test", Connected: true, Running: true, Selection: choice}
 	for _, size := range [][2]int{{80, 24}, {60, 20}, {44, 14}, {130, 30}} {
 		for _, theme := range []Theme{{}, {NoColor: true}, {Plain: true}, {ASCII: true}} {
 			for _, view := range analysis.Views[:len(analysis.Views)-1] {
-				u := UIState{Theme: theme, Sheet: &Sheet{Title: "Analysis · " + view, Analysis: view, Lines: analysis.Lines(r, view, theme.ASCII)}}
+				u := UIState{Theme: theme, analysis: readyAnalysis(r, view, theme, size[0])}
 				f := RenderFrame(s, u, size[0], size[1])
-				if len(f.Lines) != size[1] || f.CursorY != size[1]-2 || !strings.Contains(f.Lines[len(f.Lines)-2], "Ask") {
-					t.Fatal("analysis displaced bottom composer", size, view)
+				if len(f.Lines) != size[1] || f.CursorY != size[1]-1 || strings.Contains(f.Lines[len(f.Lines)-2], "Ask") {
+					t.Fatal("analysis escaped the full-screen viewport", size, view)
 				}
 				for _, line := range f.Lines {
 					if uniseg.StringWidth(sgrRE.ReplaceAllString(line, "")) >= size[0] || strings.Contains(line, "\x1b[2J") || strings.Contains(line, "\x1b]52") {
@@ -133,10 +133,10 @@ func TestAnalysisViewsResponsiveSanitizedScrolledAndCurrentHeader(t *testing.T) 
 					}
 				}
 				if view == "Tools" {
-					u.Sheet.Offset = 1_000_000
+					u.analysis.offset = 1_000_000
 					end := RenderFrame(s, u, size[0], size[1])
 					if end.SheetOffset == 0 || !strings.Contains(strings.Join(end.Lines, "\n"), "FINAL_TOOL") {
-						t.Fatal("wrapped statistics unreachable", size, strings.Join(end.Lines, "\n"))
+						t.Fatal("last tool row unreachable", size, strings.Join(end.Lines, "\n"))
 					}
 				}
 			}
@@ -161,4 +161,9 @@ func TestOptionalEffortChoiceHasReadableLabelAndKeepsWireValue(t *testing.T) {
 	if picker.selectedEffort() != "max" {
 		t.Fatal("display label changed effort sent to provider")
 	}
+}
+
+func readyAnalysis(r analysis.Report, view string, theme Theme, width int) *analysisScreen {
+	target := analysisTarget{view: view, width: makeLayout(width, 24).width}
+	return &analysisScreen{view: view, report: &r, rendered: target, rows: analysisRows(r, target, theme)}
 }

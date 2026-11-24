@@ -166,12 +166,13 @@ class ProductTests(unittest.TestCase):
                 self.assertEqual(config["Runtime"]["ReasoningEffort"], "max")
                 self.assertFalse(config["Launcher"]["DiscoverProviders"])
                 if mode == "claude":
-                    self.assertTrue(config["DisableSubagents"])
-                    self.assertNotIn("SubagentDefaults", config)
+                    self.assertNotIn("DisableSubagents", config)
                     self.assertEqual(
-                        config["Runtime"]["Claude"]["AgentModel"], "sonnet"
+                        config["SubagentDefaults"],
+                        {"Provider": "claude-api", "Model": "sonnet", "Effort": "high"},
                     )
-                    self.assertEqual(config["Runtime"]["Claude"]["AgentEffort"], "high")
+                    self.assertNotIn("AgentModel", config["Runtime"]["Claude"])
+                    self.assertNotIn("AgentEffort", config["Runtime"]["Claude"])
                 else:
                     self.assertEqual(
                         config["SubagentDefaults"],

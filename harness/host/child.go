@@ -15,10 +15,8 @@ import (
 
 type sessionContextKey struct{}
 
-// commitUnreportedFinish closes a tool-capable child that has no continuation.
-// It uses the same model-turn identity as text completion, without inventing a
-// Finish call. Coordinator invokes it only after work and waking inputs drain.
-func (s *Session) commitUnreportedFinish(ctx context.Context, turn session.TurnID) error {
+// commitUnreportedFinish closes a child after work and waking inputs drain.
+func (s *Session) commitUnreportedFinish(ctx context.Context, turn session.TurnID, reportFromReply bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.finish != nil || turn == "" || s.awaitingParentReply() {
@@ -28,6 +26,12 @@ func (s *Session) commitUnreportedFinish(ctx context.Context, turn session.TurnI
 		r, ok := s.items[i].Data.(sessionstore.ModelResponse)
 		if !ok || r.TurnID != turn {
 			continue
+		}
+		if reportFromReply {
+			if result, ok := childReplyReport(r.Response); ok {
+				f := sessionstore.FinishRecord{Version: 1, ModelTurnID: turn, Result: result}
+				return s.store.AppendHostRecord(ctx, s.ID, sessionstore.HostRecord{Version: 1, Kind: "finish", Finish: &f})
+			}
 		}
 		reason := "child ended its turn without Finish"
 		if r.Response.Stop != "" {
@@ -40,6 +44,31 @@ func (s *Session) commitUnreportedFinish(ctx context.Context, turn session.TurnI
 		return s.store.AppendHostRecord(ctx, s.ID, sessionstore.HostRecord{Version: 1, Kind: "finish", Finish: &f})
 	}
 	return nil // No canonical response yet, including an explicit user interrupt.
+}
+
+func childReplyReport(response llm.Response) (sessionstore.FinishResult, bool) {
+	if response.Stop != llm.StopComplete || response.Failure != nil {
+		return sessionstore.FinishResult{}, false
+	}
+	var parts []string
+	for _, out := range response.Output {
+		if out.Type == llm.ItemToolCall {
+			return sessionstore.FinishResult{}, false
+		}
+		if m, ok := out.Data.(llm.Message); ok && m.Role == llm.RoleAssistant {
+			parts = append(parts, m.Text)
+		}
+	}
+	summary := strings.TrimSpace(strings.Join(parts, "\n"))
+	if summary == "" {
+		return sessionstore.FinishResult{}, false
+	}
+	result := sessionstore.FinishResult{Status: "completed", Summary: summary}
+	line, _, _ := strings.Cut(summary, "\n")
+	if strings.EqualFold(strings.TrimSpace(line), "Status: failed") {
+		result.Status = "failed"
+	}
+	return result, true
 }
 
 // Only SendParent's decision/question kind establishes a reply wait. Progress
@@ -60,7 +89,7 @@ func (s *Session) awaitingParentReply() bool {
 		if !ok || latest.Status != operation.StatusCompleted {
 			return
 		}
-		state, err := operation.DecodeRemoteJobState(op)
+		state, err := operation.DecodeRemoteJobState(latest)
 		var plan struct {
 			Action   string
 			Progress bool

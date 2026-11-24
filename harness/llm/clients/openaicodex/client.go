@@ -148,10 +148,13 @@ func observeSubscriptionUsage(ctx context.Context, model llm.Model, options llm.
 		if v, err := strconv.ParseInt(headers.Get(prefix+"window-minutes"), 10, 64); err == nil && v > 0 {
 			s.WindowMinutes = &v
 		}
-		if v, err := strconv.ParseInt(headers.Get(prefix+"reset-at"), 10, 64); err == nil && v > 0 {
+		reset := headers.Get(prefix + "reset-at")
+		if v, err := strconv.ParseInt(reset, 10, 64); err == nil && v > 0 {
 			s.ResetsAt = time.Unix(v, 0).UTC()
+		} else if at, err := time.Parse(time.RFC3339Nano, reset); err == nil {
+			s.ResetsAt = at.UTC()
 		}
-		if s.UsedPercent != nil || s.WindowMinutes != nil || !s.ResetsAt.IsZero() {
+		if s.WindowMinutes != nil || !s.ResetsAt.IsZero() {
 			snapshots = append(snapshots, s)
 		}
 	}

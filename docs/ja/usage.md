@@ -130,7 +130,9 @@
 
 ## バックグラウンド作業とサブエージェント
 
-メインエージェントは、実装や調査を設定済みの子テンプレート（`lead`、`worker-*`、`collector` など）に委譲できます。ツールを使えるエージェントは `SubagentStart` を使います。Claude Code は Bash の `unreal-agent subagent start` から起動できます。
+メインエージェントは実装や調査を Unreal の子 Session（`lead`、`worker-*`、`collector` など）に委譲できます。Claude Code は Bash の `unreal-agent subagent start` で `SubagentStart` を呼び出します。組み込みの `Agent` と `Task` は無効です。Claude の子は `unreal-agent subagent send-parent` で親に質問し、最後の返信を完了報告として返します。
+
+その起動だけモデルと effort を変更するには `--model deepseek-v4.1-flash --effort max` を加えます。接続先を明示するには `--provider opencode-go` を使います。以降の委譲に使うロール設定は、呼び出した Session に `subagent model set` で保存します。[サブエージェントのモデル選択](providers.md#サブエージェントのモデルを選ぶ)
 
 - **自動再開。** ユーザー入力、子の完了通知、転送された質問や承認要求で、モデルターンの失敗後も待機中の親が動きます。利用上限の解除待ち中に届いた報告は、解除後のモデル呼び出しで処理します。ready は記録のみで、進捗は次のターンに同梱されます。
 - **裏の作業の折りたたみ:** 日常的な連絡や進捗は、チャット上で `┄ 裏の作業  2ターン · ツール3回 · 報告 [A][C]` のように1行にまとめられます。

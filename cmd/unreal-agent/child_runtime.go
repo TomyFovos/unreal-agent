@@ -6,7 +6,9 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/unreallabsai/unreal-agent/cmd/internal/agentrunner"
@@ -76,8 +78,8 @@ func builtinGPTProvider(owner *host.Session) string {
 	return "openai-codex"
 }
 
-// A lead keeps its own immutable runtime, but each new worker uses the shared
-// role choice at that start. Provider registrations and catalog readers are
+// A lead keeps its own runtime, and each new worker uses its Session's
+// current role choice. Provider registrations and catalog readers are
 // process configuration, outside the lead's recorded runtime identity.
 func configureWorkerModels(c *agentrunner.RuntimeConfig, modelFile string, sources map[string]credential.Source, parent subagent.ChildConfig) {
 	if _, err := c.ProviderRuntime(opencodego.ProviderID); err == nil {
@@ -85,6 +87,11 @@ func configureWorkerModels(c *agentrunner.RuntimeConfig, modelFile string, sourc
 		c.Catalogs[opencodego.ProviderID] = func(ctx context.Context) (modelcatalog.Catalog, error) { return models.read(ctx, false) }
 	}
 	c.Health = map[string]func(context.Context) error{}
+	if backend, err := c.ProviderRuntime(claudeagent.ProviderID); err == nil && backend.Claude != nil {
+		models := &claudeCatalog{binary: backend.Claude.Binary}
+		c.Health[claudeagent.ProviderID] = models.check
+		c.Catalogs[claudeagent.ProviderID] = func(ctx context.Context) (modelcatalog.Catalog, error) { return models.read(ctx, false) }
+	}
 	backends := maps.Clone(c.Backends)
 	if backends == nil {
 		backends = map[string]agentrunner.ProviderRuntime{}
@@ -100,11 +107,9 @@ func configureWorkerModels(c *agentrunner.RuntimeConfig, modelFile string, sourc
 	if parentLayer == "" {
 		parentLayer = subagent.RoleGroup(parent.Template)
 	}
-	resolve := childRuntimeResolverForLayer(*c, modelFile, parentLayer, nil)
+	models := subagentModelScope{defaultFile: modelFile, sessionDirectory: c.SessionDirectory, parent: parent.ParentID}
+	resolve := childRuntimeResolverForLayer(*c, models, parentLayer, nil)
 	c.ResolveChildRuntime = func(ctx context.Context, owner *host.Session, name string, template subagent.Template, requested *subagent.RuntimeRequest) (subagent.Template, error) {
-		if requested != nil {
-			return boundWorkerRuntime(ctx, owner, name, template, requested)
-		}
 		// Older leads recorded already bound templates with no Default. Supply
 		// the built-in role default only while resolving, preserving their shape
 		// for canonical replay and template validation.
@@ -114,31 +119,27 @@ func configureWorkerModels(c *agentrunner.RuntimeConfig, modelFile string, sourc
 			choice.Model, choice.Effort = collectorModel, collectorEffort
 		}
 		template.Default = &choice
-		chosen, err := resolve(ctx, owner, name, template, nil)
+		chosen, err := resolve(ctx, owner, name, template, requested)
 		chosen.Default = originalDefault
 		return chosen, err
 	}
 	c.ValidateChildTemplate = childTemplateValidator(*c)
 }
 
-// claudeChildrenRefusal says what to do while subagent model chose Claude: Claude's
-// own Agent tool runs the sub-agents, so a built-in child start is refused.
-const claudeChildrenRefusal = "subagent model で Claude を選んでいる間は子を起動できません。子を使うには subagent model で OpenAI Codex か OpenCode Go を選んでください"
-
 // childRuntimeResolver binds a child start to a registered backend. With
-// modelFile, a start of a built-in template that names no runtime runs the
-// sub-agents' model chosen with subagent model, and so do a lead's workers;
-// a choice that cannot run fails the start, nothing falls back to Codex.
+// role settings, a built-in template and its workers take their choices from
+// the top-level Session that owns the start.
 func childRuntimeResolver(c agentrunner.RuntimeConfig, modelFile string) subagent.RuntimeResolver {
-	return childRuntimeResolverForLayer(c, modelFile, "main", nil)
+	models := subagentModelScope{defaultFile: modelFile, sessionDirectory: c.SessionDirectory}
+	return childRuntimeResolverForLayer(c, models, "main", nil)
 }
 
-func childRuntimeResolverForLayer(c agentrunner.RuntimeConfig, modelFile, parentLayer string, leadDefault *subagent.RuntimeRequest) subagent.RuntimeResolver {
+func childRuntimeResolverForLayer(c agentrunner.RuntimeConfig, models subagentModelScope, parentLayer string, leadDefault *subagent.RuntimeRequest) subagent.RuntimeResolver {
 	return func(ctx context.Context, owner *host.Session, name string, template subagent.Template, requested *subagent.RuntimeRequest) (subagent.Template, error) {
 		template.Layer = subagent.ResolveLayer(name, parentLayer)
 		roleName := name
 		roleDefault := template.Default
-		if template.Layer == "lead" && subagent.RoleGroup(name) != "lead" && (c.BuiltinSubagents || modelFile != "") {
+		if parentLayer == "main" && template.Layer == "lead" && subagent.RoleGroup(name) != "lead" && (c.BuiltinSubagents || models.defaultFile != "") {
 			roleName = "lead"
 			if roleDefault != nil {
 				choice := *roleDefault
@@ -152,115 +153,55 @@ func childRuntimeResolverForLayer(c agentrunner.RuntimeConfig, modelFile, parent
 		// The child follows the Session's mode; only its maximum bounds the start.
 		ctx = owner.WithCapabilityPolicy(ctx)
 		fail := func(code string) (subagent.Template, error) { return template, &subagent.RuntimeError{Code: code} }
-		chosen := false
-		explicitCodex := false
-		var saved subagentModel
-		var roleChoice subagentModelChoice
-		if requested == nil && modelFile != "" && template.Default != nil {
-			m, e := readSubagentModel(modelFile)
-			if e != nil {
-				return fail("subagent_model_unreadable")
-			}
-			saved, roleChoice = m, m.choice(roleName)
-			if buildfeatures.Disabled(roleChoice.Provider) {
-				return template, disabledChildError()
-			}
-			explicitCodex = roleChoice.Provider == "openai-codex"
-			if roleChoice.Provider == claudeagent.ProviderID {
-				return template, &subagent.RuntimeError{Code: "provider_unavailable", Hint: claudeChildrenRefusal}
-			}
-			if roleChoice.Provider == opencodego.ProviderID || roleChoice.Model != "" || roleChoice.Effort != "" || roleChoice.Fast {
-				// The effort is the role's on this model, bound below.
-				requested, chosen = &subagent.RuntimeRequest{Provider: roleChoice.Provider, Model: roleChoice.Model, Effort: roleDefault.Effort}, true
-				if requested.Model == "" {
-					requested.Model = roleDefault.Model
-				}
-			} else if template.Default.Provider != "openai-codex" && !c.BuiltinSubagents {
-				return fail("provider_unavailable")
-			}
-		}
-		if requested != nil && buildfeatures.Disabled(requested.Provider) {
-			return template, disabledChildError()
-		}
-		if c.BuiltinSubagents {
-			id := builtinGPTProvider(owner)
-			if explicitCodex {
-				id = "openai-codex"
-			}
-			if requested != nil && requested.Provider != "" {
-				id = requested.Provider
-			}
-			var err error
-			template, err = builtinGPTTemplate(c, template, id)
-			if err != nil {
-				return template, err
-			}
-			if requested != nil && requested.Provider == "" {
-				choice := *template.Default
-				if requested.Model != "" {
-					choice.Model = requested.Model
-				}
-				if requested.Effort != "" {
-					choice.Effort = requested.Effort
-				}
-				requested = &choice
-			}
-		}
-		if requested == nil {
-			requested = roleDefault
-			if requested != nil && c.BuiltinSubagents {
-				choice := *requested
-				choice.Provider = template.Default.Provider
-				requested = &choice
-			}
-		}
-		if e := permission.FromContext(ctx).CheckTool("SubagentStart"); e != nil {
-			return fail("permission_denied")
-		}
 		active, _ := owner.RuntimeSelection()
 		if active == nil {
 			return fail("selection_unavailable")
 		}
 		choice := *active
-		if requested != nil {
-			choice = sessionstore.RuntimeSelection{Version: 1, Provider: requested.Provider, Model: requested.Model, Effort: requested.Effort.Normalize()}
+		if roleDefault != nil {
+			choice = sessionstore.RuntimeSelection{Version: 1, Provider: roleDefault.Provider, Model: roleDefault.Model, Effort: roleDefault.Effort.Normalize()}
+		}
+		if c.BuiltinSubagents {
+			choice.Provider = builtinGPTProvider(owner)
+		}
+		var saved subagentModel
+		var roleChoice subagentModelChoice
+		if models.defaultFile != "" && roleDefault != nil {
+			m, e := models.read(ctx, owner.ID)
+			if e != nil {
+				return fail("subagent_model_unreadable")
+			}
+			saved, roleChoice = m, m.choice(roleName)
+			if roleChoice.Provider != "" {
+				choice.Provider = roleChoice.Provider
+			}
+			if roleChoice.Model != "" {
+				choice.Model = roleChoice.Model
+			}
 		}
 		choice.Fast = roleChoice.Fast
-		if buildfeatures.Disabled(choice.Provider) {
+		chosen := roleChoice.Model != "" || roleChoice.Effort != "" || roleChoice.Fast
+		id := choice.Provider
+		if requested != nil && (requested.Provider != "" || requested.Model != "") {
+			id = requested.Provider
+		}
+		if buildfeatures.Disabled(id) {
 			return template, disabledChildError()
 		}
-		backend, e := c.ProviderRuntime(choice.Provider)
-		if e != nil {
-			return fail("invalid_provider")
-		}
-		if choice.Validate() != nil {
-			return fail("invalid_selection")
-		}
-		// Authorize the owning Session before any CLI health/catalog process.
-		if e = permission.FromContext(ctx).CheckProcess(); e != nil {
+		policy := permission.FromContext(ctx)
+		if policy.CheckTool("SubagentStart") != nil || policy.CheckProcess() != nil {
 			return fail("permission_denied")
 		}
 		for _, name := range template.Policy.Tools {
-			if e = permission.FromContext(ctx).CheckTool(name); e != nil {
+			if policy.CheckTool(name) != nil {
 				return fail("permission_denied")
 			}
 		}
-		if c.CheckProvider(ctx, choice.Provider) != nil {
-			return template, &subagent.RuntimeError{Code: "provider_unavailable", Hint: providerGuidance(choice.Provider, modelcatalog.AuthRequired.ProviderHint(choice.Provider), "。ログイン後は /model refresh を実行してください")}
-		}
-		catalog, e := c.Catalog(ctx, choice.Provider)
+		backend, model, e := selectChildModel(ctx, c, &choice, requested, active)
 		if e != nil {
-			return template, &subagent.RuntimeError{Code: "provider_unavailable", Hint: providerGuidance(choice.Provider, modelcatalog.CatalogUnavailable.ProviderHint(choice.Provider), "。/login でログイン手順を確認してください")}
+			return template, e
 		}
-		model, e := catalog.FindSelection(choice.Model)
-		if e != nil && !catalog.Authoritative && choice.Provider == active.Provider && choice.Model == active.Model && choice.Effort == active.Effort {
-			model.ID, model.Name, model.Efforts = active.Model, active.Name, []llm.ReasoningEffort{active.Effort}
-			e = nil
-		}
-		if e != nil {
-			return fail("invalid_model")
-		}
-		if chosen {
+		if chosen && choice.Provider == roleChoice.Provider {
 			if choice.Provider == opencodego.ProviderID {
 				choice.Effort = subagentEffort(roleName, model)
 			} else if roleChoice.Effort == "" && !model.AllowsEffort(choice.Effort) {
@@ -270,18 +211,37 @@ func childRuntimeResolverForLayer(c agentrunner.RuntimeConfig, modelFile, parent
 				choice.Effort = roleChoice.Effort
 			}
 		}
+		if requested != nil {
+			if requested.Effort != "" {
+				choice.Effort = requested.Effort.Normalize()
+			} else if requested.Model != "" && !model.AllowsEffort(choice.Effort) {
+				choice.Effort = model.DefaultEffort
+			}
+			choice.Fast = choice.Fast && model.AllowsFast(choice.Provider)
+		}
+		if choice.Validate() != nil {
+			return fail("invalid_selection")
+		}
 		if !model.AllowsEffort(choice.Effort) {
 			return fail("unsupported_effort")
 		}
+		if c.BuiltinSubagents {
+			template, e = builtinGPTTemplate(c, template, choice.Provider)
+			if e != nil {
+				return template, e
+			}
+		}
 		collector := subagentEffort("collector", model)
-		raw, e := boundChildRuntime(c, template.Runtime, backend, choice, chosen, collector)
+		retarget := chosen || c.BuiltinSubagents && requested != nil && (requested.Model != "" || requested.Provider != "")
+		raw, e := boundChildRuntime(c, template.Runtime, backend, choice, retarget, collector)
 		if e != nil {
 			return template, e
 		}
 		template.Runtime = raw
-		if (chosen || saved.Roles != nil) && len(template.Subagents) > 0 {
+		if (chosen || saved.Roles != nil || retarget) && len(template.Subagents) > 0 {
 			workers := make(map[string]subagent.Template, len(template.Subagents))
 			for worker, t := range template.Subagents {
+				workers[worker] = t
 				workerChoice := saved.choice(worker)
 				id := workerChoice.Provider
 				if id == "" {
@@ -292,7 +252,7 @@ func childRuntimeResolverForLayer(c agentrunner.RuntimeConfig, modelFile, parent
 				}
 				workerBackend, err := c.ProviderRuntime(id)
 				if err != nil {
-					return template, &subagent.RuntimeError{Code: "provider_unavailable", Hint: modelcatalog.AuthRequired.ProviderHint(id)}
+					continue // report availability when this worker is requested
 				}
 				var identity agentrunner.RuntimeIdentity
 				if json.Unmarshal(t.Runtime, &identity) != nil {
@@ -304,8 +264,8 @@ func childRuntimeResolverForLayer(c agentrunner.RuntimeConfig, modelFile, parent
 				}
 				if id == opencodego.ProviderID || workerChoice.Model != "" || workerChoice.Effort != "" || workerChoice.Fast {
 					catalog, err := c.Catalog(ctx, id)
-					if err != nil {
-						return template, &subagent.RuntimeError{Code: "provider_unavailable", Hint: modelcatalog.CatalogUnavailable.ProviderHint(id)}
+					if err != nil || !catalog.Available {
+						continue
 					}
 					m, err := catalog.FindSelection(workerModel)
 					if err != nil {
@@ -342,6 +302,101 @@ func childRuntimeResolverForLayer(c agentrunner.RuntimeConfig, modelFile, parent
 			}
 		}
 		return template, nil
+	}
+}
+
+// selectChildModel resolves only a model-only request across connections.
+// An explicit or saved provider is checked directly.
+func selectChildModel(ctx context.Context, c agentrunner.RuntimeConfig, choice *sessionstore.RuntimeSelection, requested *subagent.RuntimeRequest, active *sessionstore.RuntimeSelection) (agentrunner.ProviderRuntime, modelcatalog.Model, error) {
+	originalProvider := choice.Provider
+	if requested != nil {
+		if requested.Provider != "" {
+			choice.Provider = requested.Provider
+		}
+		if requested.Model != "" {
+			choice.Model = requested.Model
+			if requested.Provider == "" {
+				id, model, err := childProviderForModel(ctx, c, choice.Model)
+				if err != nil {
+					return agentrunner.ProviderRuntime{}, model, err
+				}
+				backend, err := c.ProviderRuntime(id)
+				if err != nil {
+					return backend, model, err
+				}
+				if id != originalProvider {
+					if backend.Provider.Auth.Method == credential.APIKey && id != opencodego.ProviderID {
+						return backend, model, &subagent.RuntimeError{Code: "provider_required", Hint: fmt.Sprintf("select the API connection with --provider %s (SubagentStart provider)", id)}
+					}
+					choice.Provider, choice.Effort, choice.Fast = id, model.DefaultEffort, false
+				}
+				return backend, model, nil
+			}
+		}
+	}
+	backend, catalog, err := childProviderCatalog(ctx, c, choice.Provider)
+	if err != nil {
+		return backend, modelcatalog.Model{}, err
+	}
+	if requested != nil && choice.Provider != originalProvider && requested.Model == "" {
+		choice.Model = backend.Provider.Model.ID
+	}
+	model, err := catalog.FindSelection(choice.Model)
+	if err != nil && (requested == nil || requested.Model == "") && !catalog.Authoritative &&
+		choice.Provider == active.Provider && choice.Model == active.Model && choice.Effort == active.Effort {
+		model.ID, model.Name, model.Efforts = active.Model, active.Name, []llm.ReasoningEffort{active.Effort}
+		err = nil
+	}
+	if err != nil {
+		return backend, model, &subagent.RuntimeError{Code: "invalid_model", Hint: fmt.Sprintf("model %q is not in %s's catalog", choice.Model, choice.Provider)}
+	}
+	if choice.Provider != originalProvider {
+		choice.Effort, choice.Fast = model.DefaultEffort, false
+	}
+	return backend, model, nil
+}
+
+func childProviderCatalog(ctx context.Context, c agentrunner.RuntimeConfig, id string) (agentrunner.ProviderRuntime, modelcatalog.Catalog, error) {
+	backend, err := c.ProviderRuntime(id)
+	if buildfeatures.Disabled(id) {
+		return backend, modelcatalog.Catalog{}, disabledChildError()
+	}
+	if err != nil || c.CheckProvider(ctx, id) != nil {
+		return backend, modelcatalog.Catalog{}, &subagent.RuntimeError{Code: "provider_unavailable", Hint: providerGuidance(id, modelcatalog.AuthRequired.ProviderHint(id), "。ログイン後は /model refresh を実行してください")}
+	}
+	catalog, err := c.Catalog(ctx, id)
+	if err != nil || !catalog.Available {
+		return backend, catalog, &subagent.RuntimeError{Code: "provider_unavailable", Hint: providerGuidance(id, modelcatalog.CatalogUnavailable.ProviderHint(id), "。/login でログイン手順を確認してください")}
+	}
+	return backend, catalog, nil
+}
+
+func childProviderForModel(ctx context.Context, c agentrunner.RuntimeConfig, id string) (string, modelcatalog.Model, error) {
+	ids := append(slices.Collect(maps.Keys(c.Backends)), c.Discovered.IDs()...)
+	ids = append(ids, c.Identity.Provider.Provider)
+	slices.Sort(ids)
+	var matches []string
+	var model modelcatalog.Model
+	for _, providerID := range slices.Compact(ids) {
+		if providerID == loginProvider {
+			continue
+		}
+		_, catalog, err := childProviderCatalog(ctx, c, providerID)
+		if err != nil {
+			continue
+		}
+		if found, err := catalog.FindSelection(id); err == nil {
+			matches = append(matches, providerID)
+			model = found
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", model, &subagent.RuntimeError{Code: "invalid_model", Hint: fmt.Sprintf("model %q is not in any available provider catalog", id)}
+	case 1:
+		return matches[0], model, nil
+	default:
+		return "", model, &subagent.RuntimeError{Code: "ambiguous_model", Hint: fmt.Sprintf("model %q is offered by %s; specify --provider ID (SubagentStart provider)", id, strings.Join(matches, ", "))}
 	}
 }
 
@@ -443,6 +498,10 @@ func validChildRuntime(c agentrunner.RuntimeConfig, base, recorded jsontext.Valu
 	if json.Unmarshal(base, &a) != nil || json.Unmarshal(recorded, &b) != nil {
 		return mismatch
 	}
+	unchanged, expected := base.Clone(), recorded.Clone()
+	if unchanged.Canonicalize() == nil && expected.Canonicalize() == nil && bytes.Equal(unchanged, expected) {
+		return nil
+	}
 	backend, e := c.ProviderRuntime(b.Provider.Provider)
 	if e != nil {
 		return mismatch
@@ -457,7 +516,7 @@ func validChildRuntime(c agentrunner.RuntimeConfig, base, recorded jsontext.Valu
 	if e != nil {
 		return mismatch
 	}
-	expected, _ := json.Marshal(registered)
+	expected, _ = json.Marshal(registered)
 	actual, _ := json.Marshal(b.Provider)
 	if !bytes.Equal(expected, actual) {
 		return mismatch

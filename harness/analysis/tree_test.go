@@ -464,3 +464,40 @@ func TestWorkerTierPricesUnknownAndPeak(t *testing.T) {
 		t.Fatal("unknown lost in JSON", err, string(data))
 	}
 }
+
+func TestTreeRefreshResumesValidatedPrefix(t *testing.T) {
+	root := session.ID("root")
+	at := time.Unix(1700000000, 0)
+	items := []host.HistoryItem{
+		{Sequence: 1, RecordedAt: at, Data: session.Turn{ID: "turn"}},
+		{Sequence: 2, RecordedAt: at, Data: sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{Usage: llm.Usage{InputTokens: 10}}}},
+	}
+	var offsets []sessionstore.Sequence
+	read := func(_ context.Context, id session.ID, after sessionstore.Sequence, _ int) (host.View, error) {
+		offsets = append(offsets, after)
+		end := min(int(after)+2, len(items))
+		return host.View{Session: sessionstore.Snapshot{Session: session.Session{ID: id, CreatedAt: at}},
+			History: host.HistoryPage{Items: items[int(after):end], NextAfter: sessionstore.Sequence(end), More: end < len(items)}}, nil
+	}
+	tree, err := ReadTree(t.Context(), root, read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A malformed suffix page must not absorb its first, otherwise valid item.
+	items = append(items, host.HistoryItem{Sequence: 3, RecordedAt: at, Data: sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{Usage: llm.Usage{InputTokens: 20}}}},
+		host.HistoryItem{Sequence: 5, RecordedAt: at, Data: sessionstore.ModelResponse{TurnID: "turn", Response: llm.Response{Usage: llm.Usage{InputTokens: 30}}}})
+	if err := tree.Refresh(t.Context(), root, read); err == nil {
+		t.Fatal("accepted a hole in the canonical prefix")
+	}
+	items[3].Sequence = 4
+	if err := tree.Refresh(t.Context(), root, read); err != nil {
+		t.Fatal(err)
+	}
+	if err := tree.Refresh(t.Context(), root, read); err != nil {
+		t.Fatal(err)
+	}
+	r := tree.Report(at.Add(time.Second), nil)
+	if !reflect.DeepEqual(offsets, []sessionstore.Sequence{0, 2, 2, 4}) || r.Usage.Input != 60 || r.Tree.Partial {
+		t.Fatal("incremental replay lost or duplicated history", offsets, r.Usage, r.Tree.Partial)
+	}
+}

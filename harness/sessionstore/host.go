@@ -144,6 +144,7 @@ const (
 	ContextWindowStart           = "window_start"
 	ContextWindowBoundary        = "window_boundary"
 	ContextWindowFallback        = "window_fallback"
+	ContextPolicyChanged         = "context_policy"
 	ContextSelectionContinuation = "selection_continuation"
 	ContextConversationBinding   = "provider_conversation_binding"
 	WindowFitExcerpted           = "excerpted"
@@ -156,6 +157,7 @@ const (
 // Unit IDs are deterministic insertion identities reconstructed by canonical replay.
 type ContextRecord struct {
 	Window              *WindowBoundary           `json:",omitzero"`
+	Policy              *ContextPolicies          `json:",omitzero"`
 	Generation          *llm.GenerationStatistics `json:",omitzero"` // historical Unreal summary generation
 	RecordRead          *RecordRead               `json:",omitzero"`
 	Conversation        *llm.ConversationRecord   `json:",omitzero"`
@@ -173,6 +175,27 @@ type ContextRecord struct {
 	Provider, Model     string              `json:",omitzero"`
 }
 
+// ContextPolicies is the effective sizing policy committed before a Session
+// uses it. It contains no runtime identities, paths or credentials.
+type ContextPolicies struct {
+	Default WindowPolicy
+	Routes  map[string]WindowPolicy `json:",omitempty"`
+}
+
+type WindowPolicy struct {
+	WindowThresholdTokens, L2TargetTokens                         int64
+	PostRebuildRatio                                              float64
+	RecentEventCount, ToolOutputExcerptChars, CacheRewarmMinutes  int
+	FallbackWindow, InputBudget, ResponseReserve, ProtocolReserve int64
+}
+
+func (p ContextPolicies) ForProvider(provider string) WindowPolicy {
+	if policy, ok := p.Routes[provider]; ok {
+		return policy
+	}
+	return p.Default
+}
+
 // WindowBoundary measures a committed rebuild. The projection is in Text,
 // Through and Retained. The first request refers to this record in its Turn.
 type WindowBoundary struct {
@@ -182,23 +205,26 @@ type WindowBoundary struct {
 	BeforeMeasurement      string
 	Estimator              string
 	ThresholdTokens        int64
+	RebuildTargetTokens    int64  `json:",omitzero"`
 	HeaderTokens           *int64 `json:",omitzero"` // separate system instructions and tool schemas
-	MinimumExceedsTarget   bool   `json:",omitzero"` // even the required projection misses W or the input budget
+	MinimumExceedsTarget   bool   `json:",omitzero"` // the unexcerpted required projection exceeds the rebuild target
 	L2Tokens               int64
 	L2TargetTokens         int64
 	RecentEvents           int
 	RecentEventLimit       *int `json:",omitzero"`
 	CacheRewarmMinutes     int  `json:",omitzero"`
 	ToolOutputExcerptChars int
-	SnapshotSequence       Sequence    `json:",omitzero"`
-	Tail                   *WindowTail `json:",omitzero"`
-	Fallback               string      `json:",omitzero"`
-	InputBudgetTokens      int64       `json:",omitzero"`
-	Fit                    string      `json:",omitzero"`
-	FitExcerptChars        *int        `json:",omitzero"`
-	FitThrough             string      `json:",omitzero"`
-	RequiredInputTokens    int64       `json:",omitzero"`
-	RequiredTailTokens     int64       `json:",omitzero"`
+	SnapshotSequence       Sequence                    `json:",omitzero"`
+	Pending                *contextstate.PendingCounts `json:",omitzero"`
+	Tail                   *WindowTail                 `json:",omitzero"`
+	Fallback               string                      `json:",omitzero"`
+	InputBudgetTokens      int64                       `json:",omitzero"`
+	Fit                    string                      `json:",omitzero"`
+	FitExcerptChars        *int                        `json:",omitzero"`
+	FitThrough             string                      `json:",omitzero"`
+	FitPreserveInputs      bool                        `json:",omitzero"`
+	RequiredInputTokens    int64                       `json:",omitzero"`
+	RequiredTailTokens     int64                       `json:",omitzero"`
 }
 
 // WindowTail describes the new raw projection and indexes addressable evidence

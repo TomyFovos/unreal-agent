@@ -3,6 +3,9 @@ package tui
 import (
 	"context"
 	"errors"
+	"reflect"
+	"slices"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/analysis"
 	"github.com/unreallabsai/unreal-agent/harness/host"
@@ -241,20 +244,55 @@ func (m *Model) EnsureAnalysis(ctx context.Context, r Reader) error {
 	}
 }
 
-func (m *Model) LoadAnalysisTree(ctx context.Context, inspect analysis.InspectFunc) error {
+// Readers without the lineage extension can still provide their own public
+// history. Forward-only readers may return an overlapping prefix.
+func rootAnalysisInspector(r Reader, root session.ID) analysis.InspectFunc {
+	return func(ctx context.Context, id session.ID, after sessionstore.Sequence, limit int) (host.View, error) {
+		if id != root {
+			return host.View{}, viewer.ErrUnavailable
+		}
+		v, err := r.Inspect(ctx, id, after, limit)
+		if err != nil {
+			return v, err
+		}
+		page := &v.History
+		for len(page.Items) > 0 && page.Items[0].Sequence <= after {
+			page.Items = page.Items[1:]
+		}
+		if page.NextAfter == 0 {
+			page.NextAfter = after
+			if n := len(page.Items); n > 0 {
+				page.NextAfter = page.Items[n-1].Sequence
+			}
+		}
+		return v, nil
+	}
+}
+
+func (m *Model) readAnalysisTree(ctx context.Context, inspect analysis.InspectFunc, now time.Time, rows []viewer.Row, observations llm.SubscriptionObservations) (analysis.Report, error) {
 	m.mu.Lock()
 	id := m.state.ID
 	m.mu.Unlock()
-	tree, err := analysis.ReadTree(ctx, id, inspect)
-	if err != nil {
-		return err
+	m.analysisMu.Lock()
+	defer m.analysisMu.Unlock()
+	if m.analysisTree == nil {
+		m.analysisTree = &analysis.Tree{}
 	}
+	if err := m.analysisTree.Refresh(ctx, id, inspect); err != nil {
+		return analysis.Report{}, err
+	}
+	r := m.analysisTree.Report(now, rows)
+	windows := m.analysisTree.SubscriptionObservations()
 	m.mu.Lock()
-	m.analysisTree = tree
-	m.state.SubscriptionUsage.Merge(tree.SubscriptionObservations())
-	m.state.Version++
+	latest := slices.Clone(m.state.SubscriptionUsage)
+	latest.Merge(windows)
+	if !reflect.DeepEqual(latest, m.state.SubscriptionUsage) {
+		m.state.SubscriptionUsage = latest
+		m.state.Version++
+	}
+	m.enrichAnalysis(&r, observations)
 	m.mu.Unlock()
-	return nil
+	return r, nil
 }
 
 func applyHistoryReceipts(entries []Entry, receipts []host.HistoryReceipt) {

@@ -10,6 +10,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/contextstate"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/session"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 )
 
 type ContextDimensions struct {
@@ -79,16 +80,30 @@ type ContextSession struct {
 	Session session.ID
 	Partial bool
 	ContextScope
-	Windows     []ContextWindow
-	Compactions []ContextCompaction
-	Fallbacks   []ContextFallback `json:",omitempty"`
+	Windows       []ContextWindow
+	Compactions   []ContextCompaction
+	Fallbacks     []ContextFallback     `json:",omitempty"`
+	PolicyPeriods []ContextPolicyPeriod `json:",omitempty"`
+}
+
+type ContextRoutePolicy struct {
+	Provider string `json:",omitzero"` // empty is the common policy
+	Policy   sessionstore.WindowPolicy
+}
+
+type ContextPolicyPeriod struct {
+	Provider    string
+	From, Until *time.Time
+	Policy      *sessionstore.WindowPolicy // nil for rebuilds without a recorded policy
+	Numbers     ContextNumbers
 }
 
 type ContextMeasurements struct {
-	PriceTable string
-	Partial    bool
-	Totals     ContextScope
-	Sessions   []ContextSession
+	PriceTable     string
+	Partial        bool
+	Totals         ContextScope
+	Sessions       []ContextSession
+	ActivePolicies []ContextRoutePolicy `json:",omitempty"`
 }
 
 type contextCounts map[string]Metric

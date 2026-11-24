@@ -143,11 +143,10 @@ substituting or omitting it.
 | `main_model` | Overrides `-m`; otherwise `anthropic/opus` or `openai/gpt-6.1-sol` |
 | `main_effort` | `max`; accepts low, medium, high, xhigh, max |
 | `child_model`, `child_effort` | Mixed/GPT: implementation lead, default gpt-6.2-sol / max; workers use that model with their template efforts; collector keeps product default gpt-6-luna / medium |
-| `child_model`, `child_effort` in Claude-only | Optional native Agent model/effort, applied through Claude Code's hook; if omitted, the unchanged product prompt chooses haiku/sonnet |
+| `child_model`, `child_effort` in Claude-only | Model and effort for Unreal children using the Claude API connection. Each defaults to the main setting when omitted |
 | `openai_key_file`, `anthropic_key_file` | Local regular 0600 key files; only the chosen configuration's keys are read |
 
-GPT-only retains the product's GPT child mechanism. Claude-only uses the normal
-Claude Code Agent tool; native child messages are linked to its Agent call.
+All three configurations delegate through Unreal child Sessions.
 
 ## Built-in Codex CLI and Claude Code baselines
 
@@ -180,10 +179,10 @@ shell, rather than included in Harbor's `--ae` configuration.
 
 ## Records, costs and publication
 
-`agent/trajectory.json` references GPT child/grandchild files
+`agent/trajectory.json` references Unreal child and grandchild files
 `agent/trajectory.<session-id>.json`. `agent/sessions/*.session.jsonl` are
 sanitized audit copies, not executable resume data. Private keys, provider home,
-raw provider replay and private operation captures are not collected. Native
+raw provider replay and private operation captures are not collected. Archived
 Claude Agent messages carry `[Claude Code Agent <tool-call-id>]` links.
 
 Trajectory totals and `AgentContext.metadata.usage_by_connection` separate

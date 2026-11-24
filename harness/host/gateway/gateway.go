@@ -141,7 +141,37 @@ func ListenAndServe(ctx context.Context, path string, c Config) error {
 		return err
 	}
 	defer cleanup()
-	server := &http.Server{ConnContext: authenticatePeer, Handler: Handler(c), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, ReadTimeout: 10 * time.Second, MaxHeaderBytes: 8192, BaseContext: func(net.Listener) context.Context { return ctx }}
+	return serve(ctx, listener, Handler(c))
+}
+
+// StartSessionCommands binds the gateway used by a child Session's shell.
+// The child is already parent-owned. Its shell can inspect and use extension
+// controls, but cannot create Sessions or act as a human permission client.
+func StartSessionCommands(ctx context.Context, path string, c Config) (io.Closer, error) {
+	listener, cleanup, err := listen(path)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	handler := Handler(c)
+	mux := http.NewServeMux()
+	mux.Handle("/v1/inspect", handler)
+	mux.Handle("/v1/extension", handler)
+	done := make(chan error, 1)
+	go func() {
+		err := serve(ctx, listener, mux)
+		cleanup()
+		done <- err
+	}()
+	return closeCommands(func() error { cancel(); return <-done }), nil
+}
+
+type closeCommands func() error
+
+func (f closeCommands) Close() error { return f() }
+
+func serve(ctx context.Context, listener net.Listener, handler http.Handler) error {
+	server := &http.Server{ConnContext: authenticatePeer, Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, ReadTimeout: 10 * time.Second, MaxHeaderBytes: 8192, BaseContext: func(net.Listener) context.Context { return ctx }}
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -151,7 +181,7 @@ func ListenAndServe(ctx context.Context, path string, c Config) error {
 		}
 	}()
 	defer close(done)
-	err = server.Serve(listener)
+	err := server.Serve(listener)
 	if errors.Is(err, http.ErrServerClosed) || ctx.Err() != nil {
 		return nil
 	}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
+	"github.com/unreallabsai/unreal-agent/harness/llm/clients/claudeagent"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
@@ -115,6 +116,9 @@ func NewChildFactory(base RuntimeConfig, configure func(subagent.ChildConfig, *R
 		runtime := base
 		runtime.Identity, runtime.SessionDirectory, runtime.Providers = identity, c.SessionDirectory, registry
 		runtime.ProviderProcess, runtime.TaskInput = c.ProviderProcess, c.InitialInput().ID
+		if link.ContextFile != nil {
+			runtime.ContextFile, runtime.Context = link.ContextFile, link.ContextFile.Current()
+		}
 		if configure != nil {
 			if err := configure(c, &runtime); err != nil {
 				return nil, nil, err
@@ -130,6 +134,7 @@ func NewChildFactory(base RuntimeConfig, configure func(subagent.ChildConfig, *R
 					return nil, nil, err
 				}
 				execution.Directory, execution.Binary, execution.Arguments = c.SessionDirectory, binary, os.Args[1:]
+				execution.ContextFile = runtime.ContextFile
 				execution.Environment, execution.Templates = os.Environ(), c.Subagents
 			}
 			tools = WithSubagentTools(func(ctx context.Context, tools ToolConfig) (Tools, error) {
@@ -156,12 +161,19 @@ func NewChildFactory(base RuntimeConfig, configure func(subagent.ChildConfig, *R
 		// template's Policy is the ceiling, its Baseline what Read Only and
 		// Ask allow without approval. Otherwise Policy is fixed.
 		hostConfig := host.Config{Directory: c.SessionDirectory, Build: factory}
+		claudeChild := claudeagent.IsProvider(identity.Provider.Provider)
 		baseline, maximum := c.Policy, (*permission.Policy)(nil)
+		ceiling := c.Policy
 		if link.Mode != "" {
 			if c.Baseline != nil {
 				baseline = *c.Baseline
 			}
-			if maximum, err = permission.New(c.Policy); err != nil {
+		}
+		if claudeChild {
+			baseline, ceiling = WithClaudeCodeRecord(baseline), WithClaudeCodeRecord(ceiling)
+		}
+		if link.Mode != "" {
+			if maximum, err = permission.New(ceiling); err != nil {
 				return nil, nil, err
 			}
 			hostConfig.PermissionMaximum, hostConfig.ApprovalTimeout = maximum, ChildApprovalTimeout
@@ -181,13 +193,24 @@ func NewChildFactory(base RuntimeConfig, configure func(subagent.ChildConfig, *R
 			}
 			return nil, nil, err
 		}
+		var commands io.Closer
 		closeOwner := childCloseFunc(func() error {
 			err := errors.Join(owner.Close(), policy.Close())
+			if commands != nil {
+				err = errors.Join(err, commands.Close())
+			}
 			if maximum != nil {
 				err = errors.Join(err, maximum.Close())
 			}
 			return err
 		})
+		if runtime.ServeChildCommands != nil {
+			commands, err = runtime.ServeChildCommands(ctx, owner)
+			if err != nil {
+				closeOwner.Close()
+				return nil, nil, err
+			}
+		}
 		configuration, err := json.Marshal(c)
 		if err != nil {
 			closeOwner.Close()
@@ -197,13 +220,22 @@ func NewChildFactory(base RuntimeConfig, configure func(subagent.ChildConfig, *R
 		if c.ProjectInstructions != nil {
 			snapshot = *c.ProjectInstructions
 		}
-		current, err := owner.Open(ctx, host.Options{TextOnlyChild: c.TextOnly, ProjectInstructions: &snapshot, Workspace: c.Workspace, ID: c.ChildID, Lifecycle: "child", Policy: policy, Configuration: configuration, Initial: []inbox.Input{c.InitialInput()}, Heartbeat: 0, PermissionMode: link.Mode})
+		current, err := owner.Open(ctx, host.Options{TextOnlyChild: c.TextOnly, ChildReportFromReply: claudeChild, ProjectInstructions: &snapshot, Workspace: c.Workspace, ID: c.ChildID, Lifecycle: "child", Policy: policy, Configuration: configuration, Initial: []inbox.Input{c.InitialInput()}, Heartbeat: 0, PermissionMode: link.Mode})
 		if err != nil {
 			closeOwner.Close()
 			return nil, nil, err
 		}
 		return current, closeOwner, nil
 	}
+}
+
+// WithClaudeCodeRecord permits receipts for tool calls already handled by the
+// Claude route's permission hooks.
+func WithClaudeCodeRecord(c permission.Config) permission.Config {
+	if !slices.Contains(c.Tools, tool.ClaudeCodeName) {
+		c.Tools = append(slices.Clone(c.Tools), tool.ClaudeCodeName)
+	}
+	return c
 }
 
 type childCloseFunc func() error

@@ -213,7 +213,7 @@ func TestDisabledOpenCodeGoSavedSessionUIAndChildren(t *testing.T) {
 			if err := writeSubagentModel(modelFile, subagentModel{Version: 1, Provider: opencodego.ProviderID, Model: "saved-model"}); err != nil {
 				t.Fatal(err)
 			}
-			ui := modelUI{owner: owner, runtime: runtime, subagentModel: modelFile}
+			ui := modelUI{owner: owner, runtime: runtime, subagentModel: subagentModelScope{defaultFile: modelFile, sessionDirectory: directory}}
 			for _, providers := range [][]modelcatalog.Provider{ui.providers(t.Context()), ui.subagentProviders(t.Context())} {
 				if slices.ContainsFunc(providers, func(p modelcatalog.Provider) bool { return p.ID == opencodego.ProviderID }) {
 					t.Fatal("disabled provider offered", providers)
@@ -238,9 +238,6 @@ func TestDisabledOpenCodeGoSavedSessionUIAndChildren(t *testing.T) {
 			requireGoDisabled(t, err)
 			_, err = resumedRuntime.LLM.Respond(t.Context(), llm.Request{}, llm.RequestOptions{})
 			requireGoDisabled(t, err)
-			for _, requested := range []*subagent.RuntimeRequest{nil, {Model: "override", Effort: "high"}, {Provider: opencodego.ProviderID, Model: "saved-model", Effort: "high"}} {
-				requireGoDisabled(t, subagentOverrideRefusal(modelFile, subagent.Template{Default: &subagent.RuntimeRequest{Provider: "openai-codex"}}, requested, false))
-			}
 			// A saved disabled route can be inspected and explicitly replaced.
 			choice, err := runtime.BindSelection(sessionstore.RuntimeSelection{Version: 1, Provider: loginProvider, Model: loginModel, Effort: "medium", RequestID: "replace"})
 			if err != nil {

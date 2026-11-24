@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
@@ -56,6 +57,13 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 	}
 	if hello.Sender != string(config.ParentID) || hello.Target != string(config.ChildID) {
 		return fmt.Errorf("handshake identity mismatch")
+	}
+	link := ChildLink{Mode: hello.Mode}
+	if policy := hello.ContextPolicy; policy != nil {
+		link.ContextFile, err = contextengine.NewConfigFile(policy.Path, policy.Initial)
+		if err != nil {
+			return err
+		}
 	}
 	if hello.Mode != "" && !hello.Mode.Valid() {
 		return fmt.Errorf("invalid parent permission mode")
@@ -147,10 +155,11 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 		}
 	})
 	var closer io.Closer
+	link.Send = ep.send
 	deadline := time.NewTimer(10 * time.Second)
 	defer deadline.Stop()
 	for {
-		child, closer, err = factory(ctx, config, ChildLink{Send: ep.send, Mode: hello.Mode})
+		child, closer, err = factory(ctx, config, link)
 		if !errors.Is(err, localfile.ErrWriterOwned) {
 			break
 		}

@@ -11,24 +11,27 @@ import (
 	"unicode/utf8"
 	"uuid"
 
-	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
 
 // The Read Only gate runs before Claude Code's own rules, which would otherwise
 // approve their allowed commands by themselves.
-const gateMatcher = "Bash|PowerShell|Edit|MultiEdit|Write|NotebookEdit|Agent"
+const gateMatcher = "Bash|PowerShell|Edit|MultiEdit|Write|NotebookEdit|Agent|Task"
+
+const delegationDenied = "Unreal Agent disables Claude Code's Agent and Task tools. Use Unreal's SubagentStart through `unreal-agent subagent start` instead."
+
+func nativeDelegation(name string) bool {
+	return name == "Agent" || name == "Task"
+}
 
 // approver asks Unreal's permission mode about Claude Code's tool calls, one at
 // a time: parallel prompts would make an open TUI prompt stale. cli is the
 // Host's executable when Claude may drive subagents with it.
 type approver struct {
-	mu          sync.Mutex
-	cli         string
-	contextCLI  string
-	agentModel  string
-	agentEffort llm.ReasoningEffort
+	mu         sync.Mutex
+	cli        string
+	contextCLI string
 }
 
 func (a *approver) hostCommand(command string) bool {
@@ -36,6 +39,9 @@ func (a *approver) hostCommand(command string) bool {
 }
 
 func (a *approver) decide(ctx context.Context, toolName string, input jsontext.Value, toolUseID string) (bool, string) {
+	if nativeDelegation(toolName) {
+		return false, delegationDenied
+	}
 	if toolName == "AskUserQuestion" {
 		return false, "Unreal Agent cannot show question dialogs. Ask the user in your reply instead."
 	}
@@ -67,37 +73,16 @@ func (a *approver) decide(ctx context.Context, toolName string, input jsontext.V
 	return false, denialMessage(permit.Decision.State)
 }
 
-// gate answers the PreToolUse hook: only Read Only refuses here, except
-// commands that only read; every other call goes on to Claude Code's rules
-// and then to decide.
+// gate answers PreToolUse before Claude Code applies its own permission rules.
 func (a *approver) gate(ctx context.Context, in hookInput) map[string]any {
 	refuse := func(reason string) map[string]any {
 		return map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}
 	}
+	if nativeDelegation(in.ToolName) {
+		return refuse(delegationDenied)
+	}
 	if in.ToolName == "Bash" && a.hostCommand(inputFields(in.ToolInput).Command) {
 		return map[string]any{} // the Host applies the Session's permissions
-	}
-	if in.ToolName == "Agent" {
-		// Each turn's process ends with the turn, which would cut off a
-		// background Agent. Its own tool calls pass this gate one by one.
-		var input map[string]any
-		if json.Unmarshal(in.ToolInput, &input) != nil {
-			return map[string]any{}
-		}
-		changed := input["run_in_background"] != false
-		input["run_in_background"] = false
-		if a.agentModel != "" {
-			changed = changed || input["model"] != a.agentModel
-			input["model"] = a.agentModel
-		}
-		if a.agentEffort != "" {
-			changed = changed || input["effort"] != string(a.agentEffort)
-			input["effort"] = string(a.agentEffort)
-		}
-		if !changed {
-			return map[string]any{}
-		}
-		return map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "Unreal Agent keeps Agent work inside the turn and applies operator-selected Agent settings.", "updatedInput": input}}
 	}
 	if in.ToolName == "Bash" {
 		original := inputFields(in.ToolInput).Command

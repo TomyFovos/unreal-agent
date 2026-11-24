@@ -80,14 +80,18 @@ func TestLaunchKeepsProjectInstructionsNativeAndEnablesOnlyMeasuredTools(t *test
 		t.Fatal(err)
 	}
 	args := strings.Split(string(data), "\n")
-	for _, flag := range []string{"--tools", "--append-system-prompt", "--settings"} {
+	for _, flag := range []string{"--tools", "--disallowedTools", "--append-system-prompt", "--settings"} {
 		i := slices.Index(args, flag)
 		if i < 0 || i+1 >= len(args) {
 			t.Fatal("missing launch argument", flag)
 		}
 		switch flag {
 		case "--tools":
-			if args[i+1] != enabledTools+",Agent" {
+			if args[i+1] != enabledTools {
+				t.Fatal(args[i+1])
+			}
+		case "--disallowedTools":
+			if args[i+1] != "Agent,Task" {
 				t.Fatal(args[i+1])
 			}
 		case "--append-system-prompt":
@@ -105,31 +109,13 @@ func TestLaunchKeepsProjectInstructionsNativeAndEnablesOnlyMeasuredTools(t *test
 			}
 		}
 	}
-	if slices.Contains(args, "--disallowedTools") || slices.Contains(args, "--disable-slash-commands") || slices.Contains(args, "--autocompact") {
+	if slices.Contains(args, "--disable-slash-commands") || slices.Contains(args, "--autocompact") {
 		t.Fatal("unexpected Claude Code flags", args)
 	}
-	for _, disabled := range []string{"Agent", "Monitor", "AskUserQuestion"} {
+	for _, disabled := range []string{"Agent", "Task", "Monitor", "AskUserQuestion"} {
 		if slices.Contains(strings.Split(enabledTools, ","), disabled) {
 			t.Fatal(disabled)
 		}
-	}
-}
-
-func TestLaunchToolsAlwaysOfferAgent(t *testing.T) {
-	if got := launchTools(SubagentCLI{Binary: "/opt/unreal/bin/unreal"}); got != enabledTools+",Agent" {
-		t.Fatal(got)
-	}
-	if got := launchTools(SubagentCLI{}); got != enabledTools+",Agent" {
-		t.Fatal(got)
-	}
-}
-
-func TestAgentDelegationStaysInsideTheTurn(t *testing.T) {
-	if env := launchEnv([]string{"HOME=/h"}, SubagentCLI{}); !slices.Contains(env, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1") {
-		t.Fatal("background tasks stay enabled without GPT children", env)
-	}
-	if env := launchEnv([]string{"HOME=/h"}, SubagentCLI{Binary: "/opt/unreal/bin/unreal"}); slices.Contains(env, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1") {
-		t.Fatal("GPT children configured, yet background tasks disabled", env)
 	}
 }
 
@@ -149,21 +135,25 @@ func TestLaunchDelegationTracksProviderAvailabilityEachTurn(t *testing.T) {
 		args := strings.Split(string(data), "\n")
 		tools := args[slices.Index(args, "--tools")+1]
 		prompt := string(data)
-		if !slices.Contains(strings.Split(tools, ","), "Agent") || strings.Contains(prompt, "No GPT children are available") == ready || strings.Contains(prompt, "Templates: lead") != ready {
+		if slices.Contains(strings.Split(tools, ","), "Agent") || flagValue(args, "--disallowedTools") != "Agent,Task" || strings.Contains(prompt, "/model refresh after signing in") == ready || strings.Contains(prompt, "Templates: lead") != ready {
 			t.Fatalf("available=%t tools=%s prompt=%s", ready, tools, prompt)
 		}
 	}
 }
 
-func TestGateKeepsAgentInsideTheTurn(t *testing.T) {
+func TestGateDeniesForegroundAndBackgroundDelegation(t *testing.T) {
 	var a approver
-	answer := a.gate(t.Context(), hookInput{ToolName: "Agent", ToolInput: jsontext.Value(`{"description":"d","prompt":"p","model":"fable","run_in_background":true}`)})
-	out, _ := answer["hookSpecificOutput"].(map[string]any)
-	input, _ := out["updatedInput"].(map[string]any)
-	if out["permissionDecision"] != "allow" || input["run_in_background"] != false || input["model"] != "fable" {
-		t.Fatal(answer)
-	}
-	if answer := a.gate(t.Context(), hookInput{ToolName: "Agent", ToolInput: jsontext.Value(`{"prompt":"p","run_in_background":false}`)}); len(answer) != 0 {
-		t.Fatal("a foreground Agent call needs no rewrite", answer)
+	for _, name := range []string{"Agent", "Task"} {
+		for _, input := range []jsontext.Value{
+			jsontext.Value(`{"description":"d","prompt":"p","model":"fable","run_in_background":true}`),
+			jsontext.Value(`{"prompt":"p","run_in_background":false}`),
+		} {
+			answer := a.gate(t.Context(), hookInput{ToolName: name, ToolInput: input})
+			out, _ := answer["hookSpecificOutput"].(map[string]any)
+			reason, _ := out["permissionDecisionReason"].(string)
+			if out["permissionDecision"] != "deny" || !strings.Contains(reason, "SubagentStart") || out["updatedInput"] != nil {
+				t.Fatalf("%s %s: %v", name, input, answer)
+			}
+		}
 	}
 }

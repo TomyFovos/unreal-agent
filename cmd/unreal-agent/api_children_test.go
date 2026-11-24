@@ -154,8 +154,11 @@ func TestAPIKeyBuiltInLeadAndGrandchildProcess(t *testing.T) {
 	}
 	// An explicit subagent model choice takes priority over the API parent's
 	// connection. Neither unavailable provider may fall back to that API.
+	scope := subagentModelScope{defaultFile: modelFile, sessionDirectory: filepath.Join(directory, "sessions")}
 	for _, chosen := range []subagentModel{{Version: 1, Provider: "openai-codex"}, {Version: 1, Provider: "opencode-go", Model: "deepseek-v4.1-flash"}} {
-		if err := writeSubagentModel(modelFile, chosen); err != nil {
+		// Seed a saved choice whose connection is now unavailable. The model
+		// setter itself validates availability before saving.
+		if err := writeSubagentModel(scope.file("api-parent"), chosen); err != nil {
 			t.Fatal(err)
 		}
 		_, err := modelExchange(t.Context(), client.Extension, modelRequest{Action: "child.start", ID: "api-parent", Generation: v.Generation, InputID: "unavailable-" + inbox.ID(chosen.Provider), Template: "collector", Task: "This selected provider is unavailable."})

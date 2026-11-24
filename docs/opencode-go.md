@@ -99,14 +99,11 @@ unreal-agent subagent model set --role all --provider opencode-go --model deepse
 理由を返して失敗し、保存済み設定を変更しません。API キー接続も利用者が明示した場合だけ使い、別 provider への自動切替はしません。
 設定・参照は Host 経由で処理し、操作した Session に役割・provider・model・effort を記録します。
 
-選択はキーと同じ共有ディレクトリの `~/.local/state/unreal-agent/subagent-model.json`
-（`XDG_STATE_HOME` が設定されていれば `$XDG_STATE_HOME/unreal-agent/subagent-model.json`）に保存し、
-全 Session・フォルダ・instance で共有します。
-Host 再起動後も保持します。Version 1 の旧単一設定は全役割への選択として読み込み、役割別設定は Version 2 で保存します。
-変更しない役割は以前の一括設定を引き継ぎます。設定は次の子から有効で、実行中の子は記録済みの選択を維持します。
-実行中の lead 配下でも、新しく開始する worker・collector はその開始時点の保存済み設定を使います。
-lead 自身と開始済みの worker・collector は、Host 再起動後もそれぞれの記録済み選択を維持します。
-明示的な `Subagents`・`SubagentDefaults` と、runtime を明示した `/children start` は共有設定の対象外です。
+トップレベルの Session をこのバージョンで初めて開くと、共有ディレクトリの `~/.local/state/unreal-agent/subagent-model.json`
+（`XDG_STATE_HOME` 設定時は `$XDG_STATE_HOME/unreal-agent/subagent-model.json`）を初期値に使います。
+Version 1 の単一設定は全役割に適用します。Session ごとの設定は Host 再起動後も使えます。
+`model set` を実行した Session で、次に起動する子と、実行中の lead が次に起動する worker・collector に適用します。
+同じ初期値ファイルを使う保存済み Session と今後の Session に反映するには `--all-sessions` を指定します。
 
 旧共通キットでリポジトリ別の State に保存した `subagent-model.json` は、共有ファイルがないときに
 そのリポジトリの起動時に内容を変えずに移行します。複数の旧設定があれば最初に起動したリポジトリの選択を共有し、
@@ -115,8 +112,8 @@ Session・ログは従来のリポジトリ別 State に保持します。
 
 保存済み設定がない役割では、親が OpenAI API を明示選択していればその API、他の親では Codex を使います。
 Codex を明示した役割は、API の親からでもサブスク接続を使います。
-`subagent start --model ID --effort LEVEL` の可否も役割ごとに判断し、Go / Claude の役割では
-`override_unavailable` を返します。変更には `subagent model set` を使います。
+`subagent start --model ID --effort LEVEL` でその子だけのモデルと effort を指定できます。
+複数の利用可能な接続先が同じモデルを提供している場合は、表示された ID の一つを `--provider ID` で指定します。
 Claude の委譲案内と可用性確認も役割ごとの選択を使い、使えない役割を別接続へ回しません。
 
 Go で effort を省略した場合、lead とメイン直下の子は最高を使います。lead 配下では worker-max は最高、worker-low / collector は最低、
@@ -131,14 +128,13 @@ effort がないモデルには指定を送りません。Flash では次のよ�
 | `worker-low` | `low` | `max` |
 | `collector` | `low` | collector 自身の設定を維持 |
 
-Claude を選んだ役割は Claude の親から Claude Code の Agent へそのモデルで委譲します。
-全役割が同じ Claude モデルなら `CLAUDE_CODE_SUBAGENT_MODEL` と `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`、
-混在時は全体を FORCE せず役割ごとの案内を使います。Agent の認証は親の明示済み Claude 接続です。
-Unreal の子として直接開始しようとすると、その役割だけ `provider_unavailable` を返します。
-実 CLI の Agent モデル反映はこの変更では live 試験していません。
+Claude を選んだ役割も Unreal の子 Session として起動し、保存したモデルと effort を使います。
+たとえば collector を Sonnet の high にするには、`unreal-agent subagent model set --role collector --provider claude --model claude-sonnet-5-5 --effort high` を実行します。
+worker・collector の役割設定は lead 配下で適用されます。Claude の lead からも Codex の lead からも Claude の子を起動できます。
+使用量は子 Session に記録し、親が承認を行います。Claude Code の `Agent` と `Task` は親・子ともに禁止です。
 
 テンプレートのない Host では CLI が再起動後から有効と表示します。
-Codex 無効・自動検出なしの Host でも、Go の設定を保存すれば次の Host 起動時にテンプレートを用意します。
+Codex 無効・自動検出なしの Host でも、利用可能な Go または Claude を選べば次の Host 起動時にテンプレートを用意します。
 
 ### キーの削除
 

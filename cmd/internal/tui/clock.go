@@ -15,10 +15,16 @@ func nextRender(s Snapshot, u UIState, view ViewMode) time.Time {
 			deadline = next
 		}
 	}
-	consider(nextSubscriptionReset(s, u))
-	if u.Sheet != nil {
-		consider(u.Sheet.refreshAt)
+	if p := u.analysis; p != nil {
+		if !p.loading {
+			if p.report == nil || p.version != s.Version || p.viewerVersion != u.Viewer.Version || !p.refreshAt.IsZero() && !u.Now.Before(p.refreshAt) {
+				consider(p.nextRead)
+			}
+			consider(p.refreshAt)
+		}
+		return deadline
 	}
+	consider(nextSubscriptionReset(s, u))
 	if u.cache != nil {
 		u.index = u.cache.index
 	}
@@ -37,7 +43,7 @@ func nextRender(s Snapshot, u UIState, view ViewMode) time.Time {
 		if row.Elapsed.Known && !row.CreatedAt.IsZero() && row.Runtime == viewer.RuntimeRunning && row.Finish == nil && row.End == nil {
 			age := u.Now.Sub(row.CreatedAt)
 			step := time.Minute
-			if age < time.Minute || analysisShowsElapsed(u.Sheet) {
+			if age < time.Minute {
 				step = time.Second
 			}
 			boundary := row.CreatedAt.Add(age.Truncate(step) + step)
@@ -67,8 +73,4 @@ func nextRender(s Snapshot, u UIState, view ViewMode) time.Time {
 		}
 	}
 	return deadline
-}
-
-func analysisShowsElapsed(sheet *Sheet) bool {
-	return sheet != nil && (sheet.Analysis == "Overview" || sheet.Analysis == "Agents")
 }

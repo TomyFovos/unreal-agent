@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -122,7 +123,7 @@ func TestHostRebuildsOversizedAutonomousTailWithOrWithoutCheckpoint(t *testing.T
 			requests := make(chan llm.Request, 1)
 			h, err := New(ctx, Config{Directory: dir, Build: func(ctx context.Context, _ session.ID) (Runtime, error) {
 				registry := tool.NewRegistry(tool.StaticTranslators{})
-				b, engine, err := windowBuilder(registry, contextengine.Config{WindowThresholdTokens: threshold})
+				b, engine, err := windowBuilder(registry, contextengine.Config{WindowThresholdTokens: threshold, L2TargetTokens: threshold / 2})
 				return Runtime{Builder: b, ContextEngine: engine, Operations: operation.NewLocalOperationManager(ctx), Tools: registry,
 					LLM: modelFunc(func(_ context.Context, r llm.Request, _ llm.RequestOptions) (llm.Response, error) {
 						requests <- r
@@ -192,6 +193,69 @@ func (m liveWindowChild) Cancel(id operation.ID, reason string) error {
 
 func TestHostWindowPreservesApprovalQuestionWaitAndRunningChild(t *testing.T) {
 	testHostWindowPending(t, nil)
+}
+
+func TestHostWindowReadsDisplacedStateFromCanonicalLog(t *testing.T) {
+	ctx, dir := t.Context(), t.TempDir()
+	store, _, _ := seedWindowHistory(t, dir)
+	const oldest = "Decision from the start of the review"
+	var original record.Locator
+	for i := range 40 {
+		id := fmt.Sprintf("decision-%02d", i)
+		text := "Keep the current approach"
+		if i == 0 {
+			text = oldest
+		}
+		event, err := contextstate.NewEvent(id, contextstate.DecisionRecorded, contextstate.Decision{
+			ID: id, Decision: text, Reason: strings.Repeat("verified findings ", 80),
+		})
+		checkHostRestore(t, err)
+		locator, err := store.AppendContextEvent(ctx, "window", event)
+		checkHostRestore(t, err)
+		if i == 0 {
+			original = locator
+		}
+	}
+
+	requests := make(chan llm.Request, 1)
+	h, err := New(ctx, Config{Directory: dir, PermissionMaximum: permission.Unrestricted(), Build: func(ctx context.Context, _ session.ID) (Runtime, error) {
+		registry := tool.NewRegistry(tool.StaticTranslators{})
+		b, engine, err := windowBuilder(registry, contextengine.Config{WindowThresholdTokens: 4_000, L2TargetTokens: 2_000})
+		return Runtime{Builder: b, ContextEngine: engine, Tools: registry, Operations: operation.NewLocalOperationManager(ctx),
+			LLM: modelFunc(func(ctx context.Context, req llm.Request, opt llm.RequestOptions) (llm.Response, error) {
+				requests <- req
+				return llm.Response{Stop: llm.StopComplete}, nil
+			})}, err
+	}})
+	checkHostRestore(t, err)
+	t.Cleanup(func() { h.Close() })
+	s, err := h.Resume(ctx, Options{ID: "window", Policy: permission.Unrestricted()})
+	checkHostRestore(t, err)
+	_, err = s.Submit(timeout(t), s.Generation, input("continue", "Continue the review"))
+	checkHostRestore(t, err)
+	var request llm.Request
+	select {
+	case request = <-requests:
+	case <-timeout(t).Done():
+		t.Fatal("no request after the boundary")
+	}
+	locator := record.Address{Session: "window", Kind: record.ContextIndex, Section: "state"}.Locator()
+	if len(request.Input) < 2 || !strings.Contains(contextengine.Text(request.Input[1]), string(locator)) ||
+		strings.Contains(contextengine.Text(request.Input[1]), oldest) {
+		t.Fatal("the bounded copy did not link to the displaced decisions")
+	}
+	page, err := s.RecordShow(ctx, locator, 0)
+	checkHostRestore(t, err)
+	var full contextstate.State
+	checkHostRestore(t, json.Unmarshal(page.Bytes, &full))
+	if got := full.Decisions["decision-00"]; len(full.Decisions) != 40 || got.Decision != oldest || got.Locator != original {
+		t.Fatal("record show did not recover the full decisions and their original evidence")
+	}
+	matches, err := s.RecordFind(ctx, record.Query{Kind: record.SessionItem, Text: oldest})
+	checkHostRestore(t, err)
+	if len(matches) != 1 || matches[0].Locator != original {
+		t.Fatalf("record find did not locate the displaced decision: %+v", matches)
+	}
 }
 
 func testHostWindowPending(t *testing.T, fake *testclaude.Fixture) {
@@ -463,7 +527,7 @@ func TestHostWindowCheckpointReplaysSameResponsesBytes(t *testing.T) {
 		checkHostRestore(t, err)
 		h, err := New(ctx, Config{Directory: dir, Build: func(ctx context.Context, _ session.ID) (Runtime, error) {
 			registry := tool.NewRegistry(tool.StaticTranslators{Read: windowTextTool(original)}, "read")
-			b, engine, err := windowBuilder(registry, contextengine.Config{WindowThresholdTokens: 2_000, InputBudget: 4_000, ToolOutputExcerptChars: 28, CacheRewarmMinutes: 54})
+			b, engine, err := windowBuilder(registry, contextengine.Config{WindowThresholdTokens: 2_000, L2TargetTokens: 1_000, InputBudget: 4_000, ToolOutputExcerptChars: 28, CacheRewarmMinutes: 54})
 			return Runtime{Builder: b, ContextEngine: engine, Tools: registry, Operations: operation.NewLocalOperationManager(ctx), LLM: adapter, Close: client.Close}, err
 		}})
 		checkHostRestore(t, err)

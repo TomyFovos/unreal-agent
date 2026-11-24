@@ -7,6 +7,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"github.com/unreallabsai/unreal-agent/harness/contextengine"
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
@@ -55,8 +56,8 @@ type Plan struct {
 	Brief         BriefFields                `json:",omitzero"`
 	Result        *sessionstore.FinishResult `json:",omitzero"`
 	RuntimeBound  bool                       `json:",omitzero"`
-	// RuntimeOverride records explicit CLI model/effort overrides of the
-	// template. Its provider is empty; the template's provider stays fixed.
+	// RuntimeOverride records the original start arguments for stable retries.
+	// Older unbound plans record only a template's model or effort override.
 	RuntimeOverride *RuntimeRequest `json:",omitzero"`
 	// Progress marks a parent message that waits for the parent's next turn.
 	Progress bool `json:",omitzero"`
@@ -114,11 +115,12 @@ type Approval struct {
 type Sender func(context.Context, inbox.Input) (host.Receipt, error)
 
 // ChildLink is what a child runtime gets from its live parent besides the
-// recorded configuration: the channel back, and the parent's current
-// permission mode (empty when the parent has no modes).
+// recorded configuration: the channel back and the parent's current
+// permission mode and context policy.
 type ChildLink struct {
-	Send Sender
-	Mode permission.Mode
+	Send        Sender
+	Mode        permission.Mode
+	ContextFile *contextengine.ConfigFile
 }
 type ChildFactory func(context.Context, ChildConfig, ChildLink) (*host.Session, io.Closer, error)
 

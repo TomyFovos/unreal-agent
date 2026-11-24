@@ -78,7 +78,7 @@ In `/model`, choose **Fast mode** after effort when the ChatGPT subscription cat
 
 On ChatGPT sign-in, GPT-6 Luna Fast uses **2.5×** the included subscription allowance and **2×** the purchased-credit or eligible enterprise pay-as-you-go rate for the same model at standard speed. Rates vary by model. [OpenAI speed guide](https://learn.chatgpt.com/docs/agent-configuration/speed#fast-mode), [OpenAI pricing](https://learn.chatgpt.com/docs/pricing?codex-pricing-speed=fast#speed-multipliers)
 
-Unreal reports `fast unsupported for <model>` if Fast cannot be enabled. If a saved selection loses catalog support, requests continue on that model at standard speed and display the same notice. `/analyze` → **Layers** groups token usage and output tok/s by the mode sent with each request. Older Codex records without mode metadata appear as `fast unknown`.
+Unreal reports `fast unsupported for <model>` if Fast cannot be enabled. If a saved selection loses catalog support, requests continue on that model at standard speed and display the same notice. `/analyze` → **Export** includes token usage and output tok/s grouped by the mode sent with each request. Older Codex records without mode metadata appear as `fast unknown`.
 
 ---
 
@@ -170,7 +170,7 @@ When Codex is configured or enabled for discovery, or an OpenAI API connection i
 
 Without a saved `unreal-agent subagent model` choice, an **OpenAI API** parent uses `openai` for its built-in GPT children and their workers. Other parents retain the `openai-codex` subscription route. Availability never changes that choice. API children keep their template models and configured effort; the subscription defaults below remain unchanged. Explicit operator templates and existing children retain their recorded connections.
 
-Claude guidance and provider availability follow each selected role. An unavailable explicit choice produces recovery guidance without changing its connection. Without shared role settings, Claude uses the Codex children while available, or its own Agent tool otherwise. Explicit Claude-model work through Agent remains available alongside Unreal children.
+Claude delegates through Unreal. Every Claude Code Session launched by Unreal has the built-in `Agent` and legacy `Task` tools disabled. An unavailable role keeps its selected connection and reports how to restore it.
 
 | Template / Role | Model & Effort | Purpose |
 | --- | --- | --- |
@@ -202,11 +202,15 @@ Roles are `lead`, `worker` (all `worker-*` templates), `collector`, and `all` (r
 
 Use `--fast on` on any role with a supported ChatGPT subscription model. A full model selection with `--fast off` or without `--fast` uses standard speed. Once a role has a saved model, `model set --role worker --fast off` changes speed and keeps its provider, model, and effort. `model show` displays the saved mode.
 
-The Host handles and records reads and changes in the owning Session. Settings remain in shared `STATE/subagent-model.json`, across Sessions, folders and Host restarts. Old Version 1 files apply their single choice to all roles; role settings use Version 2. Unchanged roles inherit the previous global choice. Settings apply to the next child start; running children and their recorded worker selections stay fixed. Explicit `Subagents`, `SubagentDefaults`, and `/children start` commands with an explicit runtime remain independent.
+The Host records reads and changes in the calling top-level Session. Each Session copies its initial choices from `STATE/subagent-model.json` the first time it opens with this version. Version 1 defaults apply their single choice to all roles. Session choices persist across resume and Host restart.
 
-For OpenCode Go, omitting effort keeps the previous mapping: lead / worker-max use the highest effort, worker-low / collector the lowest, and other workers their own supported effort or the model-derived default. Selecting worker effort `max` overrides that mapping for all workers. `subagent start --model/--effort` is refused with `override_unavailable` for roles assigned to Go or Claude; change their settings with `subagent model set`.
+`subagent model set` updates the calling Session. Its next child starts use the new settings, including workers or collectors started by an already running lead. A child keeps the provider, model, and effort selected at its own start. Use `subagent model set --all-sessions` with the usual role and model flags to update that role for saved Sessions sharing the defaults file and for future Sessions.
 
-Claude delegation guidance and availability checks follow each role. Roles assigned to Claude use Claude Code's Agent tool with the selected model. A uniform Claude choice uses `CLAUDE_CODE_SUBAGENT_MODEL` and its FORCE flag; mixed choices use role-specific guidance. They cannot be started directly as Unreal children. If this Host has no templates yet, the CLI reports that a Host restart is needed. See [the detailed CLI instructions](opencode-go.md#サブエージェントのモデルを選ぶ).
+For OpenCode Go, omitting effort from a saved role uses the highest effort for lead and worker-max, the lowest for worker-low and collector, and the template's supported effort or a model-derived default for other workers. Selecting worker effort `max` applies it to all workers.
+
+Use `subagent start --model ID [--provider ID] [--effort LEVEL]` for a single start. With only a model ID, Unreal looks for a unique match in the available registered catalogs. When multiple providers offer the model, the error lists their IDs. Supply `--provider` to select one. Separately billed API connections require an explicit selection. An explicit provider must be available and offer the requested model. Main and nested `SubagentStart` tool calls accept the same optional `model`, `provider`, and `effort` fields.
+
+A role assigned to Claude starts an Unreal child Session using the same Claude Code route as the main Session. Its model and effort come from the saved role setting. The Orchestra view shows the child, usage belongs to its Session, and approval requests go to its parent. Worker and collector role choices apply below a lead, which may use any configured provider. If the Host has no templates yet, the CLI reports when a restart is needed. See [the detailed CLI instructions](opencode-go.md#サブエージェントのモデルを選ぶ).
 
 ### Distributor-disabled OpenCode Go
 

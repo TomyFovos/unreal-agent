@@ -154,6 +154,9 @@ func startProcess(ctx context.Context, c Config, child ChildConfig, mode permiss
 		hello.ID = modelProgressHandshake
 		hello.Config = &child
 		hello.Mode = mode
+		if file := c.ContextFile; file != nil {
+			hello.ContextPolicy = &childContextPolicy{Path: file.Path(), Initial: file.Current()}
+		}
 		if err := p.write(ctx, hello); err != nil {
 			cancel()
 		}

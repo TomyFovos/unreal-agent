@@ -9,13 +9,18 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
 )
 
 // InspectTree is an explicit analysis read. Ordinary child controls retain
 // their direct-parent scope. Every edge is proven by both canonical records.
 func (r ParentReader) InspectTree(ctx context.Context, id session.ID, after sessionstore.Sequence, limit int) (host.View, error) {
-	return r.inspectTree(ctx, id, after, limit, true)
+	v, err := r.inspectTree(ctx, id, after, limit, true)
+	if err != nil {
+		return host.View{}, err
+	}
+	return copyValue(v)
 }
 
 // InspectTopology observes the visible tree using the same lineage proof as
@@ -32,9 +37,15 @@ func (r ParentReader) InspectTopology(ctx context.Context, id session.ID, after 
 		v.ModelPhase = owner.ChildModelPhase([]session.ID{id})
 		return v, nil
 	}
-	return r.inspectTree(ctx, id, after, limit, false)
+	v, err := r.inspectTree(ctx, id, after, limit, false)
+	if err != nil {
+		return host.View{}, err
+	}
+	return copyValue(v)
 }
 
+// The gateway encodes this immutable cached page directly. Public Go readers
+// copy it before returning so their callers can own and mutate the result.
 func (r ParentReader) inspectTree(ctx context.Context, id session.ID, after sessionstore.Sequence, limit int, analysis bool) (host.View, error) {
 	if limit < 1 || limit > 4096 {
 		return host.View{}, ErrInvalidPage
@@ -50,16 +61,27 @@ func (r ParentReader) inspectTree(ctx context.Context, id session.ID, after sess
 	if err != nil {
 		return host.View{}, err
 	}
+	if analysis && uint64(after) > uint64(len(child.View.History.Items)) {
+		return host.View{}, ErrInvalidPage
+	}
 	v := childPage(child.View, after, min(limit, 256), analysis)
 	if !analysis {
 		v.ModelPhase = owner.ChildModelPhase(path)
+	} else if len(path) > 0 && !v.History.More {
+		// Consult the index after proving lineage. The log inode is unchanged
+		// by archival, so its cached history needn't contain this metadata.
+		if store, err := localfile.New(r.Directory); err == nil {
+			if entry, err := store.ArchiveIndex(id); err == nil && entry.ParentID == child.Configuration.ParentID && entry.OperationID == child.Configuration.OperationID {
+				v.ArchivedEndedAt = entry.EndedAt
+			}
+		}
 	}
 	if f := v.ContextFacts; f != nil {
 		lo := sort.Search(len(f.Rows), func(i int) bool { return f.Rows[i].After > after })
 		hi := sort.Search(len(f.Rows), func(i int) bool { return f.Rows[i].After > v.History.NextAfter })
 		v.ContextFacts = &sessionstore.ContextFacts{Through: v.History.NextAfter, Rows: f.Rows[lo:hi]}
 	}
-	return copyValue(v)
+	return v, nil
 }
 
 func (r ParentReader) treeChild(ctx context.Context, owner *host.Session, id session.ID, analysis bool, seen map[session.ID]bool) (subagent.ChildView, []session.ID, error) {
