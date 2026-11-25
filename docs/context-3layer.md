@@ -56,7 +56,7 @@ These keys are under `Context` in `runtime.json`.
 | `ToolOutputExcerptChars` | `0` | Use the existing tool display allowance. A positive value sets the combined head and tail size in Unicode characters for each text part. |
 | `CacheRewarmMinutes` | `0` | Optional interval recorded for the PR7 cache comparison. Runtime requests remain driven by normal Session activity. |
 
-Use `Context.Routes` to override these keys and `InputBudget`, `FallbackWindow`, `ResponseReserve`, or `ProtocolReserve` for specific provider IDs. Omitted fields inherit the common `Context` values. Each Session, including each child, uses the provider of its current selection. The common policy and every route must keep `L2TargetTokens` within the nominal rebuild target computed from W and the ratio. The builder further caps L2 when the model's input budget or request header leaves less room.
+Use `Context.Routes` to override these keys and `InputBudget`, `FallbackWindow`, `ResponseReserve`, or `ProtocolReserve` for specific provider IDs. A child first inherits the common settings, then applies the settings for the provider of its current selection, then applies `Context.Routes.<provider>.Roles.<role>` for its resolved role (`lead`, `worker`, or `collector`). The main Session uses the common and provider settings. Omitted fields inherit their previous values. Every effective policy must keep `L2TargetTokens` within the rebuild target computed from W and the ratio. The builder further caps L2 when the model's input budget or request header leaves less room.
 
 For example, merge this `Context` object into the Host's runtime configuration.
 
@@ -68,7 +68,13 @@ For example, merge this `Context` object into the Host's runtime configuration.
     "L2TargetTokens": 5000,
     "Routes": {
       "claude": {"WindowThresholdTokens": 180000, "PostRebuildRatio": 0.6},
-      "opencode-go": {"L2TargetTokens": 3500},
+      "opencode-go": {
+        "L2TargetTokens": 3500,
+        "Roles": {
+          "lead": {"WindowThresholdTokens": 64000},
+          "worker": {"WindowThresholdTokens": 96000}
+        }
+      },
       "openai-codex": {"WindowThresholdTokens": 220000}
     }
   }
@@ -115,7 +121,7 @@ Both state review commands and `subagent review HANDLE accept|reject [--reason T
 
 Open `/analyze` → **Context** to compare request input with W and cache reads before and after rebuilds. **Export** contains detailed measurements in JSON and Markdown for the full Session tree, including archived descendants. Rows group by context strategy (`three-layer` or `historical summary`) and provider, model, effort, and Fast mode. A recorded counter or setting is `measured`, a calculation or estimate is `derived`, and unavailable data is `unknown`. JSON uses a `null` value with source `unknown` for unavailable measurements. A known total can also show how many observations were missing.
 
-The Context view shows the latest applied policy by route. Each change opens a new period for the affected Session and route. Compare rebuild counts, average input size just after rebuilding, cache read share on the first request, and L3 show and find calls. Each request and L3 count belongs to the policy that built its window, including calls that begin before the next rebuild and complete afterward. Rebuilds from before policy recording appear with an unknown policy.
+The Context view shows the latest applied policy by route and role. Each effective change opens a new policy period for the affected Session. Compare the settings, rebuild counts, average input size just after rebuilding, cache read share on the first request, and L3 show and find calls. Window measurements belong to the policy that built the window, including L3 calls that begin before the next rebuild and complete afterward. Rebuilds from before policy recording appear with an unknown policy.
 
 | Measurement | What to compare |
 | --- | --- |
@@ -136,4 +142,4 @@ Subscription utilisation shows provider-reported allowance windows, percentages,
 python3 scripts/context_replay.py ./session-copies --since 2026-11-24T00:00:00+09:00 --config ./candidate/runtime.json
 ```
 
-Copy the Session logs before replaying. The `candidate` results include each route's effective policy and simulations for the full trace and the validation period. Optional `--request-csv` uses the same candidate. The existing `codex` and `deepseek` report groups resolve policy from `openai-codex` and `opencode-go`, respectively. Candidate sizing applies the configured W, ratio, L2 cap, and budgets. The simulator estimates rendered context sizes, cache behaviour, and costs from recorded request metadata.
+Copy the Session logs before replaying. The `candidate` results include each route's effective policy, its configured `role_policies`, and simulations for the full trace and the validation period. Replay selects the role from the recorded child configuration or policy. Logs without a recorded role use the provider policy. Optional `--request-csv` uses the same candidate and includes the child role. The existing `codex` and `deepseek` report groups resolve policy from `openai-codex` and `opencode-go`, respectively. Candidate sizing applies the configured W, ratio, L2 cap, and budgets. The simulator estimates rendered context sizes, cache behaviour, and costs from recorded request metadata.

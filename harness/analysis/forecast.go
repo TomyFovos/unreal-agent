@@ -1,17 +1,16 @@
 package analysis
 
 import (
-	"math"
-	"slices"
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/llm"
+	"github.com/unreallabsai/unreal-agent/harness/usage"
 )
 
 const (
-	EMAAlpha           = 0.35
+	EMAAlpha           = usage.EMAAlpha
 	TokenForecastHours = 3
-	BurnLookback       = 3 * time.Hour
+	BurnLookback       = usage.BurnLookback
 )
 
 type TokenTrend struct {
@@ -81,86 +80,30 @@ type AllowanceForecast struct {
 }
 
 func (r Report) ForecastAllowance(w SubscriptionWindow) AllowanceForecast {
-	var f AllowanceForecast
-	at := w.PercentTime()
-	if w.UsedPercent == nil || !validPercent(*w.UsedPercent) || at.IsZero() || !w.HasWindow() || w.ResetPassed(at) {
-		return f
-	}
-	measurements := contextMeasurements(r)
-	if measurements != nil {
-		cutoff := at.Add(-BurnLookback)
-		if p := w.PeriodMinutes(); p > 0 && !w.ResetsAt.IsZero() {
-			if start := w.ResetsAt.Add(-time.Duration(p) * time.Minute); start.After(cutoff) {
-				cutoff = start
-			}
-		}
+	var observations []llm.SubscriptionObservation
+	if measurements := contextMeasurements(r); measurements != nil {
 		for _, o := range measurements.Totals.Subscription {
-			if o.At.Before(cutoff) || !o.At.Before(at) || o.UsedPercent.Value == nil || !validPercent(*o.UsedPercent.Value) {
-				continue
-			}
-			prior := llm.SubscriptionObservation{Provider: o.Provider, SubscriptionUsage: llm.SubscriptionUsage{Window: o.Window}}
+			prior := llm.SubscriptionObservation{Provider: o.Provider, ObservedAt: o.At,
+				SubscriptionUsage: llm.SubscriptionUsage{Window: o.Window, UsedPercent: o.UsedPercent.Value}}
 			if o.WindowMinutes.Value != nil {
 				prior.WindowMinutes = new(int64(*o.WindowMinutes.Value))
 			}
 			if o.ResetsAt != nil {
 				prior.ResetsAt = *o.ResetsAt
 			}
-			if !w.SameCycle(prior) || prior.ResetPassed(o.At) {
-				continue
-			}
-			f.History = append(f.History, Sample{At: o.At, Value: *o.UsedPercent.Value, Known: true})
+			observations = append(observations, prior)
 		}
 	}
-	f.History = append(f.History, Sample{At: at, Value: *w.UsedPercent, Known: true})
-	slices.SortStableFunc(f.History, func(a, b Sample) int { return a.At.Compare(b.At) })
-	// Preserve just the current monotone run and use one sample at each time.
-	dst := f.History[:0]
-	for _, sample := range f.History {
-		if len(dst) > 0 && sample.At.Equal(dst[len(dst)-1].At) {
-			dst[len(dst)-1] = sample
-			continue
-		}
-		dst = append(dst, sample)
+	forecast := usage.ForecastAllowance(w.SubscriptionObservation, observations)
+	f := AllowanceForecast{ExhaustedAt: forecast.ExhaustedAt}
+	if forecast.Rate != nil {
+		f.Rate.add(*forecast.Rate, "derived")
 	}
-	start := 0
-	for i := 1; i < len(dst); i++ {
-		if dst[i].Value < dst[i-1].Value {
-			start = i
-		}
+	for _, sample := range forecast.History {
+		f.History = append(f.History, Sample{At: sample.At, Value: sample.Value, Known: true})
 	}
-	f.History = dst[start:]
-	// EMA of each interval's rate in percentage points per hour. Weight
-	// by elapsed wall time and normalize over the observed intervals so a
-	// short first interval doesn't initialize the trend as an hour of data.
-	var weightedRate, mass float64
-	for i := 1; i < len(f.History); i++ {
-		a, b := f.History[i-1], f.History[i]
-		hours := b.At.Sub(a.At).Hours()
-		rate := (b.Value - a.Value) / hours
-		alpha := -math.Expm1(hours * math.Log1p(-EMAAlpha))
-		weightedRate = (1-alpha)*weightedRate + alpha*rate
-		mass = (1-alpha)*mass + alpha
-	}
-	if mass > 0 {
-		f.Rate.add(weightedRate/mass, "derived")
-	}
-	last := f.History[len(f.History)-1]
-	if !f.Rate.Known {
-		return f
-	}
-	if f.Rate.Value > 0 {
-		hours := (100 - last.Value) / f.Rate.Value
-		if nanos := hours * float64(time.Hour); nanos < math.MaxInt64 {
-			f.ExhaustedAt = last.At.Add(time.Duration(nanos))
-		}
-	}
-	through := w.ResetsAt
-	if !f.ExhaustedAt.IsZero() && (through.IsZero() || f.ExhaustedAt.Before(through)) {
-		through = f.ExhaustedAt
-	}
-	if through.After(last.At) {
-		used := min(100, last.Value+f.Rate.Value*through.Sub(last.At).Hours())
-		f.Projection = []Sample{last, {At: through, Value: used, Known: true}}
+	for _, sample := range forecast.Projection {
+		f.Projection = append(f.Projection, Sample{At: sample.At, Value: sample.Value, Known: true})
 	}
 	return f
 }

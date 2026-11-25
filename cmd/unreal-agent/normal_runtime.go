@@ -250,6 +250,10 @@ func chooseInitialProvider(out io.Writer) initialProviderChooser {
 
 func bootstrapRuntime(ctx context.Context, o launchOptions, choose initialProviderChooser, getenv func(string) string) (serveConfiguration, error) {
 	config := bootstrapDiscovery(o)
+	if o.bootstrapMaxActiveChildren < 0 {
+		return config, fmt.Errorf("MaxActiveChildren must be nonnegative")
+	}
+	config.MaxActiveChildren = o.bootstrapMaxActiveChildren
 	config, err := registerNormalProviders(ctx, config, o.codexFile, openCodeGoStore(o.credentials, o.defaultCredentials), getenv)
 	if err != nil {
 		return config, err

@@ -11,6 +11,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/modelcatalog"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	ledgerusage "github.com/unreallabsai/unreal-agent/harness/usage"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 	"github.com/unreallabsai/unreal-agent/internal/displaytext"
 	"github.com/unreallabsai/unreal-agent/internal/usertext"
@@ -28,6 +29,7 @@ type Sheet struct {
 
 // UIState is disposable presentation state, owned by the terminal event loop.
 type UIState struct {
+	Spend                 []ledgerusage.Spend
 	PermissionDismissed   string
 	Theme                 Theme
 	Now                   time.Time

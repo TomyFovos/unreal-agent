@@ -83,12 +83,13 @@ func TestSubagentCommandRuntimeOverrides(t *testing.T) {
 	if _, err := client.Open(t.Context(), host.Create, "parent"); err != nil {
 		t.Fatal(err)
 	}
-	cli := func(args ...string) (string, error) {
-		cmd := exec.CommandContext(t.Context(), binary, append([]string{"subagent"}, args...)...)
+	command := func(args ...string) (string, error) {
+		cmd := exec.CommandContext(t.Context(), binary, args...)
 		cmd.Env = append(append([]string(nil), environment...), subagentSocketEnv+"="+filepath.Join(directory, "host.sock"), subagentSessionEnv+"=parent")
 		out, err := cmd.CombinedOutput()
 		return string(out), err
 	}
+	cli := func(args ...string) (string, error) { return command(append([]string{"subagent"}, args...)...) }
 	for _, tc := range []struct {
 		name  string
 		flags []string
@@ -101,7 +102,7 @@ func TestSubagentCommandRuntimeOverrides(t *testing.T) {
 		{"legacy effort", []string{"--effort", "ultra"}, selection{"template-model", "max"}},
 		{"structured only", []string{"--title", "Review", "--purpose", "Acceptance decision",
 			"--inputs", "diff.txt", "--outputs", "review.md", "--verification", "Read the changed tests",
-			"--acceptance-criteria", "Explain findings with evidence"}, selection{"template-model", "high"}},
+			"--acceptance-criteria", "Explain findings with evidence", "--budget-steps", "5"}, selection{"template-model", "high"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			args := []string{"start", "--template", "review"}
@@ -113,6 +114,16 @@ func TestSubagentCommandRuntimeOverrides(t *testing.T) {
 			if err != nil {
 				t.Fatal(started, err)
 			}
+			selectionLine := "Provider / model / effort: openai-codex / " + tc.want.model + " / " + tc.want.effort
+			budgetLine := "Budget: none"
+			if tc.name == "structured only" {
+				budgetLine = "Budget: 5"
+			}
+			for _, expected := range []string{selectionLine, budgetLine} {
+				if !strings.Contains(started, expected) {
+					t.Fatalf("start receipt omitted %q: %s", expected, started)
+				}
+			}
 			handle := regexp.MustCompile(`as (child-start-[0-9a-f]+)\.`).FindStringSubmatch(started)
 			if handle == nil {
 				t.Fatal("missing child handle", started)
@@ -120,6 +131,9 @@ func TestSubagentCommandRuntimeOverrides(t *testing.T) {
 			waited, err := cli("wait", handle[1], "--timeout", "20s")
 			if err != nil || !strings.Contains(waited, "result: completed") {
 				t.Fatal("child did not finish", waited, err)
+			}
+			if !strings.Contains(waited, "calls 1 / budget "+strings.TrimPrefix(budgetLine, "Budget: ")+" · charge unknown") {
+				t.Fatalf("wait omitted ledger: %s", waited)
 			}
 			select {
 			case got := <-requests:
@@ -162,7 +176,7 @@ func TestSubagentCommandRuntimeOverrides(t *testing.T) {
 			}
 			if tc.name == "structured only" {
 				want := subagent.BriefFields{Title: "Review", Purpose: "Acceptance decision", Inputs: "diff.txt", Outputs: "review.md",
-					Verification: "Read the changed tests", AcceptanceCriteria: "Explain findings with evidence"}
+					Verification: "Read the changed tests", AcceptanceCriteria: "Explain findings with evidence", BudgetSteps: 5}
 				if plan.Text != "" || plan.Brief != want {
 					t.Fatalf("structured CLI task = %+v and %q", plan.Brief, plan.Text)
 				}
@@ -188,6 +202,12 @@ func TestSubagentCommandRuntimeOverrides(t *testing.T) {
 				t.Fatal("missing child task input")
 			}
 		})
+	}
+	var report subagent.UsageReport
+	raw, err := command("usage", "--since", "10m", "--json")
+	if err != nil || json.Unmarshal([]byte(raw), &report) != nil || report.Root != "parent" ||
+		len(report.TopChildren) != 6 || report.Last10m.Totals.Calls < 6 || report.Since != "10m0s" {
+		t.Fatalf("live usage ledger: %s %v", raw, err)
 	}
 	if out, err := cli("start", "--template", "review", "--effort", "invented", "--task", "Review."); err == nil || !strings.Contains(out, `invalid effort "invented"`) {
 		t.Fatal("invalid effort was not explained", out, err)

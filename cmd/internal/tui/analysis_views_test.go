@@ -69,12 +69,14 @@ func TestAnalysisSurfacesCausesOutliersAndFullModels(t *testing.T) {
 
 func TestAnalysisContextShowsActivePolicyAndPeriodMetrics(t *testing.T) {
 	r := analysisFixture()
-	old := sessionstore.WindowPolicy{WindowThresholdTokens: 200_000, PostRebuildRatio: 0.5, L2TargetTokens: 5000}
+	old := sessionstore.WindowPolicy{WindowThresholdTokens: 200_000, PostRebuildRatio: 0.5, L2TargetTokens: 5000, ToolOutputExcerptChars: 128}
 	current := sessionstore.WindowPolicy{WindowThresholdTokens: 180_000, PostRebuildRatio: 0.6, L2TargetTokens: 4000}
 	from, changed := r.At.Add(-time.Hour), r.At
 	r.Tree = &analysis.TreeReport{ContextMeasurements: &analysis.ContextMeasurements{
-		ActivePolicies: []analysis.ContextRoutePolicy{{Provider: "claude", Policy: current}},
-		Sessions: []analysis.ContextSession{{Session: "main", PolicyPeriods: []analysis.ContextPolicyPeriod{
+		ActivePolicies: []analysis.ContextRoutePolicy{{Provider: "claude", Policy: current}, {Provider: "opencode-go", Role: "lead", Policy: old}},
+		Sessions: []analysis.ContextSession{{Session: "lead", PolicyPeriods: []analysis.ContextPolicyPeriod{
+			{Provider: "opencode-go", Role: "lead", From: &from, Policy: &old},
+		}}, {Session: "main", PolicyPeriods: []analysis.ContextPolicyPeriod{
 			{Provider: "claude", From: &from, Until: &changed, Policy: &old, Numbers: analysis.ContextNumbers{
 				"rebuilds": {Value: new(2.0)}, "boundary_after_tokens": {Value: new(24_000.0)},
 				"first_cache_read_share": {Value: new(68.0)}, "record_show_calls": {Value: new(5.0)}, "record_find_calls": {Value: new(1.0)},
@@ -84,6 +86,7 @@ func TestAnalysisContextShowsActivePolicyAndPeriodMetrics(t *testing.T) {
 	}}
 	got := analysisText(r, "Context", 105, false)
 	for _, want := range []string{"Latest applied policy by route", "claude  W 180000 · ×0.6 · L2 4000",
+		"opencode-go / lead  W 200000", "opencode-go / lead  " + displayTime(from, "01/02 15:04:05"), "excerpt 128 chars",
 		"Rebuilds by policy period", "W 200000 · ×0.5 · L2 5000", "Rebuilds 2 · mean after 24.0k tokens · first cache read 68.0%",
 		"L3 show 5 / find 1", "Rebuilds 0 · mean after — tokens"} {
 		if !strings.Contains(got, want) {

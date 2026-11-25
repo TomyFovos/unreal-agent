@@ -122,9 +122,27 @@ def read_context_policies(path):
         routes = {}
     if not isinstance(routes, dict):
         raise ValueError("Context.Routes must be an object")
-    return common, {provider: resolve_context_policy({} if overrides is None else overrides,
-                                                      f"Context.Routes[{provider}]", common)
-                    for provider, overrides in routes.items()}
+    policies, roles_by_provider = {}, {}
+    for provider, overrides in routes.items():
+        location = f"Context.Routes[{provider}]"
+        if overrides is None:
+            overrides = {}
+        if not isinstance(overrides, dict):
+            raise ValueError(f"{location} must be an object")
+        roles = overrides.get("Roles")
+        if roles is not None and not isinstance(roles, dict):
+            raise ValueError(f"{location}.Roles must be an object")
+        policy = resolve_context_policy({key: value for key, value in overrides.items() if key != "Roles"}, location, common)
+        policies[provider] = policy
+        if roles:
+            resolved = {}
+            for role, fields in roles.items():
+                if not role:
+                    raise ValueError(f"{location}.Roles requires a role name")
+                resolved[role] = resolve_context_policy({} if fields is None else fields,
+                                                        f"{location}.Roles[{role}]", policy)
+            roles_by_provider[provider] = resolved
+    return common, policies, roles_by_provider
 
 
 @dataclass
@@ -273,9 +291,10 @@ class Step:
     l2_demand: int = 0
 
 
-def prepare(traces, profiles, policy=None):
+def prepare(traces, profiles, policy=None, roles=None):
     prepared = []
     for rows in traces:
+        effective_policy = roles.get(rows[0].role, policy) if roles else policy
         steps = []
         previous = None
         estimate = 0
@@ -289,16 +308,16 @@ def prepare(traces, profiles, policy=None):
                         and previous.header_key != request.header_key)
             observed_budget = request.budget or observed_budget
             budget = observed_budget
-            if policy is not None:
+            if effective_policy is not None:
                 if previous is None or previous.model != request.model:
                     model_window = 0
                 if request.admission.get("WindowSource") == "conservative-fallback":
-                    model_window = policy["FallbackWindow"]
+                    model_window = effective_policy["FallbackWindow"]
                 else:
                     model_window = request.admission.get("WindowTokens") or model_window
                 if model_window:
-                    budget = model_window - policy["ResponseReserve"] - policy["ProtocolReserve"]
-                budget = min(budget, policy["InputBudget"])
+                    budget = model_window - effective_policy["ResponseReserve"] - effective_policy["ProtocolReserve"]
+                budget = min(budget, effective_policy["InputBudget"])
                 if budget <= 0:
                     raise ValueError(f"candidate leaves no input budget for {request.route}/{request.model}")
             if not previous:
@@ -456,9 +475,11 @@ class Result:
         }
 
 
-def replay(traces, profiles, cache, settings, since=-math.inf, trace_writer=None, observed_windows=False, score=False):
+def replay(traces, profiles, cache, settings, since=-math.inf, trace_writer=None, observed_windows=False, score=False,
+           role_settings=None):
     result = Result()
     for stream_id, steps in enumerate(traces, 1):
+        effective = role_settings.get(steps[0].request.role, settings) if role_settings and steps else settings
         state = Context()
         previous = last_rotation = None
         predicted_positions, observed_positions = [], []
@@ -486,9 +507,9 @@ def replay(traces, profiles, cache, settings, since=-math.inf, trace_writer=None
             before = estimate if previous is None else state.input
             if previous and not mid_turn:
                 before += step.public
-            relative = state.rebuilt_at_size and settings.trigger == "growth"
+            relative = state.rebuilt_at_size and effective.trigger == "growth"
             pressure = estimate - state.rebuilt_at_size if relative else before
-            rotate = bool(pressure >= settings.w or before > step.budget or causes & NON_SIZE_CAUSES or step.switched)
+            rotate = bool(pressure >= effective.w or before > step.budget or causes & NON_SIZE_CAUSES or step.switched)
             reset = rotate or previous is None or previous.request.model != request.model
             added = max(0, step.public)
             raw = max(0, estimate - profile.header - state.l2)
@@ -505,7 +526,7 @@ def replay(traces, profiles, cache, settings, since=-math.inf, trace_writer=None
                 total, estimate = request.input, step.observed_estimate
             elif rotate:
                 estimate, state.l2, tail = fitted_projection(
-                    settings, profile, step, preferred, minimum, human_changed,
+                    effective, profile, step, preferred, minimum, human_changed,
                 )
                 total = profile.fresh_input(estimate)
                 result.rebuild_tail += tail
@@ -532,7 +553,7 @@ def replay(traces, profiles, cache, settings, since=-math.inf, trace_writer=None
                 trace_writer.writerow([request.route, stream_id, request.seq, iso_time(request.at), rotate,
                                        round(total), round(tokens.read), round(tokens.write), round(tokens.uncached),
                                        round(tokens.cost(cache), 1), request.input, request.read,
-                                       request.write, request.output])
+                                       request.write, request.output, request.role])
             state.estimate, state.input, state.cached_at = estimate, total, request.at
             state.human_tail, state.invocation_tail = preferred, process_tail if mid_turn else 0
             previous = step
@@ -651,7 +672,7 @@ def pareto(rows):
     return frontier
 
 
-def analyze_route(traces, route, since, requested, writer, policy=None):
+def analyze_route(traces, route, since, requested, writer, policy=None, roles=None):
     cutoff, cohort = data_cutoff(traces, since)
     cache = CACHES[route]
     profiles, calibration_count = learnt_profiles(traces, cutoff, cache)
@@ -670,14 +691,21 @@ def analyze_route(traces, route, since, requested, writer, policy=None):
 
     candidate = {}
     if policy is not None:
-        configured = Settings(policy["WindowThresholdTokens"], policy["PostRebuildRatio"], policy["L2TargetTokens"])
-        configured_steps = prepare(traces, profiles, policy)
+        def settings_for(p):
+            return Settings(p["WindowThresholdTokens"], p["PostRebuildRatio"], p["L2TargetTokens"])
+
+        configured = settings_for(policy)
+        configured_roles = {role: settings_for(p) for role, p in (roles or {}).items()}
+        configured_steps = prepare(traces, profiles, policy, roles)
         candidate = {"candidate": {
             "provider": ROUTE_PROVIDERS[route],
             "policy": policy,
-            "holdout": replay(configured_steps, profiles, cache, configured, cutoff, trace_writer=writer).summary(),
-            "full": replay(configured_steps, profiles, cache, configured).summary(),
+            "holdout": replay(configured_steps, profiles, cache, configured, cutoff, trace_writer=writer,
+                              role_settings=configured_roles).summary(),
+            "full": replay(configured_steps, profiles, cache, configured, role_settings=configured_roles).summary(),
         }}
+        if roles:
+            candidate["candidate"]["role_policies"] = roles
     elif writer:
         replay(steps, profiles, cache, requested, cutoff, trace_writer=writer)
     historical = sweep(-math.inf)
@@ -704,7 +732,7 @@ def main():
     parser.add_argument("copies", type=Path, nargs="+", help="directories of Session copies, oldest first")
     parser.add_argument("--claude-main", help="base name of a legacy Claude Session without a Claude provider ID")
     parser.add_argument("--since", required=True, help="RFC3339 start of the modern validation cohort")
-    parser.add_argument("--config", type=Path, help="runtime.json with Context defaults and provider overrides to replay")
+    parser.add_argument("--config", type=Path, help="runtime.json with Context defaults and provider and role overrides to replay")
     parser.add_argument("--l1", type=int, default=0, help="post-rebuild L1 token cap (0 uses the target alone)")
     parser.add_argument("--trigger", choices=("growth", "total"), default="growth")
     parser.add_argument("--w", type=int, default=200_000, help="W for the optional request CSV")
@@ -714,10 +742,10 @@ def main():
     args = parser.parse_args()
     if args.w < 1 or not 0 < args.ratio <= 1 or args.l1 < 0 or args.l2 < 1:
         parser.error("positive W and L2, a target ratio in (0, 1], and a nonnegative L1 cap are required")
-    common, routes = None, {}
+    common, routes, roles = None, {}, {}
     if args.config:
         try:
-            common, routes = read_context_policies(args.config)
+            common, routes, roles = read_context_policies(args.config)
         except (OSError, ValueError) as error:
             parser.error(str(error))
 
@@ -730,7 +758,7 @@ def main():
         for route, provider in ROUTE_PROVIDERS.items():
             if traces[route]:
                 output[route] = analyze_route(traces[route], route, timestamp(args.since), settings, writer,
-                                              routes.get(provider, common))
+                                              routes.get(provider, common), roles.get(provider))
         json.dump(output, sys.stdout, indent=2)
         print()
 
@@ -740,7 +768,7 @@ def main():
             writer = csv.writer(destination)
             writer.writerow(["route", "stream", "sequence", "at", "rebuild", "input",
                              "read", "write", "uncached", "weighted_input", "observed_input",
-                             "observed_read", "observed_write", "observed_output"])
+                             "observed_read", "observed_write", "observed_output", "role"])
             report(writer)
     else:
         report(None)

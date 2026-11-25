@@ -35,7 +35,7 @@ type approvalEvent struct {
 
 // startProcess starts the child agent process under ctx's policy and tells
 // it the parent's mode.
-func startProcess(ctx context.Context, c Config, child ChildConfig, mode permission.Mode) *processChannel {
+func startProcess(ctx context.Context, c Config, child ChildConfig, mode permission.Mode, role string) *processChannel {
 	ctx, cancel := context.WithCancel(ctx)
 	p := &processChannel{ctx: ctx, cancel: cancel, connected: make(chan struct{}), finishHint: make(chan struct{}, 1), done: make(chan struct{}), approvals: make(chan approvalEvent, 64)}
 	events := make(chan primitives.PrimitiveEvent, 16)
@@ -154,6 +154,10 @@ func startProcess(ctx context.Context, c Config, child ChildConfig, mode permiss
 		hello.ID = modelProgressHandshake
 		hello.Config = &child
 		hello.Mode = mode
+		hello.TreeRoot, hello.MaxActiveChildren = c.TreeRoot, c.MaxActiveChildren
+		if child.Layer == "" {
+			hello.ContextRole = role
+		}
 		if file := c.ContextFile; file != nil {
 			hello.ContextPolicy = &childContextPolicy{Path: file.Path(), Initial: file.Current()}
 		}

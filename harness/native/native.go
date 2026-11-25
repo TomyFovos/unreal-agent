@@ -8,44 +8,66 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/unreallabsai/unreal-agent/harness/mutation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/record"
 )
 
 const Version = 1
 
 type Request struct {
-	Version    int                `json:"version"`
-	Action     string             `json:"action"`
-	Path       string             `json:"path"`
-	Expected   *mutation.Revision `json:"expected,omitempty"`
-	Content    string             `json:"content,omitempty"`
-	OldText    string             `json:"old_text,omitempty"`
-	NewText    string             `json:"new_text,omitempty"`
-	ReplaceAll bool               `json:"replace_all,omitempty"`
-	Pattern    string             `json:"pattern,omitempty"`
-	Glob       string             `json:"glob,omitempty"`
-	StartLine  int                `json:"start_line,omitempty"`
-	Lines      int                `json:"lines,omitempty"`
-	Limit      int                `json:"limit,omitempty"`
-	MaxBytes   int                `json:"max_bytes,omitempty"`
+	Version      int                `json:"version"`
+	Action       string             `json:"action"`
+	Path         string             `json:"path"`
+	Expected     *mutation.Revision `json:"expected,omitempty"`
+	Content      string             `json:"content,omitempty"`
+	OldText      string             `json:"old_text,omitempty"`
+	NewText      string             `json:"new_text,omitempty"`
+	ReplaceAll   bool               `json:"replace_all,omitempty"`
+	Pattern      string             `json:"pattern,omitempty"`
+	Glob         string             `json:"glob,omitempty"`
+	StartLine    int                `json:"start_line,omitempty"`
+	Lines        int                `json:"lines,omitempty"`
+	Files        []ReadFile         `json:"files,omitempty"`
+	ContextLines int                `json:"context_lines,omitempty"`
+	Limit        int                `json:"limit,omitempty"`
+	MaxBytes     int                `json:"max_bytes,omitempty"`
 }
 
 func (r Request) Validate() error {
 	if r.Version != Version {
 		return errors.New("unsupported native plan version")
 	}
-	if r.Path == "" || strings.IndexByte(r.Path, 0) >= 0 {
+	if (r.Action != "read" || r.Files == nil) && !validPath(r.Path) {
 		return errors.New("path is required")
 	}
-	if r.MaxBytes < 0 || r.Limit < 0 || r.StartLine < 0 || r.Lines < 0 {
+	if r.MaxBytes < 0 || r.Limit < 0 || r.StartLine < 0 || r.Lines < 0 || r.ContextLines < 0 {
 		return errors.New("range/output limit out of bounds")
+	}
+	if r.Files != nil && r.Action != "read" || r.ContextLines != 0 && r.Action != "grep" {
+		return errors.New("files applies to read and context_lines applies to grep")
 	}
 	switch r.Action {
 	case "read":
+		if r.Files != nil {
+			if len(r.Files) == 0 || r.Path != "" || r.StartLine != 0 || r.Lines != 0 {
+				return errors.New("specify path with an optional range, or a nonempty files array")
+			}
+			for _, file := range r.Files {
+				if !validPath(file.Path) {
+					return errors.New("each file requires a path")
+				}
+				for _, lines := range file.Ranges {
+					if lines.StartLine < 0 || lines.Lines < 0 {
+						return errors.New("file range out of bounds")
+					}
+				}
+			}
+		}
 	case "write", "edit":
 		if r.Expected == nil {
 			return errors.New("expected revision is required")
@@ -72,10 +94,14 @@ func (r Request) Validate() error {
 	return nil
 }
 
+func validPath(path string) bool { return path != "" && strings.IndexByte(path, 0) < 0 }
+
 type Match struct {
-	Path string `json:"path"`
-	Line int    `json:"line,omitempty"`
-	Text string `json:"text,omitempty"`
+	Path   string   `json:"path"`
+	Line   int      `json:"line,omitempty"`
+	Text   string   `json:"text,omitempty"`
+	Before []string `json:"before,omitempty"`
+	After  []string `json:"after,omitempty"`
 }
 type Result struct {
 	Denial    *permission.Error  `json:"denial,omitempty"`
@@ -91,6 +117,8 @@ type Result struct {
 	Matches   []Match            `json:"matches,omitempty"`
 	Skipped   int                `json:"skipped,omitempty"`
 	Mutation  *mutation.Result   `json:"mutation,omitempty"`
+	Files     []ReadFileResult   `json:"files,omitempty"`
+	Locator   record.Locator     `json:"locator,omitempty"`
 }
 type Executor struct{ Files *mutation.Service }
 
@@ -116,6 +144,9 @@ func (e Executor) Execute(ctx context.Context, id string, r Request) Result {
 	if r.Action == "grep" || r.Action == "glob" {
 		return e.search(ctx, r)
 	}
+	if r.Files != nil {
+		return e.readBatch(ctx, r)
+	}
 	result.Path = r.Path
 	if r.Action == "edit" {
 		return e.edit(ctx, id, r)
@@ -128,40 +159,11 @@ func (e Executor) Execute(ctx context.Context, id string, r Request) Result {
 		result.Reason = m.Reason
 		return result
 	}
-	snap, err := e.Files.Snapshot(ctx, r.Path)
-	if err != nil {
-		result.Code = errorCode(ctx, err)
-		result.Reason = mutation.FailureReason(err)
-		result.Denial = permission.Failure(err)
-		return result
+	result, text := e.readFile(ctx, r.Path)
+	if result.Code == "ok" {
+		part := readRange(strings.SplitAfter(text, "\n"), LineRange{StartLine: r.StartLine, Lines: r.Lines}, r.MaxBytes)
+		result.StartLine, result.Content, result.Truncated = part.StartLine, part.Content, part.Truncated
 	}
-	result.Revision = &snap.Revision
-	if !snap.Revision.Exists {
-		result.Code = "not_found"
-		return result
-	}
-	if !utf8.Valid(snap.Data) || strings.IndexByte(string(snap.Data), 0) >= 0 {
-		result.Code = "binary"
-		result.Binary = true
-		return result
-	}
-	lines := strings.SplitAfter(string(snap.Data), "\n")
-	start := r.StartLine
-	if start == 0 {
-		start = 1
-	}
-	result.StartLine = start
-	if start > len(lines) {
-		result.Code = "ok"
-		return result
-	}
-	end := len(lines)
-	if r.Lines > 0 && start-1+r.Lines < end {
-		end = start - 1 + r.Lines
-	}
-	content := strings.Join(lines[start-1:end], "")
-	result.Content, result.Truncated = BoundText(content, r.MaxBytes)
-	result.Code = "ok"
 	return result
 }
 func errorCode(ctx context.Context, err error) string {
@@ -222,6 +224,9 @@ func MatchGlob(pattern, path string) (bool, error) {
 }
 func (e Executor) search(ctx context.Context, r Request) Result {
 	out := Result{Version: Version, Code: "ok"}
+	if r.ContextLines > 0 {
+		r.MaxBytes = min(r.MaxBytes, maxFileOutputBytes)
+	}
 	regex, _ := regexp.Compile(r.Pattern)
 	pattern := r.Glob
 	if pattern == "" {
@@ -271,7 +276,12 @@ func (e Executor) search(ctx context.Context, r Request) Result {
 				out.Skipped++
 				continue
 			}
-			for i, line := range strings.Split(string(snap.Data), "\n") {
+			text := string(snap.Data)
+			if r.ContextLines > 0 {
+				text = strings.TrimSuffix(text, "\n")
+			}
+			lines := strings.Split(text, "\n")
+			for i, line := range lines {
 				if !regex.MatchString(line) {
 					continue
 				}
@@ -279,9 +289,18 @@ func (e Executor) search(ctx context.Context, r Request) Result {
 					out.Truncated = true
 					return out
 				}
-				text, truncated := BoundText(line, r.MaxBytes-bytes-len(relative))
-				out.Matches = append(out.Matches, Match{Path: relative, Line: i + 1, Text: text})
-				bytes += len(relative) + len(text)
+				remaining := r.MaxBytes - bytes - len(relative)
+				text, truncated := BoundText(line, remaining)
+				match := Match{Path: relative, Line: i + 1, Text: text}
+				remaining -= len(text)
+				if !truncated && r.ContextLines > 0 {
+					before, cutBefore := grepContext(lines[max(0, i-r.ContextLines):i], true, &remaining)
+					after, cutAfter := grepContext(lines[i+1:i+1+min(r.ContextLines, len(lines)-i-1)], false, &remaining)
+					match.Before, match.After = before, after
+					truncated = cutBefore || cutAfter
+				}
+				out.Matches = append(out.Matches, match)
+				bytes = r.MaxBytes - remaining
 				if truncated {
 					out.Truncated = true
 					return out
@@ -290,6 +309,32 @@ func (e Executor) search(ctx context.Context, r Request) Result {
 		}
 	}
 	return out
+}
+
+func grepContext(lines []string, backwards bool, remaining *int) ([]string, bool) {
+	var out []string
+	truncated := false
+	for i := range lines {
+		if *remaining == 0 {
+			truncated = true
+			break
+		}
+		index := i
+		if backwards {
+			index = len(lines) - 1 - i
+		}
+		text, cut := BoundText(lines[index], *remaining-1)
+		*remaining -= len(text) + 1 // count a line separator, including for empty lines
+		out = append(out, text)
+		if cut {
+			truncated = true
+			break
+		}
+	}
+	if backwards {
+		slices.Reverse(out)
+	}
+	return out, truncated
 }
 func EncodeResult(result Result) []byte {
 	encoded, err := json.Marshal(result)

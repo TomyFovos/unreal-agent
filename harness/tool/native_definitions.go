@@ -19,12 +19,19 @@ func nativeDefinitions() []Definition {
 	for _, name := range []string{ReadName, WriteName, EditName, GrepName, GlobName} {
 		properties := map[string]any{"path": text()}
 		required := []any{"path"}
+		parameters := map[string]any{"type": "object", "properties": properties, "additionalProperties": false}
 		description := ""
 		switch name {
 		case ReadName:
-			description = "Read text with a whole-file SHA-256 revision, including range reads. Binary files return metadata."
-			properties["start_line"] = map[string]any{"type": "integer", "minimum": 1}
-			properties["lines"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 10000}
+			description = "Read text with a whole-file SHA-256 revision per file. Prefer one batched call with files and 1-based ranges over many small range reads. Use path for a single file. The batch shares max_bytes. Binary files return metadata."
+			startLine := map[string]any{"type": "integer", "minimum": 1}
+			lines := map[string]any{"type": "integer", "minimum": 1, "maximum": 10000}
+			properties["start_line"], properties["lines"] = startLine, lines
+			lineRange := map[string]any{"type": "object", "properties": map[string]any{"start_line": startLine, "lines": lines}, "additionalProperties": false}
+			files := map[string]any{"type": "object", "properties": map[string]any{"path": text(), "ranges": map[string]any{"type": "array", "items": lineRange}}, "required": []any{"path"}, "additionalProperties": false}
+			properties["files"] = map[string]any{"type": "array", "minItems": 1, "items": files}
+			required = nil
+			parameters["oneOf"] = []any{map[string]any{"required": []any{"path"}}, map[string]any{"required": []any{"files"}}}
 			properties["max_bytes"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 65536}
 		case WriteName:
 			description = "Replace a workspace file under the shared mutation lock, including in Full Access. Absolute paths must belong to the workspace; parent directory must exist. Use expected revision from read, or expected:{exists:false} without digest to create."
@@ -39,9 +46,10 @@ func nativeDefinitions() []Definition {
 			properties["replace_all"] = map[string]any{"type": "boolean"}
 			required = append(required, "expected", "old_text", "new_text")
 		case GrepName:
-			description = "Search UTF-8 text by RE2 regular expression in a directory. Glob uses slash paths and ** for recursive matching. Results and traversal are bounded."
+			description = "Search UTF-8 text by RE2 regular expression in a directory. Prefer one call with context_lines before and after each match over many small reads. Glob uses slash paths and ** for recursive matching. Results are bounded."
 			properties["pattern"] = text()
 			properties["glob"] = text()
+			properties["context_lines"] = map[string]any{"type": "integer", "minimum": 0}
 			properties["limit"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}
 			properties["max_bytes"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 65536}
 			required = append(required, "pattern")
@@ -51,7 +59,10 @@ func nativeDefinitions() []Definition {
 			properties["limit"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}
 			properties["max_bytes"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 65536}
 		}
-		defs = append(defs, Definition{Tool: llm.Tool{Type: llm.ToolFunction, Name: name, Description: description, Parameters: map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}}})
+		if required != nil {
+			parameters["required"] = required
+		}
+		defs = append(defs, Definition{Tool: llm.Tool{Type: llm.ToolFunction, Name: name, Description: description, Parameters: parameters}})
 	}
 	return defs
 }

@@ -56,6 +56,55 @@ func TestReadRangeRevisionBinaryAndLarge(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestReadBatchSharesSnapshotsAndOutputBudget(t *testing.T) {
+	e, _ := executor(t)
+	const text = "first\n日本語\nlast\n"
+	for path, data := range map[string]string{"a.txt": text, "b.txt": "other file\n", "binary": "\x00"} {
+		if err := os.WriteFile(filepath.Join(e.Files.Root(), path), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := []ReadFile{{Path: "a.txt", Ranges: []LineRange{{Lines: 1}, {StartLine: 2, Lines: 1}, {StartLine: 3, Lines: 1}}},
+		{Path: "b.txt"}, {Path: "missing"}, {Path: "binary"}}
+	result := execute(e, t, Request{Action: "read", Files: files})
+	if result.Code != "ok" || result.Truncated || len(result.Files) != len(files) {
+		t.Fatalf("batch read = %+v", result)
+	}
+	a, b := result.Files[0], result.Files[1]
+	want := []ReadRangeResult{{StartLine: 1, Content: "first\n"}, {StartLine: 2, Content: "日本語\n"}, {StartLine: 3, Content: "last\n"}}
+	if a.Revision == nil || *a.Revision != mutation.RevisionOf([]byte(text)) || !reflect.DeepEqual(a.Ranges, want) ||
+		b.Path != "b.txt" || len(b.Ranges) != 1 || b.Ranges[0].Content != "other file\n" ||
+		result.Files[2].Code != "not_found" || result.Files[3].Code != "binary" || len(result.Files[3].Ranges) != 0 {
+		t.Fatalf("incorrect file outcomes: %+v", result.Files)
+	}
+	bounded := execute(e, t, Request{Action: "read", Files: files, MaxBytes: 20})
+	if !bounded.Truncated || len(bounded.Files) != 1 || len(bounded.Files[0].Ranges) != 2 ||
+		bounded.Files[0].Ranges[1] != (ReadRangeResult{StartLine: 2, Content: "日本", Truncated: true}) {
+		t.Fatalf("batch did not share its UTF-8 byte allowance: %+v", bounded)
+	}
+}
+
+func TestGrepSurroundingLinesShareOutputBudget(t *testing.T) {
+	e, _ := executor(t)
+	const path = "sample.txt"
+	if err := os.WriteFile(filepath.Join(e.Files.Root(), path), []byte("first\nbefore\nhit\n語tail\nlast\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := Request{Action: "grep", Path: ".", Pattern: "^(hit|last)$", ContextLines: 1}
+	got := execute(e, t, r)
+	want := []Match{{Path: path, Line: 3, Text: "hit", Before: []string{"before"}, After: []string{"語tail"}},
+		{Path: path, Line: 5, Text: "last", Before: []string{"語tail"}}}
+	if got.Code != "ok" || got.Truncated || !reflect.DeepEqual(got.Matches, want) {
+		t.Fatalf("unexpected context: %+v", got)
+	}
+	r.MaxBytes = len(path) + len("hit") + len("before\n語\n")
+	cut := execute(e, t, r)
+	want[0].After = []string{"語"}
+	if !cut.Truncated || !reflect.DeepEqual(cut.Matches, want[:1]) {
+		t.Fatalf("surrounding context exceeded the byte allowance: %+v", cut)
+	}
+}
 func TestWriteEditPreconditionsAndDurableResult(t *testing.T) {
 	e, _ := executor(t)
 	absent := mutation.Revision{}

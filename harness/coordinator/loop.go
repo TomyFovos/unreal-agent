@@ -1176,8 +1176,15 @@ func (current *coordinator) recordModelResponse(ctx context.Context, response se
 	if response.WindowCache.Boundary != "" {
 		current.modelWindow = ""
 	}
-	_, err := current.addItemToLocalState(item)
-	return err
+	if _, err := current.addItemToLocalState(item); err != nil {
+		return err
+	}
+	if notice := current.dependencies.BudgetInput; notice != nil {
+		if input := notice(ctx); input != nil && !current.recordedInputIDs[input.ID] {
+			return current.handleInboxInputs(ctx, []inbox.Input{*input})
+		}
+	}
+	return nil
 }
 
 func (current *coordinator) handleOperationUpdate(
@@ -1793,6 +1800,14 @@ func (current *coordinator) addToolResultToLocalState(
 	if !exists {
 		return nil
 	}
+	if accepted := status.Status.AcceptedResult; accepted != nil {
+		if err := current.projectToolResult(status, *accepted, nil, false); err != nil {
+			return err
+		}
+		current.rememberBridgeResult(status, *accepted, nil)
+		current.finishToolCall(status.TurnID, status.CallID)
+		return nil
+	}
 	translator, exists := current.dependencies.Tools.Resolve(call.toolCall.Name)
 	if toolCallRequiresTranslator(status) {
 		translator, exists = tool.ResolveHistory(current.dependencies.Tools, call.toolCall.Name)
@@ -1942,10 +1957,11 @@ func (current *coordinator) reconcileToolCalls(
 	completed := make([]scheduledToolCall, 0)
 	for key := range current.state.toolCalls {
 
-		if !current.toolCallOperationsAreTerminal(key.turnID, key.callID) {
+		terminal := current.toolCallOperationsAreTerminal(key.turnID, key.callID)
+		call := current.state.toolCalls[key]
+		if !terminal && (call.status == nil || len(call.status.WaitingFor) != 1) {
 			continue
 		}
-		call := current.state.toolCalls[key]
 		if call.status == nil {
 			return nil, fmt.Errorf("reconcile untranslated tool call %q in turn %q", key.callID, key.turnID)
 		}
@@ -1958,6 +1974,23 @@ func (current *coordinator) reconcileToolCalls(
 			CallID:     key.callID,
 			Status:     *call.status,
 			Operations: operations,
+		}
+		if !terminal {
+			translator, _ := current.dependencies.Tools.Resolve(call.toolCall.Name)
+			acceptance, ok := translator.(tool.AcceptanceTranslator)
+			if !ok {
+				continue
+			}
+			result, err := acceptance.AcceptedResult(key.callID, operations[0])
+			if err != nil {
+				return nil, err
+			}
+			if result == nil {
+				continue
+			}
+			status.Status.AcceptedResult = result
+			status.Status.WaitingFor = nil
+			status.Operations = nil
 		}
 		item, err := current.addItemToLocalState(sessionstore.Item{
 			Kind: sessionstore.ItemToolCallStatus,

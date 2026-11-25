@@ -88,11 +88,13 @@ type ContextSession struct {
 
 type ContextRoutePolicy struct {
 	Provider string `json:",omitzero"` // empty is the common policy
+	Role     string `json:",omitzero"`
 	Policy   sessionstore.WindowPolicy
 }
 
 type ContextPolicyPeriod struct {
 	Provider    string
+	Role        string `json:",omitzero"`
 	From, Until *time.Time
 	Policy      *sessionstore.WindowPolicy // nil for rebuilds without a recorded policy
 	Numbers     ContextNumbers

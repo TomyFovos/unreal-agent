@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
 
 type contextPolicyEvent struct {
@@ -23,9 +24,9 @@ type contextPolicyRollup struct {
 	cache    CacheShare
 }
 
-func newPolicyRollup(provider string, event contextPolicyEvent, policy *sessionstore.WindowPolicy) *contextPolicyRollup {
+func newPolicyRollup(provider, role string, event contextPolicyEvent, policy *sessionstore.WindowPolicy) *contextPolicyRollup {
 	p := &contextPolicyRollup{
-		ContextPolicyPeriod: ContextPolicyPeriod{Provider: provider, Policy: policy},
+		ContextPolicyPeriod: ContextPolicyPeriod{Provider: provider, Role: viewer.SafeText(role), Policy: policy},
 		sequence:            event.sequence, counts: make(contextCounts),
 	}
 	if !event.at.IsZero() {
@@ -36,7 +37,7 @@ func newPolicyRollup(provider string, event contextPolicyEvent, policy *sessions
 
 // Metrics belong to the policy that built the window. A reload can change
 // the next rebuild's settings while the preceding projection is still in use.
-func (m *contextReplay) policyPeriods(windows map[*contextWindowLog]*windowMeasurements, observed bool, provider string) ([]ContextPolicyPeriod, []string, *contextPolicyEvent) {
+func (m *contextReplay) policyPeriods(windows map[*contextWindowLog]*windowMeasurements, observed bool, provider, role string) ([]ContextPolicyPeriod, []string, *contextPolicyEvent) {
 	routes := map[string]bool{provider: true}
 	rebuilds := make(map[string][]*contextWindowLog)
 	for _, w := range m.windows {
@@ -55,11 +56,11 @@ func (m *contextReplay) policyPeriods(windows map[*contextWindowLog]*windowMeasu
 	providers := slices.Sorted(maps.Keys(routes))
 	var out []ContextPolicyPeriod
 	for _, route := range providers {
-		periods := m.routePolicies(route)
+		periods := m.routePolicies(route, role)
 		for _, w := range rebuilds[route] {
 			i := sort.Search(len(periods), func(i int) bool { return periods[i].sequence > w.sequence })
 			if i == 0 {
-				unknown := newPolicyRollup(route, contextPolicyEvent{}, nil)
+				unknown := newPolicyRollup(route, role, contextPolicyEvent{}, nil)
 				if len(periods) > 0 {
 					unknown.Until = periods[0].From
 				}
@@ -79,14 +80,18 @@ func (m *contextReplay) policyPeriods(windows map[*contextWindowLog]*windowMeasu
 	return out, providers, latest
 }
 
-func (m *contextReplay) routePolicies(route string) []*contextPolicyRollup {
+func (m *contextReplay) routePolicies(route, fallbackRole string) []*contextPolicyRollup {
 	var periods []*contextPolicyRollup
 	for _, event := range m.policies {
 		policy := event.policy.ForProvider(route)
-		if n := len(periods); n > 0 && *periods[n-1].Policy == policy {
+		role := event.policy.Role
+		if role == "" {
+			role = fallbackRole
+		}
+		period := newPolicyRollup(route, role, event, &policy)
+		if n := len(periods); n > 0 && *periods[n-1].Policy == policy && periods[n-1].Role == period.Role {
 			continue
 		}
-		period := newPolicyRollup(route, event, &policy)
 		if n := len(periods); n > 0 {
 			periods[n-1].Until = period.From
 		}
@@ -135,27 +140,43 @@ func (p *contextPolicyRollup) report(observed bool) ContextPolicyPeriod {
 }
 
 func activeContextPolicies(results []contextSessionResult) []ContextRoutePolicy {
-	var latest *contextPolicyEvent
-	routes := make(map[string]bool)
+	type roleRoutes struct {
+		latest *contextPolicyEvent
+		routes map[string]bool
+	}
+	roles := make(map[string]*roleRoutes)
 	for _, r := range results {
-		if r.policy != nil && (latest == nil || r.policy.at.After(latest.at)) {
-			latest = r.policy
+		if r.policy == nil {
+			continue
+		}
+		role := r.policy.policy.Role
+		group := roles[role]
+		if group == nil {
+			group = &roleRoutes{routes: make(map[string]bool)}
+			roles[role] = group
+		}
+		if group.latest == nil || r.policy.at.After(group.latest.at) {
+			group.latest = r.policy
 		}
 		for _, route := range r.routes {
 			if route != "" {
-				routes[route] = true
+				group.routes[route] = true
 			}
 		}
 	}
-	if latest == nil {
-		return nil
-	}
-	for route := range latest.policy.Routes {
-		routes[route] = true
-	}
-	out := []ContextRoutePolicy{{Policy: latest.policy.Default}}
-	for _, provider := range slices.Sorted(maps.Keys(routes)) {
-		out = append(out, ContextRoutePolicy{Provider: provider, Policy: latest.policy.ForProvider(provider)})
+	var out []ContextRoutePolicy
+	for _, role := range slices.Sorted(maps.Keys(roles)) {
+		group := roles[role]
+		policy := group.latest.policy
+		if role == "" {
+			out = append(out, ContextRoutePolicy{Policy: policy.Default})
+			for route := range policy.Routes {
+				group.routes[route] = true
+			}
+		}
+		for _, provider := range slices.Sorted(maps.Keys(group.routes)) {
+			out = append(out, ContextRoutePolicy{Provider: provider, Role: viewer.SafeText(role), Policy: policy.ForProvider(provider)})
+		}
 	}
 	return out
 }

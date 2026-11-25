@@ -500,6 +500,30 @@ class CommonDevelopmentTests(unittest.TestCase):
                 common.launch(args, self.package)
                 self.assertEqual(execute.call_args.args[2]["TZ"], expected)
 
+    @LINUX_ONLY
+    def test_max_active_children_survives_updates_and_writes_runtime(self):
+        self.args.max_active_children = common.max_active_children("10")
+        settings = self.install()
+        self.assertEqual(settings["MaxActiveChildren"], 10)
+        del self.args.max_active_children
+        settings = self.install()
+        self.assertEqual(settings["MaxActiveChildren"], 10)
+        with self.assertRaises(argparse.ArgumentTypeError):
+            common.max_active_children("-1")
+        root = self.repo()
+        paths = common.prepare_repo(settings, root, "default")
+        command = common.command_for(settings, root, paths, "dev")
+        self.assertEqual(command[command.index("--bootstrap-max-active-children") + 1], "10")
+        paths["config"].parent.mkdir(parents=True, exist_ok=True)
+        paths["config"].write_text(json.dumps({"Runtime": {"Workspace": str(root)}, "Context": {"RoleOverrides": {}}}))
+        paths["config"].chmod(0o600)
+        common.prepare_repo(settings, root, "default")
+        self.assertEqual(json.loads(paths["config"].read_text())["MaxActiveChildren"], 10)
+        self.args.max_active_children = common.max_active_children("0")
+        settings = self.install()
+        common.prepare_repo(settings, root, "default")
+        self.assertEqual(json.loads(paths["config"].read_text())["MaxActiveChildren"], 0)
+
     def test_invalid_instance_and_package_io_report_causes(self):
         with self.assertRaises(pilot.PilotError): common.repo_paths(self.home, self.home / "repo", "../old")
         (self.package / "KIT.json").unlink()

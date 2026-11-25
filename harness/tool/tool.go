@@ -14,9 +14,10 @@ import (
 type CallStatus struct {
 	Denial         *permission.Error `json:",omitzero"`
 	Error          string
-	ErrorTruncated bool           `json:",omitzero"`
-	OriginalError  []byte         `json:",omitzero"`
-	WaitingFor     []operation.ID `json:",omitzero"`
+	ErrorTruncated bool            `json:",omitzero"`
+	OriginalError  []byte          `json:",omitzero"`
+	WaitingFor     []operation.ID  `json:",omitzero"`
+	AcceptedResult *llm.ToolResult `json:",omitzero"`
 }
 
 // Context is turn-local and coordinator-owned. Submit allocates an ID and
@@ -27,6 +28,12 @@ type Context interface {
 
 type ResultTranslator interface {
 	TranslateResult(string, CallStatus, []operation.Operation) (llm.ToolResult, error)
+}
+
+// AcceptanceTranslator can acknowledge a durable background Operation before
+// it ends. The Coordinator persists that result once for replay.
+type AcceptanceTranslator interface {
+	AcceptedResult(string, operation.Operation) (*llm.ToolResult, error)
 }
 
 // ResultFailureClassifier optionally interprets a tool's typed terminal receipt.

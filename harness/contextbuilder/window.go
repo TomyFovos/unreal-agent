@@ -64,8 +64,8 @@ func (b *builder) SetWindowSource(id session.ID, state func(context.Context) (co
 	b.windowSource = windowSource{session: id, state: state}
 }
 
-func (b *builder) SetContextConfigFile(file *contextengine.ConfigFile) {
-	b.contextConfigFile = file
+func (b *builder) SetContextPolicy(file *contextengine.ConfigFile, role string) {
+	b.contextConfigFile, b.contextRole = file, role
 }
 
 func (b *builder) refreshContextPolicy(persist func(sessionstore.ContextRecord) error) error {
@@ -75,15 +75,15 @@ func (b *builder) refreshContextPolicy(persist func(sessionstore.ContextRecord) 
 	}
 	prior := b.recordedContextPolicy
 	if prior != nil || b.window.header != "" {
-		policy := config.Policies()
-		if prior == nil || prior.Default != policy.Default || !maps.Equal(prior.Routes, policy.Routes) {
+		policy := config.PoliciesForRole(b.contextRole)
+		if prior == nil || prior.Role != policy.Role || prior.Default != policy.Default || !maps.Equal(prior.Routes, policy.Routes) {
 			if err := persist(sessionstore.ContextRecord{Kind: sessionstore.ContextPolicyChanged, Provider: b.provider, Policy: &policy}); err != nil {
 				return err
 			}
 			b.recordedContextPolicy = &policy
 		}
 	}
-	if b.window.header == "" && b.excerptChars() != config.ForProvider(b.provider).ToolOutputExcerptChars {
+	if b.window.header == "" && b.excerptChars() != config.ForRole(b.provider, b.contextRole).ToolOutputExcerptChars {
 		clear(b.derived)
 		b.estimate = derivedEstimate{}
 	}
@@ -95,7 +95,7 @@ func (b *builder) persistWindow(persist func(sessionstore.ContextRecord) error, 
 	// Record the initial policy on the first window, even when it opens
 	// directly with a rebuild. Later updates have their own event.
 	if b.recordedContextPolicy == nil {
-		window.Policy = new(b.contextConfig.Policies())
+		window.Policy = new(b.contextConfig.PoliciesForRole(b.contextRole))
 	}
 	if err := persist(window); err != nil {
 		return err
@@ -136,7 +136,7 @@ func (b *builder) excerptChars() int {
 	if b.window.header != "" {
 		return b.window.excerptChars
 	}
-	return b.contextConfig.ForProvider(b.provider).ToolOutputExcerptChars
+	return b.contextConfig.ForRole(b.provider, b.contextRole).ToolOutputExcerptChars
 }
 
 func (b *builder) contextPrefix() []llm.Item {
@@ -252,7 +252,7 @@ func (b *builder) prepareWindow(ctx context.Context, persist func(sessionstore.C
 	if err := b.refreshContextPolicy(persist); err != nil {
 		return false, err
 	}
-	config := b.contextConfig.ForProvider(b.provider)
+	config := b.contextConfig.ForRole(b.provider, b.contextRole)
 	budget, err := config.BudgetFor(b.contextRuntime, 0)
 	if err != nil {
 		return false, err

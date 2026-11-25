@@ -179,6 +179,14 @@ Codex 無効・自動検出なしの Host でも、利用可能な Go または 
   書きません）。この許可を使うのはモデルへの要求と子の設定の確認だけで、AI が使うツールには関係
   しません。キーがなければ何も送りません。
 
+### 課金額と課金区分
+
+各 Responses の `usage.opencode` に `allowance`（消費した USD 枠）、`list_cost`（USD の定価）、`billing_source` があれば、応答の使用量に記録します。旧記録では保存済みの `Usage.Raw.opencode` を読みます。フィールドがない額は不明です。
+
+2026-11-24 の観測では、課金区分が `go` から `go-plus` に切り替わり、`allowance` と `list_cost` の比が 0.60 から 1.20 に変わりました。倍率は応答ごとに異なり得ます。`unreal-agent usage` と `/analyze` の **Usage** で、記録された区分別の実額と呼出単価を比較できます。
+
+[English billing notes](opencode-go-billing.md)
+
 ### 上限とエラー
 
 Codex と同じ経路に乗せます。ただし共通の再試行の判定は、迷うと再試行する設計で、再試行しないコードは

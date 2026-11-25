@@ -283,3 +283,50 @@ func TestReviewIsOptionalMetadataWithOptionalReason(t *testing.T) {
 	}
 	t.Fatal("SubagentReview missing")
 }
+
+func TestSubagentToolUsageReceiptAndInspectionActions(t *testing.T) {
+	template := runtime.Template{Workspace: t.TempDir(), Runtime: []byte(`{"Provider":{"provider":"opencode-go","model":{"id":"deepseek"}},"ReasoningEffort":"max"}`)}
+	var tr = &translator{action: "start", owner: "parent", templates: map[string]runtime.Template{"worker": template}}
+	makeOp := func(args string) operation.Operation {
+		t.Helper()
+		c := &ctx{}
+		status := tr.Translate(c, llm.ToolCall{Name: "SubagentStart", Arguments: args})
+		if status.Error != "" || len(c.specs) != 1 {
+			t.Fatalf("tool %s: %+v", args, status)
+		}
+		spec := c.specs[0]
+		return operation.Operation{ID: "handle", ToolName: "SubagentStart", Type: spec.Type, Version: spec.Version, State: spec.State, MaxOutputLength: spec.MaxOutputLength, Status: operation.StatusAwaiting}
+	}
+	op := makeOp(`{"template":"worker","task":"plan","brief":{"budget_steps":10}}`)
+	plan, err := runtime.DecodePlan(op)
+	if err != nil || plan.Brief.BudgetSteps != 10 || !plan.UsageReceipt {
+		t.Fatal(plan, err)
+	}
+	state, err := operation.DecodeRemoteJobState(op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Handle, _ = json.Marshal(runtime.Handle{Version: 1, ParentID: plan.ParentID, ChildID: plan.ChildID, OperationID: op.ID,
+		QueuedAhead: new(2), UsageAtStart: []string{"opencode-go · 12 calls · charge $0.12"}})
+	step, err := operation.UpdateRemoteJob(op, state, operation.StatusAwaiting)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := tr.AcceptedResult("call", *step.Operation)
+	if err != nil || receipt == nil {
+		t.Fatal(receipt, err)
+	}
+	text := receipt.Output[0].Value
+	for _, expected := range []string{`"Status":"queued"`, `"Ahead":2`, `"Selection":"opencode-go / deepseek / max"`, `"Budget":"10"`, "12 calls"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("missing %s from %s", expected, text)
+		}
+	}
+	for _, action := range []string{"list", "show", "wait"} {
+		op := makeOp(`{"template":"*","action":"` + action + `","handle":"owned","all":true,"timeout_seconds":1}`)
+		p, err := runtime.DecodePlan(op)
+		if err != nil || p.Action != action || p.Handle != "owned" || p.WaitSeconds != 1 || !p.InspectAll {
+			t.Fatalf("inspection plan %+v: %v", p, err)
+		}
+	}
+}

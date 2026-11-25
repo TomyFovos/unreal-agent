@@ -66,6 +66,12 @@ Settings store only the file paths, never key values. Files without permissions 
 
    Enter `y` when asked to create the Session.
 
+### Limiting Concurrent Children
+
+Pass `bash development.sh --max-active-children 10` to set the maximum for each Session tree. The common launcher saves it across upgrades and writes `MaxActiveChildren` in the workspace’s `runtime.json` when you launch. The default and explicit `0` allow any number. For an operator-supplied `--config`, set the field in that file.
+
+Hosts with a live runtime file reread the setting at child admission and while waiting for slots. Other Hosts use their startup setting. Lowering the value leaves current children running and queues new starts until there is room. Upgrade and restart an older Host to enable the feature.
+
 ### What Gets Installed
 
 - **Commands:** `~/.local/bin/unreal` and `~/.local/bin/unreal-agent`

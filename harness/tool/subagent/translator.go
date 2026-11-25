@@ -67,6 +67,7 @@ func Extensions(owner session.ID, templates map[string]runtime.Template, child b
 		return nil, err
 	}
 	brief := map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
+		"budget_steps":        map[string]any{"type": "integer", "minimum": 0, "description": "Expected model calls for the child and all its descendants. Omit or use zero for no budget."},
 		"title":               map[string]any{"type": "string", "description": "One-line task title"},
 		"purpose":             map[string]any{"type": "string", "description": "What the work will help decide"},
 		"inputs":              map[string]any{"type": "string", "description": "Paths, references and sections to read"},
@@ -80,7 +81,13 @@ func Extensions(owner session.ID, templates map[string]runtime.Template, child b
 		required                  []string
 		isChild                   bool
 	}{
-		{"SubagentStart", "start", "Start a child. Supply optional brief fields and/or task instructions. The harness adds launch conditions and report guidance. End the turn to wait.", map[string]any{"template": map[string]any{"type": "string"}, "task": map[string]any{"type": "string"}, "brief": brief}, []string{"template"}, false},
+		{"SubagentStart", "start", "Start a child (the default action) or list, show, or wait for owned children. For list, show, or wait, use a template name or * for all roles. Show also takes a handle. The start can queue when the Session tree is at capacity.", map[string]any{
+			"template": map[string]any{"type": "string"}, "task": map[string]any{"type": "string"}, "brief": brief,
+			"action":          map[string]any{"type": "string", "enum": []string{"start", "list", "show", "wait"}},
+			"handle":          map[string]any{"type": "string", "description": "Owned child handle. Optional for wait."},
+			"all":             map[string]any{"type": "boolean", "description": "Include ended children in list."},
+			"timeout_seconds": map[string]any{"type": "integer", "minimum": 0, "description": "How long to wait. Defaults to 30 seconds."},
+		}, []string{"template"}, false},
 		{"SubagentSend", "send", "Message an owned child by operation handle; acknowledgement confirms receipt only.", map[string]any{"handle": map[string]any{"type": "string"}, "text": map[string]any{"type": "string"}}, []string{"handle", "text"}, false},
 		{"SubagentCancel", "cancel", "Cancel an owned child by operation handle.", map[string]any{"handle": map[string]any{"type": "string"}}, []string{"handle"}, false},
 		{"SubagentApprove", "approve", "Allow or deny an owned child request; escalate to your parent/user if unsure.", map[string]any{"handle": map[string]any{"type": "string"}, "request": map[string]any{"type": "string"}, "allow": map[string]any{"type": "boolean"}}, []string{"handle", "request", "allow"}, false},
@@ -97,6 +104,9 @@ func Extensions(owner session.ID, templates map[string]runtime.Template, child b
 }
 func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallStatus {
 	var args struct {
+		Action       string                  `json:"action"`
+		All          bool                    `json:"all"`
+		WaitSeconds  int                     `json:"timeout_seconds"`
 		Template     string                  `json:"template"`
 		Task         string                  `json:"task"`
 		Brief        runtime.BriefFields     `json:"brief"`
@@ -145,7 +155,16 @@ func (t *translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallSta
 	if t.action == "review" {
 		p.Review, p.Text = args.Decision, args.Reason
 	}
-	if t.action == "start" {
+	if t.action == "start" && args.Action != "" && args.Action != "start" {
+		switch args.Action {
+		case "list", "show", "wait":
+			p.Action, p.Template, p.InspectAll, p.WaitSeconds = args.Action, args.Template, args.All, args.WaitSeconds
+		default:
+			return tool.ErrorStatus("Unknown subagent action", 0)
+		}
+	}
+	if p.Action == "start" {
+		p.UsageReceipt = true
 		config, ok := t.templates[args.Template]
 		if !ok {
 			return tool.ErrorStatus("Unknown child template", 0)
@@ -218,28 +237,39 @@ func (t *translator) TranslateResult(id string, status tool.CallStatus, ops []op
 				}
 			}
 			value := struct {
-				Handle  operation.ID
-				Status  operation.Status
-				Message string
-				Result  *runtime.Handle
-				Preview string `json:",omitzero"`
+				Selection   string   `json:",omitzero"`
+				Budget      string   `json:",omitzero"`
+				Usage       []string `json:",omitzero"`
+				QueuedAhead *int     `json:",omitzero"`
+				Handle      operation.ID
+				Status      operation.Status
+				Message     string
+				Result      *runtime.Handle
+				Preview     string `json:",omitzero"`
 			}{Handle: op.ID, Status: op.Status, Message: s.TerminalResult}
+			plan, _ := runtime.DecodePlan(op)
+			if t.action == "start" && plan.Action == "start" && plan.UsageReceipt {
+				value.Selection, value.Budget = plan.SelectionText(), plan.BudgetText()
+				if handle, err := runtime.DecodeHandle(op); err == nil {
+					value.Usage, value.QueuedAhead = handle.UsageAtStart, handle.QueuedAhead
+				}
+				if value.Usage == nil {
+					value.Usage = []string{"Session tree usage unknown"}
+				}
+			}
 			if s.TerminalError != "" {
 				value.Message = s.TerminalError
 			}
-			if t.action == "start" && len(s.Handle) > 0 {
+			if t.action == "start" && plan.Action == "start" && len(s.Handle) > 0 {
 				handle, err := runtime.DecodeHandle(op)
 				if err != nil {
 					return llm.ToolResult{}, err
 				}
 				if handle.Brief != nil {
-					plan, err := runtime.DecodePlan(op)
-					if err != nil {
-						return llm.ToolResult{}, err
-					}
 					value.Preview = handle.Brief.Render(plan.Text)
 					handle.Brief = nil // the preview carries the same facts
 				}
+				handle.UsageAtStart, handle.QueuedAhead, handle.Started = nil, nil, false
 				value.Result = &handle
 			}
 			data, err := json.Marshal(value)
@@ -250,4 +280,31 @@ func (t *translator) TranslateResult(id string, status tool.CallStatus, ops []op
 		}
 	}
 	return llm.ToolResult{CallID: id, Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: text}}}, nil
+}
+
+// AcceptedResult reports queue admission before the child has a slot. A
+// running start keeps its ordinary terminal result.
+func (t *translator) AcceptedResult(id string, op operation.Operation) (*llm.ToolResult, error) {
+	if t.action != "start" || op.Status != operation.StatusAwaiting {
+		return nil, nil
+	}
+	handle, err := runtime.DecodeHandle(op)
+	if err != nil || handle.QueuedAhead == nil {
+		return nil, nil
+	}
+	plan, err := runtime.DecodePlan(op)
+	if err != nil || plan.Action != "start" {
+		return nil, err
+	}
+	data, err := json.Marshal(struct {
+		Handle            operation.ID
+		Status            string
+		Ahead             int
+		Selection, Budget string
+		Usage             []string
+	}{op.ID, "queued", *handle.QueuedAhead, plan.SelectionText(), plan.BudgetText(), handle.UsageAtStart})
+	if err != nil {
+		return nil, err
+	}
+	return &llm.ToolResult{CallID: id, Output: []llm.ToolResultOutput{{Kind: llm.ToolResultText, Value: string(data)}}}, nil
 }

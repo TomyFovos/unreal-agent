@@ -74,6 +74,12 @@ bash development.sh --openai-api-key-file /absolute/openai.key --anthropic-api-k
 
 ---
 
+### 子 Session の同時実行上限
+
+`bash development.sh --max-active-children 10` で Session ツリーごとの上限を設定します。共通ランチャーは更新後も設定を保持し、起動時に workspace の `runtime.json` へ `MaxActiveChildren` を書き込みます。既定値と明示的な `0` は上限なしです。独自の `--config` を使う場合は、そのファイルに設定します。
+
+runtime ファイルを再読込する Host では、子の受付時と空き枠を待つ間にこの設定を読み直します。それ以外の Host では起動時の値を使います。値を下げると、稼働中の子は継続し、新たな子は空きができるまで待機します。旧版の Host には新しいビルドでの再起動が必要です。
+
 ## Mac: どのフォルダからでも `unreal NAME`
 
 macOS では、この Git チェックアウトでリビジョンをインストールします（`REV` は必須で、完全または短縮のコミットハッシュ、あるいはタグやブランチなど Git がコミットに解決できるリビジョンを指定できます）。

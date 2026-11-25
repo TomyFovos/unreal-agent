@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/analysis"
+	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
 
@@ -47,7 +48,7 @@ func openAnalysis(ctx context.Context) *analysisScreen {
 	return &analysisScreen{ctx: ctx, cancel: cancel, picker: analyzePicker(""), ja: analysisJapanese(os.Getenv)}
 }
 
-func (p *analysisScreen) request(m *Model, inspect analysis.InspectFunc, s Snapshot, v viewer.PanelSnapshot, theme Theme, now time.Time, width int, updates chan<- analysisUpdate) {
+func (p *analysisScreen) request(m *Model, inspect analysis.InspectFunc, readUsage func(context.Context, time.Duration) (subagent.UsageReport, error), s Snapshot, v viewer.PanelSnapshot, theme Theme, now time.Time, width int, updates chan<- analysisUpdate) {
 	if p.loading {
 		return
 	}
@@ -71,6 +72,11 @@ func (p *analysisScreen) request(m *Model, inspect analysis.InspectFunc, s Snaps
 			r, err := m.readAnalysisTree(ctx, inspect, now, v.Rows, v.SubscriptionUsage)
 			result.err = err
 			if err == nil {
+				if readUsage != nil {
+					if ledger, err := readUsage(ctx, time.Hour); err == nil {
+						r.Ledger = &ledger
+					}
+				}
 				report, result.report = &r, &r
 			}
 		}

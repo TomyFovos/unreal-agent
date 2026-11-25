@@ -101,7 +101,7 @@ func StartChildWithBrief(ctx context.Context, owner *host.Session, generation st
 	} else if requested != nil {
 		return host.Receipt{}, &RuntimeError{Code: "selection_unsupported"}
 	}
-	spec, e := NewSpec(Plan{Version: 1, Action: "start", ParentID: owner.ID, Template: name, Text: task, Brief: brief, Configuration: &configured, RuntimeBound: bound, RuntimeOverride: override, Notify: true})
+	spec, e := NewSpec(Plan{Version: 1, Action: "start", ParentID: owner.ID, Template: name, Text: task, Brief: brief, Configuration: &configured, RuntimeBound: bound, RuntimeOverride: override, Notify: true, UsageReceipt: true})
 	if e != nil {
 		return host.Receipt{}, e
 	}

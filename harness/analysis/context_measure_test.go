@@ -206,6 +206,37 @@ func TestContextPolicyPeriodsAttributeMetricsToRebuildingPolicy(t *testing.T) {
 	}
 }
 
+func TestContextPolicyPeriodsKeepChildRolesSeparate(t *testing.T) {
+	const provider = "opencode-go"
+	results := make([]contextSessionResult, 0, 3)
+	for i, tc := range []struct {
+		role string
+		w    int64
+	}{{"", 200_000}, {"lead", 48_000}, {"worker", 72_000}} {
+		f := &measurementFixture{Accumulator: New(session.ID(tc.role + "-session"))}
+		common := sessionstore.WindowPolicy{WindowThresholdTokens: 200_000, PostRebuildRatio: 0.5, L2TargetTokens: 5000}
+		window := common
+		window.WindowThresholdTokens = tc.w
+		f.contextRecord(i, sessionstore.ContextRecord{Kind: sessionstore.ContextWindowStart, Provider: provider,
+			Policy: &sessionstore.ContextPolicies{Role: tc.role, Default: common, Routes: map[string]sessionstore.WindowPolicy{provider: window}}})
+		results = append(results, f.context.project(true, nil, f.calls, ModelKey{Provider: provider}, tc.role))
+		periods := results[i].view.PolicyPeriods
+		if len(periods) != 1 || periods[0].Role != tc.role || periods[0].Policy == nil || periods[0].Policy.WindowThresholdTokens != tc.w {
+			t.Fatalf("policy periods for %q: %+v", tc.role, periods)
+		}
+	}
+	report := contextReport(results, false)
+	if active := report.ActivePolicies; len(active) != 4 || active[1].Role != "" || active[1].Policy.WindowThresholdTokens != 200_000 ||
+		active[2].Role != "lead" || active[2].Policy.WindowThresholdTokens != 48_000 ||
+		active[3].Role != "worker" || active[3].Policy.WindowThresholdTokens != 72_000 {
+		t.Fatalf("active policies merged roles: %+v", active)
+	}
+	if got := strings.Join(contextLines(report), "\n"); !strings.Contains(got, "Policy period · opencode-go / lead") ||
+		!strings.Contains(got, "Active context policy · opencode-go / worker") {
+		t.Fatal("export lost the child roles")
+	}
+}
+
 func TestContextMeasurementsWindowsAndExport(t *testing.T) {
 	f := &measurementFixture{Accumulator: New("main")}
 	const strategy = contextengine.WindowThreeLayer

@@ -55,6 +55,8 @@ func SubscriptionProviderName(provider string) string {
 		return "ChatGPT"
 	case "claude":
 		return "Claude"
+	case "opencode-go":
+		return "OpenCode Go"
 	default:
 		return provider
 	}

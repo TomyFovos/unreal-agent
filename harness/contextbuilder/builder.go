@@ -54,6 +54,7 @@ type builder struct {
 	contextConfig             contextengine.Config
 	contextConfigFile         *contextengine.ConfigFile
 	recordedContextPolicy     *sessionstore.ContextPolicies
+	contextRole               string
 	contextRuntime            contextengine.Runtime
 	constraints               contextengine.Constraints
 	source                    sessionstore.Item

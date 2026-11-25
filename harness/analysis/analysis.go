@@ -18,6 +18,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/provider"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
 
@@ -73,6 +74,7 @@ type Errors struct {
 	Recent                             []Event
 }
 type Report struct {
+	Ledger              *subagent.UsageReport    `json:"-"`
 	Dashboard           *Dashboard               `json:"-"`
 	Tree                *TreeReport              `json:",omitzero"`
 	ContextMeasurements *ContextMeasurements     `json:",omitzero"`
@@ -81,6 +83,7 @@ type Report struct {
 	Activities          []llm.ActivityRecord     `json:",omitzero"`
 	Redactions          []RedactionTotals        `json:",omitzero"`
 	Compactions         []llm.ConversationRecord `json:",omitzero"`
+	RoleUsage           []RoleUsage              `json:",omitempty"`
 	UsageRetryAt        time.Time                `json:",omitzero"`
 	AverageInputTokens  float64
 	InputTokenResponses int

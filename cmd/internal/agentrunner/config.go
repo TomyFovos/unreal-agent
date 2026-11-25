@@ -34,6 +34,7 @@ type ToolConfig struct {
 }
 
 type Tools struct {
+	AfterRestore     func()
 	RetainOperation  func(context.Context, operation.Operation) (bool, error)
 	InterruptedInput func(operation.Operation) (*inbox.Input, error)
 	CompletedInput   func(operation.Operation) (*inbox.Input, error)

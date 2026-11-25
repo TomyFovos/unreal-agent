@@ -56,7 +56,7 @@ S10 には S6 に載る子が報告したパスと、最後の意味上の区切
 | `ToolOutputExcerptChars` | `0` | ツール既存の表示量を使います。正の値でテキスト部分ごとの先頭・末尾の合計文字数を指定します。 |
 | `CacheRewarmMinutes` | `0` | PR7 で比較する任意の温め直し間隔を記録します。実行時の要求は既存の Session の動作に従います。 |
 
-`Context.Routes` に provider ID を指定すると、表の設定と `InputBudget`、`FallbackWindow`、`ResponseReserve`、`ProtocolReserve` を上書きできます。省略した項目は共通の `Context` 値を継承します。親子それぞれの Session は、その時点で選択されている provider の値を使います。共通設定と各ルートの `L2TargetTokens` は、W と比率で計算した再構築目標以下に収めます。モデルの入力予算やヘッダーの占有量に応じて、実際の L2 予算はさらに小さくなります。
+`Context.Routes` にプロバイダ ID を指定すると、表の設定と `InputBudget`、`FallbackWindow`、`ResponseReserve`、`ProtocolReserve` を上書きできます。子 Session は共通設定、現在選択しているプロバイダ設定、`Context.Routes.<provider>.Roles.<role>` の順に適用します。`<role>` には起動時に確定した `lead`・`worker`・`collector` などの役割が入ります。メイン Session には共通設定とプロバイダ設定が適用されます。省略した項目は直前の設定を継承します。各実効設定の `L2TargetTokens` は、W と比率で計算した再構築目標以下に収めます。モデルの入力予算やヘッダーの占有量に応じて、実際の L2 予算はさらに小さくなります。
 
 たとえば、Host の設定ファイルの `Context` に次の値を追加します。
 
@@ -68,7 +68,13 @@ S10 には S6 に載る子が報告したパスと、最後の意味上の区切
     "L2TargetTokens": 5000,
     "Routes": {
       "claude": {"WindowThresholdTokens": 180000, "PostRebuildRatio": 0.6},
-      "opencode-go": {"L2TargetTokens": 3500},
+      "opencode-go": {
+        "L2TargetTokens": 3500,
+        "Roles": {
+          "lead": {"WindowThresholdTokens": 64000},
+          "worker": {"WindowThresholdTokens": 96000}
+        }
+      },
       "openai-codex": {"WindowThresholdTokens": 220000}
     }
   }
@@ -116,7 +122,7 @@ Responses 系はネイティブツールを使います。Claude Code の統括�
 
 `/analyze` の **文脈（Context）** で入力と W、境界直後と定常時のキャッシュ読取率を比較できます。**書き出し（Export）** の JSON と Markdown に、アーカイブ済みの子を含む全体の計測値が入ります。方式（`three-layer`・`historical summary`）、プロバイダ、モデル、effort、Fast ごとの内訳があります。記録された値は `measured`、計算や推定で得た値は `derived`、欠損は `unknown` です。JSON では `unknown` の値を `null` で表し、既知の集計値にも欠けた観測の件数を付けます。
 
-文脈ビューではルートごとの最新の適用値と、Session・ルートごとの適用期間を表示します。期間ごとに再構築回数、再構築直後の平均入力サイズ、最初のリクエストのキャッシュ読取率、L3 の show・find 回数を比較できます。リクエストと L3 の呼び出しは、そのウィンドウを組み立てたポリシーに集計します。次の再構築をまたいで完了した L3 呼び出しは、開始時のウィンドウの件数に含めます。ポリシー記録が始まる前の再構築はポリシー不明として表示します。
+文脈ビューではルートと役割ごとの最新の適用値と、各 Session の適用期間を表示します。期間ごとに設定値、再構築回数、再構築直後の平均入力サイズ、最初のリクエストのキャッシュ読取率、L3 の show・find 回数を比較できます。ウィンドウの計測は、そのウィンドウを組み立てたポリシーに集計します。次の再構築をまたいで完了した L3 呼び出しは、開始時のウィンドウの件数に含めます。ポリシー記録が始まる前の再構築はポリシー不明として表示します。
 
 | 計測項目 | 比較できる値 |
 | --- | --- |
@@ -137,4 +143,4 @@ Responses 系はネイティブツールを使います。Claude Code の統括�
 python3 scripts/context_replay.py ./session-copies --since 2026-11-24T00:00:00+09:00 --config ./candidate/runtime.json
 ```
 
-Session ログのコピーを入力にします。`candidate` にはルートごとの実効値と、全期間・検証期間それぞれの試算が出ます。`--request-csv` も同じ候補を使います。従来の集計名 `codex` と `deepseek` には、それぞれ `openai-codex` と `opencode-go` の値を適用します。試算は設定された W、比率、L2 上限、入力予算を使い、投影後のサイズやキャッシュ挙動、費用をリクエストの記録から推定します。
+Session ログのコピーを入力にします。`candidate` にはルートごとの実効値、設定された役割の `role_policies`、全期間・検証期間それぞれの試算が出ます。リプレイは子の起動設定またはポリシー記録から役割を取得します。役割の記録がないログにはプロバイダ設定を使います。`--request-csv` は同じ候補を使い、子の役割も出力します。従来の集計名 `codex` と `deepseek` には、それぞれ `openai-codex` と `opencode-go` の値を適用します。試算は設定された W、比率、L2 上限、入力予算を使い、投影後のサイズやキャッシュ挙動、費用をリクエストの記録から推定します。

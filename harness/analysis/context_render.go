@@ -172,11 +172,18 @@ func contextTables(r *ContextMeasurements) []contextTable {
 		if route.Provider != "" {
 			name = textOrUnknown(route.Provider)
 		}
+		if route.Role != "" {
+			name += " / " + textOrUnknown(route.Role)
+		}
 		tables = append(tables, contextTable{title: "Active context policy · " + name, rows: policyRows(route.Policy)})
 	}
 	for _, s := range r.Sessions {
 		for _, period := range s.PolicyPeriods {
-			t := contextTable{title: "Session " + string(s.Session) + " · Policy period · " + textOrUnknown(period.Provider) + " · " + contextTime(period.From)}
+			name := textOrUnknown(period.Provider)
+			if period.Role != "" {
+				name += " / " + textOrUnknown(period.Role)
+			}
+			t := contextTable{title: "Session " + string(s.Session) + " · Policy period · " + name + " · " + contextTime(period.From)}
 			if period.Until != nil {
 				t.rows = append(t.rows, [2]string{"Until", contextTime(period.Until)})
 			}

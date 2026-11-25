@@ -58,7 +58,7 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 	if hello.Sender != string(config.ParentID) || hello.Target != string(config.ChildID) {
 		return fmt.Errorf("handshake identity mismatch")
 	}
-	link := ChildLink{Mode: hello.Mode}
+	link := ChildLink{Mode: hello.Mode, ContextRole: hello.ContextRole, TreeRoot: hello.TreeRoot, MaxActiveChildren: hello.MaxActiveChildren}
 	if policy := hello.ContextPolicy; policy != nil {
 		link.ContextFile, err = contextengine.NewConfigFile(policy.Path, policy.Initial)
 		if err != nil {

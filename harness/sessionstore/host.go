@@ -178,6 +178,7 @@ type ContextRecord struct {
 // ContextPolicies is the effective sizing policy committed before a Session
 // uses it. It contains no runtime identities, paths or credentials.
 type ContextPolicies struct {
+	Role    string `json:",omitzero"` // the child role whose effective routes are recorded
 	Default WindowPolicy
 	Routes  map[string]WindowPolicy `json:",omitempty"`
 }

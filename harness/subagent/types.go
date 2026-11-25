@@ -68,7 +68,10 @@ type Plan struct {
 	// Notify tells the parent when the child ends, as a message that wakes
 	// it. A child started without a tool call (the subagent command) has no
 	// tool result to do that.
-	Notify bool `json:",omitzero"`
+	Notify       bool `json:",omitzero"`
+	UsageReceipt bool `json:",omitzero"`
+	InspectAll   bool `json:",omitzero"`
+	WaitSeconds  int  `json:",omitzero"`
 }
 type ChildConfig struct {
 	Version                uint32
@@ -101,6 +104,9 @@ type Handle struct {
 	Finish        *sessionstore.FinishRecord `json:",omitzero"`
 	FinishLocator record.Locator             `json:",omitzero"`
 	Brief         *DelegationBrief           `json:",omitzero"`
+	QueuedAhead   *int                       `json:",omitzero"` // initial position, even after starting
+	Started       bool                       `json:",omitzero"`
+	UsageAtStart  []string                   `json:",omitzero"`
 	// Approvals are the child's requests waiting for this parent (U17).
 	Approvals []Approval `json:",omitzero"`
 }
@@ -118,9 +124,12 @@ type Sender func(context.Context, inbox.Input) (host.Receipt, error)
 // recorded configuration: the channel back and the parent's current
 // permission mode and context policy.
 type ChildLink struct {
-	Send        Sender
-	Mode        permission.Mode
-	ContextFile *contextengine.ConfigFile
+	Send              Sender
+	Mode              permission.Mode
+	ContextFile       *contextengine.ConfigFile
+	ContextRole       string
+	TreeRoot          session.ID
+	MaxActiveChildren int
 }
 type ChildFactory func(context.Context, ChildConfig, ChildLink) (*host.Session, io.Closer, error)
 
@@ -133,8 +142,20 @@ func (p Plan) Validate() error {
 	}
 	switch p.Action {
 	case "start":
+		if p.Brief.BudgetSteps < 0 {
+			return fmt.Errorf("budget_steps must be nonnegative")
+		}
 		if p.Template == "" || p.Configuration == nil || !filepath.IsAbs(p.Configuration.Workspace) || !p.Configuration.Runtime.IsValid() {
 			return fmt.Errorf("invalid child configuration")
+		}
+	case "show":
+		if p.Handle == "" {
+			return fmt.Errorf("child operation handle is required")
+		}
+	case "list":
+	case "wait":
+		if p.WaitSeconds < 0 {
+			return fmt.Errorf("timeout_seconds must be nonnegative")
 		}
 	case "send", "cancel":
 		if p.Handle == "" {

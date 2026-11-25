@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 )
@@ -20,6 +21,11 @@ func (m *Manager) RetainOperation(ctx context.Context, op operation.Operation) (
 	p, err := DecodePlan(op)
 	if err != nil || p.Action != "start" {
 		return false, nil
+	}
+	if resumableStart(op) && m.usage != nil {
+		if queued, err := m.usage.isQueued(ctx, p.ParentID, op.ID); err == nil && queued {
+			return true, nil
+		}
 	}
 	store, err := localfile.New(m.config.Directory)
 	if err != nil {
@@ -50,6 +56,16 @@ func (m *Manager) RetainOperation(ctx context.Context, op operation.Operation) (
 		return false, err
 	}
 	defer lock.Close()
+	if resumableStart(op) && m.usage != nil && m.usage.hasQueuedDescendant(ctx, p.ChildID) {
+		// Resume just the ancestor Sessions that own persisted queued jobs.
+		// Ordinary lost running children still follow orphan reconciliation.
+		if p.ParentID == m.config.Owner.ID {
+			m.mu.Lock()
+			m.resumeQueueOwner[op.ID] = true
+			m.mu.Unlock()
+		}
+		return true, nil
+	}
 	_, err = m.recordOrphanEnd(ctx, store, op.ID, p)
 	return false, err
 }
@@ -83,17 +99,22 @@ func (m *Manager) recordOrphanEnd(ctx context.Context, store *localfile.Store, i
 
 // A recovered live child owns its existing runtime. Observe its committed
 // completion while it reconnects; never spawn a replacement for the same ID.
-func (m *Manager) watchRecovered(ctx context.Context, id operation.ID, p Plan, state *operation.RemoteJobState) (operation.Status, error) {
+func (m *Manager) watchRecovered(ctx context.Context, j *job, p Plan, state *operation.RemoteJobState) (operation.Status, error) {
+	id := j.operation.ID
 	store, err := localfile.New(m.config.Directory)
 	if err != nil {
 		return operation.StatusFailed, err
 	}
 	ticker := time.NewTicker(time.Second)
+	defer m.checkChildUsage(ctx, p, id, nil)
 	defer ticker.Stop()
 	var previous os.FileInfo
 	var view ChildView
 	finished := func(view ChildView) (operation.Status, error) {
-		handle := Handle{Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: id, Finish: view.Finish, FinishLocator: view.FinishLocator}
+		var handle Handle
+		_ = json.Unmarshal(state.Handle, &handle)
+		handle.Version, handle.ParentID, handle.ChildID, handle.OperationID = 1, p.ParentID, p.ChildID, id
+		handle.Finish, handle.FinishLocator, handle.Started = view.Finish, view.FinishLocator, true
 		if view.Configuration != nil {
 			handle.Brief = view.Configuration.Brief
 		}
@@ -119,6 +140,18 @@ func (m *Manager) watchRecovered(ctx context.Context, id operation.ID, p Plan, s
 		}
 		lock, err := store.AcquireWriter(p.ChildID)
 		if err == nil {
+			// The old writer can be draining when the new Host restores.
+			// Reopen the same owner once its lease is released if it still
+			// owns queued work. The queue keeps its original tickets.
+			if m.usage != nil && m.usage.hasQueuedDescendant(ctx, p.ChildID) {
+				if err := lock.Close(); err != nil {
+					return operation.StatusFailed, err
+				}
+				m.mu.Lock()
+				m.resumeQueueOwner[id] = true
+				m.mu.Unlock()
+				return m.spawn(ctx, j, p, state)
+			}
 			view, recordErr := m.recordOrphanEnd(ctx, store, id, p)
 			err = recordErr
 			err = errors.Join(err, lock.Close())
@@ -134,6 +167,35 @@ func (m *Manager) watchRecovered(ctx context.Context, id operation.ID, p Plan, s
 		case <-ctx.Done():
 			return operation.StatusCanceled, context.Cause(ctx)
 		case <-ticker.C:
+			m.checkChildUsage(ctx, p, id, nil)
 		}
 	}
+}
+
+func resumableStart(op operation.Operation) bool {
+	return !terminalStatus(op.Status) && op.Status != operation.StatusCanceling
+}
+
+func (m *Manager) retainQueuedWork(ctx context.Context, op operation.Operation) (bool, error) {
+	p, err := DecodePlan(op)
+	if err != nil || p.Action != "start" || !resumableStart(op) || m.usage == nil {
+		return false, nil
+	}
+	queued, _ := m.usage.isQueued(ctx, p.ParentID, op.ID)
+	return queued || m.usage.hasQueuedDescendant(ctx, p.ChildID), nil
+}
+
+func (r *UsageReader) hasQueuedDescendant(ctx context.Context, id session.ID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entries, err := r.readTree(ctx, id, true)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries[1:] {
+		if entry.State == "queued" {
+			return true
+		}
+	}
+	return false
 }

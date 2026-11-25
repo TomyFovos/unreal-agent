@@ -511,7 +511,7 @@ func (b *builder) buildDerived() (Result, error) {
 	}
 	runtime := b.contextRuntime
 	runtime.Provider, runtime.Model = b.provider, b.request.Model.ID
-	budget, err := b.contextConfig.ForProvider(runtime.Provider).BudgetFor(runtime, 0)
+	budget, err := b.contextConfig.ForRole(runtime.Provider, b.contextRole).BudgetFor(runtime, 0)
 	if err != nil {
 		return Result{}, err
 	}

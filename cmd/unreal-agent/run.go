@@ -31,14 +31,15 @@ type serveConfiguration struct {
 	providerStatuses    []modelcatalog.Provider
 	providerDiagnostics []string
 	// Launcher is nonsecret local discovery policy, outside Session identity.
-	Launcher        *normalLauncherConfig `json:",omitzero"`
-	Context         contextengine.Config  `json:",omitzero"`
-	Runtime         agentrunner.RuntimeIdentity
-	Permissions     permission.Config
-	PermissionModes *permission.ModesConfig `json:",omitzero"`
-	LanguageServers []lsp.ServerConfig
-	DebugAdapters   []dap.AdapterConfig
-	Subagents       map[string]childTemplate
+	Launcher          *normalLauncherConfig `json:",omitzero"`
+	Context           contextengine.Config  `json:",omitzero"`
+	Runtime           agentrunner.RuntimeIdentity
+	Permissions       permission.Config
+	PermissionModes   *permission.ModesConfig `json:",omitzero"`
+	LanguageServers   []lsp.ServerConfig
+	DebugAdapters     []dap.AdapterConfig
+	Subagents         map[string]childTemplate
+	MaxActiveChildren int `json:",omitzero"`
 	// Additional registered backends. Runtime.Provider remains the initial
 	// provider, preserving existing single-provider configuration identities.
 	Providers        map[string]agentrunner.ProviderRuntime `json:",omitzero"`
@@ -210,7 +211,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			childDefaultCredentials = *defaultCredentials
 			discovered = &agentrunner.DiscoveredBackends{}
 		}
-		runtimeConfig, templates, err := withParentSubagents(agentrunner.RuntimeConfig{CredentialSources: config.apiKeySources(), BuiltinSubagents: builtinSubagents, Context: config.Context, ContextFile: contextFile, Identity: config.Runtime, SessionDirectory: *directory, Providers: registry, Credentials: resolver, LanguageTools: languageTools, DebugAdapters: config.DebugAdapters, Backends: config.Providers, Health: health, Catalogs: catalogs, Discovered: discovered}, config.Subagents, capabilityPolicy, *credentials, childDefaultCredentials, codexPath, subagentModelPath)
+		runtimeConfig, templates, err := withParentSubagents(agentrunner.RuntimeConfig{CredentialSources: config.apiKeySources(), BuiltinSubagents: builtinSubagents, Context: config.Context, ContextFile: contextFile, MaxActiveChildren: config.MaxActiveChildren, Identity: config.Runtime, SessionDirectory: *directory, Providers: registry, Credentials: resolver, LanguageTools: languageTools, DebugAdapters: config.DebugAdapters, Backends: config.Providers, Health: health, Catalogs: catalogs, Discovered: discovered}, config.Subagents, capabilityPolicy, *credentials, childDefaultCredentials, codexPath, subagentModelPath)
 		if err != nil {
 			return err
 		}

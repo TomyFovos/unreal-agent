@@ -146,13 +146,14 @@ type Config struct {
 	Routes                                                        map[string]RouteConfig `json:",omitempty"`
 }
 
-// RouteConfig overrides the common policy for a provider ID. A nil field
-// inherits the common value, including when another field explicitly uses zero.
+// RouteConfig overrides the common policy for a provider ID. Roles can in
+// turn override the provider's policy. Nil fields inherit the enclosing value.
 type RouteConfig struct {
-	FallbackWindow, InputBudget, ResponseReserve, ProtocolReserve *int64   `json:",omitzero"`
-	WindowThresholdTokens, L2TargetTokens                         *int64   `json:",omitzero"`
-	PostRebuildRatio                                              *float64 `json:",omitzero"`
-	RecentEventCount, ToolOutputExcerptChars, CacheRewarmMinutes  *int     `json:",omitzero"`
+	FallbackWindow, InputBudget, ResponseReserve, ProtocolReserve *int64                 `json:",omitzero"`
+	WindowThresholdTokens, L2TargetTokens                         *int64                 `json:",omitzero"`
+	PostRebuildRatio                                              *float64               `json:",omitzero"`
+	RecentEventCount, ToolOutputExcerptChars, CacheRewarmMinutes  *int                   `json:",omitzero"`
+	Roles                                                         map[string]RouteConfig `json:",omitempty"`
 }
 
 const WindowThreeLayer = "three-layer"
@@ -201,9 +202,17 @@ func (c Config) Resolve() (Config, error) {
 	if err := c.validatePolicy(); err != nil {
 		return c, err
 	}
-	for provider := range c.Routes {
+	for provider, route := range c.Routes {
 		if err := c.ForProvider(provider).validatePolicy(); err != nil {
 			return c, fmt.Errorf("Routes[%q]: %w", provider, err)
+		}
+		for role, overrides := range route.Roles {
+			if role == "" || overrides.Roles != nil {
+				return c, fmt.Errorf("Routes[%q].Roles[%q]: expected a named role with policy fields", provider, role)
+			}
+			if err := c.ForRole(provider, role).validatePolicy(); err != nil {
+				return c, fmt.Errorf("Routes[%q].Roles[%q]: %w", provider, role, err)
+			}
 		}
 	}
 	return c, nil

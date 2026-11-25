@@ -22,7 +22,7 @@ A **Session** is a persistent conversation tied to a workspace (your Git worktre
 | Command | What It Does |
 | --- | --- |
 | `unreal` | Lists existing main Sessions (newest first) so you can pick one by number |
-| `unreal <name>` | Attaches to `<name>`, or offers to create it in the current workspace |
+| `unreal <name>` | Attaches to `<name>` from any directory; the Session runs in the workspace where it was created (offers to create it in the current workspace when no Session has that name) |
 | `unreal --where <name>` | Prints the workspace directory path for Session `<name>` |
 | `ucd <name>` | Changes your current Bash directory (`cd`) to Session `<name>`'s workspace |
 | `unreal --workspace-info` | Prints Workspace, Config, State, and Socket for the current workspace |
@@ -30,8 +30,10 @@ A **Session** is a persistent conversation tied to a workspace (your Git worktre
 
 > **Notes:**
 > - Running bare `unreal` without a name only lists existing Sessions; it never creates a new one.
-> - If the same Session name exists in multiple workspaces, the current workspace takes precedence; otherwise Unreal prompts you to pick by number.
-> - Advanced flags `--instance` and `--config` target an explicit operator instance in the current workspace and bypass global Session lookup.
+> - **A Session name refers to exactly one Session.** Names never coexist: calling a name from any directory works in that Session's original workspace, and a new Session cannot take a name that is already used (not even with `--instance`).
+> - One workspace keeps one instance: kit updates and provider settings changes reuse it.
+> - If an older version left several Sessions with one name, opening it prints a warning and a list (Enter opens the newest one with a running Host). Retire the extra ones with `unreal --archive-session <name> --workspace <path>` (add `--instance` when one workspace has several); records are kept, and a retired name can be used for a new Session.
+> - Advanced flags `--instance` and `--config` target an explicit operator instance in the current workspace and bypass global Session lookup; they still refuse a name used by another Session.
 
 ---
 
@@ -59,9 +61,31 @@ The bottom bar displays three live metrics (`—` when unknown):
 - **Speed (`速度`):** Output generation speed in `tok/s`. A `~` prefix indicates client-clock timing (used for Claude). Tool execution and approval wait times are excluded.
 - **Cache (`キャッシュ`):** Prompt cache hit rate for the latest turn.
 
-The footer also shows the remaining ChatGPT and Claude subscription allowance from the Session tree, including archived children (for example `週 残り13%`; ASCII: `7d left 13%`). Common windows use short labels such as `5h` and `週` (weekly). Reset times use the terminal's local time. As space runs out, the footer drops reset times and optional fields. Open **Subscription usage** in `/analyze` for observation times and windows whose reset has passed.
+The footer also shows the remaining ChatGPT and Claude subscription allowance from the Session tree, including archived children (for example `週 残り13%`; ASCII: `7d left 13%`). Common windows use short labels such as `5h` and `週` (weekly). Reset times use the terminal's local time. As space runs out, the footer drops reset times and optional fields. Open **Subscription usage** in `/analyze` for observation times and windows whose reset has passed. When a provider reports charges, the footer also shows today’s charged amount and the current rate. This fits after the subscription gauges and is the first item to disappear on narrow terminals.
 
 ---
+
+## Inspecting Session usage
+
+From a Session shell, run `unreal-agent usage`. Add `--since 30m` for a custom recent window or `--json` for a supervisor script. The ledger includes the caller and all descendants, including archived children. It reports total, 10-minute and 60-minute calls and token counters, provider/model and role breakdowns, top children, charges and allowance forecasts when observed. A partial total includes only available records. Unreported charges remain unknown.
+
+To inspect an offline copy, pass `--session-directory PATH --session ID` together. Point to its `sessions/` directory with `sessions-archive/` beside it. This reads the logs without opening a Host or writing to the copy.
+
+## Native File Tools
+
+Providers with Unreal's native tools can read several files and line ranges in one `read` call. Prefer one batch for the evidence needed for the current step. Each file returns its own status and whole-file revision. Ranges are 1-based. Omitting `ranges` reads the file from line 1 within the shared output budget. The single-file `path`, `start_line`, and `lines` arguments still work.
+
+```json
+{"files":[{"path":"main.go","ranges":[{"start_line":20,"lines":40},{"start_line":120,"lines":25}]},{"path":"config.go","ranges":[{"lines":50}]}],"max_bytes":24000}
+```
+
+Set `context_lines` on `grep` to get surrounding lines in the same response as each match. `before` and `after` list preceding and following lines in file order.
+
+```json
+{"path":".","glob":"**/*.go","pattern":"func build","context_lines":5}
+```
+
+Each call shares one `max_bytes` allowance across its results. The default is 16 KiB and the maximum is 64 KiB. When `truncated` is true, the call stopped at its output limit. The receipt's `locator` can retrieve the bounded result from L3 after the context window excerpts it. [Three-layer evidence reads](context-3layer.md)
 
 ## Keyboard Shortcuts & Text Input
 
@@ -141,13 +165,13 @@ For a single start, add `--model deepseek-v4.1-flash --effort max`. Add `--provi
 
 ### Delegation brief
 
-`SubagentStart` accepts an optional `brief` with `title`, `purpose`, `inputs`, `outputs`, `verification`, and `acceptance_criteria`. The Bash command accepts the same fields.
+`SubagentStart` accepts an optional `brief` with `title`, `purpose`, `inputs`, `outputs`, `verification`, `acceptance_criteria`, and `budget_steps`. The Bash command accepts the same fields.
 
 ```bash
 unreal-agent subagent start --template lead --title 'Check report totals' \
   --purpose 'Decide whether to accept the report' --inputs 'report.json' \
   --outputs 'A list of discrepancies' --verification 'Recompute the totals' \
-  --acceptance-criteria 'Cite each discrepancy and its source' --task 'Use the current fixture.'
+  --acceptance-criteria 'Cite each discrepancy and its source' --budget-steps 40 --task 'Use the current fixture.'
 ```
 
 Free-text `task`, `--task`, and a quoted heredoc still work. Omitted fields appear as `未指定/unspecified`. The harness adds the absolute work root and any differing process working directory, the selected permission mode and configured write scope, `TMPDIR`, restrictions from the settings and explicit instructions, the report format, certainty labels with sources, and a next-action placeholder. An explicitly labelled `Prohibitions: …` line from the task or acceptance criteria is reproduced in the brief. The child receives the same text shown in the start preview and in `subagent show HANDLE --task`.
@@ -155,3 +179,13 @@ Free-text `task`, `--task`, and a quoted heredoc still work. Omitted fields appe
 A child can ask `SendParent` for the exact value of one field using `brief <field>`, such as `brief root` or `brief verification`. The tool returns the stored value when present. Other questions go to the parent unchanged. The ended notice includes the full recorded completion report. The parent reviews the evidence and decides whether to accept.
 
 `/analyze` → **Overview** shows measured handled and forwarded counts per routing rule. It labels the estimated parent wakeups saved as an upper bound from brief replies, since multiple messages can share a parent turn.
+
+### Budgets, notices and queued children
+
+`--budget-steps N` sets the expected model calls across the child and its descendants. Omit it or use zero for no budget. Start reports the selected provider, model, effort, budget and usage by provider in the caller’s tree. The child is asked to tell the parent before exceeding the budget.
+
+At 80%, the child receives a notice. At 100% and each further 50 percentage points of the original budget, the parent receives a waking notice with the subtree call count and provider breakdown. Without a budget, 250, 500, 1,000 and each further doubling are reported as quiet progress in the parent’s next request. Notices are recorded so each threshold is delivered once across restarts. The model or operator decides whether to continue, stop or split the work.
+
+`subagent list`, `show` and `wait` report each child’s subtree calls, budget, charge and state. Native callers use `SubagentStart` with `action` set to `list`, `show` or `wait`, and `template` set to a name or `"*"`. Pass `handle` for `show`, and optionally for `wait`. `list` accepts `all: true` for ended children.
+
+When [the concurrency limit](install.md#limiting-concurrent-children) is set and the tree has no free slot, the start returns a queued handle and its initial position. The tree takes queued starts in order as slots free up. Queued handles work with `list`, `show`, `wait` and `cancel`, and the queue is restored when the Host reopens the Session. Running parents below the root also occupy slots, including while waiting for their children.

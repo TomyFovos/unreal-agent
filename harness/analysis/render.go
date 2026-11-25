@@ -88,6 +88,13 @@ func Lines(r Report, view string, ascii bool) []string {
 		out = append(out, cacheLines(r)...)
 		out = append(out, usageLines(r.Usage)...)
 		out = append(out, compactionLines(r)...)
+		if len(r.RoleUsage) > 0 {
+			out = append(out, "Model calls and input tokens per call by role")
+			for _, role := range r.RoleUsage {
+				out = append(out, fmt.Sprintf("  %s  %s calls  %s tokens/call", textOrUnknown(role.Role),
+					contextNumberText(contextNumber(role.Calls), ""), contextNumberText(contextNumber(role.InputTokensPerCall), "")))
+			}
+		}
 	case "turns":
 		out = append(out, "TURN PROVIDER / MODEL / EFFORT · INPUT CACHED REASON OUTPUT")
 		for _, t := range r.Turns {

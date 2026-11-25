@@ -183,7 +183,10 @@ func TestClaudeChildResumesWithinHostContextBudget(t *testing.T) {
 	t.Parallel()
 	h := startOpenCodeGoChildren(t, true, false)
 	h.cfg.Context.FallbackWindow = 400_000
-	h.cfg.Context.Routes = map[string]contextengine.RouteConfig{"claude": {WindowThresholdTokens: new(int64(350_000))}}
+	h.cfg.Context.Routes = map[string]contextengine.RouteConfig{"claude": {
+		WindowThresholdTokens: new(int64(350_000)),
+		Roles:                 map[string]contextengine.RouteConfig{"lead": {WindowThresholdTokens: new(int64(330_000))}},
+	}}
 	h.cfg.Runtime.Provider.Model.ID = "opus"
 	h.cfg.Runtime.ReasoningEffort = llm.ReasoningEffortMax
 	h.claude.Set(t, testclaude.Config{Catalog: claudeChildCatalog})
@@ -214,7 +217,10 @@ func TestClaudeChildResumesWithinHostContextBudget(t *testing.T) {
 		return hasFinalText(v, "waiting for follow-up") && v.Progress == nil
 	})
 
-	h.cfg.Context.Routes["claude"] = contextengine.RouteConfig{WindowThresholdTokens: new(int64(360_000)), PostRebuildRatio: new(0.6)}
+	h.cfg.Context.Routes["claude"] = contextengine.RouteConfig{
+		WindowThresholdTokens: new(int64(360_000)), PostRebuildRatio: new(0.6),
+		Roles: map[string]contextengine.RouteConfig{"lead": {WindowThresholdTokens: new(int64(340_000))}},
+	}
 	config, err := json.Marshal(h.cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -239,18 +245,26 @@ func TestClaudeChildResumesWithinHostContextBudget(t *testing.T) {
 	h.waitReport(t, string(handle), "follow-up complete")
 	child := requireClaudeTestChild(t, h, id, "opus", "max", "follow-up complete")
 
-	for _, view := range []host.View{mainView, child} {
+	for _, test := range []struct {
+		view          host.View
+		role          string
+		before, after int64
+	}{{mainView, "", 350_000, 360_000}, {child, "lead", 330_000, 340_000}} {
+		view := test.view
 		var policies []sessionstore.WindowPolicy
 		var kinds []string
 		for _, item := range view.History.Items {
 			if r, ok := item.Data.(sessionstore.HostRecord); ok && r.Context != nil && r.Context.Policy != nil {
+				if r.Context.Policy.Role != test.role {
+					t.Fatalf("recorded role in %s = %q, want %q", view.Session.Session.ID, r.Context.Policy.Role, test.role)
+				}
 				policies = append(policies, r.Context.Policy.ForProvider("claude"))
 				kinds = append(kinds, r.Context.Kind)
 			}
 		}
 		if !slices.Equal(kinds, []string{sessionstore.ContextWindowStart, sessionstore.ContextPolicyChanged}) ||
-			policies[0].WindowThresholdTokens != 350_000 || policies[0].PostRebuildRatio != 0.5 ||
-			policies[1].WindowThresholdTokens != 360_000 || policies[1].PostRebuildRatio != 0.6 {
+			policies[0].WindowThresholdTokens != test.before || policies[0].PostRebuildRatio != 0.5 ||
+			policies[1].WindowThresholdTokens != test.after || policies[1].PostRebuildRatio != 0.6 {
 			t.Fatalf("live policy was not recorded in %s: %v, %+v", view.Session.Session.ID, kinds, policies)
 		}
 	}

@@ -1,4 +1,5 @@
 from contextlib import redirect_stdout
+import csv
 from io import StringIO
 import json
 from pathlib import Path
@@ -11,7 +12,7 @@ from context_replay import (
     CACHES, Profile, Settings, Step, fitted_projection, main, predict_cache, read_context_policies, replay, ttl_report,
 )
 from context_replay_native import audit
-from context_replay_records import Request, tool_action
+from context_replay_records import Request, tool_actions
 
 
 def request(number, estimate):
@@ -67,9 +68,11 @@ class ReplayTest(unittest.TestCase):
         def tool(name, args):
             return {"Type": "tool_call", "Data": {"Name": name, "Arguments": json.dumps(args)}}
 
-        native = tool_action(tool("claude_code", {"tool": "Read", "input": {"file_path": "./a.go"}}))
-        self.assertEqual(native, tool_action(tool("Bash", {"command": "cat a.go"})))
-        self.assertEqual(tool_action(tool("Bash", {"command": "cat a.go | wc -l"}))[0], "repeat")
+        native = tool_actions(tool("claude_code", {"tool": "Read", "input": {"file_path": "./a.go"}}))
+        self.assertEqual(native, tool_actions(tool("Bash", {"command": "cat a.go"})))
+        self.assertEqual(tool_actions(tool("Bash", {"command": "cat a.go | wc -l"}))[0][0], "repeat")
+        batch = tool_actions(tool("read", {"files": [{"path": "a.go"}, {"path": "b.go"}, {"path": "./a.go"}]}))
+        self.assertEqual(batch, native + tool_actions(tool("read", {"path": "b.go"})))
 
 
 class NativeAuditTest(unittest.TestCase):
@@ -120,29 +123,32 @@ class NativeAuditTest(unittest.TestCase):
 
 
 class PolicyReplayTest(unittest.TestCase):
+    at = "2026-11-24T00:00:01Z"
+
+    def write_session(self, path, provider, model, role="", recorded_role=""):
+        def row(seq, kind, data):
+            return {"data": {"Item": {"Sequence": seq, "RecordedAt": self.at, "Kind": kind, "Data": data}}}
+
+        rows = [
+            row(1, "host_record", {"Kind": "configuration", "Configuration": {"Layer": role}}),
+            row(2, "host_record", {"Kind": "runtime_applied",
+                                   "Selection": {"Provider": provider, "Model": model, "Revision": 1}}),
+            row(3, "turn", {"ID": "turn", "Type": "regular", "RuntimeRevision": 1,
+                            "ContextAdmission": {"EstimatedInputTokens": 8000, "BudgetTokens": 94_880,
+                                                 "WindowTokens": 100_000, "WindowSource": "catalog"}}),
+        ]
+        if provider == "claude":
+            rows.append(row(4, "host_record", {"Activity": {"Kind": "claude_stream", "Provider": provider,
+                "Model": model, "ID": "turn/stream/1", "Reason": json.dumps({"event": "message_start"}),
+                "RequestUsage": {"Input": 8000, "Read": 1000, "Write": 0}}}))
+        else:
+            rows.append(row(4, "model_response", {"TurnID": "turn", "Response": {
+                "Model": model, "Usage": {"InputTokens": 8000, "CachedInputTokens": 1000}}}))
+        if recorded_role:
+            rows.append(row(5, "host_record", {"Context": {"Kind": "context_policy", "Policy": {"Role": recorded_role}}}))
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
     def test_cli_replays_resolved_policy_for_each_provider(self):
-        at = "2026-11-24T00:00:01Z"
-
-        def write_session(path, provider, model):
-            def row(seq, kind, data):
-                return {"data": {"Item": {"Sequence": seq, "RecordedAt": at, "Kind": kind, "Data": data}}}
-
-            rows = [
-                row(1, "host_record", {"Kind": "runtime_applied",
-                                       "Selection": {"Provider": provider, "Model": model, "Revision": 1}}),
-                row(2, "turn", {"ID": "turn", "Type": "regular", "RuntimeRevision": 1,
-                                "ContextAdmission": {"EstimatedInputTokens": 8000, "BudgetTokens": 94_880,
-                                                     "WindowTokens": 100_000, "WindowSource": "catalog"}}),
-            ]
-            if provider == "claude":
-                rows.append(row(3, "host_record", {"Activity": {"Kind": "claude_stream", "Provider": provider,
-                    "Model": model, "ID": "turn/stream/1", "Reason": json.dumps({"event": "message_start"}),
-                    "RequestUsage": {"Input": 8000, "Read": 1000, "Write": 0}}}))
-            else:
-                rows.append(row(3, "model_response", {"TurnID": "turn", "Response": {
-                    "Model": model, "Usage": {"InputTokens": 8000, "CachedInputTokens": 1000}}}))
-            path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
-
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = root / "runtime.json"
@@ -158,9 +164,9 @@ class PolicyReplayTest(unittest.TestCase):
                 ("child", "claude", "opus"), ("main", "openai-codex", "gpt"),
                 ("deepseek", "opencode-go", "deepseek-v4.1-flash"), ("glm", "opencode-go", "glm"),
             ):
-                write_session(root / f"{name}.session.jsonl", provider, model)
+                self.write_session(root / f"{name}.session.jsonl", provider, model)
             output = StringIO()
-            with patch.object(sys, "argv", ["context_replay.py", str(root), "--config", str(config), "--since", at]), redirect_stdout(output):
+            with patch.object(sys, "argv", ["context_replay.py", str(root), "--config", str(config), "--since", self.at]), redirect_stdout(output):
                 main()
             report = json.loads(output.getvalue())
 
@@ -176,6 +182,27 @@ class PolicyReplayTest(unittest.TestCase):
                 self.assertEqual(candidate["policy"]["PostRebuildRatio"], ratio)
                 self.assertEqual(candidate["holdout"]["rebuilds"], rebuilds)
                 self.assertEqual(candidate["holdout"]["predicted"]["input"], expected_input)
+
+    def test_cli_replays_each_role_on_the_same_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, request_csv = root / "runtime.json", root / "calls.csv"
+            config.write_text(json.dumps({"Context": {"L2TargetTokens": 1000, "Routes": {
+                "opencode-go": {"WindowThresholdTokens": 6000, "PostRebuildRatio": 0.6, "InputBudget": 5000,
+                                "Roles": {"lead": {"WindowThresholdTokens": 4000, "InputBudget": 3000}}},
+            }}}), encoding="utf-8")
+            self.write_session(root / "lead.session.jsonl", "opencode-go", "deepseek", role="lead")
+            self.write_session(root / "worker.session.jsonl", "opencode-go", "deepseek", recorded_role="worker")
+            output = StringIO()
+            args = ["context_replay.py", str(root), "--config", str(config), "--since", self.at, "--request-csv", str(request_csv)]
+            with patch.object(sys, "argv", args), redirect_stdout(output):
+                main()
+            with request_csv.open(newline="") as stream:
+                inputs = {row["role"]: int(row["input"]) for row in csv.DictReader(stream)}
+        candidate = json.loads(output.getvalue())["deepseek"]["candidate"]
+        self.assertEqual(inputs, {"lead": 1800, "worker": 3000})
+        self.assertEqual(candidate["role_policies"]["lead"]["PostRebuildRatio"], 0.6)
+        self.assertEqual(candidate["holdout"]["predicted"]["input"], 4800)
 
     def test_candidate_rejects_invalid_effective_limits(self):
         with tempfile.TemporaryDirectory() as tmp:

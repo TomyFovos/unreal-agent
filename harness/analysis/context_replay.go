@@ -438,7 +438,7 @@ func (m *contextReplay) response(seq sessionstore.Sequence, at time.Time, v sess
 	if v.WindowCache.Boundary != "" {
 		t.firstCache = v.WindowCache
 	}
-	if !isClaude(t.key.Provider) && t.latest == nil && t.single == nil {
+	if !isClaude(t.key.Provider) && !request.toolBatch && t.latest == nil && t.single == nil {
 		t.single = &contextRequest{
 			contextPosition: contextPosition{after: t.after, window: t.window}, key: t.key,
 			at: t.at, usage: responseRequestUsage(v.Response.Usage),
@@ -457,7 +457,7 @@ func (m *contextReplay) response(seq sessionstore.Sequence, at time.Time, v sess
 }
 
 func isClaude(provider string) bool {
-	return provider == "claude-code" || provider == "claude-api" || provider == "claude-code-api"
+	return provider == "claude" || provider == "claude-code" || provider == "claude-api" || provider == "claude-code-api"
 }
 
 func userQuestions(items []llm.Item) int {

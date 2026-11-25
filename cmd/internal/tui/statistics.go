@@ -60,7 +60,8 @@ func statisticsBar(s Snapshot, u UIState, l layout) line {
 	if room != compact.width() {
 		compact = subscriptionBar(windows, u.Theme, room, room-compact.width())
 	}
-	return joined(out, compact).clip(l.width)
+	spend := spendBar(u.Spend, u.Theme, room-compact.width())
+	return joined(out, compact, spend).clip(l.width)
 }
 
 func currentStatistics(s Snapshot) *llm.GenerationStatistics {

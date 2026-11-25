@@ -185,7 +185,7 @@ func reconcileStoppedChildren(ctx context.Context, store *localfile.Store, id se
 
 // ReconcileStoppedSession settles children of a reaped child process, including
 // a process that died before its own Host could checkpoint its shutdown.
-func ReconcileStoppedSession(ctx context.Context, directory string, id session.ID) error {
+func ReconcileStoppedSession(ctx context.Context, directory string, id session.ID, retainQueue ...func(context.Context, operation.Operation) (bool, error)) error {
 	store, err := localfile.New(directory)
 	if err != nil {
 		return err
@@ -197,7 +197,11 @@ func ReconcileStoppedSession(ctx context.Context, directory string, id session.I
 	if err != nil {
 		return err
 	}
-	err = reconcileStoppedChildren(ctx, store, id, nil, nil)
+	var retain func(context.Context, operation.Operation) (bool, error)
+	if len(retainQueue) > 0 {
+		retain = retainQueue[0]
+	}
+	err = reconcileStoppedChildren(ctx, store, id, nil, retain)
 	if errors.Is(err, fs.ErrNotExist) {
 		err = nil // A failed process start need not have created a Session.
 	}

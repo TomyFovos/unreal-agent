@@ -43,6 +43,8 @@
 
 Sandbox が UTC の場合は、インストール時に `--time-zone Asia/Tokyo` を追加すると日本時間で表示します。日本以外では現地の IANA タイムゾーン名を指定してください。設定は更新後も引き継がれ、起動シェルの `TZ` が優先されます。
 
+子 Session の同時実行数をツリーごとに制限するには `--max-active-children 10` を追加します。設定は更新後も引き継がれ、次回の起動時に workspace の runtime.json に反映されます。既定と `0` は上限なしです。
+
 ---
 
 ## 3. 起動と操作
@@ -60,11 +62,14 @@ unreal development
 
 | コマンド | 動作 |
 | --- | --- |
-| `unreal NAME` | 同名 Session に接続し、見つからなければ現在の workspace に新規作成するか確認します（別のディレクトリからでも名前で接続でき、同名が複数あれば現在の workspace を優先、それ以外は番号で選択）。 |
+| `unreal NAME` | 名前で Session に接続します。どのディレクトリから実行しても、その Session を作った workspace で動きます。名前は1つの Session にだけ使い、同じ名前の Session は作れません。見つからなければ現在の workspace での新規作成を確認します。古い版で同名が複数できていたら、警告と一覧を出し（Enter で稼働中の Host がある最新の候補）、不要な方の `--archive-session` を促します。 |
 | `unreal`（引数なし） | 既存のメイン Session を新しい順に一覧表示し、番号で選びます（一覧から新規作成はしません）。 |
-| `unreal --list` | Session の一覧（名前・workspace・最終更新）を新しい順に表示します。 |
+| `unreal --list` | Session の一覧（名前・workspace・最終更新・Host の稼働状態・instance）を新しい順に表示します。 |
 | `unreal --where NAME` | その Session の workspace のパスを表示します。 |
 | `ucd NAME` | Bash でその Session の workspace ディレクトリへ移動します。 |
+| `unreal --archive-session NAME --workspace PATH` | 指定した workspace の Session を名前検索と一覧から除外します。同じ workspace に複数あれば `--instance` も指定します。 |
+
+アーカイブ後も会話の記録は残ります。開くには対象 workspace に移動し、`unreal NAME --instance INSTANCE` で instance を明示します。
 
 ※ `unreal` が別のコマンドに隠れる場合は `type -a unreal` で確認し、`"$HOME/.local/bin/unreal"` を使ってください。
 

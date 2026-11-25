@@ -24,6 +24,7 @@ type ActivityRecord struct {
 	Effort       string              `json:",omitzero"`
 	Template     string              `json:",omitzero"`
 	Layer        string              `json:",omitzero"` // child_start: role group at start, independent of provider
+	QueueOrder   uint64              `json:",omitzero"` // child_queued: order within the Session tree
 	Tool         string              `json:",omitzero"`
 	Reason       string              `json:",omitzero"`
 	Usage        *Usage              `json:",omitzero"`

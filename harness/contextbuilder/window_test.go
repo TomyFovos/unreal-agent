@@ -612,6 +612,35 @@ func TestWindowUsesPolicyOfCurrentProvider(t *testing.T) {
 	}
 }
 
+func TestWindowUsesChildRolePolicy(t *testing.T) {
+	const provider = "opencode-go"
+	f := newContextFixture(t, provider, contextengine.Config{Routes: map[string]contextengine.RouteConfig{
+		provider: {PostRebuildRatio: new(0.6), Roles: map[string]contextengine.RouteConfig{
+			"lead": {WindowThresholdTokens: new(int64(20_000)), InputBudget: new(int64(10_001)),
+				L2TargetTokens: new(int64(1000)), ToolOutputExcerptChars: new(128)},
+		}},
+	}})
+	f.b.SetContextPolicy(nil, "lead")
+	f.b.SetContextRuntime(sessionstore.RuntimeSelection{Provider: provider, Model: "synthetic-model", ContextWindow: 50_000}, true)
+	f.user(t, "active", "Continue work")
+	var records []sessionstore.ContextRecord
+	if err := f.b.PrepareContext(t.Context(), windowRecorder(t, f, &records), true); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Kind != sessionstore.ContextWindowBoundary ||
+		records[0].Policy == nil || records[0].Policy.Role != "lead" {
+		t.Fatalf("role not recorded at rebuild: %+v", records)
+	}
+	w := records[0].Window
+	if w.ThresholdTokens != 20_000 || w.RebuildTargetTokens != 6_000 || w.L2TargetTokens != 1000 || w.ToolOutputExcerptChars != 128 {
+		t.Fatalf("window did not use the child role: %+v", w)
+	}
+	built, err := f.b.Build()
+	if err != nil || built.Report.Context.Budget.Input != 10_001 {
+		t.Fatalf("admission did not use the child role: %+v, %v", built.Report, err)
+	}
+}
+
 func TestWindowKeepsInputsPendingBeforeLastUserMessage(t *testing.T) {
 	f := newContextFixture(t, "openai-codex", contextengine.Config{
 		WindowThresholdTokens: 2000, L2TargetTokens: 1000,

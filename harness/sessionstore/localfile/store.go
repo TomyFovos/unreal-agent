@@ -52,11 +52,32 @@ func New(directory string) (*Store, error) {
 	if err := os.MkdirAll(absolute, 0o700); err != nil {
 		return nil, fmt.Errorf("create session store directory: %w", err)
 	}
+	return newStore(absolute), nil
+}
+
+// OpenExisting opens the layout for observation without creating any files.
+func OpenExisting(directory string) (*Store, error) {
+	if strings.TrimSpace(directory) == "" {
+		return nil, fmt.Errorf("session store directory is empty")
+	}
+	absolute, err := filepath.Abs(directory)
+	if err != nil {
+		return nil, err
+	}
+	if info, err := os.Stat(absolute); err != nil {
+		return nil, err
+	} else if !info.IsDir() {
+		return nil, fmt.Errorf("session store is not a directory: %s", absolute)
+	}
+	return newStore(absolute), nil
+}
+
+func newStore(absolute string) *Store {
 	return &Store{
 		directory:       absolute,
 		writeStateCache: make(map[session.ID]cachedWriteState),
 		observers:       make(map[sessionstore.ObserverID]sessionstore.Observer),
-	}, nil
+	}
 }
 
 func (store *Store) AddObserver(observer sessionstore.Observer) sessionstore.ObserverID {

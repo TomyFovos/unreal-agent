@@ -97,6 +97,7 @@ const (
 type Reasoning struct {
 	Summary []string       `json:",omitzero"`
 	Raw     jsontext.Value `json:",omitzero"`
+	Charge  *Charge        `json:",omitzero"`
 }
 
 type ToolType string
@@ -216,6 +217,16 @@ type Usage struct {
 	// a measured zero. Empty preserves the existing adapters' usage contract.
 	Unknown []UsageField   `json:",omitzero"`
 	Raw     jsontext.Value `json:",omitzero"`
+	Charge  *Charge        `json:",omitzero"`
+}
+
+// Charge records the provider's amounts for this response. An absent amount
+// is unknown, independently of the other amount and of the billing source.
+type Charge struct {
+	Charged       *float64 `json:"charged,omitempty"`
+	List          *float64 `json:"list,omitempty"`
+	Currency      string   `json:"currency"`
+	BillingSource string   `json:"billing_source,omitempty"`
 }
 
 type UsageField string

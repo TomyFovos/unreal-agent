@@ -8,21 +8,31 @@ import (
 
 // ForProvider overlays a resolved config using the exact runtime provider ID.
 func (c Config) ForProvider(provider string) Config {
-	r, ok := c.Routes[provider]
+	return c.ForRole(provider, "")
+}
+
+// ForRole resolves the common, provider and child role policy in that order.
+func (c Config) ForRole(provider, role string) Config {
+	r := c.Routes[provider]
 	c.Routes = nil
-	if ok {
-		override(&c.FallbackWindow, r.FallbackWindow)
-		override(&c.InputBudget, r.InputBudget)
-		override(&c.ResponseReserve, r.ResponseReserve)
-		override(&c.ProtocolReserve, r.ProtocolReserve)
-		override(&c.WindowThresholdTokens, r.WindowThresholdTokens)
-		override(&c.PostRebuildRatio, r.PostRebuildRatio)
-		override(&c.L2TargetTokens, r.L2TargetTokens)
-		override(&c.RecentEventCount, r.RecentEventCount)
-		override(&c.ToolOutputExcerptChars, r.ToolOutputExcerptChars)
-		override(&c.CacheRewarmMinutes, r.CacheRewarmMinutes)
+	c.applyOverrides(r)
+	if overrides, ok := r.Roles[role]; role != "" && ok {
+		c.applyOverrides(overrides)
 	}
 	return c
+}
+
+func (c *Config) applyOverrides(r RouteConfig) {
+	override(&c.FallbackWindow, r.FallbackWindow)
+	override(&c.InputBudget, r.InputBudget)
+	override(&c.ResponseReserve, r.ResponseReserve)
+	override(&c.ProtocolReserve, r.ProtocolReserve)
+	override(&c.WindowThresholdTokens, r.WindowThresholdTokens)
+	override(&c.PostRebuildRatio, r.PostRebuildRatio)
+	override(&c.L2TargetTokens, r.L2TargetTokens)
+	override(&c.RecentEventCount, r.RecentEventCount)
+	override(&c.ToolOutputExcerptChars, r.ToolOutputExcerptChars)
+	override(&c.CacheRewarmMinutes, r.CacheRewarmMinutes)
 }
 
 func override[T int | int64 | float64](value, replacement *T) {
@@ -59,11 +69,15 @@ func (c Config) validatePolicy() error {
 }
 
 func (c Config) Policies() sessionstore.ContextPolicies {
-	policies := sessionstore.ContextPolicies{Default: c.windowPolicy()}
+	return c.PoliciesForRole("")
+}
+
+func (c Config) PoliciesForRole(role string) sessionstore.ContextPolicies {
+	policies := sessionstore.ContextPolicies{Role: role, Default: c.windowPolicy()}
 	if len(c.Routes) > 0 {
 		policies.Routes = make(map[string]sessionstore.WindowPolicy, len(c.Routes))
 		for provider := range c.Routes {
-			policies.Routes[provider] = c.ForProvider(provider).windowPolicy()
+			policies.Routes[provider] = c.ForRole(provider, role).windowPolicy()
 		}
 	}
 	return policies

@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/rivo/uniseg"
 	"github.com/unreallabsai/unreal-agent/harness/analysis"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/subagent"
 )
 
 func (p *analysisPainter) contextView(r analysis.Report, c analysis.ContextSignal) {
@@ -71,19 +74,24 @@ func (p *analysisPainter) contextPolicies(c *analysis.ContextMeasurements) {
 	wrap := func(text string) {
 		p.rows = append(p.rows, wrapLine(textLine(SafeText(text), meta), p.width, false, 2)...)
 	}
+	settings := func(policy sessionstore.WindowPolicy) {
+		wrap(fmt.Sprintf(p.tr("  Recent %d · excerpt %d chars · rewarm %dm · input cap %d · fallback %d · reserves %d + %d",
+			"  直近 %d · 抜粋 %d 字 · 再加温 %d 分 · 入力上限 %d · 既定窓 %d · 予約 %d + %d"),
+			policy.RecentEventCount, policy.ToolOutputExcerptChars, policy.CacheRewarmMinutes,
+			policy.InputBudget, policy.FallbackWindow, policy.ResponseReserve, policy.ProtocolReserve))
+	}
 	if len(c.ActivePolicies) > 0 {
-		p.section("Latest applied policy by route", "ルート別の適用済みポリシー")
+		p.section("Latest applied policy by route and role", "ルート・役割別の適用済みポリシー")
 		for _, route := range c.ActivePolicies {
 			name := route.Provider
 			if name == "" {
 				name = p.tr("Default", "既定")
 			}
-			policy := route.Policy
-			wrap(name + "  " + windowPolicyText(policy))
-			wrap(fmt.Sprintf(p.tr("  Recent %d · excerpt %d chars · rewarm %dm · input cap %d · fallback %d · reserves %d + %d",
-				"  直近 %d · 抜粋 %d 字 · 再加温 %d 分 · 入力上限 %d · 既定窓 %d · 予約 %d + %d"),
-				policy.RecentEventCount, policy.ToolOutputExcerptChars, policy.CacheRewarmMinutes,
-				policy.InputBudget, policy.FallbackWindow, policy.ResponseReserve, policy.ProtocolReserve))
+			if route.Role != "" {
+				name += " / " + route.Role
+			}
+			wrap(name + "  " + windowPolicyText(route.Policy))
+			settings(route.Policy)
 		}
 		p.blank()
 	}
@@ -109,7 +117,14 @@ func (p *analysisPainter) contextPolicies(c *analysis.ContextMeasurements) {
 			if period.Until != nil {
 				dates += " → " + displayTime(*period.Until, "01/02 15:04:05")
 			}
-			wrap(knownLabel(period.Provider) + "  " + dates + "  " + policy)
+			name := knownLabel(period.Provider)
+			if period.Role != "" {
+				name += " / " + knownLabel(period.Role)
+			}
+			wrap(name + "  " + dates + "  " + policy)
+			if period.Policy != nil {
+				settings(*period.Policy)
+			}
 			metric := func(key string, format func(float64) string) string {
 				n := period.Numbers[key]
 				if n.Value == nil {
@@ -132,7 +147,7 @@ func windowPolicyText(policy sessionstore.WindowPolicy) string {
 	return fmt.Sprintf("W %d · ×%g · L2 %d", policy.WindowThresholdTokens, policy.PostRebuildRatio, policy.L2TargetTokens)
 }
 
-func (p *analysisPainter) agents(now time.Time, d *analysis.Dashboard) {
+func (p *analysisPainter) agents(now time.Time, d *analysis.Dashboard, ledger *subagent.UsageReport) {
 	_, _, tokens, total := usageGroups(d)
 	ranked := rankedChildren(d.Children, tokens)
 	if len(ranked) == 0 {
@@ -153,7 +168,15 @@ func (p *analysisPainter) agents(now time.Time, d *analysis.Dashboard) {
 	for _, c := range ranked {
 		longest = max(longest, durationOf(c).Value)
 	}
-	wide := p.width >= 145
+	budgetWidth := 0
+	childUsage := make(map[session.ID]subagent.SessionUsage)
+	if ledger != nil {
+		budgetWidth = 16
+		for _, row := range ledger.Sessions {
+			childUsage[row.ID] = row
+		}
+	}
+	wide := p.width >= 145+budgetWidth
 	roleWidth, modelWidth := 11, 19
 	modelLabel := func(c analysis.ChildSignal) string {
 		if c.Effort == "" {
@@ -164,19 +187,22 @@ func (p *analysisPainter) agents(now time.Time, d *analysis.Dashboard) {
 	for _, child := range ranked {
 		modelWidth = max(modelWidth, uniseg.StringWidth(modelLabel(child))+1)
 	}
-	modelWidth = min(modelWidth, max(10, p.width-49))
-	titleWidth := min(34, max(10, p.width-modelWidth-roleWidth-26))
+	modelWidth = min(modelWidth, max(10, p.width-49-budgetWidth))
+	titleWidth := min(34, max(10, p.width-modelWidth-roleWidth-26-budgetWidth))
 	if wide {
-		titleWidth = min(titleWidth, max(10, p.width-modelWidth-78))
+		titleWidth = min(titleWidth, max(10, p.width-modelWidth-78-budgetWidth))
 	}
 	if p.width < 60 {
-		titleWidth, roleWidth, modelWidth = max(9, p.width-24), 0, 0
+		titleWidth, roleWidth, modelWidth = max(9, p.width-24-budgetWidth), 0, 0
 	}
 	rowLabel := func(title, role, model, state string, st style) line {
 		label := p.titleCell(title, titleWidth, strong)
 		return joined(label, padCell("", titleWidth-label.width()+1, normal), padCell(role, roleWidth, normal), padCell(model, modelWidth, normal), padCell(state, 11, st))
 	}
 	header := rowLabel(p.tr("Title", "タイトル"), p.tr("Role", "役割"), p.tr("Model·effort", "モデル・effort"), p.tr("State", "状態"), strong)
+	if budgetWidth > 0 {
+		header = append(header, padCell(p.tr("Calls / budget", "呼出 / 予算"), budgetWidth, strong)...)
+	}
 	if wide {
 		header = append(header, padCell(p.tr("Result", "結果"), 13, strong)...)
 		header = append(header, padCell(p.tr("Time / max", "時間 / 最大"), 19, strong)...)
@@ -197,7 +223,34 @@ func (p *analysisPainter) agents(now time.Time, d *analysis.Dashboard) {
 		if uniseg.StringWidth(model) >= modelWidth {
 			model = knownLabel(child.Model)
 		}
+		childLedger, observed := childUsage[child.ID]
+		if childLedger.State == "queued" {
+			state = p.tr("Queued", "待機列")
+		}
 		row := rowLabel(analysisChildTitle(child), knownLabel(child.Role), model, state, stateColor)
+		if budgetWidth > 0 {
+			text, st := absentMeasure, normal
+			if observed {
+				budget := p.tr("none", "なし")
+				if childLedger.BudgetSteps > 0 {
+					budget = strconv.Itoa(childLedger.BudgetSteps)
+				}
+				calls := strconv.Itoa(childLedger.Subtree.Calls)
+				if childLedger.Partial {
+					if childLedger.Subtree.Calls == 0 {
+						calls = absentMeasure
+					} else {
+						calls += "+"
+					}
+				}
+				text = calls + "/" + budget
+				if childLedger.BudgetSteps > 0 && childLedger.Subtree.Calls > childLedger.BudgetSteps {
+					text = "! " + text
+					st = warningStyle
+				}
+			}
+			row = append(row, padCell(text, budgetWidth, st)...)
+		}
 		row = append(row, padCell(result, 13, stateColor)...)
 		m := tokens[child.ID]
 		cache, share := m.Cache.Percent(), ratioMetric(m.Weighted, total.Weighted)

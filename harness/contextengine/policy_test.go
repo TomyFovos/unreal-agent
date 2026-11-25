@@ -49,6 +49,8 @@ func TestContextPolicyValidation(t *testing.T) {
 		{`{"Routes":{"claude":{"PostRebuildRatio":0}}}`, `Routes["claude"]: PostRebuildRatio`},
 		{`{"Routes":{"claude":{"PostRebuildRatio":1}}}`, `Routes["claude"]: PostRebuildRatio`},
 		{`{"Routes":{"claude":{"WindowThresholdTokens":9999}}}`, `Routes["claude"]: L2TargetTokens`},
+		{`{"Routes":{"claude":{"Roles":{"lead":{"WindowThresholdTokens":9999}}}}}`, `Routes["claude"].Roles["lead"]: L2TargetTokens`},
+		{`{"Routes":{"claude":{"Roles":{"lead":{"InputBudget":0}}}}}`, `Routes["claude"].Roles["lead"]: context: invalid_budget`},
 	} {
 		var cfg Config
 		err := json.Unmarshal([]byte(test.raw), &cfg)
@@ -62,6 +64,41 @@ func TestContextPolicyValidation(t *testing.T) {
 	cfg := Config{Routes: map[string]RouteConfig{"claude": {WindowThresholdTokens: new(int64(10_001)), L2TargetTokens: new(int64(5_000))}}}
 	if _, err := cfg.Resolve(); err != nil {
 		t.Fatal("L2 equal to the rounded target should be valid", err)
+	}
+}
+
+func TestContextPolicyResolvesChildRoleOverrides(t *testing.T) {
+	var config Config
+	raw := []byte(`{"RecentEventCount":7,"Routes":{"opencode-go":{"PostRebuildRatio":0.6,"InputBudget":100000,"Roles":{
+		"lead":{"WindowThresholdTokens":40000,"L2TargetTokens":2000,"RecentEventCount":0},
+		"worker":{"ToolOutputExcerptChars":100}}}}}`)
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatal(err)
+	}
+	config, err := config.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lead := config.ForRole("opencode-go", "lead")
+	if lead.WindowThresholdTokens != 40_000 || lead.PostRebuildRatio != 0.6 || lead.L2TargetTokens != 2000 ||
+		lead.InputBudget != 100_000 || lead.RecentEventCount != 0 {
+		t.Fatalf("lead policy = %+v", lead)
+	}
+	worker := config.ForRole("opencode-go", "worker")
+	if worker.WindowThresholdTokens != 200_000 || worker.PostRebuildRatio != 0.6 || worker.L2TargetTokens != 5000 ||
+		worker.RecentEventCount != 7 || worker.ToolOutputExcerptChars != 100 {
+		t.Fatalf("worker policy = %+v", worker)
+	}
+	for _, route := range []string{"opencode-go", "claude"} {
+		policy := config.ForProvider(route).windowPolicy()
+		if config.ForRole(route, "collector").windowPolicy() != policy ||
+			(route == "claude" && config.ForRole(route, "lead").windowPolicy() != policy) {
+			t.Fatalf("role override leaked into %s", route)
+		}
+	}
+	snapshot := config.PoliciesForRole("lead")
+	if snapshot.Role != "lead" || snapshot.ForProvider("opencode-go") != lead.windowPolicy() {
+		t.Fatalf("recorded policy = %+v", snapshot)
 	}
 }
 

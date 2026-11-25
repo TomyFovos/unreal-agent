@@ -31,7 +31,7 @@ type PeerMessage struct {
 }
 
 func (p PeerMessage) Validate() error {
-	if p.Version != 1 || p.Sender == "" || p.Target == "" || p.Sender == p.Target || p.Handle == "" || (p.Kind != "message" && p.Kind != "progress" && p.Kind != "ready" && p.Kind != "ended") {
+	if p.Version != 1 || p.Sender == "" || p.Target == "" || p.Sender == p.Target || p.Handle == "" || (p.Kind != "message" && p.Kind != "progress" && p.Kind != "ready" && p.Kind != "ended" && p.Kind != "budget") {
 		return fmt.Errorf("invalid peer message")
 	}
 	if p.ReportLocator != "" {

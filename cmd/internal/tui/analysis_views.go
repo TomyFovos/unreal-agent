@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,7 +70,7 @@ func analysisRows(r analysis.Report, target analysisTarget, theme Theme) []line 
 	case "Context":
 		p.contextView(r, d.Context)
 	case "Agents":
-		p.agents(r.At, d)
+		p.agents(r.At, d, r.Ledger)
 	case "Tools":
 		p.tools(d, r.ByTool)
 	case "Time":
@@ -243,7 +244,18 @@ func partsTotal(parts []barPart) float64 {
 }
 
 func (p *analysisPainter) usageViews(r analysis.Report, d *analysis.Dashboard, complete bool) {
+	if r.Ledger != nil {
+		p.charges(r.Ledger)
+	}
 	models, roles, children, total := usageGroups(d)
+	roleUsage := make(map[string]analysis.RoleUsage, len(r.RoleUsage))
+	for _, usage := range r.RoleUsage {
+		role := knownLabel(usage.Role)
+		roleUsage[role] = usage
+		if !slices.ContainsFunc(roles, func(group usageGroup) bool { return group.label == role }) {
+			roles = append(roles, usageGroup{label: role})
+		}
+	}
 	p.add(p.tr("R cache read  W cache write  U uncached  O output", "R キャッシュ読取  W 書込  U 未キャッシュ  O 出力"), meta)
 	if total.UnsplitInput.Known {
 		p.add(p.tr("N non-read input · write/uncached split unknown", "N 読取以外の入力 · 書込と未キャッシュの内訳不明"), meta)
@@ -260,6 +272,12 @@ func (p *analysisPainter) usageViews(r analysis.Report, d *analysis.Dashboard, c
 		}
 		for _, row := range groups {
 			p.usageGroup(row, total.Weighted)
+			if i != 0 {
+				calls := roleUsage[row.label]
+				p.add(fmt.Sprintf(p.tr("  %s model calls · %s input tokens/call", "  モデル呼出 %s 回 · 1 回あたり入力 %s トークン"),
+					metricText(calls.Calls, func(n float64) string { return strconv.FormatInt(int64(n), 10) }),
+					metricText(calls.InputTokensPerCall, tokensText)), meta)
+			}
 		}
 	}
 	p.blank()

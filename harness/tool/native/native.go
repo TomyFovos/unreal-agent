@@ -31,7 +31,12 @@ func (t translator) Translate(ctx tool.Context, call llm.ToolCall) tool.CallStat
 	if _, ok := fields["action"]; ok {
 		return tool.ErrorStatus("action is tool-owned", 1024)
 	}
-	required := []string{"path"}
+	var required []string
+	if _, batched := fields["files"]; t.action != "read" || !batched {
+		required = append(required, "path")
+	} else if _, single := fields["path"]; single {
+		return tool.ErrorStatus("specify path or files", 1024)
+	}
 	if t.action == "write" {
 		required = append(required, "content")
 	}

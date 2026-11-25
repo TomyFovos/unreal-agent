@@ -16,9 +16,10 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/usage"
 	"io/fs"
-	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -28,17 +29,19 @@ import (
 )
 
 type Config struct {
-	Owner            *host.Session
-	Directory        string
-	Binary           string
-	Arguments        []string
-	ContextFile      *contextengine.ConfigFile
-	Environment      []string
-	Templates        map[string]Template
-	Child            *ChildConfig
-	SendParent       Sender
-	ValidateTemplate func(Template, Template) error
-	ResolveRuntime   RuntimeResolver
+	Owner             *host.Session
+	TreeRoot          session.ID
+	MaxActiveChildren int
+	Directory         string
+	Binary            string
+	Arguments         []string
+	ContextFile       *contextengine.ConfigFile
+	Environment       []string
+	Templates         map[string]Template
+	Child             *ChildConfig
+	SendParent        Sender
+	ValidateTemplate  func(Template, Template) error
+	ResolveRuntime    RuntimeResolver
 }
 type job struct {
 	ctx        context.Context
@@ -50,18 +53,21 @@ type job struct {
 	approvals  []Approval // the child's requests waiting for this parent
 }
 type Manager struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	config      Config
-	mu          sync.Mutex
-	jobs        map[operation.ID]*job
-	canceled    map[operation.ID]bool
-	changed     chan struct{}
-	updates     chan operation.Operation
-	closed      bool
-	recovering  map[operation.ID]bool
-	restartEnds map[operation.ID]*sessionstore.EndRecord
-	workers     sync.WaitGroup
+	ctx              context.Context
+	cancel           context.CancelFunc
+	config           Config
+	mu               sync.Mutex
+	jobs             map[operation.ID]*job
+	canceled         map[operation.ID]bool
+	changed          chan struct{}
+	updates          chan operation.Operation
+	closed           bool
+	recovering       map[operation.ID]bool
+	restartEnds      map[operation.ID]*sessionstore.EndRecord
+	resumeQueueOwner map[operation.ID]bool
+	workers          sync.WaitGroup
+	usage            *UsageReader
+	limit            activeChildLimit
 }
 
 func NewManager(ctx context.Context, c Config) (*Manager, error) {
@@ -87,8 +93,18 @@ func NewManager(ctx context.Context, c Config) (*Manager, error) {
 		_ = json.Unmarshal(raw, &copy)
 		c.Child = &copy
 	}
+	if c.Directory == "" && c.Child != nil {
+		c.Directory = c.Child.SessionDirectory
+	}
+	var reader *UsageReader
+	if c.Directory != "" {
+		reader, err = OpenUsageReader(c.Directory)
+		if err != nil {
+			return nil, err
+		}
+	}
 	ctx, cancel := context.WithCancel(ctx)
-	return &Manager{ctx: ctx, cancel: cancel, config: c, jobs: map[operation.ID]*job{}, canceled: map[operation.ID]bool{}, recovering: map[operation.ID]bool{}, restartEnds: map[operation.ID]*sessionstore.EndRecord{}, changed: make(chan struct{}), updates: make(chan operation.Operation)}, nil
+	return &Manager{ctx: ctx, cancel: cancel, config: c, jobs: map[operation.ID]*job{}, canceled: map[operation.ID]bool{}, recovering: map[operation.ID]bool{}, restartEnds: map[operation.ID]*sessionstore.EndRecord{}, resumeQueueOwner: map[operation.ID]bool{}, changed: make(chan struct{}), updates: make(chan operation.Operation), usage: reader, limit: activeChildLimit{current: c.MaxActiveChildren}}, nil
 }
 func (m *Manager) RemoteJobPlanType() operation.RemoteJobPlanType       { return PlanType }
 func (m *Manager) RemoteJobPlanVersion() operation.RemoteJobPlanVersion { return PlanVersion }
@@ -219,10 +235,12 @@ func (m *Manager) run(j *job, p Plan) {
 			recovering := m.recovering[j.operation.ID]
 			m.mu.Unlock()
 			if recovering {
-				status, err = m.watchRecovered(ctx, j.operation.ID, p, &state)
+				status, err = m.watchRecovered(ctx, j, p, &state)
 			} else {
 				status, err = m.spawn(ctx, j, p, &state)
 			}
+		case "list", "show", "wait":
+			state.TerminalResult, err = m.inspectChildren(ctx, p)
 		case "send":
 			var connection *processChannel
 			connection, err = m.connection(ctx, p.Handle)
@@ -291,6 +309,15 @@ func (m *Manager) run(j *job, p Plan) {
 	default:
 	}
 	if ctx.Err() != nil {
+		if p.Action == "start" && m.ctx.Err() != nil && !m.wasCanceled(j) {
+			var h Handle
+			if json.Unmarshal(state.Handle, &h) == nil && h.QueuedAhead != nil && !h.Started {
+				return
+			}
+			if m.usage != nil && m.usage.hasQueuedDescendant(context.WithoutCancel(ctx), p.ChildID) {
+				return
+			}
+		}
 		status = operation.StatusCanceled
 	}
 	if err != nil && status != operation.StatusCanceled {
@@ -342,7 +369,8 @@ func (m *Manager) CompletedInput(op operation.Operation) (*inbox.Input, error) {
 	if end != nil {
 		return m.InterruptedInput(op)
 	}
-	if !p.Notify {
+	handle, _ := DecodeHandle(op)
+	if !p.Notify && handle.QueuedAhead == nil {
 		return nil, nil
 	}
 	state, err := operation.DecodeRemoteJobState(op)
@@ -353,7 +381,6 @@ func (m *Manager) CompletedInput(op operation.Operation) (*inbox.Input, error) {
 	if sender == "" {
 		sender = ChildID(p.ParentID, op.ID)
 	}
-	handle, _ := DecodeHandle(op)
 	payload, err := json.Marshal(inbox.PeerMessage{Version: 1, Sender: string(sender), Target: string(p.ParentID), Handle: string(op.ID), Kind: "ended",
 		Text: endedText(op.ID, op.Status, handle.Finish, state.TerminalError), ReportIncluded: handle.Finish != nil, ReportLocator: handle.FinishLocator})
 	if err != nil {
@@ -513,6 +540,9 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 	} else if !sameJSON(actual, expected) {
 		return operation.StatusFailed, fmt.Errorf("child template changed")
 	}
+	m.mu.Lock()
+	resumeQueue := m.resumeQueueOwner[j.operation.ID]
+	m.mu.Unlock()
 	snapshot, err := projectinstructions.Discover(allowed.Workspace)
 	if err != nil {
 		return operation.StatusFailed, err
@@ -528,6 +558,7 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 		}
 		child.Layer = ResolveLayer(p.Template, parentLayer)
 	}
+	role := child.Layer
 	if s := sessionstore.SelectionFromConfiguration(allowed.Runtime); s != nil && s.Provider == "claude-code" {
 		child.TextOnly = !sessionstore.ToolBridgeEnabledFromConfiguration(child.Runtime)
 		child.ProviderProcess = true
@@ -557,7 +588,13 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 			return operation.StatusFailed, err
 		}
 	}
-	handle := Handle{Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: j.operation.ID, Brief: child.Brief}
+	handle, err := DecodeHandle(j.operation)
+	if err != nil {
+		handle = Handle{Version: 1, ParentID: p.ParentID, ChildID: p.ChildID, OperationID: j.operation.ID, Brief: child.Brief}
+	}
+	if handle.UsageAtStart == nil {
+		handle.UsageAtStart = m.startUsage(ctx)
+	}
 	collect := func(requireTerminal bool) (bool, error) {
 		view, err := ReadChild(ctx, m.config.Directory, p.ChildID, 0, 1)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -597,6 +634,9 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 		// Preserve the original permission/environment snapshot for this ID.
 		child.Brief = view.Configuration.Brief
 		handle.Brief = child.Brief
+		if resumeQueue {
+			child.ProjectInstructions = view.Configuration.ProjectInstructions
+		}
 		// Config bytes bind provider/profile/workspace/policy across restarts.
 		got, _ := json.Marshal(view.Configuration)
 		want, _ := json.Marshal(child)
@@ -633,12 +673,14 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 	if selection := sessionstore.SelectionFromConfiguration(child.Runtime); selection != nil {
 		started.Provider, started.Model, started.Effort = selection.Provider, selection.Model, string(selection.Effort)
 	}
-	if err := m.config.Owner.RecordActivity(ctx, started); err != nil {
-		slog.Warn("record child startup", "error", err)
+	// The enclosing Session already reserved this slot before shutdown.
+	if !resumeQueue {
+		if err := m.admitChild(ctx, j, p, started, &handle, state); err != nil {
+			return operation.StatusFailed, err
+		}
 	}
-	state.Handle, _ = json.Marshal(handle)
-	checkpoint, _ := operation.UpdateRemoteJob(j.operation, *state, operation.StatusAwaiting)
-	m.emit(*checkpoint.Operation)
+	handle.Started = true
+	m.publishStart(j, handle, state)
 	select {
 	case <-j.cancel:
 		return operation.StatusCanceled, nil
@@ -646,7 +688,14 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 		return operation.StatusCanceled, context.Cause(ctx)
 	default:
 	}
-	channel := startProcess(ctx, m.config, child, mode)
+	// The parent may have changed modes while this start was queued.
+	if control != nil {
+		mode = control.Snapshot().Mode
+	}
+	config := m.config
+	config.TreeRoot = m.treeRoot(ctx)
+	config.MaxActiveChildren = m.maxActiveChildren()
+	channel := startProcess(ctx, config, child, mode, role)
 	m.mu.Lock()
 	j.connection = channel
 	j.approvals = nil
@@ -655,11 +704,18 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 	defer func() {
 		channel.cancel()
 		<-channel.done
-		resultErr = errors.Join(resultErr, host.ReconcileStoppedSession(context.WithoutCancel(ctx), m.config.Directory, p.ChildID))
+		if m.ctx.Err() != nil && !m.wasCanceled(j) {
+			resultErr = errors.Join(resultErr, host.ReconcileStoppedSession(context.WithoutCancel(ctx), m.config.Directory, p.ChildID, m.retainQueuedWork))
+		} else {
+			resultErr = errors.Join(resultErr, host.ReconcileStoppedSession(context.WithoutCancel(ctx), m.config.Directory, p.ChildID))
+		}
 	}()
 	if control != nil {
 		m.workers.Go(func() { followMode(ctx, channel, control, mode) })
 	}
+	usageTick := time.NewTicker(500 * time.Millisecond)
+	defer usageTick.Stop()
+	defer m.checkChildUsage(ctx, p, j.operation.ID, nil)
 	var canceled bool
 	var timer <-chan time.Time
 	cancellation := j.cancel
@@ -678,6 +734,8 @@ func (m *Manager) spawn(ctx context.Context, j *job, p Plan, state *operation.Re
 				data, _ := json.Marshal(inbox.ControlMessage{Mode: inbox.StopHard, Reason: "parent canceled child"})
 				_, _ = channel.send(ctx, inbox.Input{ID: inbox.ID("stop:" + string(j.operation.ID)), Kind: inbox.InputControl, Payload: data})
 			})
+		case <-usageTick.C:
+			m.checkChildUsage(ctx, p, j.operation.ID, channel)
 		case <-timer:
 			channel.cancel()
 			timer = nil
@@ -819,4 +877,22 @@ func finishStatus(h Handle) operation.Status {
 // end checkpoint alone is not evidence that the parent received its report.
 func (m *Manager) parentSaw(id operation.ID) bool {
 	return m.config.Owner.HasChildReport(id)
+}
+
+func (m *Manager) startUsage(ctx context.Context) []string {
+	if m.usage != nil {
+		report, err := m.usage.Read(ctx, m.config.Owner.ID, time.Now(), time.Hour)
+		if err == nil {
+			lines := usage.ProviderLines(report.All.ByProvider, report.Allowances)
+			switch {
+			case report.Partial:
+				return append(lines, "Session tree usage partial")
+			case len(lines) > 0:
+				return lines
+			default:
+				return []string{"No recorded model calls in this Session tree."}
+			}
+		}
+	}
+	return []string{"Session tree usage unknown"}
 }

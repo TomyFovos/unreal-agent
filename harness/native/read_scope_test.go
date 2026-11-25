@@ -101,6 +101,13 @@ func TestOutsideReadsPreserveExplicitPolicyExclusions(t *testing.T) {
 		}
 	}
 	ctx := permission.WithPolicy(t.Context(), policy)
+	batch := (Executor{Files: files}).Execute(ctx, "batch", Request{Version: Version, Action: "read", Files: []ReadFile{
+		{Path: filepath.Join(secret, "data")}, {Path: filepath.Join(allowed, "data")},
+	}})
+	if batch.Code != "ok" || len(batch.Files) != 2 || batch.Files[0].Code != "permission_denied" || len(batch.Files[0].Ranges) != 0 ||
+		batch.Files[1].Code != "ok" || len(batch.Files[1].Ranges) != 1 || batch.Files[1].Ranges[0].Content != "needle" {
+		t.Fatalf("batch path policy: %+v", batch)
+	}
 	for _, action := range []string{"read", "grep", "glob"} {
 		for _, dir := range []string{allowed, secret} {
 			r := Request{Version: 1, Action: action, Path: dir, Pattern: "needle"}

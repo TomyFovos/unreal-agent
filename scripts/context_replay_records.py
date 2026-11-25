@@ -65,6 +65,7 @@ class Request:
     invocation: str
     implementation: str
     activity: list = field(default_factory=list)
+    role: str = ""
 
     @property
     def estimate(self):
@@ -97,23 +98,24 @@ def json_dict(value):
     return {}
 
 
-def tool_action(output):
+def tool_actions(output):
     if output.get("Type") != "tool_call" or output.get("ParentCallID") or output.get("OutputLimit"):
-        return None
+        return []
     tool = output["Data"]
     name, args = tool.get("Name", "").lower(), json_dict(tool.get("Arguments"))
     if name == "claude_code":
         name, args = args.get("tool", "").lower(), json_dict(args.get("input"))
     if name in {"read", "readfile", "read_file"}:
-        path = args.get("file_path") or args.get("path")
-        if isinstance(path, str) and path:
-            return "file", digest(posixpath.normpath(path))
+        files = args.get("files")
+        paths = [file.get("path") for file in files if isinstance(file, dict)] if isinstance(files, list) else [
+            args.get("file_path") or args.get("path")]
+        return [("file", digest(path)) for path in dict.fromkeys(posixpath.normpath(p) for p in paths if isinstance(p, str) and p)]
     if name in {"bash", "shell", "exec_command"}:
         command = args.get("command") or args.get("cmd")
         if isinstance(command, str) and command.strip():
             path = simple_read(command)
-            return ("file", digest(path)) if path else ("repeat", digest(command.strip()))
-    return None
+            return [("file", digest(path))] if path else [("repeat", digest(command.strip()))]
+    return []
 
 
 def digest(text):
@@ -186,7 +188,7 @@ def load_session(paths, claude_main):
     requests, actions = [], []
     turns, streams, selections = {}, {}, {}
     active, window = {}, None
-    implementation, header = "", ""
+    implementation, header, role = "", "", ""
     human = human_tokens = peers = 0
     tool_ids = set()
     for item in session_items(paths):
@@ -221,14 +223,18 @@ def load_session(paths, claude_main):
                         ))
             if response.get("Stop") not in {"max_tokens", "max_output_tokens", "length"}:
                 for output in response.get("Output") or []:
-                    action = tool_action(output)
-                    if action:
+                    reads = tool_actions(output)
+                    if reads:
                         call = output["Data"].get("CallID")
                         if not call or call not in tool_ids:
-                            actions.append((seq, *action))
+                            actions.extend((seq, *action) for action in reads)
                             tool_ids.add(call)
         elif kind == "host_record":
             context = data.get("Context") or {}
+            if data.get("Kind") == "configuration":
+                lineage = json_dict(data.get("Configuration"))
+                role = lineage.get("Layer") or role
+            role = (context.get("Policy") or {}).get("Role") or role
             ctx_kind = context.get("Kind")
             if ctx_kind in {"window_start", "window_boundary"}:
                 header = context.get("Header", "")
@@ -273,6 +279,8 @@ def load_session(paths, claude_main):
                 request = streams[key]
                 request.end = timestamp(activity.get("EndedAt") or item["RecordedAt"])
                 request.output = use.get("Output", event.get("output_tokens"))
+    for request in requests:
+        request.role = role
     requests.sort(key=lambda request: request.seq)
     seqs = [request.seq for request in requests]
     for seq, kind, value in sorted(actions, key=lambda entry: entry[0]):

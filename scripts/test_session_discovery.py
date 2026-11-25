@@ -1,10 +1,14 @@
 """Cross-workspace launcher tests use only synthetic state and a native stub."""
+from http.server import BaseHTTPRequestHandler
 import json
 import os
 from pathlib import Path
+import socket
+from socketserver import UnixStreamServer
 import subprocess
 import sys
 import tempfile
+from threading import Thread
 import unittest
 
 import common_development as common
@@ -79,6 +83,56 @@ class SessionDiscoveryTests(unittest.TestCase):
         self.assertIn(str(older), result.stderr)
 
     @LINUX_ONLY
+    def test_named_session_from_stale_workspace_prefers_running_host(self):
+        old, old_paths = self.register("old", "jh", 1000, instance="p-old")
+        live, live_paths = self.register("live", "jh", 2000)
+        nested = old / "nested"
+        nested.mkdir()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stale:
+            stale.bind(str(old_paths["socket"]))
+
+        class ReadinessHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                if self.path != "/v1/auth/methods":
+                    self.send_error(404)
+                    return
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"Methods":[{}]}\n')
+
+            def log_message(self, *args):
+                pass
+
+        with UnixStreamServer(str(live_paths["socket"]), ReadinessHandler) as server:
+            thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+            thread.start()
+            try:
+                result = self.launch("jh", cwd=nested, choice="\n")
+                native = self.native(result)
+                self.assertEqual(native["cwd"], str(live))
+                self.assertEqual(native["args"][1], str(live_paths["state"]))
+                self.assertEqual(native["args"][-1], "jh")
+                self.assertIn("番号 [1]", result.stderr)
+
+                # Host status still wins when the stopped copy is newer.
+                os.utime(old_paths["state"] / "sessions/jh.session.jsonl", (3000, 3000))
+                result = self.launch("jh", cwd=nested, choice="\n")
+                self.assertEqual(self.native(result)["cwd"], str(live))
+                warning, _, old_row, live_row, prompt = result.stderr.splitlines()
+                self.assertIn("同じ名前の Session が 2 個あります", warning)
+                self.assertIn(f"1. jh  {old}  1970-", old_row)
+                self.assertIn("Host 停止中  instance=p-old", old_row)
+                self.assertIn(f"2. jh  {live}  1970-", live_row)
+                self.assertIn("Host 稼働中  instance=default", live_row)
+                self.assertIn("番号 [2]", prompt)
+                override = self.native(self.launch("jh", cwd=nested, choice="1\n"))
+                self.assertEqual(override["args"][1], str(old_paths["state"]))
+            finally:
+                server.shutdown()
+                thread.join()
+
+    @LINUX_ONLY
     def test_bare_launcher_lists_recent_main_sessions(self):
         older, _ = self.register("older", "old", 1000)
         newer, _ = self.register("newer", "recent", 2000)
@@ -125,19 +179,19 @@ class SessionDiscoveryTests(unittest.TestCase):
 
     @LINUX_ONLY
     def test_registered_workspace_opens_existing_session_elsewhere(self):
-        here, paths = self.register("here", "existing", when=2000)
-        elsewhere, _ = self.register("elsewhere", "dev", when=1000)
+        here, _ = self.register("here", "existing", when=2000)
+        elsewhere, paths = self.register("elsewhere", "dev", when=1000)
         nested = here / "nested"
         nested.mkdir()
         # A name only in another workspace opens there instead of creating one here.
         result = self.native(self.launch("dev", cwd=nested))
         self.assertEqual(result["cwd"], str(elsewhere))
         self.assertEqual(result["args"][-1], "dev")
-        # The current workspace's copy of the name wins.
+        # Both Hosts are stopped, so the newer copy is the default.
         self.register("here", "dev", when=500)
-        local = self.native(self.launch("dev", cwd=nested))
-        self.assertEqual(local["cwd"], str(here))
-        self.assertEqual(local["args"][1], str(paths["state"]))
+        newest = self.native(self.launch("dev", cwd=nested))
+        self.assertEqual(newest["cwd"], str(elsewhere))
+        self.assertEqual(newest["args"][1], str(paths["state"]))
         # A bare launch lists every Session, newest first, and never creates one.
         listed = self.native(self.launch(cwd=nested, choice="2\n"))
         self.assertEqual(listed["cwd"], str(elsewhere))
@@ -154,6 +208,24 @@ class SessionDiscoveryTests(unittest.TestCase):
         self.assertEqual(result["cwd"], str(self.outside))
         self.assertEqual(result["args"][-1], "new")
 
+    @LINUX_ONLY
+    def test_explicit_instance_cannot_take_a_name_used_elsewhere(self):
+        elsewhere, _ = self.register("elsewhere", "dev")
+        here = self.home / "here"
+        here.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(here)], check=True, env=self.env)
+        taken = self.launch("dev", "--instance", "p-new", cwd=here)
+        self.assertNotEqual(taken.returncode, 0)
+        self.assertIn("common_session_name_taken", taken.stderr)
+        self.assertIn(str(elsewhere), taken.stderr)
+        self.assertNotIn("NATIVE:", taken.stdout)
+        # The Session's own instance still reopens explicitly.
+        own = self.native(self.launch("dev", "--instance", "default", cwd=elsewhere))
+        self.assertEqual(own["cwd"], str(elsewhere))
+        # A free name may still be created with an explicit instance.
+        fresh = self.native(self.launch("fresh", "--instance", "p-new", cwd=here))
+        self.assertEqual(fresh["args"][-1], "fresh")
+
     def test_bare_launch_without_sessions_creates_nothing(self):
         result = self.launch()
         self.assertNotEqual(result.returncode, 0)
@@ -168,14 +240,60 @@ class SessionDiscoveryTests(unittest.TestCase):
         self.assertEqual(result["args"][1], str(paths["state"]))
 
     @LINUX_ONLY
-    def test_where_prefers_current_workspace_and_prompts_elsewhere(self):
+    def test_where_defaults_to_newest_and_accepts_manual_choice(self):
         here, _ = self.register("here", "dev", 1000)
         there, _ = self.register("there", "dev", 2000)
         result = self.launch("--where", "dev", cwd=here)
-        self.assertEqual(result.stdout, str(here)+"\n")
-        result = self.launch("--where", "dev", choice="1\n")
         self.assertEqual(result.stdout, str(there)+"\n")
+        self.assertIn("番号 [1]", result.stderr)
         self.assertIn(str(here), result.stderr)
+        result = self.launch("--where", "dev", choice="2\n")
+        self.assertEqual(result.stdout, str(here)+"\n")
+
+    @LINUX_ONLY
+    def test_same_workspace_duplicates_can_be_selected_and_archived_by_instance(self):
+        workspace, default_paths = self.register("work", "jh", 1000)
+        _, newest_paths = self.register("work", "jh", 2000, instance="p-new")
+        result = self.launch("jh", cwd=workspace)
+        self.assertEqual(self.native(result)["args"][1], str(newest_paths["state"]))
+        self.assertIn("instance=default", result.stderr)
+        self.assertIn("番号 [1]", result.stderr)
+
+        args = ("--archive-session", "jh", "--workspace", str(workspace))
+        ambiguous = self.launch(*args)
+        self.assertIn("common_session_archive_ambiguous", ambiguous.stderr)
+        archived = self.launch(*args, "--instance", "p-new")
+        self.assertEqual(archived.returncode, 0, archived.stderr)
+        remaining = self.native(self.launch("jh", cwd=workspace))
+        self.assertEqual(remaining["args"][1], str(default_paths["state"]))
+
+    @LINUX_ONLY
+    def test_archive_session_retires_only_the_selected_workspace_name(self):
+        old, old_paths = self.register("old", "jh", 1000)
+        live, _ = self.register("live", "jh", 2000)
+        record = old_paths["state"] / "sessions/jh.session.jsonl"
+        before = record.stat()
+        archived = self.launch("--archive-session", "jh", "--workspace", str(old))
+        self.assertEqual(archived.returncode, 0, archived.stderr)
+        self.assertNotIn("NATIVE:", archived.stdout)
+        listing = self.launch("--list")
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        self.assertIn(str(live), listing.stdout)
+        self.assertNotIn(str(old), listing.stdout)
+        result = self.launch("--where", "jh", cwd=old)
+        self.assertEqual(result.stdout, str(live)+"\n")
+        self.assertNotIn("番号", result.stderr)
+
+        archived = self.launch("--archive-session", "jh", "--workspace", str(live))
+        self.assertEqual(archived.returncode, 0, archived.stderr)
+        hidden = self.launch("jh", cwd=old, choice="y\n")
+        self.assertIn("common_session_archived", hidden.stderr)
+        self.assertNotIn("NATIVE:", hidden.stdout)
+        explicit = self.native(self.launch("jh", "--instance", "default", cwd=old))
+        self.assertEqual(explicit["args"][1], str(old_paths["state"]))
+        after = record.stat()
+        self.assertEqual((after.st_ino, after.st_size, after.st_mtime_ns),
+                         (before.st_ino, before.st_size, before.st_mtime_ns))
 
 
 if __name__ == "__main__":

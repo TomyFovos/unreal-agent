@@ -23,6 +23,8 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/subagent"
+	ledgerusage "github.com/unreallabsai/unreal-agent/harness/usage"
 	"github.com/unreallabsai/unreal-agent/harness/viewer"
 )
 
@@ -65,6 +67,7 @@ type Config struct {
 	RuntimeCapabilities func(context.Context) (map[string]modelcatalog.Capabilities, error)
 	ExportAnalysis      func(context.Context, analysis.Report, string) (string, error)
 	AnalysisInspect     analysis.InspectFunc
+	UsageTree           func(context.Context, time.Duration) (subagent.UsageReport, error)
 	// Empty uses the standard private state export directory. No subprocess
 	// backend is used for public conversation exports.
 	ExportDirectory string
@@ -247,6 +250,10 @@ func Run(ctx context.Context, c Config) error {
 	viewerDirty := true
 	viewerSecond := int64(0)
 	analysisUpdates := make(chan analysisUpdate, 1)
+	spendUpdates := make(chan []ledgerusage.Spend, 1)
+	if c.UsageTree != nil {
+		go watchSpend(ctx, c.UsageTree, spendUpdates)
+	}
 	width, height := 80, 24
 	previousWidth, previousHeight, previousRows := 0, 0, 0
 	previousConversationHeight := 0
@@ -313,7 +320,7 @@ func Run(ctx context.Context, c Config) error {
 				selectionGeneration, selectionRevision = s.Generation, s.Selection.Revision
 			}
 			if u.analysis != nil {
-				u.analysis.request(m, inspectAnalysis, s, u.Viewer, u.Theme, u.Now, makeLayout(width, height).width, analysisUpdates)
+				u.analysis.request(m, inspectAnalysis, c.UsageTree, s, u.Viewer, u.Theme, u.Now, makeLayout(width, height).width, analysisUpdates)
 			}
 			if c.WatchPermissions != nil && s.Connected && s.Generation != "" && permissionGeneration != s.Generation {
 				if cancelPermission != nil {
@@ -470,6 +477,9 @@ func Run(ctx context.Context, c Config) error {
 			if !ok {
 				c.Updates = nil
 			}
+			dirty = true
+		case spend := <-spendUpdates:
+			u.Spend = spend
 			dirty = true
 		case result := <-analysisUpdates:
 			if u.analysis == result.screen {

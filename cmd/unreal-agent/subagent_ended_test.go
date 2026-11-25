@@ -37,6 +37,10 @@ func TestSubagentWaitAndSendReturnImmediatelyForTerminalChildren(t *testing.T) {
 			}
 			var inspections, controls atomic.Int32
 			server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/extension" {
+					w.Write([]byte(`{"Error":"unsupported_action"}`))
+					return
+				}
 				if r.URL.Path != "/v1/inspect" {
 					controls.Add(1)
 					http.Error(w, "unexpected control", 500)

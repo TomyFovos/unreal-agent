@@ -46,7 +46,7 @@ const subagentUsage = `usage: unreal-agent subagent COMMAND
                                          save settings for the calling Session
   start [--template lead] [--provider ID] [--model ID] [--effort LEVEL] [--task TEXT]
         [--title TEXT] [--purpose TEXT] [--inputs TEXT] [--outputs TEXT]
-        [--verification TEXT] [--acceptance-criteria TEXT]
+        [--verification TEXT] [--budget-steps N] [--acceptance-criteria TEXT]
                                          start a child and display its brief
                                          optional task instructions can come from stdin
   wait [HANDLE ...] [--timeout 9m]        wait until a child finishes or asks for approval
@@ -87,6 +87,7 @@ func runSubagentCLI(ctx context.Context, args []string, stdin io.Reader, out io.
 		task := flags.String("task", "", "task text, read from stdin when empty")
 		var brief subagent.BriefFields
 		flags.StringVar(&brief.Title, "title", "", "short task title")
+		flags.IntVar(&brief.BudgetSteps, "budget-steps", 0, "expected model calls for the child and its descendants")
 		flags.StringVar(&brief.Purpose, "purpose", "", "what the work will help decide")
 		flags.StringVar(&brief.Inputs, "inputs", "", "paths and references to read")
 		flags.StringVar(&brief.Outputs, "outputs", "", "artifacts and destinations")
@@ -172,6 +173,7 @@ func runSubagentCLI(ctx context.Context, args []string, stdin io.Reader, out io.
 		if len(children) == 0 {
 			fmt.Fprintln(out, "No children in this Session.")
 		}
+		c.loadUsage(ctx, children)
 		ended := map[operation.Status]int{}
 		for _, child := range children {
 			if *all || child.running() {
@@ -194,7 +196,9 @@ func runSubagentCLI(ctx context.Context, args []string, stdin io.Reader, out io.
 		if err != nil {
 			return err
 		}
-		child.report(out, c.name, *task)
+		states := []childState{child}
+		c.loadUsage(ctx, states)
+		states[0].report(out, c.name, *task)
 		return nil
 	}
 	return errors.New(subagentUsage)
@@ -323,16 +327,21 @@ func (c subagentCLI) model(ctx context.Context, args []string) error {
 
 // childState is one child as its parent's start Operation records it.
 type childState struct {
-	handle    operation.ID
-	child     session.ID
-	template  string
-	task      string
-	brief     *subagent.DelegationBrief
-	status    operation.Status
-	runtime   *sessionstore.RuntimeSelection
-	finish    *sessionstore.FinishRecord
-	approvals []subagent.Approval
-	message   string
+	handle            operation.ID
+	child             session.ID
+	template          string
+	task              string
+	brief             *subagent.DelegationBrief
+	status            operation.Status
+	runtime           *sessionstore.RuntimeSelection
+	finish            *sessionstore.FinishRecord
+	approvals         []subagent.Approval
+	message           string
+	queue             *int
+	started           bool
+	startUsage        []string
+	selection, budget string
+	ledger            *subagent.SessionUsage
 }
 
 func (s childState) running() bool {
@@ -350,13 +359,15 @@ func (c subagentCLI) children(ctx context.Context) ([]childState, host.View, err
 		if err != nil || plan.Action != "start" {
 			continue
 		}
-		state := childState{handle: op.ID, child: plan.ChildID, template: plan.Template, task: plan.Text, status: op.Status}
+		state := childState{handle: op.ID, child: plan.ChildID, template: plan.Template, task: plan.Text, status: op.Status,
+			selection: plan.SelectionText(), budget: plan.BudgetText()}
 		if plan.Configuration != nil {
 			state.runtime = sessionstore.SelectionFromConfiguration(plan.Configuration.Runtime)
 		}
 		if handle, err := subagent.DecodeHandle(op); err == nil {
 			state.finish, state.approvals = handle.Finish, handle.Approvals
 			state.brief = handle.Brief
+			state.queue, state.started, state.startUsage = handle.QueuedAhead, handle.Started, handle.UsageAtStart
 		}
 		if remote, err := operation.DecodeRemoteJobState(op); err == nil {
 			state.message = remote.TerminalError
@@ -411,7 +422,24 @@ func (c subagentCLI) start(ctx context.Context, template, task string, brief sub
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	fmt.Fprintf(c.out, "Started %s as %s.\nEnd your turn to receive the completion report.\n", template, handle)
+	switch {
+	case child.queue != nil:
+		fmt.Fprintf(c.out, "Queued %s as %s (%d ahead).\n", template, handle, *child.queue)
+	case child.status == operation.StatusFailed || child.status == operation.StatusCanceled:
+		fmt.Fprintf(c.out, "%s %s as %s.\n", child.status, template, handle)
+	default:
+		fmt.Fprintf(c.out, "Started %s as %s.\n", template, handle)
+	}
+	fmt.Fprintf(c.out, "Provider / model / effort: %s\nBudget: %s\n", child.selection, child.budget)
+	if len(child.startUsage) == 0 {
+		fmt.Fprintln(c.out, "Session tree usage unknown")
+	}
+	for _, line := range child.startUsage {
+		fmt.Fprintln(c.out, line)
+	}
+	if child.running() {
+		fmt.Fprintln(c.out, "End your turn to receive the completion report.")
+	}
 	if child.brief != nil {
 		fmt.Fprintln(c.out, child.brief.Render(child.task))
 	}
@@ -495,6 +523,7 @@ func (c subagentCLI) wait(ctx context.Context, handles []string, timeout time.Du
 			// Nothing runs anymore: report the latest child in full, which a
 			// wait right after a quick child's start is about.
 			fmt.Fprintln(c.out, "No running children.")
+			c.loadUsage(ctx, children)
 			for i, child := range children {
 				if i == len(children)-1 {
 					child.report(c.out, c.name, false)
@@ -518,11 +547,17 @@ func (c subagentCLI) wait(ctx context.Context, handles []string, timeout time.Du
 			}
 		}
 		if ready || !time.Now().Before(deadline) {
+			c.loadUsage(ctx, selected)
 			for _, child := range selected {
 				child.report(c.out, c.name, false)
 			}
 			if !ready {
-				fmt.Fprintln(c.out, "Still running. End your turn; completion will be sent as a message.")
+				queued := slices.ContainsFunc(selected, func(child childState) bool { return child.displayStatus() == "queued" })
+				if queued {
+					fmt.Fprintln(c.out, "Still waiting for children. End your turn to receive completion notices.")
+				} else {
+					fmt.Fprintln(c.out, "Still running. End your turn; completion will be sent as a message.")
+				}
 			}
 			return nil
 		}
@@ -590,8 +625,42 @@ func (s childState) label() string {
 	return label
 }
 
+func (c subagentCLI) loadUsage(ctx context.Context, children []childState) {
+	if len(children) == 0 {
+		return
+	}
+	report, err := (viewer.Remote{ParentID: c.parent, Call: c.client.Extension}).UsageTree(ctx, time.Hour)
+	if err != nil {
+		return
+	}
+	byHandle := make(map[operation.ID]*subagent.SessionUsage, len(report.TopChildren))
+	for i := range report.TopChildren {
+		row := &report.TopChildren[i]
+		byHandle[row.Handle] = row
+	}
+	for i := range children {
+		children[i].ledger = byHandle[children[i].handle]
+	}
+}
+
+func (s childState) displayStatus() string {
+	if s.running() && s.status != operation.StatusCanceling {
+		if s.queue != nil && !s.started || s.ledger != nil && s.ledger.State == "queued" {
+			return "queued"
+		}
+	}
+	return string(s.status)
+}
+
+func (s childState) usageText() string {
+	if s.ledger == nil {
+		return fmt.Sprintf("calls unknown / budget %s · charge unknown", s.budget)
+	}
+	return s.ledger.UsageText()
+}
+
 func (s childState) summary(out io.Writer) {
-	line := fmt.Sprintf("%s  %s  %s", s.handle, s.label(), s.status)
+	line := fmt.Sprintf("%s  %s  %s", s.handle, s.label(), s.displayStatus())
 	switch {
 	case len(s.approvals) > 0:
 		line += fmt.Sprintf("  waiting for %d approval(s)", len(s.approvals))
@@ -600,11 +669,12 @@ func (s childState) summary(out io.Writer) {
 	case s.message != "":
 		line += "  " + firstLine(s.message)
 	}
-	fmt.Fprintln(out, line)
+	fmt.Fprintln(out, line+"  "+s.usageText())
 }
 
 func (s childState) report(out io.Writer, name string, includeTask bool) {
-	fmt.Fprintf(out, "== %s  %s  %s\n", s.handle, s.label(), s.status)
+	fmt.Fprintf(out, "== %s  %s  %s\n", s.handle, s.label(), s.displayStatus())
+	fmt.Fprintln(out, s.usageText())
 	if includeTask {
 		if s.brief != nil {
 			fmt.Fprintln(out, s.brief.Render(s.task))

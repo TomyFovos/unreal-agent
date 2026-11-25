@@ -33,6 +33,9 @@ func readServeConfiguration(path string) (serveConfiguration, error) {
 		return config, fmt.Errorf("decode runtime configuration: %w", err)
 	}
 	config = compatible.serveConfiguration
+	if config.MaxActiveChildren < 0 {
+		return config, fmt.Errorf("MaxActiveChildren must be nonnegative")
+	}
 	if windowStrategy {
 		slog.Warn("Context.WindowStrategy is deprecated and ignored. Unreal uses three-layer context.")
 	}

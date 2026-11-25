@@ -58,8 +58,10 @@ type RuntimeConfig struct {
 	ValidateChildTemplate func(subagent.Template, subagent.Template) error
 	// Context is a versioned, disposable projection strategy. It is deliberately
 	// outside immutable runtime/auth identity, so old histories need no migration.
-	Context     contextengine.Config
-	ContextFile *contextengine.ConfigFile
+	Context           contextengine.Config
+	ContextFile       *contextengine.ConfigFile
+	MaxActiveChildren int
+	ContextRole       string // the child Session's resolved role
 	// ClaudeSubagents lets the Claude route drive this Host's child templates
 	// through Bash (U21); zero when there are none.
 	ClaudeSubagents claudeagent.SubagentCLI
@@ -325,8 +327,8 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 			return host.Runtime{}, e
 		}
 		builder.(interface {
-			SetContextConfigFile(*contextengine.ConfigFile)
-		}).SetContextConfigFile(c.ContextFile)
+			SetContextPolicy(*contextengine.ConfigFile, string)
+		}).SetContextPolicy(c.ContextFile, c.ContextRole)
 		registry := &selectedTools{Registry: configured.Registry}
 		refreshPermission := func(context.Context) error {
 			updated := constraints
@@ -463,7 +465,7 @@ func NewRuntimeFactory(c RuntimeConfig) (host.Factory, jsontext.Value, error) {
 			builder.SetModel(llm.Model{ID: choice.Model, ReasoningEffort: choice.Effort, Fast: choice.Fast})
 			return nil
 		}
-		return host.Runtime{RetainOperation: configured.RetainOperation, InterruptedInput: configured.InterruptedInput, CompletedInput: configured.CompletedInput, ContextEngine: engine, Selection: &base, ValidateSelection: validate, ApplySelection: apply, BeforeGeneration: refreshPermission, Builder: builder, LLM: client, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, configured.RemoteJobs...), Close: closeRuntime}, nil
+		return host.Runtime{AfterRestore: configured.AfterRestore, RetainOperation: configured.RetainOperation, InterruptedInput: configured.InterruptedInput, CompletedInput: configured.CompletedInput, ContextEngine: engine, Selection: &base, ValidateSelection: validate, ApplySelection: apply, BeforeGeneration: refreshPermission, Builder: builder, LLM: client, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, configured.RemoteJobs...), Close: closeRuntime}, nil
 
 	}
 	return factory, identity, nil

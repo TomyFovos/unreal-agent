@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"encoding/json/v2"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 // BriefFields are the optional facts supplied by the delegating agent.
 // Text (including any paths and commands) is kept as supplied.
 type BriefFields struct {
+	BudgetSteps        int    `json:"budget_steps,omitzero"`
 	Title              string `json:"title,omitzero"`
 	Purpose            string `json:"purpose,omitzero"`
 	Inputs             string `json:"inputs,omitzero"`
@@ -126,7 +128,7 @@ func childTMPDIR(environment []string) string {
 type briefField struct{ key, rule, value string }
 
 func (b DelegationBrief) fields() []briefField {
-	return []briefField{
+	fields := []briefField{
 		{"root", "Q1", b.Root},
 		{"write_scope", "Q2", b.WriteScope},
 		{"tmpdir", "Q3", b.TMPDIR},
@@ -141,6 +143,10 @@ func (b DelegationBrief) fields() []briefField {
 		{"verification", "Q6", b.Fields.Verification},
 		{"acceptance_criteria", "Q6", b.Fields.AcceptanceCriteria},
 	}
+	if b.Fields.BudgetSteps > 0 {
+		fields = append(fields, briefField{"budget_steps", "Q6", fmt.Sprintf("%d model calls across this Session and all its children. Tell your parent before exceeding it.", b.Fields.BudgetSteps)})
+	}
+	return fields
 }
 
 // Render is used by the child's initial input and by the parent's preview.

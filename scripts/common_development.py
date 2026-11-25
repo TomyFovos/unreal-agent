@@ -283,6 +283,9 @@ def install(args, directory, meta):
         pilot.fail("common_binding_invalid", "Invalid executable reference; value withheld.")
     previous = read_settings(home) if os.path.lexists(settings_path(home)) else None
     zone = getattr(args, "time_zone", None) or (previous or {}).get("TimeZone")
+    max_children = getattr(args, "max_active_children", None)
+    if max_children is None:
+        max_children = (previous or {}).get("MaxActiveChildren")
     choices = provider_choices(args, previous)
     sources = api_key_sources(args, previous)
     content_id = hashlib.sha256(files.read_owned(directory / "SHA256SUMS", limit=4096)).hexdigest()[:16]
@@ -311,6 +314,8 @@ def install(args, directory, meta):
             settings["APIKeys"] = sources
         if zone:
             settings["TimeZone"] = zone
+        if max_children is not None:
+            settings["MaxActiveChildren"] = max_children
         if prior_version is not None:
             settings["PreviousBinaryDirectory"] = str(prior_version)
         old_settings = files.read_owned(settings_path(home), private=True) if previous else None
@@ -450,6 +455,8 @@ def command_for(settings, workspace, paths, session):
                "--state-directory", str(paths["state"]), "--socket", str(paths["socket"]),
                "--shared-state-directory", str(shared_state_directory(Path(settings["Home"])))]
     if paths.get("explicit_config"): command += ["--config", str(paths["config"])]
+    elif "MaxActiveChildren" in settings and not paths["config"].exists():
+        command += ["--bootstrap-max-active-children", str(settings["MaxActiveChildren"])]
     if settings["DockerOAuth"]: command.append("--bootstrap-codex-docker-oauth")
     if settings.get("CodexRoute") == "auto": command.append("--bootstrap-codex-auto")
     if settings.get("CodexRoute") == "disabled": command.append("--bootstrap-codex-disabled")
@@ -474,14 +481,19 @@ def prepare_repo(settings, workspace, instance):
             config = pilot.decode(old_config)
             if not isinstance(config, dict) or not isinstance(config.get("Runtime"), dict) or config["Runtime"].get("Workspace") != str(workspace):
                 pilot.fail("common_workspace_binding_mismatch", "Keep existing config/history; workspace changed. Use an explicit separate --instance.")
+            changed = "MaxActiveChildren" in settings and config.get("MaxActiveChildren") != settings["MaxActiveChildren"]
+            if changed:
+                config["MaxActiveChildren"] = settings["MaxActiveChildren"]
             if settings.get("APIKeys"):
                 launcher = config.get("Launcher") or {"Version": 1}
                 config["Launcher"] = launcher
                 sources = launcher.setdefault("APIKeys", {})
                 if any(sources.get(key) != source for key, source in settings["APIKeys"].items()):
                     sources.update(settings["APIKeys"])
-                    updated = (json.dumps(config, indent=2, ensure_ascii=True) + "\n").encode()
-                    daily.replace_owned(p["config"], updated, old_config, 0o600)
+                    changed = True
+            if changed:
+                updated = (json.dumps(config, indent=2, ensure_ascii=True) + "\n").encode()
+                daily.replace_owned(p["config"], updated, old_config, 0o600)
     return p
 
 
@@ -710,7 +722,11 @@ def main_session_files(state):
             yield path, name
 
 
-def discover_sessions(home, bindings=None):
+def archive_marker(item):
+    return item["state"] / f"{item['name']}.session-archived"
+
+
+def discover_sessions(home, bindings=None, *, name=None):
     """Build the main Session inventory from names, mtimes and workspace metadata."""
     if bindings is None:
         bindings = discover_workspaces(home)
@@ -726,61 +742,98 @@ def discover_sessions(home, bindings=None):
         base = base_match.group() if base_match else key
         instance = state.name[len(base) + 1:] if state.name != base else "default"
         current = bindings.get(base, binding)["instance"]
-        for path, name in main_session_files(state):
+        for path, session in main_session_files(state):
+            if name is not None and session != name:
+                continue
             try:
                 if not path.is_file() or path.is_symlink():
                     continue
                 modified = path.stat().st_mtime
             except OSError:
                 continue  # Sessions can disappear while another process lists them.
-            sessions.append({"name": name, "workspace": binding["workspace"],
-                             "instance": instance, "current": instance == current,
-                             "mtime": modified})
+            item = {"name": session, "workspace": binding["workspace"], "state": state,
+                    "instance": instance, "current": instance == current, "mtime": modified}
+            item["archived"] = archive_marker(item).is_file()
+            sessions.append(item)
     return sessions
 
 
-def unique_sessions(sessions):
-    # A workspace can retain the same name in an older provider instance. Its
-    # current instance wins; otherwise use the most recently updated copy.
-    unique = {}
-    for item in sorted(sessions, key=lambda item: item["mtime"], reverse=True):
-        key = (item["workspace"], item["name"])
-        previous = unique.get(key)
-        if previous is None or item["current"] and not previous["current"]:
-            unique[key] = item
-    return sorted(unique.values(), key=lambda item: (-item["mtime"], str(item["workspace"]), item["name"]))
+def host_running(state):
+    # The native launcher uses the same read-only readiness request.
+    try:
+        reply = LiveHost(state / "run/host.sock").call("auth/methods", {}, allow_error=True)
+    except (OSError, ValueError, HTTPException, pilot.PilotError):
+        return False
+    methods = reply.get("Methods")
+    return isinstance(methods, list) and bool(methods) and not reply.get("Error")
 
 
-def session_row(item):
+def session_rows(sessions):
+    running = {}
+    for item in sorted(sessions, key=lambda item: (-item["mtime"], item["workspace"], item["name"], item["instance"])):
+        state = item["state"]
+        if state not in running:
+            running[state] = host_running(state)
+        yield item, running[state]
+
+
+def session_row(item, running):
     when = datetime.fromtimestamp(item["mtime"]).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-    return f"{item['name']}  {item['workspace']}  {when}"
+    status = "稼働中" if running else "停止中"
+    return f"{item['name']}  {item['workspace']}  {when}  Host {status}  instance={item['instance']}"
 
 
 def list_sessions(settings):
     """Print every main Session, newest first, without choosing or starting one."""
-    choices = unique_sessions(discover_sessions(Path(settings["Home"])))
+    choices = [item for item in discover_sessions(Path(settings["Home"])) if not item["archived"]]
     if not choices:
         print("Session はありません。新しく作るときは unreal NAME と名前を指定してください。")
-    for item in choices:
-        print(session_row(item))
+    for item, running in session_rows(choices):
+        print(session_row(item, running))
 
 
-def choose_session(sessions, *, always_prompt=False):
-    choices = unique_sessions(sessions)
-    if len(choices) == 1 and not always_prompt:
-        return choices[0]
+def choose_session(sessions, *, by_name):
+    if len(sessions) == 1 and by_name:
+        return sessions[0]
+    rows = list(session_rows(sessions))
+    default = next((n for n, (_, running) in enumerate(rows, 1) if running), 1) if by_name else None
+    if by_name:
+        # Names are unique by design; several copies are leftovers to retire.
+        print(f"同じ名前の Session が {len(rows)} 個あります（名前は1つの Session にだけ使います）。"
+              "使わないものは unreal --archive-session NAME --workspace PATH で外してください。", file=sys.stderr)
     print("Session を選んでください:", file=sys.stderr)
-    for number, item in enumerate(choices, 1):
-        print(f"{number}. {session_row(item)}", file=sys.stderr)
+    for number, (item, running) in enumerate(rows, 1):
+        print(f"{number}. {session_row(item, running)}", file=sys.stderr)
     while True:
-        print("番号: ", end="", file=sys.stderr, flush=True)
+        prompt = f"番号 [{default}]: " if default is not None else "番号: "
+        print(prompt, end="", file=sys.stderr, flush=True)
         try:
-            answer = input()
+            answer = input().strip()
         except EOFError:
+            if default is not None:
+                return rows[default - 1][0]
             pilot.fail("common_session_choice_required", "端末で Session の番号を選んでください。")
-        if answer.isdecimal() and 1 <= int(answer) <= len(choices):
-            return choices[int(answer) - 1]
+        if not answer and default is not None:
+            return rows[default - 1][0]
+        if answer.isdecimal() and 1 <= int(answer) <= len(rows):
+            return rows[int(answer) - 1][0]
         print("一覧の番号を入力してください。", file=sys.stderr)
+
+
+def archive_session(settings, name, workspace, instance):
+    home = Path(settings["Home"])
+    workspace = daily.safe_path(Path(workspace).expanduser().resolve())
+    matches = [item for item in discover_sessions(home, name=name)
+               if item["workspace"] == workspace and (instance is None or item["instance"] == instance)]
+    if not matches:
+        pilot.fail("common_session_not_found", f"{workspace} に Session {name} が見つかりません。")
+    if len(matches) > 1:
+        instances = ", ".join(sorted(item["instance"] for item in matches))
+        pilot.fail("common_session_archive_ambiguous", f"--instance で対象を指定してください ({instances})。")
+    item = matches[0]
+    pilot.private_tree(home, item["state"].relative_to(home))
+    files.publish_bytes(archive_marker(item), b"archived\n")
+    print(f"{name} をアーカイブしました ({workspace}, instance={item['instance']})。")
 
 
 def validate_discovered_workspace(workspace):
@@ -801,22 +854,27 @@ def resolve_session(settings, args):
     name = where if where is not None else args.session
     explicit = args.instance is not None or getattr(args, "config", None) is not None
     if where is None and (explicit or args.workspace_info or args.acceptance_fixture):
-        return daily.git_root(), name or "default", args.instance
+        target = daily.git_root()
+        if explicit and name is not None and not args.workspace_info and not args.acceptance_fixture:
+            # A Session name names one Session: an explicit instance may reopen its
+            # own Session, but never start a second Session under a taken name.
+            instance = args.instance or "default"
+            taken = [item for item in discover_sessions(home, name=name) if not item["archived"]
+                     and (item["workspace"], item["instance"]) != (target, instance)]
+            if taken:
+                pilot.fail("common_session_name_taken",
+                           f"Session {name} は {taken[0]['workspace']} にあります。同じ名前の Session は作れません。"
+                           f"unreal {name} で開いてください。")
+        return target, name or "default", args.instance
     bindings = discover_workspaces(home)
     cwd = Path.cwd().resolve()
     local = [item["workspace"] for item in bindings.values()
              if cwd == item["workspace"] or item["workspace"] in cwd.parents]
     workspace = max(local, key=lambda path: len(path.parts)) if local else None
-    matches = discover_sessions(home, bindings)
-    if name is not None:
-        matches = [item for item in matches if item["name"] == name]
-    # The current workspace's copy wins; otherwise the name opens wherever it exists.
-    if workspace is not None and name is not None:
-        preferred = [item for item in matches if item["workspace"] == workspace]
-        if preferred:
-            matches = preferred
+    sessions = discover_sessions(home, bindings, name=name)
+    matches = [item for item in sessions if not item["archived"]]
     if matches:
-        chosen = choose_session(matches, always_prompt=name is None)
+        chosen = choose_session(matches, by_name=name is not None)
         if where is None:
             validate_discovered_workspace(chosen["workspace"])
         return chosen["workspace"], chosen["name"], None if chosen["current"] else chosen["instance"]
@@ -828,6 +886,8 @@ def resolve_session(settings, args):
     if workspace is not None:
         validate_discovered_workspace(workspace)
     target = workspace or daily.git_root()
+    if any(item["archived"] and item["workspace"] == target and item["current"] for item in sessions):
+        pilot.fail("common_session_archived", f"{target} の Session {name} はアーカイブ済みです。")
     print(f"Session {name} はありません。{target} に新しく作りますか？ [y/N]: ", end="", file=sys.stderr, flush=True)
     try:
         answer = input()
@@ -860,6 +920,9 @@ def launch(args, directory):
         time.tzset()
     if getattr(args, "list", False):
         list_sessions(settings); return
+    if getattr(args, "archive_session", None) is not None:
+        archive_session(settings, args.archive_session, args.workspace, args.instance)
+        return
     workspace, session, instance = resolve_session(settings, args)
     if getattr(args, "where", None) is not None:
         print(workspace)
@@ -886,6 +949,16 @@ def time_zone_name(value):
     return value
 
 
+def max_active_children(value):
+    try:
+        limit = int(value)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError("expected a nonnegative integer") from err
+    if not 0 <= limit <= sys.maxsize:
+        raise argparse.ArgumentTypeError("expected a nonnegative integer")
+    return limit
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_subparsers(dest="mode", required=True)
@@ -893,6 +966,8 @@ def main(argv=None):
     install_args.add_argument("--configure-providers", action="store_true")
     install_args.add_argument("--time-zone", type=time_zone_name, metavar="IANA_ZONE",
                               help="Save a time zone for Unreal, for example Asia/Tokyo")
+    install_args.add_argument("--max-active-children", type=max_active_children, metavar="N",
+                              help="Save the maximum concurrent children per Session tree (0 is unlimited)")
     for prefix in ("openai", "anthropic"):
         install_args.add_argument("--" + prefix + "-api-key-file", default="", metavar="PATH")
         install_args.add_argument("--" + prefix + "-api-key-env", default="", metavar="NAME")
@@ -911,8 +986,11 @@ def main(argv=None):
     install_args.add_argument("--replace-pilot-launcher", action="store_true")
     launch_args = modes.add_parser("launch")
     launch_args.add_argument("session", nargs="?", default=None)
-    launch_args.add_argument("--where", metavar="NAME", help="Print the workspace of an existing main Session")
-    launch_args.add_argument("--list", action="store_true", help="List main Sessions, newest first")
+    session_actions = launch_args.add_mutually_exclusive_group()
+    session_actions.add_argument("--where", metavar="NAME", help="Print the workspace of an existing main Session")
+    session_actions.add_argument("--list", action="store_true", help="List main Sessions, newest first")
+    session_actions.add_argument("--archive-session", metavar="NAME", help="Hide a Session from name lookup and lists")
+    launch_args.add_argument("--workspace", metavar="PATH", help="Workspace of the Session to archive")
     launch_args.add_argument("--instance", default=None)
     launch_args.add_argument("--restart-host", action="store_true", help="Restart the workspace Host, confirming before interrupting work")
     launch_args.add_argument("--config", default=None)
@@ -920,6 +998,13 @@ def main(argv=None):
     launch_args.add_argument("--workspace-info", action="store_true")
     launch_args.add_argument("--acceptance-fixture", action="store_true")
     args = parser.parse_args(argv)
+    if args.mode == "launch":
+        if (args.workspace is None) != (args.archive_session is None):
+            launch_args.error("--archive-session and --workspace must be used together")
+        if args.archive_session is not None and (
+                args.session is not None or args.config is not None or args.restart_host
+                or args.readme or args.workspace_info or args.acceptance_fixture):
+            launch_args.error("--archive-session can only be combined with --workspace and --instance")
     try:
         directory = Path(__file__).resolve().parent
         if args.mode == "install": install(args, directory, package(directory))

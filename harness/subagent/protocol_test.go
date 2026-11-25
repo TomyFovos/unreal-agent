@@ -111,7 +111,7 @@ func TestBlockedProcessWriteIsCanceledAndDrained(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	child := ChildConfig{ParentID: "parent", ChildID: "child", Workspace: t.TempDir()}
-	p := startProcess(ctx, Config{Owner: &host.Session{ID: "parent"}, Binary: "/bin/sh", Arguments: []string{"-c", "sleep 60"}}, child, "")
+	p := startProcess(ctx, Config{Owner: &host.Session{ID: "parent"}, Binary: "/bin/sh", Arguments: []string{"-c", "sleep 60"}}, child, "", "")
 	defer func() { p.cancel(); <-p.done }()
 	writeCtx, stop := context.WithCancel(ctx)
 	done := make(chan error, 1)

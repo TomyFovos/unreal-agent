@@ -36,6 +36,10 @@ func TestSubagentListAndShowFlags(t *testing.T) {
 	var current atomic.Pointer[host.View]
 	current.Store(&view)
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/extension" {
+			w.Write([]byte(`{"Error":"unsupported_action"}`))
+			return
+		}
 		if r.URL.Path != "/v1/inspect" {
 			t.Errorf("unexpected request: %s", r.URL.Path)
 			http.Error(w, "unexpected request", 500)

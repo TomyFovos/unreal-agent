@@ -185,7 +185,7 @@ func withParentSubagents(c agentrunner.RuntimeConfig, configured map[string]chil
 			return template, err
 		}
 	}
-	execution := subagent.Config{Directory: directory, Binary: binary, Arguments: arguments, ContextFile: c.ContextFile, Environment: childEnvironment(c), Templates: templates, ResolveRuntime: resolve, ValidateTemplate: childTemplateValidator(c)}
+	execution := subagent.Config{Directory: directory, MaxActiveChildren: c.MaxActiveChildren, Binary: binary, Arguments: arguments, ContextFile: c.ContextFile, Environment: childEnvironment(c), Templates: templates, ResolveRuntime: resolve, ValidateTemplate: childTemplateValidator(c)}
 	c.ControlTools = true
 	c.ResolveChildRuntime = resolve
 	c.NewTools = withSubagentTools(c.NewTools, execution, c.Identity.DisallowedTools)

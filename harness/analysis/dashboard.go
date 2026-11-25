@@ -77,7 +77,11 @@ func (a *Accumulator) dashboard(r *Report, tree *Tree, rows []viewer.Row) *Dashb
 	rootTools := a.toolSamples()
 	d.Wall = a.wallSignal(rootTools)
 	if tree == nil {
-		d.add(a, "main", rootTools)
+		role := a.sessionRole()
+		var calls modelCallUsage
+		calls.add(a, !r.Partial)
+		r.RoleUsage = []RoleUsage{calls.report(role)}
+		d.add(a, role, rootTools)
 		for _, row := range rows {
 			if row.ParentID != a.id {
 				continue
@@ -102,6 +106,7 @@ func (a *Accumulator) dashboard(r *Report, tree *Tree, rows []viewer.Row) *Dashb
 		d.resolveUsageProviders()
 		return d
 	}
+	r.RoleUsage = tree.roleUsage(r.Tree.Sessions)
 
 	live := make(map[session.ID]viewer.Row, len(rows))
 	for _, row := range rows {

@@ -30,6 +30,7 @@ type launchOptions struct {
 	bootstrapDocker                                                bool
 	bootstrapAuto                                                  bool
 	bootstrapClaude                                                string
+	bootstrapMaxActiveChildren                                     int
 	bootstrapCodexDisabled, bootstrapClaudeDisabled                bool
 	// defaultCredentials is <sharedState or state>/credentials. Common and
 	// folders launchers share the store /login names. It is not part of the
@@ -190,6 +191,7 @@ func parseLaunchOptions(args []string, output io.Writer, getenv func(string) str
 	flags.BoolVar(&o.bootstrapDocker, "bootstrap-codex-docker-oauth", false, "first-run discovery: explicitly use Docker Sandbox OAuth and validated forward proxy")
 	flags.BoolVar(&o.bootstrapAuto, "bootstrap-codex-auto", false, "first-run discovery: validate native Codex routing; never fall back from an intended Docker source")
 	flags.StringVar(&o.bootstrapClaude, "bootstrap-claude-binary", "", "first-run discovery: optional external Claude executable")
+	flags.IntVar(&o.bootstrapMaxActiveChildren, "bootstrap-max-active-children", 0, "first-run maximum running child Sessions (0 is unlimited)")
 	apiKeyFlags(flags, &o)
 	flags.DurationVar(&o.timeout, "startup-timeout", o.timeout, "optional maximum wait for gateway readiness (0 waits until canceled)")
 	flags.BoolVar(&o.help, "help", false, "show usage")

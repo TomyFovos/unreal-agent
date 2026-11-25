@@ -54,6 +54,9 @@ func terminalResultState(status sessionstore.ToolCallStatus, translator tool.Res
 	if failed {
 		return llm.ToolResultFailed
 	}
+	if status.Status.AcceptedResult != nil {
+		return llm.ToolResultSucceeded
+	}
 	if translator == nil {
 		return llm.ToolResultUnknown
 	}

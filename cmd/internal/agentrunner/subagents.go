@@ -11,6 +11,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/permission"
 	"github.com/unreallabsai/unreal-agent/harness/projectinstructions"
 	"github.com/unreallabsai/unreal-agent/harness/provider"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/subagent"
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 	subtool "github.com/unreallabsai/unreal-agent/harness/tool/subagent"
@@ -77,6 +78,7 @@ func WithSubagentTools(base ToolFactory, configuration subagent.Config, disabled
 		configured.InterruptedInput = manager.InterruptedInput
 		configured.RetainOperation = manager.RetainOperation
 		configured.CompletedInput = manager.CompletedInput
+		configured.AfterRestore = manager.RecoverUsageNotices
 		configured.Close = func() error {
 			var err error
 			err = manager.Close()
@@ -116,6 +118,10 @@ func NewChildFactory(base RuntimeConfig, configure func(subagent.ChildConfig, *R
 		runtime := base
 		runtime.Identity, runtime.SessionDirectory, runtime.Providers = identity, c.SessionDirectory, registry
 		runtime.ProviderProcess, runtime.TaskInput = c.ProviderProcess, c.InitialInput().ID
+		runtime.ContextRole = c.Layer
+		if runtime.ContextRole == "" {
+			runtime.ContextRole = link.ContextRole
+		}
 		if link.ContextFile != nil {
 			runtime.ContextFile, runtime.Context = link.ContextFile, link.ContextFile.Current()
 		}
@@ -126,7 +132,7 @@ func NewChildFactory(base RuntimeConfig, configure func(subagent.ChildConfig, *R
 		}
 		var tools ToolFactory
 		if !c.TextOnly {
-			execution := subagent.Config{Child: &c, SendParent: link.Send, ResolveRuntime: runtime.ResolveChildRuntime, ValidateTemplate: runtime.ValidateChildTemplate}
+			execution := subagent.Config{Child: &c, SendParent: link.Send, TreeRoot: link.TreeRoot, MaxActiveChildren: link.MaxActiveChildren, ResolveRuntime: runtime.ResolveChildRuntime, ValidateTemplate: runtime.ValidateChildTemplate}
 			if len(c.Subagents) > 0 {
 				// A lead starts its workers with this same child process command.
 				binary, err := os.Executable()
@@ -160,7 +166,14 @@ func NewChildFactory(base RuntimeConfig, configure func(subagent.ChildConfig, *R
 		// A parent with permission modes makes this child follow its mode: the
 		// template's Policy is the ceiling, its Baseline what Read Only and
 		// Ask allow without approval. Otherwise Policy is fixed.
-		hostConfig := host.Config{Directory: c.SessionDirectory, Build: factory}
+		hostConfig := host.Config{Directory: c.SessionDirectory, Build: func(ctx context.Context, id session.ID) (host.Runtime, error) {
+			built, err := factory(ctx, id)
+			if err == nil {
+				owner, _ := host.SessionFromContext(ctx)
+				built.BudgetInput = subagent.ChildBudgetInput(owner, c)
+			}
+			return built, err
+		}}
 		claudeChild := claudeagent.IsProvider(identity.Provider.Provider)
 		baseline, maximum := c.Policy, (*permission.Policy)(nil)
 		ceiling := c.Policy

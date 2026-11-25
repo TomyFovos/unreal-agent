@@ -11,6 +11,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
 	"io"
 	"math"
@@ -21,18 +22,21 @@ import (
 const modelProgressHandshake inbox.ID = "model_progress"
 
 type frame struct {
-	Version       uint32
-	Connection    string
-	Sender        string
-	Target        string
-	Kind          string
-	ID            inbox.ID                   `json:",omitzero"`
-	Config        *ChildConfig               `json:",omitzero"`
-	ContextPolicy *childContextPolicy        `json:",omitzero"` // live Host policy carried by hello
-	Input         *inbox.Input               `json:",omitzero"`
-	Receipt       *host.Receipt              `json:",omitzero"`
-	Finish        *sessionstore.FinishRecord `json:",omitzero"`
-	Error         string                     `json:",omitzero"`
+	Version           uint32
+	Connection        string
+	Sender            string
+	Target            string
+	Kind              string
+	ID                inbox.ID                   `json:",omitzero"`
+	Config            *ChildConfig               `json:",omitzero"`
+	ContextPolicy     *childContextPolicy        `json:",omitzero"` // live Host policy carried by hello
+	TreeRoot          session.ID                 `json:",omitzero"`
+	MaxActiveChildren int                        `json:",omitzero"`
+	ContextRole       string                     `json:",omitzero"` // hello: role even when recorded lineage predates it
+	Input             *inbox.Input               `json:",omitzero"`
+	Receipt           *host.Receipt              `json:",omitzero"`
+	Finish            *sessionstore.FinishRecord `json:",omitzero"`
+	Error             string                     `json:",omitzero"`
 	// Mode is the parent's permission mode (hello, mode). Approval is a
 	// child's request (approval, approval_done) or the parent's answer
 	// (decide). None of these is durable: a restarted child asks again.

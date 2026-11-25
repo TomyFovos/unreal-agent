@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -86,7 +87,11 @@ func factory(c sub.Config, model llm.Adapter) host.Factory {
 		for _, d := range registry.StaticDefinitions() {
 			builder.AddTool(d.Tool)
 		}
-		return host.Runtime{RetainOperation: manager.RetainOperation, InterruptedInput: manager.InterruptedInput, CompletedInput: manager.CompletedInput, Builder: builder, LLM: model, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, manager), Close: manager.Close}, nil
+		var budgetInput func(context.Context) *inbox.Input
+		if c.Child != nil {
+			budgetInput = sub.ChildBudgetInput(owner, *c.Child)
+		}
+		return host.Runtime{BudgetInput: budgetInput, AfterRestore: manager.RecoverUsageNotices, RetainOperation: manager.RetainOperation, InterruptedInput: manager.InterruptedInput, CompletedInput: manager.CompletedInput, Builder: builder, LLM: model, Tools: registry, Operations: operation.NewLocalOperationManager(ctx, manager), Close: manager.Close}, nil
 	}
 }
 func TestChildServerHelper(t *testing.T) {
@@ -114,8 +119,58 @@ func TestChildServerHelper(t *testing.T) {
 			return nil, nil, err
 		}
 		var calls atomic.Int32
-		model := adapter(func(ctx context.Context, r llm.Request, _ llm.RequestOptions) (llm.Response, error) {
+		model := adapter(func(ctx context.Context, r llm.Request, options llm.RequestOptions) (llm.Response, error) {
 			n := calls.Add(1)
+			switch c.Task {
+			case "queue-lead":
+				var started, ended bool
+				for _, item := range r.Input {
+					if call, ok := item.Data.(llm.ToolCall); ok && call.Name == "SubagentStart" {
+						started = true
+					}
+					if message, ok := item.Data.(llm.Message); ok {
+						peer, _ := modelPeer(message.Text)
+						ended = ended || peer.Kind == "ended"
+					}
+				}
+				if !started {
+					return response("SubagentStart", `{"template":"worker","task":"finish-after-release"}`), nil
+				}
+				if ended {
+					return response("Finish", `{"status":"completed","summary":"lead complete","changedFiles":[],"tests":[],"blockers":[]}`), nil
+				}
+				return llm.Response{ID: "lead-idle", Stop: llm.StopComplete}, nil
+			case "budget-steps":
+				for {
+					data, _ := os.ReadFile(filepath.Join(c.Workspace, "allowed-step"))
+					step, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+					if step >= int(n) {
+						break
+					}
+					select {
+					case <-ctx.Done():
+						return llm.Response{}, ctx.Err()
+					case <-time.After(10 * time.Millisecond):
+					}
+				}
+				result := response("SendParent", `{"text":"measurement step","progress":true}`)
+				if n == 8 {
+					result = response("Finish", `{"status":"completed","summary":"budget test","changedFiles":[],"tests":[],"blockers":[]}`)
+				}
+				result.Provider, result.Model, result.ID = "fake", "budget-model", fmt.Sprint(n)
+				return result, nil
+			case "quiet-milestone":
+				if n == 1 {
+					for i := range 250 {
+						err := options.RecordActivity(ctx, llm.ActivityRecord{Kind: "claude_stream", ID: fmt.Sprintf("%s/stream/%d", options.Identity.TurnID, i), Provider: "claude", Model: "test", Reason: `{"event":"message_start"}`})
+						if err != nil {
+							return llm.Response{}, err
+						}
+					}
+				}
+				<-ctx.Done()
+				return llm.Response{}, ctx.Err()
+			}
 			if c.Task == "brief routing fixture" {
 				return runBriefRoutingFixture(ctx, c, r, int(n)-1)
 			}
@@ -173,7 +228,12 @@ func TestChildServerHelper(t *testing.T) {
 			}
 			return response("Finish", `{"status":"completed","summary":"child complete","changedFiles":[],"tests":["helper"],"blockers":[]}`), nil
 		})
-		h, err := host.New(ctx, host.Config{Directory: c.SessionDirectory, Build: factory(sub.Config{Child: &c, SendParent: send}, model)})
+		config := sub.Config{Child: &c, SendParent: send, TreeRoot: link.TreeRoot, MaxActiveChildren: link.MaxActiveChildren}
+		if len(c.Subagents) != 0 {
+			config.Directory, config.Binary, config.Arguments = c.SessionDirectory, os.Args[0], os.Args[1:]
+			config.Environment, config.Templates = os.Environ(), c.Subagents
+		}
+		h, err := host.New(ctx, host.Config{Directory: c.SessionDirectory, Build: factory(config, model)})
 		if err != nil {
 			policy.Close()
 			return nil, nil, err

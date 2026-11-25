@@ -48,6 +48,27 @@ func TestInvalidArgumentsNeverSubmit(t *testing.T) {
 	}
 }
 
+func TestBatchReadAndGrepContextValidateToolArguments(t *testing.T) {
+	for _, test := range []struct {
+		name, args string
+		valid      bool
+	}{
+		{"read", `{"files":[{"path":"a","ranges":[{"start_line":3,"lines":5}]},{"path":"b"}]}`, true},
+		{"read", `{"files":[]}`, false},
+		{"read", `{"path":"a","files":[{"path":"b"}]}`, false},
+		{"read", `{"files":[{"ranges":[{"lines":3}]}]}`, false},
+		{"read", `{"files":[{"path":"b","ranges":[{"lines":-3}]}]}`, false},
+		{"grep", `{"path":".","pattern":"needle","context_lines":6}`, true},
+		{"grep", `{"path":".","pattern":"needle","context_lines":-1}`, false},
+	} {
+		ctx := &recorder{}
+		status := New(test.name).Translate(ctx, llm.ToolCall{Arguments: test.args})
+		if (status.Error == "") != test.valid || (len(ctx.specs) == 1) != test.valid {
+			t.Fatalf("%s %s: %+v (%d operations)", test.name, test.args, status, len(ctx.specs))
+		}
+	}
+}
+
 func TestTypedOutcomeClassifiesReadWithoutChangingOperation(t *testing.T) {
 	translator := New("read").(tool.ResultFailureClassifier)
 	spec, err := files.Spec(files.Request{Version: files.Version, Action: "read", Path: "fixture.txt"})

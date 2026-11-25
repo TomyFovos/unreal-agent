@@ -481,7 +481,7 @@ func Run(
 			}
 			return err
 		}
-		return host.Runtime{RetainOperation: configuredTools.RetainOperation, InterruptedInput: configuredTools.InterruptedInput, CompletedInput: configuredTools.CompletedInput, ContextEngine: engine, Builder: builder, LLM: client, Tools: runtimeRegistry, Close: closeRuntime, Operations: operation.NewLocalOperationManager(sessionContext, jobs...)}, nil
+		return host.Runtime{AfterRestore: configuredTools.AfterRestore, RetainOperation: configuredTools.RetainOperation, InterruptedInput: configuredTools.InterruptedInput, CompletedInput: configuredTools.CompletedInput, ContextEngine: engine, Builder: builder, LLM: client, Tools: runtimeRegistry, Close: closeRuntime, Operations: operation.NewLocalOperationManager(sessionContext, jobs...)}, nil
 	}})
 	if err != nil {
 		return err

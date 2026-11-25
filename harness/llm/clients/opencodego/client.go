@@ -141,7 +141,9 @@ func (client *Client) Respond(ctx context.Context, request llm.Request, options 
 	}
 	// Legacy ultra is sent as max, which DeepSeek V4.1 Flash accepts.
 	request.Model.ReasoningEffort = request.Model.ReasoningEffort.Normalize()
-	return client.adapter.Respond(ctx, request, options)
+	response, err := client.adapter.Respond(ctx, request, options)
+	response.Usage.Charge = ReportedCharge(response.Usage.Raw)
+	return response, err
 }
 
 func (client *Client) Close() error { return client.remote.Close() }

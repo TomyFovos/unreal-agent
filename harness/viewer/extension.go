@@ -8,11 +8,13 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/host"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
+	"github.com/unreallabsai/unreal-agent/harness/subagent"
 )
 
 const maxExtensionRequest = 128 << 10
@@ -25,9 +27,11 @@ type extensionRequest struct {
 	After    sessionstore.Sequence
 	Limit    int
 	Control  ControlRequest
+	Since    string `json:",omitzero"`
 	Display  string `json:",omitzero"` // view.set: chat, orchestration or split
 }
 type extensionReply struct {
+	Usage             *subagent.UsageReport        `json:",omitzero"`
 	View              *host.View                   `json:",omitzero"`
 	Receipt           *host.Receipt                `json:",omitzero"`
 	SubscriptionUsage llm.SubscriptionObservations `json:",omitzero"`
@@ -79,6 +83,7 @@ func extensionError(err error) string {
 // It revalidates parent/child identity at the owning Host for every action.
 type ExtensionHandler struct {
 	cache     *parentReadCache
+	usage     *subagent.UsageReader
 	Host      *host.Host
 	Directory string
 }
@@ -86,7 +91,8 @@ type ExtensionHandler struct {
 // NewExtensionHandler shares immutable read projections across the scoped
 // child polls of this Host. Direct struct construction remains supported.
 func NewExtensionHandler(owner *host.Host, directory string) ExtensionHandler {
-	return ExtensionHandler{Host: owner, Directory: directory, cache: newParentReadCache()}
+	reader, _ := subagent.OpenUsageReader(directory)
+	return ExtensionHandler{Host: owner, Directory: directory, cache: newParentReadCache(), usage: reader}
 }
 
 func (h ExtensionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -107,6 +113,27 @@ func (h ExtensionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		out.Error = "invalid_request"
 	} else {
 		switch q.Action {
+		case "usage":
+			if _, err = (HostControls{Host: h.Host}).owner(r.Context(), ControlRequest{ParentID: q.ParentID}); err != nil {
+				break
+			}
+			since, parseErr := time.ParseDuration(q.Since)
+			if parseErr != nil || since <= 0 {
+				out.Error = "invalid_duration"
+				break
+			}
+			reader := h.usage
+			if reader == nil {
+				reader, err = subagent.OpenUsageReader(h.Directory)
+				if err != nil {
+					break
+				}
+			}
+			var report subagent.UsageReport
+			report, err = reader.Read(r.Context(), q.ParentID, time.Now(), since)
+			if err == nil {
+				out.Usage = &report
+			}
 		case "subscription_usage":
 			reader := ParentReader{Host: h.Host, ParentID: q.ParentID, Directory: h.Directory, cache: h.cache}
 			out.SubscriptionUsage, err = reader.DescendantSubscriptionUsage(r.Context())
@@ -318,3 +345,15 @@ func (r Remote) ResumeChild(ctx context.Context, q ControlRequest) error {
 
 var _ Reader = Remote{}
 var _ Controls = Remote{}
+
+// UsageTree reads the ledger rooted at this authenticated Session.
+func (r Remote) UsageTree(ctx context.Context, since time.Duration) (subagent.UsageReport, error) {
+	reply, err := r.exchange(ctx, extensionRequest{Action: "usage", ParentID: r.ParentID, Since: since.String()})
+	if err != nil {
+		return subagent.UsageReport{}, err
+	}
+	if reply.Usage == nil || reply.Usage.Root != r.ParentID {
+		return subagent.UsageReport{}, ErrInvalidPage
+	}
+	return *reply.Usage, nil
+}

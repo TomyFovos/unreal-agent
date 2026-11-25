@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
-	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"sync"
+
+	"github.com/unreallabsai/unreal-agent/harness/operation"
+	"github.com/unreallabsai/unreal-agent/harness/record"
 )
 
 const PlanType operation.RemoteJobPlanType = "native_file"
@@ -90,6 +92,9 @@ func (h *Handler) AddRemoteJobWithContext(parent context.Context, current operat
 		result := Result{Version: Version, Code: "canceled", Path: request.Path}
 		if current.Status != operation.StatusCanceling {
 			result = h.executor.Execute(ctx, h.namespace+"/"+string(current.ID), request)
+			if (request.Files != nil || request.ContextLines > 0) && result.Code != "canceled" {
+				result.Locator = record.Output(h.namespace, string(current.ID), record.State)
+			}
 		}
 		current.Denial = result.Denial
 		state.Handle = EncodeResult(result)

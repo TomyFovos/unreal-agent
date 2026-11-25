@@ -46,6 +46,8 @@ type Runtime struct {
 	RetainOperation   func(context.Context, operation.Operation) (bool, error)
 	InterruptedInput  func(operation.Operation) (*inbox.Input, error)
 	CompletedInput    func(operation.Operation) (*inbox.Input, error)
+	BudgetInput       func(context.Context) *inbox.Input
+	AfterRestore      func()
 	ContextEngine     *contextengine.Engine
 	Selection         *sessionstore.RuntimeSelection
 	ApplySelection    func(sessionstore.RuntimeSelection) error
@@ -531,6 +533,9 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		AfterRestore: func() {
 			s.background.start(s.archiveLoop)
 			s.wakeChildArchive()
+			if !created && s.runtime.AfterRestore != nil {
+				s.runtime.AfterRestore()
+			}
 		},
 		CacheKey:           s.modelCacheKey(),
 		RecordActivity:     s.recordActivity,
@@ -539,6 +544,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		InterruptedInput:   s.runtime.InterruptedInput,
 		RetainOperation:    s.runtime.RetainOperation,
 		CompletedInput:     s.runtime.CompletedInput,
+		BudgetInput:        s.runtime.BudgetInput,
 		ContextBuilt:       s.contextBuilt,
 		BeforeTurn:         s.beginTurn,
 		RuntimeSelection:   s.RuntimeSelection,

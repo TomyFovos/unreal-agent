@@ -13,7 +13,7 @@ import (
 )
 
 func (a *Accumulator) ContextReport(observed bool) *ContextMeasurements {
-	return contextReport([]contextSessionResult{a.context.project(observed, nil, a.calls, modelKey(a.active))}, !observed)
+	return contextReport([]contextSessionResult{a.context.project(observed, nil, a.calls, modelKey(a.active), a.metrics.layer)}, !observed)
 }
 
 type windowMeasurements struct {
@@ -31,7 +31,7 @@ type contextSessionResult struct {
 	routes   []string
 }
 
-func (m *contextReplay) project(observed bool, facts *sessionstore.ContextFacts, calls map[string]*call, fallback ModelKey) contextSessionResult {
+func (m *contextReplay) project(observed bool, facts *sessionstore.ContextFacts, calls map[string]*call, fallback ModelKey, role string) contextSessionResult {
 	result := contextSessionResult{
 		view: ContextSession{Session: m.id, Partial: !observed, Fallbacks: m.fallbacks}, groups: make(contextGroups),
 		strategy: make(contextGroups), reviews: make(reviewGroups),
@@ -261,7 +261,7 @@ func (m *contextReplay) project(observed bool, facts *sessionstore.ContextFacts,
 		result.strategy.group(ContextDimensions{Strategy: key.Strategy}).merge("user_questions", c["user_questions"])
 	}
 	result.view.Subscription = slices.Clone(m.subscription)
-	result.view.PolicyPeriods, result.routes, result.policy = m.policyPeriods(windows, observed, fallback.Provider)
+	result.view.PolicyPeriods, result.routes, result.policy = m.policyPeriods(windows, observed, fallback.Provider, role)
 	return result
 }
 
@@ -593,7 +593,7 @@ func (t *Tree) contextReport(root *Accumulator, sessions []SessionMetric) *Conte
 			a = root
 		}
 		accumulators[a.id], index[a.id] = a, i
-		results = append(results, a.context.project(n.observed, n.facts, a.calls, sessions[i].ModelKey))
+		results = append(results, a.context.project(n.observed, n.facts, a.calls, sessions[i].ModelKey, sessions[i].Layer))
 	}
 	for _, child := range sessions {
 		parent := accumulators[child.ParentID]
