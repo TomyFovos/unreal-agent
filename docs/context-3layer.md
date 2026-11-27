@@ -112,6 +112,7 @@ Responses providers use the native tool names. A Claude Code main uses the Host'
 | `state accept HANDLE` or `state reject HANDLE [--why TEXT]` | `StateAccept` or `StateReject` | Settle the owned child's review. The reason is optional. |
 | `state question TEXT [--id ID] [--source LOCATOR]` | `StateQuestion` | Record a note about a question. Send the question in the visible reply. The source can link an existing assistant record. |
 | `state answer ID --source LOCATOR` | `StateAnswer` | Link the open question to the user message that answers it and settle the wait. |
+| `state import SESSION --sessions DIR` | (CLI only) | Replay another Session's record read-only and copy its current rules, decisions, open plan steps and open questions into this Session's L2. IDs gain the source Session's name as a prefix; locators keep naming the source Session. Repeating an import leaves the state unchanged. |
 
 `state question answer` is also accepted. The CLI can take multiline text from stdin with `-`. Use `--help` after a command for its flags.
 

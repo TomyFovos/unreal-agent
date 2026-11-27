@@ -105,6 +105,7 @@ type Client struct {
 	config           Config
 	approver         approver
 	activityInterval time.Duration
+	updateWaitLimit  time.Duration
 }
 
 func (c Config) String() string    { data, _ := json.Marshal(c); return string(data) }
@@ -137,7 +138,7 @@ func NewClient(config Config) (*Client, error) {
 	if !filepath.IsAbs(config.Subagents.Binary) || !filepath.IsAbs(config.Subagents.Socket) {
 		config.Subagents.Binary, config.Subagents.Templates = "", nil
 	}
-	return &Client{config: config, approver: approver{cli: subagentCommandPath(config.Subagents), contextCLI: config.Subagents.ContextCommand}, activityInterval: streamActivityInterval}, nil
+	return &Client{config: config, approver: approver{cli: subagentCommandPath(config.Subagents), contextCLI: config.Subagents.ContextCommand}, activityInterval: streamActivityInterval, updateWaitLimit: cliUpdateWaitLimit}, nil
 }
 
 func (c *Client) Close() error { return nil }
@@ -197,12 +198,31 @@ func (c *Client) Respond(ctx context.Context, request llm.Request, opt llm.Reque
 	if err := ctx.Err(); err != nil {
 		return llm.Response{}, err
 	}
-	for attempt := 0; ; attempt++ {
-		response, err := c.run(ctx, request, opt, session, resume, prompt)
+	wait := cliUpdateWait{path: c.config.Binary, remaining: c.updateWaitLimit, progress: opt.Progress}
+	for conversationRetried := false; ; {
+		response, err := c.run(ctx, request, opt, session, resume, prompt, &wait)
+		var unavailable *cliUnavailable
+		if errors.As(err, &unavailable) {
+			if err := wait.untilReady(ctx); err == nil {
+				continue
+			}
+			if err := ctx.Err(); err != nil {
+				wait.finish("canceled")
+				return llm.Response{}, err
+			}
+			wait.finish("timed out")
+			return llm.Response{}, unavailable.failure
+		}
+		if ctx.Err() != nil {
+			wait.finish("canceled")
+		} else {
+			wait.finish("startup failed")
+		}
 		var started *startError
-		if attempt > 0 || !errors.As(err, &started) {
+		if conversationRetried || !errors.As(err, &started) {
 			return response, err
 		}
+		conversationRetried = true
 		// Claude Code's own record decides: start the conversation it lacks,
 		// or continue the one it already has.
 		switch started.kind {
@@ -224,7 +244,7 @@ type startError struct {
 
 func (e *startError) Error() string { return "Claude Code: " + e.message }
 
-func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOptions, session string, resume bool, prompt string) (llm.Response, error) {
+func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOptions, session string, resume bool, prompt string, wait *cliUpdateWait) (llm.Response, error) {
 	if err := ctx.Err(); err != nil {
 		return llm.Response{}, err
 	}
@@ -304,7 +324,11 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	cmd.Stderr = &stderr
 	started := time.Now().UTC()
 	if err = cmd.Start(); err != nil {
-		return llm.Response{}, &Error{Code: "cli_missing", Message: err.Error()}
+		failure := &Error{Code: "cli_missing", Message: err.Error()}
+		if temporarilyUnusableCLI(err, cmd.Dir) {
+			return llm.Response{}, &cliUnavailable{failure}
+		}
+		return llm.Response{}, failure
 	}
 	out := &writer{w: stdin}
 	t := newTurn(ctx, cancel, opt, out, c.config.Results, &c.approver, c.config.Directory, session)
@@ -318,6 +342,7 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		time.AfterFunc(3*time.Second, cancel)
 	})
 	defer stopInterrupt()
+	const exitGrace = 5 * time.Second
 	finishProcess := sync.OnceFunc(func() {
 		// Closing stdin ends the CLI after it has saved the conversation; a
 		// stuck one is stopped, then killed with everything it started.
@@ -326,11 +351,11 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		go func() { _ = cmd.Wait(); close(exited) }()
 		select {
 		case <-exited:
-		case <-time.After(5 * time.Second):
+		case <-time.After(exitGrace):
 			cancel()
 			select {
 			case <-exited:
-			case <-time.After(5 * time.Second):
+			case <-time.After(exitGrace):
 				killGroup(cmd)
 				<-exited
 			}
@@ -345,16 +370,21 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		"PreToolUse":    []any{map[string]any{"matcher": gateMatcher, "hookCallbackIds": []string{gateHook}}},
 		"PostToolBatch": []any{map[string]any{"hookCallbackIds": []string{batchHook}, "timeout": batchHookSeconds}},
 	}
-	if err = out.send(map[string]any{"type": "control_request", "request_id": "unreal-init", "request": map[string]any{"subtype": "initialize", "hooks": hooks}}); err == nil {
-		err = out.send(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": prompt}, "parent_tool_use_id": nil, "session_id": ""})
+	sendErr := out.send(map[string]any{"type": "control_request", "request_id": "unreal-init", "request": map[string]any{"subtype": "initialize", "hooks": hooks}})
+	if sendErr == nil {
+		sendErr = out.send(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": prompt}, "parent_tool_use_id": nil, "session_id": ""})
 	}
-	if err != nil {
-		finishProcess()
-		return llm.Response{}, startFailure(stderr.String(), &Error{Code: "subprocess_failure", Message: err.Error()})
+	if sendErr != nil {
+		// A loader can exit before the first write. Check for a frame even on
+		// that path, while allowing the same grace period for the CLI to exit.
+		_ = stdin.Close()
+		_ = stdout.(*os.File).SetReadDeadline(time.Now().Add(exitGrace))
 	}
 
 	reader := bufio.NewReaderSize(stdout, 64<<10)
 	subscription := c.providerID() == ProviderID
+	sawFrame := false
+	readEnded := false
 	var result *frame
 	var lastInput *int64
 	for result == nil {
@@ -364,7 +394,14 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 		}
 		if len(line) > 0 {
 			var f frame
-			if json.Unmarshal(line, &f) == nil {
+			if json.Unmarshal(line, &f) == nil && f.Type != "" {
+				if !sawFrame {
+					sawFrame = true
+					wait.finish("ready")
+				}
+				if sendErr != nil {
+					break
+				}
 				if subscription && f.Type == "rate_limit_event" && f.RateLimitInfo != nil {
 					t.recordSubscriptionUsage(f, request.Model)
 				}
@@ -380,6 +417,10 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 			}
 		}
 		if readErr != nil {
+			readEnded = errors.Is(readErr, io.EOF)
+			if sendErr != nil && errors.Is(readErr, os.ErrDeadlineExceeded) {
+				cancel()
+			}
 			break
 		}
 	}
@@ -389,9 +430,15 @@ func (c *Client) run(ctx context.Context, request llm.Request, opt llm.RequestOp
 	if ctx.Err() != nil {
 		return llm.Response{}, ctx.Err()
 	}
-	if result == nil {
+	if sendErr != nil || result == nil {
 		finishProcess()
 		stderrText := stderr.String()
+		if !sawFrame && readEnded && executableLoadFailure(cmd.ProcessState, stderrText) {
+			return llm.Response{}, &cliUnavailable{&Error{Code: "cli_missing", Message: lastLine(stderrText)}}
+		}
+		if sendErr != nil {
+			return llm.Response{}, startFailure(stderrText, &Error{Code: "subprocess_failure", Message: sendErr.Error()})
+		}
 		fallback := &Error{Code: "subprocess_failure", Message: lastLine(stderrText)}
 		failure := startFailure(stderrText, fallback)
 		if subscription && failure == fallback {

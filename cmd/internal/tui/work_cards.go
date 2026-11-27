@@ -359,8 +359,8 @@ func mainCardPulse(s Snapshot, main viewer.Row, rows []viewer.Row, now time.Time
 	if !s.Running {
 		return "停止"
 	}
-	if p := s.Progress; p != nil && p.Mode == "usage_limit_wait" {
-		return llm.UsageLimitWaiting(p.RetryAt)
+	if text := modelWaitText(s.Progress); text != "" {
+		return text
 	}
 	phase := ""
 	elapsed, known := time.Duration(0), false

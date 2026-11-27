@@ -10,6 +10,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/inbox"
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
+	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 	"golang.org/x/sys/unix"
 	"io"
@@ -197,7 +198,7 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 		workers.Go(func() { forwardApprovals(ctx, ep, control) })
 	}
 	if hello.ID == modelProgressHandshake {
-		workers.Go(func() { forwardModelProgress(ctx, ep, child) })
+		workers.Go(func() { forwardModelProgress(ctx, ep, child, hello.ModelProgress != nil) })
 	}
 	workers.Go(func() { forwardUsageWait(ctx, ep, child, config) })
 	// Ready has stable identity in canonical ChildConfig and is retryable after
@@ -243,9 +244,12 @@ func Serve(ctx context.Context, input io.ReadCloser, output io.WriteCloser, fact
 	}
 }
 
-func forwardModelProgress(ctx context.Context, ep *endpoint, child *host.Session) {
+func forwardModelProgress(ctx context.Context, ep *endpoint, child *host.Session, includeUsageReset bool) {
 	for ctx.Err() == nil {
 		progress, changed := child.WatchModelProgress()
+		if !includeUsageReset {
+			progress = modelPhasesOnly(progress)
+		}
 		f := ep.envelope("model_progress")
 		f.ModelProgress = &progress
 		if err := ep.write(ctx, f); err != nil {
@@ -259,6 +263,21 @@ func forwardModelProgress(ctx context.Context, ep *endpoint, child *host.Session
 	}
 }
 
+// Older parents strictly decode the phase frame and never advertised usage resets.
+func modelPhasesOnly(p host.ModelProgress) host.ModelProgress {
+	phases := host.ModelProgress{Phase: p.Phase}
+	for id, child := range p.Children {
+		childPhases := modelPhasesOnly(child)
+		if childPhases.Phase != "" || len(childPhases.Children) != 0 {
+			if phases.Children == nil {
+				phases.Children = make(map[session.ID]host.ModelProgress)
+			}
+			phases.Children[id] = childPhases
+		}
+	}
+	return phases
+}
+
 // Waiting is a quiet parent progress input: visible without starting another
 // model request or blocking the child's Coordinator on a transport ACK.
 func forwardUsageWait(ctx context.Context, ep *endpoint, child *host.Session, config ChildConfig) {
@@ -269,11 +288,10 @@ func forwardUsageWait(ctx context.Context, ep *endpoint, child *host.Session, co
 			return
 		}
 		publish := func(p *host.Progress) bool {
-			var until time.Time
-			if p != nil && p.Mode == "usage_limit_wait" {
-				until = p.RetryAt
-			}
-			if until.Equal(previous) {
+			until := p.UsageRetryAt()
+			// Model progress carries live changes to the reset time. Only the
+			// start and end of the wait need quiet, durable parent notices.
+			if until.IsZero() == previous.IsZero() {
 				return true
 			}
 			id := until

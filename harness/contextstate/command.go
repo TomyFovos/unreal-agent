@@ -3,6 +3,7 @@ package contextstate
 import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"maps"
 	"slices"
 	"time"
 	"unicode/utf8"
@@ -26,7 +27,38 @@ const (
 	AnswerUser Action = "StateAnswer"
 	ShowRecord Action = "RecordShow"
 	FindRecord Action = "RecordFind"
+	// Import is an operator command of the Session CLI, not a model tool:
+	// it copies another Session's recorded state into this Session.
+	Import Action = "StateImport"
 )
+
+// ImportNote carries another Session's current rules, decisions, open plan
+// steps and open questions. IDs stay as recorded there; the Host prefixes
+// them with From, and locators keep pointing to the original Session.
+type ImportNote struct {
+	From      string     `json:"from"`
+	Rules     []Rule     `json:"rules,omitempty"`
+	Decisions []Decision `json:"decisions,omitempty"`
+	Plan      []PlanStep `json:"plan,omitempty"`
+	Questions []Question `json:"questions,omitempty"`
+}
+
+// ImportFrom selects what an import carries from a replayed State.
+func ImportFrom(from string, s State) ImportNote {
+	note := ImportNote{From: from, Plan: slices.Clone(s.Plan.Steps)}
+	for _, id := range slices.Sorted(maps.Keys(s.Rules)) {
+		note.Rules = append(note.Rules, s.Rules[id])
+	}
+	for _, id := range slices.Sorted(maps.Keys(s.Decisions)) {
+		note.Decisions = append(note.Decisions, s.Decisions[id])
+	}
+	for _, id := range slices.Sorted(maps.Keys(s.QuestionsToUser.Current)) {
+		if q := s.QuestionsToUser.Current[id]; q.Status == QuestionOpen {
+			note.Questions = append(note.Questions, q)
+		}
+	}
+	return note
+}
 
 func Actions() []Action {
 	return []Action{Show, Decide, SetPlan, AddRule, Accept, Reject, AskUser, AnswerUser, ShowRecord, FindRecord}

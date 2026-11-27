@@ -112,6 +112,7 @@ Responses 系はネイティブツールを使います。Claude Code の統括�
 | `state accept HANDLE` または `state reject HANDLE [--why TEXT]` | `StateAccept` または `StateReject` | 自分の子の受入・差し戻しを記録する。理由は任意。 |
 | `state question TEXT [--id ID] [--source LOCATOR]` | `StateQuestion` | 質問を手記録する。ユーザーには本文で質問する。既存の統括発言も出典に指定できる。 |
 | `state answer ID --source LOCATOR` | `StateAnswer` | 未回答の質問に本人の回答を結び付け、待ちを解消する。 |
+| `state import SESSION --sessions DIR` | （CLI のみ） | 別の Session の記録を読み取り専用で再生し、現在の規則・決定・未完了の手順・未回答の質問を、この Session の L2 に取り込む。ID には元の Session 名を前に付け、locator は元の Session を指したまま残す。同じ取り込みを繰り返しても状態は変わらない。 |
 
 `state question answer` も使えます。テキストに `-` を渡すと標準入力から原文を読みます。各コマンドの `--help` でフラグを確認できます。
 

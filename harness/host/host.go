@@ -236,6 +236,8 @@ type Session struct {
 	subscribers           map[uint64]chan Event
 	nextSubscriber        uint64
 	progress              *Progress
+	usageWait             *Progress
+	resumeUsageWait       chan struct{}
 	modelProgress         ModelProgress
 	modelProgressChanged  chan struct{}
 	contextReport         *contextengine.Diagnostics
@@ -294,6 +296,9 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		select {
 		case <-old.done:
 		default:
+			if o.Mode == Resume && old.requestUsageRetry() {
+				return old, nil
+			}
 			return nil, localfile.ErrWriterOwned
 		}
 	}
@@ -395,7 +400,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	s := &Session{ID: o.ID, Generation: uuid.New().String(), ctx: cctx, cancel: cancel, lock: lock, store: raw,
 		snapshot: restored.Snapshot, operations: map[operation.ID]operation.Operation{}, submissions: map[inbox.ID]*submission{},
 		subscribers: map[uint64]chan Event{}, done: make(chan struct{}), running: true, archiveWake: make(chan struct{}, 1),
-		selectionChanged: make(chan struct{}, 1), workspace: o.Workspace}
+		selectionChanged: make(chan struct{}, 1), resumeUsageWait: make(chan struct{}, 1), workspace: o.Workspace}
 	s.permissions = controller
 	if controller != nil {
 		controller.RecordApproval = s.recordApproval
@@ -429,6 +434,9 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 	s.historyWorkBefore = make([]*HistoryWork, 0, len(items))
 	for _, item := range items {
 		s.rememberOwnedItem(item, false)
+	}
+	if o.Mode == Resume && s.usageWait != nil {
+		s.resumeUsageWait <- struct{}{}
 	}
 	if err = s.verifyRuntimeSelections(); err != nil {
 		return nil, err
@@ -540,6 +548,8 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		CacheKey:           s.modelCacheKey(),
 		RecordActivity:     s.recordActivity,
 		ModelWaiting:       s.modelWaiting,
+		ModelWaitUpdated:   s.updateModelWait,
+		ResumeUsageWait:    s.resumeUsageWait,
 		RetryModelFailures: s.lifecycle == "child",
 		InterruptedInput:   s.runtime.InterruptedInput,
 		RetainOperation:    s.runtime.RetainOperation,
@@ -604,6 +614,7 @@ func (h *Host) Open(ctx context.Context, o Options) (result *Session, err error)
 		runErr = errors.Join(runErr, lock.Close())
 		s.running = false
 		s.progress = nil
+		s.usageWait = nil
 		s.err = runErr
 		s.broadcast(Event{Kind: "stopped"})
 		for id, ch := range s.subscribers {
@@ -793,7 +804,7 @@ func (s *Session) view(after sessionstore.Sequence, limit int) (View, error) {
 		return View{}, fmt.Errorf("history cursor beyond session")
 	}
 	end := min(int(after)+limit, len(s.items))
-	v := View{Context: s.contextReport, Progress: s.progress, ProjectInstructions: s.instructions, Session: s.snapshot, Generation: s.Generation, Revision: s.revision, Running: s.running,
+	v := View{Context: s.contextReport, Progress: s.visibleProgress(), ProjectInstructions: s.instructions, Session: s.snapshot, Generation: s.Generation, Revision: s.revision, Running: s.running,
 		History: ProjectHistoryPage(sessionstore.Page{Items: s.items[int(after):end], NextAfter: sessionstore.Sequence(end), More: end < len(s.items)})}
 	if s.permissions != nil {
 		v.Permissions = s.permissions.Snapshot()
@@ -859,8 +870,14 @@ func (s *Session) Subscribe(after sessionstore.Sequence, limit, capacity int) (S
 	}}, nil
 }
 func (s *Session) broadcast(event Event) {
-	if phase := s.progress.modelPhase(); phase != s.modelProgress.Phase {
+	progress := s.visibleProgress()
+	if event.Kind == "progress" {
+		event.Progress = progress
+	}
+	phase, until := progress.modelPhase(), progress.UsageRetryAt()
+	if phase != s.modelProgress.Phase || !until.Equal(s.modelProgress.UsageRetryAt) {
 		s.modelProgress.Phase = phase
+		s.modelProgress.UsageRetryAt = until
 		s.modelProgressChangedLocked()
 	}
 	s.revision++
@@ -925,13 +942,14 @@ func (s *Session) rememberOwnedItem(item sessionstore.Item, notify bool) {
 			case llm.ActivityModelFailure:
 				s.progress = nil
 			case "usage_limit_wait":
-				s.progress = nil
+				s.usageWait = nil
 				if !a.RetryAt.IsZero() {
+					s.progress = nil
 					s.progressEpoch++
-					s.progress = &Progress{TurnID: s.currentTurn(), Epoch: s.progressEpoch, Mode: "usage_limit_wait", RetryAt: a.RetryAt}
+					s.usageWait = &Progress{TurnID: s.currentTurn(), Epoch: s.progressEpoch, Mode: "usage_limit_wait", RetryAt: a.RetryAt}
 				}
 				if notify {
-					s.broadcast(Event{Kind: "progress", Progress: s.progress})
+					s.broadcast(Event{Kind: "progress"})
 				}
 			}
 		}

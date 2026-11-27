@@ -58,6 +58,7 @@ type projection struct {
 	end               *sessionstore.EndRecord
 	activity          string
 	usageWaitUntil    time.Time
+	liveUsageRetryAt  time.Time
 	runtime           Liveness
 	resync            bool
 	more              bool
@@ -154,6 +155,7 @@ func (m *Model) snapshot(p *projection, v host.View) {
 	p.view.Failure = v.Failure
 	p.view.ProjectInstructions = v.ProjectInstructions
 	p.view.ModelPhase = v.ModelPhase
+	p.liveUsageRetryAt = v.Progress.UsageRetryAt()
 	previous, children := p.operations, p.children
 	p.operations = make(map[operation.ID]operation.Operation, len(v.Operations))
 	p.children = make(map[operation.ID]decodedChild)
@@ -201,7 +203,7 @@ func (m *Model) AppendPage(id session.ID, after sessionstore.Sequence, view host
 	if view.Revision < p.view.Revision {
 		return ErrStale
 	}
-	if (!view.Running || p.runtime != RuntimeUnknown) && len(view.History.Items) == 0 && !view.History.More && !p.more && view.Revision == p.view.Revision && reflect.DeepEqual(view.Session, p.view.Session) && view.Running == p.view.Running && view.Failure == p.view.Failure && view.ModelPhase == p.view.ModelPhase && reflect.DeepEqual(view.ProjectInstructions, p.view.ProjectInstructions) && len(view.Operations) == len(p.operations) {
+	if (!view.Running || p.runtime != RuntimeUnknown) && len(view.History.Items) == 0 && !view.History.More && !p.more && view.Revision == p.view.Revision && reflect.DeepEqual(view.Session, p.view.Session) && view.Running == p.view.Running && view.Failure == p.view.Failure && view.ModelPhase == p.view.ModelPhase && view.Progress.UsageRetryAt().Equal(p.liveUsageRetryAt) && reflect.DeepEqual(view.ProjectInstructions, p.view.ProjectInstructions) && len(view.Operations) == len(p.operations) {
 		same := true
 		for _, op := range view.Operations {
 			if old, ok := p.operations[op.ID]; !ok || !reflect.DeepEqual(old, op) {
@@ -249,7 +251,13 @@ func (m *Model) Apply(id session.ID, event host.Event) error {
 		return ErrResync
 	}
 	if event.Kind == "progress" || event.Kind == "context" {
-		// The main chat consumes stream text. Child reads carry phase only.
+		// The main chat consumes stream text. The viewer needs only the reset.
+		if event.Kind == "progress" {
+			if until := event.Progress.UsageRetryAt(); !until.Equal(p.liveUsageRetryAt) {
+				p.liveUsageRetryAt = until
+				m.version++
+			}
+		}
 		p.view.Revision = event.Revision
 		return nil
 	}
@@ -293,6 +301,7 @@ func (m *Model) Apply(id session.ID, event host.Event) error {
 	case "stopped":
 		p.runtime = RuntimeStopped
 		p.view.Running = false
+		p.liveUsageRetryAt = time.Time{}
 	default:
 		p.resync = true
 		p.runtime = RuntimeUnknown
@@ -304,9 +313,10 @@ func (m *Model) Apply(id session.ID, event host.Event) error {
 func (m *Model) Disconnect(id session.ID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if p := m.sessions[id]; p != nil && (p.runtime != RuntimeUnknown || p.view.ModelPhase != "") {
+	if p := m.sessions[id]; p != nil && (p.runtime != RuntimeUnknown || p.view.ModelPhase != "" || !p.liveUsageRetryAt.IsZero()) {
 		p.runtime = RuntimeUnknown
 		p.view.ModelPhase = ""
+		p.liveUsageRetryAt = time.Time{}
 		m.version++
 	}
 }
@@ -535,6 +545,9 @@ func (m *Model) base(id session.ID, p *projection, now time.Time) Row {
 	r.Activity = p.activity
 	r.ModelPhase = p.view.ModelPhase
 	r.UsageWaitUntil = p.usageWaitUntil
+	if !p.liveUsageRetryAt.IsZero() && !p.resync {
+		r.UsageWaitUntil = p.liveUsageRetryAt
+	}
 	r.CreatedAt = p.view.Session.Session.CreatedAt
 	r.LastActivityAt = p.lastActivityAt
 	cutoff := now.Add(-10 * time.Minute)

@@ -22,6 +22,10 @@ type Dependencies struct {
 	RecordActivity func(context.Context, llm.ActivityRecord) error
 	// ModelWaiting publishes the usage-limit wait; zero clears it.
 	ModelWaiting func(context.Context, time.Time) error
+	// ModelWaitUpdated changes the reset shown for an existing wait.
+	ModelWaitUpdated func(time.Time)
+	// ResumeUsageWait wakes a live Session on explicit resume.
+	ResumeUsageWait <-chan struct{}
 	// Child Sessions keep their execution ownership after a transient inference
 	// failure. Other lifecycles retain their configured provider retry policy.
 	RetryModelFailures bool

@@ -102,6 +102,40 @@ func TestModelRefreshRegistersNewlyAuthenticatedProviderInRunningHost(t *testing
 	}
 }
 
+func TestClaudeCodeUpdateWaitCatalogRecoversOnRefresh(t *testing.T) {
+	f, cli := normalFixture(t, true, true)
+	l := launcher{start: f.start, choose: func([]string) (string, error) { return claudeagent.ProviderID, nil }}
+	l.attach = func(ctx context.Context, c *gateway.Client, id session.ID) error {
+		query := modelRequest{Action: "model.catalog", ID: id, Provider: claudeagent.ProviderID, Refresh: true}
+		before, err := c.Inspect(ctx, id, 0, 128)
+		if err != nil {
+			t.Fatal(err)
+		}
+		target := cli.Binary + ".updating"
+		if err := os.Rename(cli.Binary, target); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := modelExchange(ctx, c.Extension, query); err == nil && out.Catalog != nil && out.Catalog.Available {
+			t.Fatal("missing Claude Code still has an available catalog")
+		}
+		if err := os.Rename(target, cli.Binary); err != nil {
+			t.Fatal(err)
+		}
+		out, err := modelExchange(ctx, c.Extension, query)
+		if err != nil || out.Catalog == nil || !out.Catalog.Available || len(out.Catalog.Models) == 0 {
+			t.Fatalf("catalog did not recover: %+v, %v", out.Catalog, err)
+		}
+		after, err := c.Inspect(ctx, id, 0, 128)
+		if err != nil || !after.Running || after.Generation != before.Generation || f.starts.Load() != 1 || len(cli.Calls(t)) != 0 {
+			t.Fatalf("catalog refresh affected the Session or ran inference: %v", err)
+		}
+		return nil
+	}
+	if err := l.run(t.Context(), nil, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUnavailableStartupGuidanceHasCommandsAndNoInternalCodes(t *testing.T) {
 	for _, providers := range [][]modelcatalog.Provider{
 		{unavailableProvider("openai-codex", modelcatalog.AuthRequired), unavailableProvider("claude", modelcatalog.AuthRequired)},

@@ -17,7 +17,6 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"github.com/unreallabsai/unreal-agent/harness/operation"
 	"github.com/unreallabsai/unreal-agent/harness/permission"
-	"github.com/unreallabsai/unreal-agent/harness/primitives"
 	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
 	"github.com/unreallabsai/unreal-agent/harness/sessionstore"
@@ -156,7 +155,7 @@ func (current *coordinator) Run(ctx context.Context) error {
 		current.dependencies.AfterRestore()
 	}
 	if !current.usageRetryAt.IsZero() {
-		current.modelRetry = time.After(max(0, time.Until(current.usageRetryAt)))
+		current.scheduleUsageRetry()
 	}
 	defer func() {
 		if err := current.clearUsageWait(context.WithoutCancel(ctx)); err != nil {
@@ -308,9 +307,13 @@ func (current *coordinator) runLoop(ctx context.Context) error {
 				return ctx.Err()
 			}
 			current.modelRetry = nil
-			if err := current.clearUsageWait(ctx); err != nil {
-				return err
+			current.state.callModel = true
+
+		case <-current.dependencies.ResumeUsageWait:
+			if current.usageRetryAt.IsZero() || current.modelRetry == nil {
+				continue
 			}
+			current.modelRetry = nil
 			current.state.callModel = true
 
 		case <-current.dependencies.SelectionChanged:
@@ -589,10 +592,6 @@ func (current *coordinator) processOperations(ctx context.Context, updates []ope
 
 func (current *coordinator) processModelResponse(ctx context.Context, modelResponse modelResponseResult) error {
 	current.interruptModel()
-	if modelResponse.err == nil && modelResponse.response.Stop == llm.StopWindowBoundary && current.windowContinuation {
-		current.state.callModel = true
-		return nil
-	}
 	if modelResponse.err != nil {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -607,18 +606,18 @@ func (current *coordinator) processModelResponse(ctx context.Context, modelRespo
 		var limited llm.UsageLimitFailure
 		if errors.As(modelResponse.err, &limited) {
 			if until, reached := limited.UsageLimitReset(); reached {
-				if !until.After(time.Now()) {
-					until = time.Now().Add(primitives.DefaultRemoteRequest("", "", "").RetryPolicy.MaxBackoff)
-				}
-				current.usageRetryAt = until
-				current.state.callModel = false
-				current.modelRetry = time.After(time.Until(until))
-				if publish := current.dependencies.ModelWaiting; publish != nil {
-					return publish(ctx, until)
-				}
-				return nil
+				return current.waitForUsage(ctx, until)
 			}
 		}
+	}
+	if err := current.clearUsageWait(ctx); err != nil {
+		return err
+	}
+	if modelResponse.err == nil && modelResponse.response.Stop == llm.StopWindowBoundary && current.windowContinuation {
+		current.state.callModel = true
+		return nil
+	}
+	if modelResponse.err != nil {
 		var retryable interface{ RetryableModelFailure() bool }
 		if current.dependencies.RetryModelFailures && !llm.IsContextOverflow(modelResponse.err, modelResponse.response) && errors.As(modelResponse.err, &retryable) && retryable.RetryableModelFailure() {
 			if record := current.dependencies.RecordActivity; record != nil {
@@ -666,17 +665,6 @@ func (current *coordinator) processModelResponse(ctx context.Context, modelRespo
 func (current *coordinator) clearToolGrace() {
 	clear(current.state.graceToolCalls)
 	current.state.grace = nil
-}
-
-func (current *coordinator) clearUsageWait(ctx context.Context) error {
-	if current.usageRetryAt.IsZero() {
-		return nil
-	}
-	current.usageRetryAt = time.Time{}
-	if publish := current.dependencies.ModelWaiting; publish != nil {
-		return publish(ctx, time.Time{})
-	}
-	return nil
 }
 
 func (current *coordinator) handleStop(ctx context.Context) (bool, error) {
@@ -1024,9 +1012,7 @@ func (current *coordinator) handleInboxInput(ctx context.Context, input inbox.In
 	}
 	if input.Kind == inbox.InputExternal {
 		current.stopIdle("user_input")
-		if current.usageRetryAt.IsZero() {
-			current.modelRetry = nil
-		}
+		current.modelRetry = nil
 	}
 	item, err := current.addItemToLocalState(sessionstore.Item{
 		Kind: sessionstore.ItemInput,

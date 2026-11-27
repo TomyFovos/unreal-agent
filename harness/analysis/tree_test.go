@@ -405,21 +405,25 @@ func TestAnalyzeShowsActiveUsageReset(t *testing.T) {
 			Kind: sessionstore.HostActivity, Activity: &llm.ActivityRecord{Kind: "usage_limit_wait", StartedAt: at, RetryAt: retryAt},
 		}})
 	}
-	check := func(at time.Time, waiting bool) {
+	check := func(at, want time.Time) {
 		t.Helper()
-		report := a.Snapshot(at, true, false, nil, nil)
-		report.Tree = tree.Snapshot(a)
+		report := tree.Report(at, nil)
 		for _, view := range []string{"Overview", "Usage", "Layers"} {
 			lines := strings.Join(Lines(report, view, true), "\n")
-			if strings.Contains(lines, llm.UsageLimitWaiting(until)) != waiting {
-				t.Fatalf("%s waiting = %t\n%s", view, waiting, lines)
+			if (!want.IsZero() && !strings.Contains(lines, llm.UsageLimitWaiting(want))) ||
+				(!want.Equal(until) && strings.Contains(lines, llm.UsageLimitWaiting(until))) {
+				t.Fatalf("%s reset = %v\n%s", view, want, lines)
 			}
 		}
 	}
 	record(at, until)
-	check(at, true)
-	record(until, time.Time{})
-	check(until, false)
+	check(at, until)
+	updated := until.Add(time.Hour)
+	tree.nodes[0].liveUsageRetryAt = updated
+	check(at, updated)
+	tree.nodes[0].liveUsageRetryAt = time.Time{}
+	record(updated, time.Time{})
+	check(updated, time.Time{})
 }
 
 func TestWorkerTierModelSwitchAndMixedRework(t *testing.T) {

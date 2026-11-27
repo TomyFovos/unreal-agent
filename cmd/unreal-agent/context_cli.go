@@ -17,6 +17,7 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/host/gateway"
 	"github.com/unreallabsai/unreal-agent/harness/record"
 	"github.com/unreallabsai/unreal-agent/harness/session"
+	"github.com/unreallabsai/unreal-agent/harness/sessionstore/localfile"
 )
 
 const contextUsage = `usage: unreal-agent state show
@@ -28,13 +29,21 @@ const contextUsage = `usage: unreal-agent state show
        unreal-agent state accept|reject HANDLE [--why TEXT]
        unreal-agent state question [TEXT] [--id ID] [--source LOCATOR]
        unreal-agent state answer ID --source LOCATOR
+       unreal-agent state import SESSION --sessions DIR
        unreal-agent record show LOCATOR [--page-bytes N] [--json]
        unreal-agent record find [TEXT] [--kind KIND] [--handle HANDLE] [--from RFC3339] [--before RFC3339]
 
 Pass - as a text argument to read it verbatim from stdin.`
 
 func runContextCLI(ctx context.Context, args []string, stdin io.Reader, out io.Writer) error {
-	cmd, asJSON, err := parseContextCommand(args, stdin, out)
+	var cmd contextstate.Command
+	var asJSON bool
+	var err error
+	if len(args) >= 2 && args[0] == "state" && args[1] == "import" {
+		cmd, err = parseImportCommand(ctx, args[2:], out)
+	} else {
+		cmd, asJSON, err = parseContextCommand(args, stdin, out)
+	}
 	if err != nil {
 		return err
 	}
@@ -68,6 +77,34 @@ func runContextCLI(ctx context.Context, args []string, stdin io.Reader, out io.W
 	}
 	_, err = fmt.Fprintln(out, string(encoded))
 	return err
+}
+
+// parseImportCommand replays another Session's history read-only and sends
+// its current rules, decisions, open plan steps and open questions.
+func parseImportCommand(ctx context.Context, args []string, out io.Writer) (contextstate.Command, error) {
+	var cmd contextstate.Command
+	flags := flag.NewFlagSet("unreal-agent state import", flag.ContinueOnError)
+	flags.SetOutput(out)
+	flags.Usage = func() { fmt.Fprintln(out, contextUsage) }
+	dir := flags.String("sessions", "", "the other Session's session directory")
+	rest, err := parseAll(flags, args)
+	if err != nil {
+		return cmd, err
+	}
+	if len(rest) != 1 || *dir == "" {
+		return cmd, errors.New(contextUsage)
+	}
+	store, err := localfile.OpenExisting(*dir)
+	if err != nil {
+		return cmd, err
+	}
+	state, err := store.ContextState(ctx, session.ID(rest[0]))
+	if err != nil {
+		return cmd, err
+	}
+	cmd.Action = contextstate.Import
+	cmd.Args, err = json.Marshal(contextstate.ImportFrom(rest[0], state))
+	return cmd, err
 }
 
 func parseContextCommand(args []string, stdin io.Reader, out io.Writer) (contextstate.Command, bool, error) {

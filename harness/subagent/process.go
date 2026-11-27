@@ -152,6 +152,7 @@ func startProcess(ctx context.Context, c Config, child ChildConfig, mode permiss
 	go func() {
 		hello := ep.envelope("hello")
 		hello.ID = modelProgressHandshake
+		hello.ModelProgress = &host.ModelProgress{} // advertise usage resets in progress frames
 		hello.Config = &child
 		hello.Mode = mode
 		hello.TreeRoot, hello.MaxActiveChildren = c.TreeRoot, c.MaxActiveChildren

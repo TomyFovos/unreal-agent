@@ -2,6 +2,7 @@ package host
 
 import (
 	"maps"
+	"time"
 
 	"github.com/unreallabsai/unreal-agent/harness/session"
 )
@@ -28,15 +29,18 @@ func (p *Progress) modelPhase() ModelPhase {
 	return ""
 }
 
-// ModelProgress relays only request phases across child process boundaries.
+// ModelProgress relays request phases and usage-limit resets across child process boundaries.
 // Children is keyed by immediate child ID so observations can follow the
 // same lineage as their canonical start records.
 type ModelProgress struct {
-	Phase    ModelPhase                   `json:",omitzero"`
-	Children map[session.ID]ModelProgress `json:",omitzero"`
+	Phase        ModelPhase                   `json:",omitzero"`
+	UsageRetryAt time.Time                    `json:",omitzero"`
+	Children     map[session.ID]ModelProgress `json:",omitzero"`
 }
 
-func (p ModelProgress) empty() bool { return p.Phase == "" && len(p.Children) == 0 }
+func (p ModelProgress) empty() bool {
+	return p.Phase == "" && p.UsageRetryAt.IsZero() && len(p.Children) == 0
+}
 
 func (s *Session) modelProgressChangedLocked() {
 	if s.modelProgressChanged != nil {
@@ -53,7 +57,9 @@ func (s *Session) WatchModelProgress() (ModelProgress, <-chan struct{}) {
 	if s.modelProgressChanged == nil {
 		s.modelProgressChanged = make(chan struct{})
 	}
-	return ModelProgress{Phase: s.modelProgress.Phase, Children: maps.Clone(s.modelProgress.Children)}, s.modelProgressChanged
+	p := s.modelProgress
+	p.Children = maps.Clone(p.Children)
+	return p, s.modelProgressChanged
 }
 
 // SetChildModelProgress takes ownership of the snapshot decoded from the
@@ -76,16 +82,19 @@ func (s *Session) SetChildModelProgress(id session.ID, progress ModelProgress) {
 }
 
 func (s *Session) ChildModelPhase(path []session.ID) ModelPhase {
+	return s.ChildModelProgress(path).Phase
+}
+
+// ChildModelProgress returns the live model state along a validated child path.
+func (s *Session) ChildModelProgress(path []session.ID) ModelProgress {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	progress := s.modelProgress
 	for _, id := range path {
 		progress = progress.Children[id]
 	}
-	switch progress.Phase {
-	case ModelRequesting, ModelStreaming:
-		return progress.Phase
-	default:
-		return ""
+	if progress.Phase != ModelRequesting && progress.Phase != ModelStreaming {
+		progress.Phase = ""
 	}
+	return ModelProgress{Phase: progress.Phase, UsageRetryAt: progress.UsageRetryAt}
 }

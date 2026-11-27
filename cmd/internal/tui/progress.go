@@ -2,9 +2,24 @@ package tui
 
 import (
 	"fmt"
-	"github.com/unreallabsai/unreal-agent/harness/llm"
 	"time"
+
+	"github.com/unreallabsai/unreal-agent/harness/host"
+	"github.com/unreallabsai/unreal-agent/harness/llm"
 )
+
+func modelWaitText(p *host.Progress) string {
+	if p == nil || p.Done {
+		return ""
+	}
+	switch p.Mode {
+	case "usage_limit_wait":
+		return llm.UsageLimitWaiting(p.RetryAt)
+	case "claude_code_update_wait":
+		return "Claude Code の更新を待っています"
+	}
+	return ""
+}
 
 // mainBusy describes observed work, independently of whether it was started
 // by a person or a child notification.
@@ -53,8 +68,8 @@ func pulse(s Snapshot, u UIState, l layout) line {
 	if !s.Connected || !s.Running || runtime(s) == "failed" {
 		return nil
 	}
-	if p := s.Progress; p != nil && p.Mode == "usage_limit_wait" {
-		return l.markedGutter(u.Theme.symbol("◌", "."), warningStyle, textLine(llm.UsageLimitWaiting(p.RetryAt), warningStyle))
+	if text := modelWaitText(s.Progress); text != "" {
+		return l.markedGutter(u.Theme.symbol("◌", "."), warningStyle, textLine(text, warningStyle))
 	}
 	phase := ""
 	runningTools := false

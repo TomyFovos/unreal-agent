@@ -114,7 +114,11 @@ func (r ParentReader) Inspect(ctx context.Context, id session.ID, after sessions
 		return owner.Inspect(after, limit)
 	}
 	if r.cache != nil {
-		return r.cache.inspect(ctx, owner, r.ParentID, r.Directory, id, after, min(limit, 256))
+		v, err := r.cache.inspect(ctx, owner, r.ParentID, r.Directory, id, after, min(limit, 256))
+		if err == nil {
+			observeModelProgress(&v, owner, []session.ID{id})
+		}
+		return v, err
 	}
 	latest, err := owner.Inspect(0, 1)
 	if err != nil {
@@ -144,6 +148,7 @@ func (r ParentReader) Inspect(ctx context.Context, id session.ID, after sessions
 	if config == nil || config.ParentID != r.ParentID || config.ChildID != id || config.OperationID != identity {
 		return host.View{}, fmt.Errorf("child canonical configuration does not match parent")
 	}
+	observeModelProgress(&child.View, owner, []session.ID{id})
 	return child.View, nil
 }
 func (r ParentReader) Subscribe(ctx context.Context, id session.ID, after sessionstore.Sequence, limit, capacity int) (host.Subscription, error) {

@@ -304,6 +304,9 @@ func (current *coordinator) acceptBridgeRequest(ctx context.Context, request bri
 	if len(round.calls) == 0 {
 		return errors.New("empty tool rendezvous")
 	}
+	if err := current.clearUsageWait(ctx); err != nil {
+		return err
+	}
 	current.bridge, current.bridgeActive = round, true
 	if _, err := current.handleModelResponse(ctx, sessionstore.ModelResponse{TurnID: round.turn, Response: request.response}); err != nil {
 		if errors.Is(err, llm.ErrToolIdentityConflict) || errors.Is(err, llm.ErrToolRecoveryRequired) {

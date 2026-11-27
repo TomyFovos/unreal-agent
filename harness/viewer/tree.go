@@ -27,21 +27,21 @@ func (r ParentReader) InspectTree(ctx context.Context, id session.ID, after sess
 // analysis. The direct-child reader remains the fast path for direct children.
 func (r ParentReader) InspectTopology(ctx context.Context, id session.ID, after sessionstore.Sequence, limit int) (host.View, error) {
 	if v, err := r.Inspect(ctx, id, after, limit); !errors.Is(err, ErrUnavailable) {
-		if err != nil || id == r.ParentID {
-			return v, err
-		}
-		owner, err := r.owner(ctx)
-		if err != nil {
-			return host.View{}, err
-		}
-		v.ModelPhase = owner.ChildModelPhase([]session.ID{id})
-		return v, nil
+		return v, err
 	}
 	v, err := r.inspectTree(ctx, id, after, limit, false)
 	if err != nil {
 		return host.View{}, err
 	}
 	return copyValue(v)
+}
+
+func observeModelProgress(v *host.View, owner *host.Session, path []session.ID) {
+	p := owner.ChildModelProgress(path)
+	v.ModelPhase = p.Phase
+	if !p.UsageRetryAt.IsZero() {
+		v.Progress = &host.Progress{Mode: "usage_limit_wait", RetryAt: p.UsageRetryAt}
+	}
 }
 
 // The gateway encodes this immutable cached page directly. Public Go readers
@@ -65,9 +65,8 @@ func (r ParentReader) inspectTree(ctx context.Context, id session.ID, after sess
 		return host.View{}, ErrInvalidPage
 	}
 	v := childPage(child.View, after, min(limit, 256), analysis)
-	if !analysis {
-		v.ModelPhase = owner.ChildModelPhase(path)
-	} else if len(path) > 0 && !v.History.More {
+	observeModelProgress(&v, owner, path)
+	if analysis && len(path) > 0 && !v.History.More {
 		// Consult the index after proving lineage. The log inode is unchanged
 		// by archival, so its cached history needn't contain this metadata.
 		if store, err := localfile.New(r.Directory); err == nil {

@@ -22,8 +22,48 @@ type Progress struct {
 	RetryAt         time.Time                 `json:",omitzero"`
 }
 
+// UsageRetryAt is the provider's latest reset for the active usage-limit wait.
+func (p *Progress) UsageRetryAt() time.Time {
+	if p != nil && p.Mode == "usage_limit_wait" {
+		return p.RetryAt
+	}
+	return time.Time{}
+}
+
 func (s *Session) modelWaiting(ctx context.Context, until time.Time) error {
 	return s.recordActivity(ctx, llm.ActivityRecord{Kind: "usage_limit_wait", StartedAt: time.Now().UTC(), RetryAt: until})
+}
+
+// A rejected retry updates the live reset while the original wait stays open.
+func (s *Session) updateModelWait(until time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.usageWait != nil {
+		s.usageWait.RetryAt = until
+		s.broadcast(Event{Kind: "progress"})
+	}
+}
+
+func (s *Session) requestUsageRetry() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.running || s.ctx.Err() != nil || s.usageWait == nil {
+		return false
+	}
+	select {
+	case s.resumeUsageWait <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// Keep the wait visible until the coordinator sees a response or an exit.
+// Caller holds s.mu.
+func (s *Session) visibleProgress() *Progress {
+	if s.usageWait != nil {
+		return s.usageWait
+	}
+	return s.progress
 }
 
 type progressAdapter struct {
@@ -84,7 +124,7 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 	defer func() { s.mu.Lock(); s.respondingLocked(-1); s.mu.Unlock() }()
 	s.progress = &Progress{TurnID: turn, Epoch: epoch, Mode: "completed_response"}
 	o.ConversationTokens, o.ConversationBindings = s.conversationStateLocked()
-	s.broadcast(Event{Kind: "progress", Progress: s.progress})
+	s.broadcast(Event{Kind: "progress"})
 	s.mu.Unlock()
 	o.RecordConversation = s.recordConversation
 	o.RecordConversationBinding = s.recordConversationBinding
@@ -124,7 +164,7 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 						epoch, turn = s.progressEpoch, next.ID
 						pendingUTF8 = ""
 						s.progress = &Progress{TurnID: turn, Epoch: epoch, Mode: "completed_response"}
-						s.broadcast(Event{Kind: "progress", Progress: s.progress})
+						s.broadcast(Event{Kind: "progress"})
 					}
 					break
 				}
@@ -161,7 +201,7 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 			if !done && s.progress != nil && s.progress.Epoch == epoch {
 				s.progress.Statistics = public.Generation
 				s.progress.Done = true
-				s.broadcast(Event{Kind: "progress", Progress: s.progress})
+				s.broadcast(Event{Kind: "progress"})
 			}
 			s.mu.Unlock()
 			outcomes, err := tools(callCtx, public)
@@ -219,7 +259,7 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 				current.Text += strings.ToValidUTF8(pendingUTF8[:end], "")
 				pendingUTF8 = pendingUTF8[end:]
 				if p.Reset || phaseChanged || current.modelPhase() != modelPhase || lastBroadcast.IsZero() || now().Sub(lastBroadcast) >= 30*time.Millisecond {
-					s.broadcast(Event{Kind: "progress", Progress: current})
+					s.broadcast(Event{Kind: "progress"})
 					lastBroadcast = now()
 				}
 			}
@@ -240,7 +280,7 @@ func (a *progressAdapter) Respond(ctx context.Context, r llm.Request, o llm.Requ
 		if response.Generation != nil {
 			s.progress.Statistics = response.Generation
 		}
-		s.broadcast(Event{Kind: "progress", Progress: s.progress})
+		s.broadcast(Event{Kind: "progress"})
 	}
 	s.mu.Unlock()
 	return response, err

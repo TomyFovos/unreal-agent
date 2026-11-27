@@ -30,7 +30,7 @@ var commandCatalog = []commandCandidate{
 	{"/stop session", "/stop session", "stop this session now (/resume restarts it)", noArguments},
 	{"/stop now", "/stop now", "hard stop this session", noArguments},
 	{"/stop idle", "/stop idle", "stop when the agent is idle", noArguments},
-	{"/resume", "/resume", "resume this stopped session", noArguments},
+	{"/resume", "/resume", "resume this session or retry a usage-limit wait", noArguments},
 	{"/retry", "/retry", "resend the last uncertain input safely", noArguments},
 	{"/detach", "/detach", "leave; the session keeps running", noArguments},
 	{"/login", "/login", "show login instructions for Codex, Claude and OpenCode Go", noArguments},

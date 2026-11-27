@@ -26,7 +26,7 @@ func TestClaudeUsageLimitWaitWithChild(t *testing.T) {
 	for _, tc := range []struct {
 		name, reset string
 		until       time.Time
-		waits       int
+		retries     int
 	}{
 		{"weekly UTC", "3pm (UTC)", time.Date(2000, 1, 2, 15, 0, 0, 0, time.UTC), 1},
 		{"unparseable reset", "an unknown time", time.Time{}, 2},
@@ -53,9 +53,29 @@ func TestClaudeUsageLimitWaitWithChild(t *testing.T) {
 				b.(interface{ SetRuntimeProvider(string) }).SetRuntimeProvider(claudeagent.ProviderID)
 				b.(interface{ SetWindowPrompt(llm.WindowPrompt) }).SetWindowPrompt(claudeagent.WindowPromptLine)
 				run.current.dependencies.ContextBuilder, run.current.dependencies.LLM = b, client
+				type waitUpdate struct{ retryAt, publishedAt time.Time }
+				updates := make(chan waitUpdate, tc.retries+1)
 				run.current.dependencies.ModelWaiting = func(ctx context.Context, until time.Time) error {
-					a := llm.ActivityRecord{Kind: "usage_limit_wait", StartedAt: time.Now().UTC(), RetryAt: until}
-					return store.AppendHostRecord(ctx, "session-1", sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostActivity, Activity: &a})
+					at := time.Now().UTC()
+					a := llm.ActivityRecord{Kind: "usage_limit_wait", StartedAt: at, RetryAt: until}
+					if err := store.AppendHostRecord(ctx, "session-1", sessionstore.HostRecord{Version: 1, Kind: sessionstore.HostActivity, Activity: &a}); err != nil {
+						return err
+					}
+					updates <- waitUpdate{retryAt: until, publishedAt: at}
+					return nil
+				}
+				run.current.dependencies.ModelWaitUpdated = func(until time.Time) {
+					updates <- waitUpdate{retryAt: until, publishedAt: time.Now().UTC()}
+				}
+				nextUpdate := func() waitUpdate {
+					t.Helper()
+					select {
+					case update := <-updates:
+						return update
+					case <-time.After(time.Second):
+						t.Fatal("no usage wait update after the model call")
+						return waitUpdate{}
+					}
 				}
 				history := func() []sessionstore.Item {
 					t.Helper()
@@ -112,33 +132,38 @@ func TestClaudeUsageLimitWaitWithChild(t *testing.T) {
 					t.Fatal("child did not complete normally during the wait", run.operations.cancels)
 				}
 				backoff := primitives.DefaultRemoteRequest("", "", "").RetryPolicy.MaxBackoff
-				for i := range tc.waits {
+				for i := range tc.retries {
+					update := nextUpdate()
 					waits := waitRecords()
-					if len(waits) != 2*i+1 {
-						t.Fatal("expected a single new wait", waits)
+					if len(waits) != 1 || waits[0].RetryAt.IsZero() {
+						t.Fatal("expected the same open wait for each retry", waits)
 					}
-					wait := waits[2*i]
 					want := tc.until
 					if want.IsZero() {
-						want = wait.StartedAt.Add(backoff)
+						want = update.publishedAt.Add(backoff)
 					}
-					if !wait.RetryAt.Equal(want) {
-						t.Fatalf("waiting until %v, want %v", wait.RetryAt, want)
+					if !update.retryAt.Equal(want) {
+						t.Fatalf("waiting until %v, want %v", update.retryAt, want)
 					}
-					synctest.Sleep(time.Until(want) - time.Nanosecond)
+					next := update.publishedAt.Add(min(5*time.Minute, want.Sub(update.publishedAt)))
+					synctest.Sleep(time.Until(next) - time.Nanosecond)
 					synctest.Wait()
 					if calls := fake.Calls(t); len(calls) != i+1 {
-						t.Fatal("model retried before reset", len(calls))
+						t.Fatal("model retried before its scheduled time", len(calls))
 					}
-					if i == tc.waits-1 {
+					if i == tc.retries-1 {
 						fake.Set(t, testclaude.Config{AgentFinal: "Resumed automatically."})
 					}
 					synctest.Sleep(time.Nanosecond + 4*slurpIdleTimeout)
 					synctest.Wait()
 				}
+				if closed := nextUpdate(); !closed.retryAt.IsZero() {
+					t.Fatal("usage wait was not closed", closed)
+				}
+				synctest.Wait()
 				calls, waits := fake.Calls(t), waitRecords()
-				if len(calls) != tc.waits+1 || len(waits) != 2*tc.waits || !waits[len(waits)-1].RetryAt.IsZero() {
-					t.Fatal("expected one model retry per reset and a cleared wait", len(calls), waits)
+				if len(calls) != tc.retries+1 || len(waits) != 2 || !waits[1].RetryAt.IsZero() {
+					t.Fatal("expected the scheduled retries and a single cleared wait", len(calls), waits)
 				}
 				if pending := run.current.pendingInputs(); pending != 0 {
 					t.Fatal("successful retry did not acknowledge its inputs", pending)

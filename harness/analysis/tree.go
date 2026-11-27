@@ -93,18 +93,19 @@ type TreeReport struct {
 }
 
 type treeNode struct {
-	acc             *Accumulator
-	after           sessionstore.Sequence
-	parent          session.ID
-	handle          operation.ID
-	template, title string
-	layer           string
-	selection       *sessionstore.RuntimeSelection
-	status          operation.Status
-	observed        bool
-	facts           *sessionstore.ContextFacts
-	operations      []operation.Operation
-	archivedEnd     time.Time
+	acc              *Accumulator
+	after            sessionstore.Sequence
+	parent           session.ID
+	handle           operation.ID
+	template, title  string
+	layer            string
+	selection        *sessionstore.RuntimeSelection
+	status           operation.Status
+	observed         bool
+	facts            *sessionstore.ContextFacts
+	operations       []operation.Operation
+	archivedEnd      time.Time
+	liveUsageRetryAt time.Time
 }
 type Tree struct {
 	nodes      []*treeNode
@@ -234,6 +235,7 @@ func (n *treeNode) read(ctx context.Context, inspect InspectFunc) error {
 		}
 		if !page.More {
 			n.archivedEnd = v.ArchivedEndedAt
+			n.liveUsageRetryAt = v.Progress.UsageRetryAt()
 			return nil
 		}
 	}
@@ -277,6 +279,7 @@ func (t *Tree) Report(now time.Time, rows []viewer.Row) Report {
 		direct = append(direct, row)
 	}
 	r := root.acc.Snapshot(now, false, false, direct, nil)
+	r.UsageRetryAt = tree.Sessions[0].UsageRetryAt
 	r.Tree = tree
 	r.Dashboard = root.acc.dashboard(&r, t, rows)
 	return r
@@ -401,6 +404,9 @@ func (t *Tree) Snapshot(root *Accumulator) *TreeReport {
 		}
 		s.UsageLimitWait = m.waitMetric(n.observed)
 		s.UsageRetryAt = m.waitRetryAt
+		if n.observed && !n.liveUsageRetryAt.IsZero() {
+			s.UsageRetryAt = n.liveUsageRetryAt
+		}
 		r.Sessions = append(r.Sessions, s)
 	}
 	r.buildTasks()

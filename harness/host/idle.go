@@ -71,7 +71,7 @@ func (a *progressAdapter) Idle(ctx context.Context, r llm.Request, o llm.Request
 		defer s.mu.Unlock()
 		if !done && ctx.Err() == nil && s.running && s.progressEpoch == epoch && s.currentTurn() == turn {
 			s.progress = &Progress{TurnID: turn, Epoch: epoch, Attempt: p.Attempt, Mode: p.Phase}
-			s.broadcast(Event{Kind: "progress", Progress: s.progress})
+			s.broadcast(Event{Kind: "progress"})
 		}
 	}
 	idle.Idle(ctx, r, o)

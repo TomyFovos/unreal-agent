@@ -168,6 +168,12 @@ func (s *Session) ContextCommand(ctx context.Context, generation string, inputID
 			return result, err
 		}
 		return s.answerContextQuestion(ctx, inputID, args)
+	case contextstate.Import:
+		var args contextstate.ImportNote
+		if err := decode(&args); err != nil {
+			return result, err
+		}
+		return s.importContext(ctx, args)
 	default:
 		return result, fmt.Errorf("unknown context command %q", cmd.Action)
 	}
@@ -241,6 +247,76 @@ func (s *Session) recordRead(ctx context.Context, read sessionstore.RecordRead) 
 	if err := s.store.AppendHostRecord(context.WithoutCancel(ctx), s.ID, r); err != nil {
 		slog.Warn("record evidence read measurement", "action", read.Action)
 	}
+}
+
+// importContext appends another Session's state as this Session's events.
+// Event IDs derive from the source IDs, so repeating an import is a no-op.
+// Copied IDs gain the source prefix; locators still name the source Session.
+func (s *Session) importContext(ctx context.Context, note contextstate.ImportNote) (contextstate.Result, error) {
+	from := strings.TrimSpace(note.From)
+	if from == "" || strings.ContainsAny(from, ":/ \t\r\n") || from == string(s.ID) {
+		return contextstate.Result{}, fmt.Errorf("import needs another Session's name")
+	}
+	prefix := func(id string) string { return from + "/" + id }
+	prefixAll := func(ids []string) []string {
+		out := make([]string, len(ids))
+		for i, id := range ids {
+			out[i] = prefix(id)
+		}
+		return out
+	}
+	type item struct {
+		kind  contextstate.EventKind
+		id    string
+		value any
+	}
+	var items []item
+	for _, r := range note.Rules {
+		if strings.TrimSpace(r.ID) == "" || strings.TrimSpace(r.Excerpt) == "" {
+			return contextstate.Result{}, fmt.Errorf("imported rule needs an ID and an excerpt")
+		}
+		items = append(items, item{contextstate.RuleRecorded, r.ID, contextstate.Rule{ID: prefix(r.ID), Excerpt: r.Excerpt, Locator: r.Locator}})
+	}
+	for _, d := range note.Decisions {
+		if strings.TrimSpace(d.ID) == "" || strings.TrimSpace(d.Decision) == "" {
+			return contextstate.Result{}, fmt.Errorf("imported decision needs an ID and a text")
+		}
+		id := d.ID
+		d.Evidence, d.ID, d.Plan = contextstate.Evidence{}, prefix(id), prefixAll(d.Plan)
+		items = append(items, item{contextstate.DecisionRecorded, id, d})
+	}
+	for _, p := range note.Plan {
+		if strings.TrimSpace(p.ID) == "" {
+			return contextstate.Result{}, fmt.Errorf("imported plan step needs an ID")
+		}
+		id := p.ID
+		p.Evidence, p.ID, p.DependsOn, p.Decisions = contextstate.Evidence{}, prefix(id), prefixAll(p.DependsOn), prefixAll(p.Decisions)
+		items = append(items, item{contextstate.PlanChanged, id, p})
+	}
+	for _, q := range note.Questions {
+		if strings.TrimSpace(q.ID) == "" {
+			return contextstate.Result{}, fmt.Errorf("imported question needs an ID")
+		}
+		id := q.ID
+		q.Evidence, q.ID = contextstate.Evidence{}, prefix(id)
+		items = append(items, item{contextstate.QuestionChanged, id, contextstate.QuestionUpdate{Question: q, Text: q.FirstLine}})
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.running {
+		return contextstate.Result{}, ErrStopped
+	}
+	var last record.Locator
+	for _, it := range items {
+		event, err := contextstate.NewEvent("import:"+from+":"+string(it.kind)+":"+it.id, it.kind, it.value)
+		if err != nil {
+			return contextstate.Result{}, err
+		}
+		if last, err = s.store.AppendContextEvent(ctx, s.ID, event); err != nil {
+			return contextstate.Result{}, err
+		}
+	}
+	return contextstate.Result{ID: from, Locator: last}, nil
 }
 
 func noteID(explicit, fallback string) string {
